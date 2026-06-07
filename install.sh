@@ -101,7 +101,9 @@ else
   cd "$BUILD_DIR"
   [[ -d RTLSDR-Airband ]] || git clone https://github.com/rtl-airband/RTLSDR-Airband.git
   cd RTLSDR-Airband && rm -rf build && mkdir build && cd build
-  cmake -DPLATFORM=native .. && make -j"$(nproc)" && make install
+  # -DNFM=ON: תמיכת NFM כבויה כברירת מחדל ב-RTLSDR-Airband; הממשק מציע NFM
+  # אז חובה להפעיל אותה, אחרת בחירת NFM => "unknown modulation" וקריסה.
+  cmake -DPLATFORM=native -DNFM=ON .. && make -j"$(nproc)" && make install
 fi
 
 # ----------------------------------------------------------------------------
