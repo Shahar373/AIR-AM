@@ -46,10 +46,17 @@
     const PORT = 8000;
 
     // רשימת הערוצים - חייבת להתאים ל-mountpoint שב-airband.conf
+    // (ברירת מחדל = קבוצה A: מגדל / ATIS / קרקע-מזרח)
     const STREAMS = [
-      { name: "Guard (חירום)", freq: "121.500 MHz", mount: "guard.mp3" },
-      { name: "Channel 2",     freq: "119.500 MHz", mount: "ch2.mp3" },
-      { name: "Channel 3",     freq: "121.000 MHz", mount: "ch3.mp3" },
+      { name: "LLBG Tower (מגדל)",   freq: "134.600 MHz", mount: "tower.mp3" },
+      { name: "LLBG ATIS",           freq: "132.500 MHz", mount: "atis.mp3" },
+      { name: "LLBG Ground East",    freq: "129.200 MHz", mount: "ground_e.mp3" },
+      // קבוצה B (אם תפעיל אותה ב-airband.conf):
+      // { name: "LLBG Approach",       freq: "120.500 MHz", mount: "approach.mp3" },
+      // { name: "Tel Aviv Control",    freq: "121.400 MHz", mount: "tlv_ctl.mp3" },
+      // { name: "LLBG Ground West",    freq: "118.050 MHz", mount: "ground_w.mp3" },
+      // { name: "LLBG Delivery",       freq: "121.950 MHz", mount: "delivery.mp3" },
+      // { name: "Guard",               freq: "121.500 MHz", mount: "guard.mp3" },
     ];
     // ────────────────────────────────────────────────────────
 
