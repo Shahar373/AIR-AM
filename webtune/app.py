@@ -11,6 +11,7 @@
 # ============================================================================
 import json
 import subprocess
+import time
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
@@ -21,7 +22,8 @@ STATE_PATH = Path("/var/lib/airam/state.json")
 MOUNT = "live.mp3"          # שם ה-stream הקבוע ב-Icecast
 ICECAST_PORT = 8000
 SOURCE_PW = "airam"         # סיסמת source פנימית קבועה (המשתמש לא נחשף אליה)
-SAMPLE_RATE = 2.56          # Msps - ערוץ יחיד ממורכז, חלון צר מספיק
+SAMPLE_RATE = 2.56          # Msps - ערוץ יחיד, חלון צר מספיק
+DC_OFFSET = 0.3             # MHz - מזיזים את centerfreq מהתדר כדי להתרחק מ-spike ה-DC
 GAIN_DEFAULT = 40
 SQUELCH_MODES = {"auto", "open", "manual"}
 SNR_MIN, SNR_MAX = 0.0, 60.0   # dB - תחום clamp ל-SNR ידני
@@ -78,7 +80,7 @@ def render_config(freq, mod, agc, gain, squelch_mode="auto", squelch_snr=SNR_DEF
     lines += [
         f"    sample_rate = {SAMPLE_RATE};",
         '    mode = "multichannel";',
-        f"    centerfreq = {f:.4f};",
+        f"    centerfreq = {f + DC_OFFSET:.4f};",   # מוסט מהערוץ כדי להימנע מ-spike ה-DC
         "    channels:",
         "    (",
         "      {",
@@ -150,8 +152,8 @@ def api_tune():
         freq = float(data.get("freq"))
     except (TypeError, ValueError):
         return jsonify(ok=False, error="תדר לא תקין"), 400
-    if not (0.1 <= freq <= 2000.0):
-        return jsonify(ok=False, error="תדר מחוץ לטווח (0.1–2000 MHz)"), 400
+    if not (0.1 <= freq <= 1999.5):   # מרווח עבור DC_OFFSET (centerfreq <= 2000)
+        return jsonify(ok=False, error="תדר מחוץ לטווח (0.1–1999.5 MHz)"), 400
 
     mod = "nfm" if str(data.get("mod", "am")).lower() == "nfm" else "am"
     agc = bool(data.get("agc", True))
@@ -179,6 +181,17 @@ def api_tune():
     )
     if r.returncode != 0:
         return jsonify(ok=False, error=(r.stderr or "restart failed").strip()), 500
+
+    # systemctl restart מחזיר 0 ברגע שהשירות הופעל; מוודאים שהוא באמת נשאר חי
+    # (תדר/מכשיר בעייתי גורם ל-rtl_airband לקרוס מיד) ומדווחים אמת ל-UI.
+    time.sleep(1.5)
+    chk = subprocess.run(["systemctl", "is-active", "rtl_airband"],
+                         capture_output=True, text=True)
+    if chk.stdout.strip() != "active":
+        log = subprocess.run(["journalctl", "-u", "rtl_airband", "-n", "5", "--no-pager"],
+                             capture_output=True, text=True).stdout
+        return jsonify(ok=False, error="rtl_airband נכשל לעלות — בדוק תדר/חיבור SDR",
+                       detail=log), 500
 
     return jsonify(ok=True, freq=freq, mod=mod, agc=agc, gain=gain,
                    squelch_mode=squelch_mode, squelch_snr=squelch_snr)

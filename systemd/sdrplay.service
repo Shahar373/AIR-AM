@@ -1,12 +1,14 @@
 [Unit]
 Description=SDRplay API Service
 After=network.target
+# בלי הגבלת קצב-הפעלה => מתאושש לנצח (חשוב לניתוק/חיבור USB)
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/sdrplay_apiService
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target

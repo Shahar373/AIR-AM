@@ -1,20 +1,22 @@
 [Unit]
 Description=AIR-AM - RTLSDR-Airband aviation receiver (SDRplay RSP1B)
 Documentation=https://github.com/rtl-airband/RTLSDR-Airband/wiki
-# מחכים לרשת, ל-Icecast ולשירות ה-API של SDRplay לפני הפעלה
 After=network-online.target icecast2.service sdrplay.service
 Wants=network-online.target
-Wants=sdrplay.service
+# Requires (לא Wants) => הפעלה מחדש של ה-API גוררת את rtl_airband
+Requires=sdrplay.service
+# בלי הגבלת קצב-הפעלה => מתאושש לנצח (ניתוק/חיבור USB, מרוץ אתחול)
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-# -f = הרצה בקדמה (foreground), נדרש עבור systemd
-# -c = נתיב קובץ ההגדרות
+# שער מוכנות: מחכה שה-SDRplay API באמת יענה לפני הרצת rtl_airband
+ExecStartPre=/usr/local/bin/airam-wait-sdrplay
 ExecStart=/usr/local/bin/rtl_airband -f -c /etc/rtl_airband/airband.conf
 # rtl_airband זקוק להרשאות root לגישת חומרה ולעדיפות זמן-אמת
 User=root
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target

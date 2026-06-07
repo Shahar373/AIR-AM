@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  AIR-AM  -  שער מוכנות ל-SDRplay (ExecStartPre של rtl_airband)
+# ----------------------------------------------------------------------------
+#  חוסם עד שה-SDRplay API מגיב ומכשיר ניתן לפתיחה, או עד timeout.
+#  מונע מרוץ אתחול שבו rtl_airband עולה לפני ש-sdrplay_apiService מוכן.
+#  יציאה != 0 => systemd ינסה שוב (Restart=always).
+# ============================================================================
+for _ in $(seq 1 30); do
+  if SoapySDRUtil --probe="driver=sdrplay" >/dev/null 2>&1; then
+    exit 0
+  fi
+  sleep 1
+done
+exit 1
