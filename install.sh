@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  AIR-AM  -  סקריפט התקנה ל-Raspberry Pi (Pi 5 / Pi 4, Raspberry Pi OS 64-bit)
+#  AIR-AM  -  התקנה מלאה ל-Raspberry Pi (Pi 5 / Pi 4, Raspberry Pi OS 64-bit)
 # ----------------------------------------------------------------------------
-#  מתקין: תלויות בנייה, SoapySDR, SoapySDRPlay3, RTLSDR-Airband, Icecast2,
-#  ומגדיר שירות systemd שמריץ הכל אוטומטית.
+#  מתקין הכל אוטומטית: SDRplay API, SoapySDR + SoapySDRPlay3, RTLSDR-Airband,
+#  Icecast2 (ללא סיסמה למאזין), שרת בורר התדרים הוובי, ושירותי systemd.
 #
-#  ⚠️ הרץ סקריפט זה *על ה-Pi עצמו*, לא על מחשב אחר.
-#  שימוש:   chmod +x install.sh && sudo ./install.sh
+#  ⚠️ הרץ *על ה-Pi עצמו*:   chmod +x install.sh && sudo ./install.sh
 # ============================================================================
 set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_DIR="${HOME}/air-am-build"
-log() { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
-warn() { printf '\n\033[1;33m[!] %s\033[0m\n' "$*"; }
-die() { printf '\n\033[1;31m[X] %s\033[0m\n' "$*" >&2; exit 1; }
+if [[ -n "${SUDO_USER:-}" ]]; then BUILD_DIR="/home/$SUDO_USER/air-am-build"; else BUILD_DIR="/root/air-am-build"; fi
+SDRPLAY_VER="3.15.2"     # אם יצא עדכון: עדכן כאן (ודא שהקובץ קיים באתר sdrplay)
+SOURCE_PW="airam"        # סיסמת source פנימית (פנימי בלבד; מאזינים לא צריכים סיסמה)
 
+log()  { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
+warn() { printf '\n\033[1;33m[!] %s\033[0m\n' "$*"; }
+die()  { printf '\n\033[1;31m[X] %s\033[0m\n' "$*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "יש להריץ עם sudo (root)."
+
+mkdir -p "$BUILD_DIR"
 
 # ----------------------------------------------------------------------------
 # 1. תלויות מערכת
@@ -24,120 +28,130 @@ die() { printf '\n\033[1;31m[X] %s\033[0m\n' "$*" >&2; exit 1; }
 log "מתקין תלויות (apt)..."
 apt-get update
 apt-get install -y \
-  git cmake build-essential pkg-config \
+  git cmake build-essential pkg-config curl \
   libusb-1.0-0-dev \
   libsoapysdr-dev soapysdr-tools \
   libmp3lame-dev libshout3-dev \
   libconfig++-dev libfftw3-dev \
-  icecast2
-
-mkdir -p "$BUILD_DIR"
+  icecast2 python3 python3-flask
 
 # ----------------------------------------------------------------------------
-# 2. SDRplay API  (נדרש ל-RSP1B)
+# 2. SDRplay API  (הורדה + חילוץ + התקנה אוטומטית, ללא אישור רישיון אינטראקטיבי)
 # ----------------------------------------------------------------------------
-# ה-API של SDRplay הוא קובץ קנייני שמורידים מהאתר הרשמי (מאחורי טופס),
-# ולכן אי אפשר להוריד אותו אוטומטית כאן. בדיקה אם כבר מותקן:
-if [[ -e /usr/local/lib/libsdrplay_api.so* ]] || ldconfig -p | grep -q sdrplay_api; then
-  log "SDRplay API כבר מותקן."
+if ldconfig -p | grep -q libsdrplay_api; then
+  log "SDRplay API כבר מותקן - מדלג."
 else
-  warn "SDRplay API לא נמצא. בצע ידנית פעם אחת:"
-  cat <<'EOF'
-  ------------------------------------------------------------------
-  1) הורד את ה-API ל-Linux ARM64 מ:
-        https://www.sdrplay.com/downloads/   (בחר 'API/HW Driver - V3.xx (Linux)')
-  2) הקובץ נראה כך:  SDRplay_RSP_API-Linux-3.15.x.run
-  3) הרץ:
-        chmod +x SDRplay_RSP_API-Linux-*.run
-        sudo ./SDRplay_RSP_API-Linux-*.run
-     (אשר את הרישיון; הוא יתקין שירות בשם sdrplay)
-  4) ודא שהשירות רץ:
-        sudo systemctl status sdrplay
-  ואז הרץ שוב את ./install.sh
-  ------------------------------------------------------------------
-EOF
-  die "התקן את SDRplay API והרץ שוב."
+  log "מתקין SDRplay API v${SDRPLAY_VER}..."
+  case "$(uname -m)" in
+    aarch64) APIARCH="arm64" ;;
+    armv7l)  APIARCH="armv7l" ;;
+    x86_64)  APIARCH="x86_64" ;;
+    *)       APIARCH="arm64" ;;
+  esac
+  RUN="/tmp/sdrplay.run"; EXT="/tmp/sdrplay_api"
+  curl -fSL --retry 4 -o "$RUN" \
+    "https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-${SDRPLAY_VER}.run" \
+    || die "הורדת SDRplay API נכשלה. בדוק רשת או עדכן SDRPLAY_VER בראש הסקריפט."
+  chmod +x "$RUN"
+  rm -rf "$EXT"
+  # חילוץ ללא הרצה (makeself) => עוקפים את אישור הרישיון האינטראקטיבי
+  "$RUN" --noexec --target "$EXT"
+
+  [[ -d "$EXT/$APIARCH" ]] || APIARCH="$(basename "$(find "$EXT" -maxdepth 1 -type d -name '*64*' | head -1)")"
+  [[ -n "$APIARCH" && -d "$EXT/$APIARCH" ]] || die "לא נמצאה ספריית ארכיטקטורה בתוך ה-API."
+
+  # ספריות
+  LIB="$(ls "$EXT/$APIARCH"/libsdrplay_api.so.* | head -1)"
+  cp -f "$LIB" /usr/local/lib/
+  BASE="$(basename "$LIB")"                       # libsdrplay_api.so.3.15
+  ln -sf "/usr/local/lib/$BASE" /usr/local/lib/libsdrplay_api.so.3
+  ln -sf /usr/local/lib/libsdrplay_api.so.3 /usr/local/lib/libsdrplay_api.so
+  # קבצי כותרת (נדרשים לבניית SoapySDRPlay3)
+  cp -f "$EXT"/*.h /usr/local/include/ 2>/dev/null || true
+  cp -f "$EXT"/inc/*.h /usr/local/include/ 2>/dev/null || true
+  # שירות ה-API + כללי udev
+  cp -f "$EXT/$APIARCH/sdrplay_apiService" /usr/local/bin/
+  chmod 755 /usr/local/bin/sdrplay_apiService
+  cp -f "$EXT"/*.rules /etc/udev/rules.d/ 2>/dev/null || true
+  udevadm control --reload-rules 2>/dev/null || true
+  ldconfig
 fi
 
 # ----------------------------------------------------------------------------
-# 3. SoapySDRPlay3  (תוסף SoapySDR ל-SDRplay)
+# 3. SoapySDRPlay3
 # ----------------------------------------------------------------------------
 if SoapySDRUtil --info 2>/dev/null | grep -qi sdrplay; then
-  log "SoapySDRPlay3 כבר מותקן."
+  log "SoapySDRPlay3 כבר מותקן - מדלג."
 else
   log "בונה SoapySDRPlay3..."
   cd "$BUILD_DIR"
   [[ -d SoapySDRPlay3 ]] || git clone https://github.com/pothosware/SoapySDRPlay3.git
-  cd SoapySDRPlay3
-  rm -rf build && mkdir build && cd build
-  cmake ..
-  make -j"$(nproc)"
-  make install
-  ldconfig
+  cd SoapySDRPlay3 && rm -rf build && mkdir build && cd build
+  cmake .. && make -j"$(nproc)" && make install && ldconfig
 fi
 
 # ----------------------------------------------------------------------------
 # 4. RTLSDR-Airband
 # ----------------------------------------------------------------------------
 if command -v rtl_airband >/dev/null 2>&1; then
-  log "RTLSDR-Airband כבר מותקן (דלג, או מחק /usr/local/bin/rtl_airband לבנייה מחדש)."
+  log "RTLSDR-Airband כבר מותקן - מדלג."
 else
   log "בונה RTLSDR-Airband..."
   cd "$BUILD_DIR"
   [[ -d RTLSDR-Airband ]] || git clone https://github.com/rtl-airband/RTLSDR-Airband.git
-  cd RTLSDR-Airband
-  rm -rf build && mkdir build && cd build
-  # PLATFORM=native => אופטימיזציה ל-CPU של ה-Pi הנוכחי (NEON)
-  cmake -DPLATFORM=native ..
-  make -j"$(nproc)"
-  make install
+  cd RTLSDR-Airband && rm -rf build && mkdir build && cd build
+  cmake -DPLATFORM=native .. && make -j"$(nproc)" && make install
 fi
 
 # ----------------------------------------------------------------------------
-# 5. התקנת קובץ ההגדרות
+# 5. Icecast2  -  ללא סיסמה למאזין (סיסמת source פנימית קבועה)
 # ----------------------------------------------------------------------------
-log "מתקין קובץ הגדרות ל-/etc/rtl_airband/airband.conf ..."
-mkdir -p /etc/rtl_airband
-if [[ -f /etc/rtl_airband/airband.conf ]]; then
-  warn "קיים airband.conf - שומר גיבוי ב-airband.conf.bak ולא דורס."
-  cp -n "$REPO_DIR/config/airband.conf" /etc/rtl_airband/airband.conf.new
-  echo "    הגרסה החדשה מהריפו נשמרה כ-airband.conf.new להשוואה."
-else
-  cp "$REPO_DIR/config/airband.conf" /etc/rtl_airband/airband.conf
-fi
-
-# ----------------------------------------------------------------------------
-# 6. Icecast2
-# ----------------------------------------------------------------------------
-log "מפעיל את Icecast2 ..."
+log "מגדיר Icecast2 (מאזינים ללא סיסמה)..."
+# ברירת המחדל של דביאן משתמשת ב-'hackme' - מחליפים לערך הפנימי הקבוע שלנו
+sed -i "s/>hackme</>${SOURCE_PW}</g" /etc/icecast2/icecast.xml || true
+# אפשר את השירות
+[[ -f /etc/default/icecast2 ]] && sed -i 's/^ENABLE=.*/ENABLE=true/' /etc/default/icecast2 || true
+grep -q "^ENABLE=" /etc/default/icecast2 2>/dev/null || echo "ENABLE=true" >> /etc/default/icecast2
 systemctl enable icecast2
-systemctl restart icecast2 || warn "Icecast2 לא עלה - ייתכן שצריך להגדיר סיסמאות ב-/etc/icecast2/icecast.xml"
-cat <<'EOF'
-
-  ℹ️  סיסמאות Icecast: ערוך /etc/icecast2/icecast.xml והגדר:
-        <source-password>   = הסיסמה שב-airband.conf (password של ה-source)
-        <admin-password>    = סיסמת ניהול
-        <hostname>          = כתובת ה-IP של ה-Pi
-      ואז:  sudo systemctl restart icecast2
-EOF
+systemctl restart icecast2
 
 # ----------------------------------------------------------------------------
-# 7. שירות systemd
+# 6. קובץ הגדרות התחלתי + תיקיית state
 # ----------------------------------------------------------------------------
-log "מתקין שירות systemd ..."
-cp "$REPO_DIR/systemd/rtl_airband.service" /etc/systemd/system/rtl_airband.service
+log "מתקין קובץ הגדרות התחלתי..."
+mkdir -p /etc/rtl_airband /var/lib/airam
+[[ -f /etc/rtl_airband/airband.conf ]] || cp "$REPO_DIR/config/airband.conf" /etc/rtl_airband/airband.conf
+
+# ----------------------------------------------------------------------------
+# 7. שרת בורר התדרים (web tuner)
+# ----------------------------------------------------------------------------
+log "מתקין את שרת הווב ל-/opt/airam ..."
+mkdir -p /opt/airam
+cp -r "$REPO_DIR/webtune" /opt/airam/
+
+# ----------------------------------------------------------------------------
+# 8. שירותי systemd
+# ----------------------------------------------------------------------------
+log "מתקין שירותי systemd ..."
+cp "$REPO_DIR/systemd/sdrplay.service"     /etc/systemd/system/
+cp "$REPO_DIR/systemd/rtl_airband.service" /etc/systemd/system/
+cp "$REPO_DIR/systemd/airam-web.service"   /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable rtl_airband
+systemctl enable --now sdrplay.service || warn "sdrplay.service לא עלה - בדוק חיבור ה-RSP1B."
+sleep 2
+systemctl enable --now rtl_airband.service || warn "rtl_airband לא עלה - בדוק journalctl -u rtl_airband"
+systemctl enable --now airam-web.service
 
+IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 log "ההתקנה הסתיימה ✅"
 cat <<EOF
 
-  השלבים הבאים:
-   1) ערוך תדרים:   sudo nano /etc/rtl_airband/airband.conf
-   2) הגדר סיסמאות Icecast (ראה למעלה) והפעל מחדש icecast2.
-   3) הפעל:         sudo systemctl start rtl_airband
-   4) בדוק לוג:     sudo journalctl -u rtl_airband -f
-   5) האזן מהטלפון: http://<IP-של-ה-Pi>:8000/guard.mp3   (ב-VLC או בדפדפן)
+  🎧 פתח בטלפון את בורר התדרים:
+        http://${IP:-<IP-של-ה-Pi>}:8080
 
-  IP של ה-Pi:  $(hostname -I 2>/dev/null | awk '{print $1}')
+  שם בוחרים פריסט או מקלידים תדר חופשי, וההאזנה מתחילה.
+  מאזינים לא צריכים שום סיסמה.
+
+  לוגים:  sudo journalctl -u rtl_airband -f
+          sudo journalctl -u airam-web -f
 EOF

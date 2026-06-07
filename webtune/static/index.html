@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>AIR-AM · בורר תדרים</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: #0e1116; color: #e6edf3; margin: 0; padding: 1rem;
+      max-width: 560px; margin-inline: auto;
+    }
+    h1 { font-size: 1.3rem; margin: 0 0 .1rem; }
+    p.sub { color: #8b949e; margin: 0 0 1rem; font-size: .85rem; }
+
+    .display {
+      background: #161b22; border: 1px solid #30363d; border-radius: 14px;
+      padding: 1rem; text-align: center; margin-bottom: 1rem;
+    }
+    .display .freq {
+      font-size: 2.6rem; font-weight: 700; color: #58a6ff;
+      font-variant-numeric: tabular-nums; line-height: 1.1;
+    }
+    .display .freq small { font-size: 1rem; color: #8b949e; font-weight: 400; }
+    .display .status { font-size: .85rem; color: #8b949e; margin-top: .35rem; min-height: 1.2em; }
+    .dot { display:inline-block; width:.6em; height:.6em; border-radius:50%; background:#3fb950; margin-inline-start:.4em; }
+    .dot.off { background:#6e7681; }
+
+    audio { width: 100%; margin-top: .8rem; }
+
+    .row { display: flex; gap: .5rem; margin-bottom: 1rem; }
+    input[type="number"] {
+      flex: 1; background:#0d1117; border:1px solid #30363d; color:#e6edf3;
+      border-radius:10px; padding:.7rem; font-size:1.1rem; text-align:center;
+    }
+    button {
+      background:#238636; color:#fff; border:0; border-radius:10px;
+      padding:.7rem 1.1rem; font-size:1rem; font-weight:600; cursor:pointer;
+    }
+    button:active { transform: scale(.98); }
+    button.secondary { background:#21262d; border:1px solid #30363d; }
+
+    .presets { display:grid; grid-template-columns:repeat(2,1fr); gap:.5rem; margin-bottom:1rem; }
+    .presets button { background:#161b22; border:1px solid #30363d; color:#e6edf3;
+      font-weight:500; padding:.65rem .4rem; text-align:start; }
+    .presets button .pf { color:#58a6ff; font-variant-numeric:tabular-nums; font-size:.8rem; }
+    .presets button.active { border-color:#58a6ff; background:#172036; }
+
+    .opts { display:flex; align-items:center; gap:1rem; flex-wrap:wrap;
+      font-size:.85rem; color:#8b949e; border-top:1px solid #30363d; padding-top:.8rem; }
+    .opts label { display:flex; align-items:center; gap:.35rem; }
+    .opts .hint { flex-basis:100%; margin:.2rem 0 0; font-size:.78rem; line-height:1.6; }
+    select, input[type="range"] { accent-color:#58a6ff; }
+  </style>
+</head>
+<body>
+  <h1>✈️ AIR-AM</h1>
+  <p class="sub">בורר תדרי תעופה · SDRplay RSP1B</p>
+
+  <div class="display">
+    <div class="freq"><span id="curFreq">—</span> <small>MHz</small></div>
+    <div class="status"><span id="status">טוען…</span><span id="dot" class="dot off"></span></div>
+    <audio id="player" controls preload="none"></audio>
+  </div>
+
+  <div class="row">
+    <input id="freqInput" type="number" step="0.005" min="0.1" max="2000"
+           placeholder="תדר חופשי, למשל 134.600" />
+    <button id="tuneBtn">כוונן</button>
+  </div>
+
+  <div class="presets" id="presets"></div>
+
+  <div class="opts">
+    <label>אפנון:
+      <select id="mod">
+        <option value="am" selected>AM (תעופה)</option>
+        <option value="nfm">NFM</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="agc" checked /> AGC אוטומטי</label>
+    <label id="gainWrap" style="display:none">
+      Gain <input type="range" id="gain" min="0" max="60" value="40" />
+      <span id="gainVal">40</span>
+    </label>
+    <label>סקוולץ׳:
+      <select id="squelch">
+        <option value="auto" selected>אוטומטי</option>
+        <option value="open">תמיד פתוח</option>
+        <option value="manual">ידני</option>
+      </select>
+    </label>
+    <label id="snrWrap" style="display:none">
+      סף SNR <input type="range" id="snr" min="3" max="25" step="1" value="9" />
+      <span id="snrVal">9</span> dB
+    </label>
+    <p class="hint">אוטומטי מתאים לרוב התדרים · ל-ATIS ושידור רציף בחר "תמיד פתוח" · "ידני" אם נפתח על רעש או חותך</p>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const player = $("player");
+    let cfg = { port: 8000, mount: "live.mp3", presets: [] };
+    let retryTimer = null;
+    let current = 132.5;   // התדר הפעיל כרגע (לכיוונון-מחדש בשינוי squelch)
+
+    const streamURL = () =>
+      `http://${location.hostname}:${cfg.port}/${cfg.mount}?t=${Date.now()}`;
+
+    function setStatus(text, live) {
+      $("status").textContent = text;
+      $("dot").className = "dot" + (live ? "" : " off");
+    }
+
+    function renderPresets(active) {
+      const box = $("presets");
+      box.innerHTML = "";
+      for (const p of cfg.presets) {
+        const b = document.createElement("button");
+        const f = p.freq.toFixed(3);
+        b.innerHTML = `${p.name}<br><span class="pf">${f}</span>`;
+        if (active && Math.abs(p.freq - active) < 0.0005) b.classList.add("active");
+        b.onclick = () => selectPreset(p);
+        box.appendChild(b);
+      }
+    }
+
+    // בחירת פריסט: פריסט עם רמז squelch (ATIS => "open") קובע את מצב ה-squelch,
+    // אחרת חוזרים ל"אוטומטי". כך כל פריסט מביא את ה-squelch הנכון לערוץ.
+    function selectPreset(p) {
+      const sq = p.sq || "auto";
+      $("squelch").value = sq;
+      $("snrWrap").style.display = sq === "manual" ? "flex" : "none";
+      tune(p.freq);
+    }
+
+    function retune() { tune(current); }
+
+    // טעינת השמע מחדש עם ניסיונות חוזרים (ה-mount חוזר כמה שניות אחרי restart)
+    function reloadStream(tries = 8) {
+      clearTimeout(retryTimer);
+      player.src = streamURL();
+      player.load();
+      player.play().then(() => setStatus("משדר", true)).catch(() => {
+        setStatus("מוכן — לחץ ▶ להאזנה", true);
+      });
+      player.onerror = () => {
+        if (tries > 0) retryTimer = setTimeout(() => reloadStream(tries - 1), 1500);
+        else setStatus("הסטרים לא זמין — נסה שוב", false);
+      };
+    }
+
+    async function tune(freq) {
+      freq = parseFloat(freq);
+      if (!(freq >= 0.1 && freq <= 2000)) { setStatus("תדר לא תקין", false); return; }
+      current = freq;
+      $("curFreq").textContent = freq.toFixed(3);
+      $("freqInput").value = freq.toFixed(3);
+      renderPresets(freq);
+      setStatus("מכוונן… (כ-3 שניות)", false);
+      try {
+        const res = await fetch("/api/tune", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            freq,
+            mod: $("mod").value,
+            agc: $("agc").checked,
+            gain: parseInt($("gain").value, 10),
+            squelch_mode: $("squelch").value,
+            squelch_snr: parseInt($("snr").value, 10),
+          }),
+        });
+        const data = await res.json();
+        if (!data.ok) { setStatus("שגיאה: " + (data.error || ""), false); return; }
+        setStatus("מתחבר לסטרים…", false);
+        setTimeout(() => reloadStream(), 3500);
+      } catch (e) {
+        setStatus("שגיאת רשת", false);
+      }
+    }
+
+    // אירועים
+    $("tuneBtn").onclick = () => tune($("freqInput").value);
+    $("freqInput").addEventListener("keydown", (e) => { if (e.key === "Enter") tune($("freqInput").value); });
+    $("agc").onchange = () => { $("gainWrap").style.display = $("agc").checked ? "none" : "flex"; };
+    $("gain").oninput = () => { $("gainVal").textContent = $("gain").value; };
+    // שינוי squelch מצריך restart => מכווננים מחדש את התדר הנוכחי
+    $("squelch").onchange = () => {
+      $("snrWrap").style.display = $("squelch").value === "manual" ? "flex" : "none";
+      retune();
+    };
+    $("snr").oninput = () => { $("snrVal").textContent = $("snr").value; };  // משוב חי בלבד
+    $("snr").onchange = () => retune();                                      // החל רק בשחרור
+
+    // אתחול: משוך מצב נוכחי
+    fetch("/api/state").then((r) => r.json()).then((st) => {
+      cfg = st;
+      $("mod").value = st.mod || "am";
+      $("agc").checked = st.agc !== false;
+      $("gain").value = st.gain || 40;
+      $("gainVal").textContent = $("gain").value;
+      $("gainWrap").style.display = $("agc").checked ? "none" : "flex";
+      $("squelch").value = st.squelch_mode || "auto";
+      $("snr").value = st.squelch_snr || 9;
+      $("snrVal").textContent = $("snr").value;
+      $("snrWrap").style.display = ($("squelch").value === "manual") ? "flex" : "none";
+      current = Number(st.freq);
+      $("curFreq").textContent = Number(st.freq).toFixed(3);
+      $("freqInput").value = Number(st.freq).toFixed(3);
+      renderPresets(st.freq);
+      setStatus("מוכן — לחץ ▶ או בחר תדר", false);
+      player.src = streamURL();
+    }).catch(() => setStatus("אין חיבור לשרת", false));
+  </script>
+</body>
+</html>
