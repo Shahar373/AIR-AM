@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AIR-AM · האזנה לתעופה</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: #0e1116; color: #e6edf3; margin: 0; padding: 1.2rem;
+      max-width: 640px; margin-inline: auto;
+    }
+    h1 { font-size: 1.4rem; margin: 0 0 .2rem; }
+    p.sub { color: #8b949e; margin: 0 0 1.2rem; font-size: .9rem; }
+    .card {
+      background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+      padding: 1rem; margin-bottom: .9rem;
+    }
+    .card h2 { font-size: 1.05rem; margin: 0 0 .1rem; }
+    .card .freq { color: #58a6ff; font-variant-numeric: tabular-nums; font-size: .85rem; }
+    audio { width: 100%; margin-top: .7rem; }
+    .cfg { font-size: .8rem; color: #8b949e; border-top: 1px solid #30363d;
+           padding-top: .8rem; margin-top: 1rem; }
+    code { background: #21262d; padding: .1rem .35rem; border-radius: 5px; }
+  </style>
+</head>
+<body>
+  <h1>✈️ AIR-AM</h1>
+  <p class="sub">האזנה לתדרי תעופה (AM) דרך SDRplay RSP1B</p>
+
+  <div id="streams"></div>
+
+  <div class="cfg">
+    אם לא נשמע כלום: ודא ש-<code>PI_HOST</code> למטה הוא ה-IP של ה-Pi,
+    ושהשירות רץ (<code>systemctl status rtl_airband</code>).<br />
+    אפשר גם לפתוח ישירות ב-VLC:
+    <code id="vlcHint"></code>
+  </div>
+
+  <script>
+    // ── הגדרות ──────────────────────────────────────────────
+    // אם פותחים את הדף מה-Pi עצמו, ה-IP מזוהה אוטומטית.
+    // אחרת, החלף ידנית בכתובת ה-Pi (למשל "192.168.1.50").
+    const PI_HOST = location.hostname && location.hostname !== "" ? location.hostname : "192.168.1.50";
+    const PORT = 8000;
+
+    // רשימת הערוצים - חייבת להתאים ל-mountpoint שב-airband.conf
+    const STREAMS = [
+      { name: "Guard (חירום)", freq: "121.500 MHz", mount: "guard.mp3" },
+      { name: "Channel 2",     freq: "119.500 MHz", mount: "ch2.mp3" },
+      { name: "Channel 3",     freq: "121.000 MHz", mount: "ch3.mp3" },
+    ];
+    // ────────────────────────────────────────────────────────
+
+    const base = `http://${PI_HOST}:${PORT}/`;
+    const container = document.getElementById("streams");
+    for (const s of STREAMS) {
+      const url = base + s.mount;
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = `
+        <h2>${s.name}</h2>
+        <div class="freq">${s.freq}</div>
+        <audio controls preload="none" src="${url}"></audio>`;
+      container.appendChild(card);
+    }
+    document.getElementById("vlcHint").textContent = base + STREAMS[0].mount;
+  </script>
+</body>
+</html>
