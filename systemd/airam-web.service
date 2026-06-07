@@ -1,0 +1,16 @@
+[Unit]
+Description=AIR-AM web tuner (frequency selector UI)
+After=network-online.target icecast2.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/airam/webtune
+ExecStart=/usr/bin/python3 /opt/airam/webtune/app.py
+# רץ כ-root כדי לכתוב את ההגדרות ולהפעיל מחדש את rtl_airband (רשת פרטית בלבד)
+User=root
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

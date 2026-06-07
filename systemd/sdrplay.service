@@ -1,0 +1,12 @@
+[Unit]
+Description=SDRplay API Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sdrplay_apiService
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
