@@ -121,6 +121,7 @@ sudo ./install.sh
 | הדף לא נטען | `sudo systemctl status airam-web` · `sudo journalctl -u airam-web -f` |
 | המכשיר לא מזוהה | `SoapySDRUtil --probe="driver=sdrplay"` — אמור להראות RSP1B. ודא ש-`systemctl status sdrplay` רץ ושה-USB מחובר. |
 | אין סאונד | בחר ATIS 132.5 (משדר ברצף). בדוק `journalctl -u rtl_airband -f`. ודא שיש שידור בתדר. |
+| `unknown modulation` / קורס ב-NFM | תמיכת NFM כבויה כברירת מחדל בבנייה של RTLSDR-Airband. תעופה היא AM בלבד — בחר **AM**. כדי שאופציית NFM תעבוד, בנה מחדש: `cd ~/air-am-build/RTLSDR-Airband/build && cmake -DPLATFORM=native -DNFM=ON .. && make -j4 && sudo make install && sudo systemctl restart rtl_airband` |
 | רעש/עיוות חזק | כבה AGC בממשק והורד Gain (נסה 20–30). |
 | הסטרים לא חוזר אחרי כיוונון | זה לוקח ~3 שניות; הדף מנסה שוב לבד. אם לא — לחץ ▶ בנגן. |
 | latency גבוה (עיכוב בשמיעה) | תוקן — `install.sh` מכוונן את Icecast (`burst-size=0`) ל-~2–4 שניות. אם עדכנת מגרסה ישנה, הרץ שוב את ההתקנה. חזרה לטאב מסנכרנת ל-live. |
