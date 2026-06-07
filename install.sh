@@ -94,16 +94,25 @@ fi
 # ----------------------------------------------------------------------------
 # 4. RTLSDR-Airband
 # ----------------------------------------------------------------------------
-if command -v rtl_airband >/dev/null 2>&1; then
-  log "RTLSDR-Airband כבר מותקן - מדלג."
+# marker: מסמן שהבינארי נבנה עם NFM + bitrate מוגבר. אם חסר (גרסה ישנה) => בונים מחדש.
+AIRAM_RTL_MARK="/usr/local/share/airam/.rtl_airband-build"
+if command -v rtl_airband >/dev/null 2>&1 && [[ -f "$AIRAM_RTL_MARK" ]]; then
+  log "RTLSDR-Airband (NFM + bitrate) כבר מותקן - מדלג."
 else
-  log "בונה RTLSDR-Airband..."
+  log "בונה RTLSDR-Airband (NFM + bitrate 48k ל-latency נמוך)..."
   cd "$BUILD_DIR"
   [[ -d RTLSDR-Airband ]] || git clone https://github.com/rtl-airband/RTLSDR-Airband.git
-  cd RTLSDR-Airband && rm -rf build && mkdir build && cd build
+  cd RTLSDR-Airband
+  # bitrate קבוע-בקוד 16kbps => סטרים דליל => הדפדפן ממלא buffer התחלתי לאט (~30 שניות).
+  # מעלים ל-48kbps: סטרים צפוף פי-3 => הנגן מתחיל מהר יותר ו-latency צונח דרמטית.
+  git checkout -- src/output.cpp 2>/dev/null || true   # איפוס לפני sed (אידמפוטנטי)
+  sed -i 's/lame_set_brate(lame, 16);/lame_set_brate(lame, 48);/' src/output.cpp
+  grep -q 'lame_set_brate(lame, 48);' src/output.cpp || warn "לא הצלחתי להעלות bitrate (שורת lame_set_brate השתנתה ב-upstream)."
+  rm -rf build && mkdir build && cd build
   # -DNFM=ON: תמיכת NFM כבויה כברירת מחדל ב-RTLSDR-Airband; הממשק מציע NFM
   # אז חובה להפעיל אותה, אחרת בחירת NFM => "unknown modulation" וקריסה.
   cmake -DPLATFORM=native -DNFM=ON .. && make -j"$(nproc)" && make install
+  mkdir -p "$(dirname "$AIRAM_RTL_MARK")"; touch "$AIRAM_RTL_MARK"
 fi
 
 # ----------------------------------------------------------------------------
@@ -113,11 +122,23 @@ log "מגדיר Icecast2 (מאזינים ללא סיסמה, latency נמוך)...
 ICE=/etc/icecast2/icecast.xml
 # סיסמת source פנימית (אידמפוטנטי - לא תלוי בערך ברירת המחדל)
 sed -i -E "s#<source-password>[^<]*</source-password>#<source-password>${SOURCE_PW}</source-password>#" "$ICE"
-# כיוונון latency נמוך: ברירת המחדל burst-size=65536 בייט ≈ 33 שניות ב-16kbps!
-sed -i -E 's#<burst-on-connect>[^<]*</burst-on-connect>#<burst-on-connect>0</burst-on-connect>#' "$ICE"
-sed -i -E 's#<burst-size>[^<]*</burst-size>#<burst-size>0</burst-size>#' "$ICE"
-sed -i -E 's#<queue-size>[^<]*</queue-size>#<queue-size>8192</queue-size>#' "$ICE"
-sed -i -E 's#<source-timeout>[^<]*</source-timeout>#<source-timeout>10</source-timeout>#' "$ICE"
+
+# מבטיח ערך לתג בתוך <limits>: מחליף אם קיים, אחרת מזריק לפני </limits>.
+# קריטי כי בחלק מגרסאות Debian התגיות חסרות בברירת המחדל => sed פשוט לא היה מוצא
+# מה להחליף, וה-burst נשאר 64KB ≈ 30 שניות latency (בדיוק התקלה שדווחה).
+ensure_limit() {  # $1=tag  $2=value
+  if grep -q "<$1>" "$ICE"; then
+    sed -i -E "s#<$1>[^<]*</$1>#<$1>$2</$1>#" "$ICE"
+  else
+    sed -i -E "s#</limits>#    <$1>$2</$1>\n</limits>#" "$ICE"
+  fi
+}
+# burst-size=0 => אין prefill של buffer ישן בחיבור (זה היה מקור ה-30 שניות).
+# queue-size גדול מ-burst (חובה, אחרת ה-source נזרק) ולא מוסיף latency למאזין שעומד בקצב.
+ensure_limit burst-on-connect 0
+ensure_limit burst-size 0
+ensure_limit queue-size 65536
+ensure_limit source-timeout 10
 # אפשר את השירות
 [[ -f /etc/default/icecast2 ]] && sed -i 's/^ENABLE=.*/ENABLE=true/' /etc/default/icecast2 || true
 grep -q "^ENABLE=" /etc/default/icecast2 2>/dev/null || echo "ENABLE=true" >> /etc/default/icecast2
