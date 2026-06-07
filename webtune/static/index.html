@@ -51,6 +51,7 @@
     .opts { display:flex; align-items:center; gap:1rem; flex-wrap:wrap;
       font-size:.85rem; color:#8b949e; border-top:1px solid #30363d; padding-top:.8rem; }
     .opts label { display:flex; align-items:center; gap:.35rem; }
+    .opts .hint { flex-basis:100%; margin:.2rem 0 0; font-size:.78rem; line-height:1.6; }
     select, input[type="range"] { accent-color:#58a6ff; }
   </style>
 </head>
@@ -84,6 +85,18 @@
       Gain <input type="range" id="gain" min="0" max="60" value="40" />
       <span id="gainVal">40</span>
     </label>
+    <label>סקוולץ׳:
+      <select id="squelch">
+        <option value="auto" selected>אוטומטי</option>
+        <option value="open">תמיד פתוח</option>
+        <option value="manual">ידני</option>
+      </select>
+    </label>
+    <label id="snrWrap" style="display:none">
+      סף SNR <input type="range" id="snr" min="3" max="25" step="1" value="9" />
+      <span id="snrVal">9</span> dB
+    </label>
+    <p class="hint">אוטומטי מתאים לרוב התדרים · ל-ATIS ושידור רציף בחר "תמיד פתוח" · "ידני" אם נפתח על רעש או חותך</p>
   </div>
 
   <script>
@@ -91,6 +104,7 @@
     const player = $("player");
     let cfg = { port: 8000, mount: "live.mp3", presets: [] };
     let retryTimer = null;
+    let current = 132.5;   // התדר הפעיל כרגע (לכיוונון-מחדש בשינוי squelch)
 
     const streamURL = () =>
       `http://${location.hostname}:${cfg.port}/${cfg.mount}?t=${Date.now()}`;
@@ -108,10 +122,21 @@
         const f = p.freq.toFixed(3);
         b.innerHTML = `${p.name}<br><span class="pf">${f}</span>`;
         if (active && Math.abs(p.freq - active) < 0.0005) b.classList.add("active");
-        b.onclick = () => tune(p.freq);
+        b.onclick = () => selectPreset(p);
         box.appendChild(b);
       }
     }
+
+    // בחירת פריסט: פריסט עם רמז squelch (ATIS => "open") קובע את מצב ה-squelch,
+    // אחרת חוזרים ל"אוטומטי". כך כל פריסט מביא את ה-squelch הנכון לערוץ.
+    function selectPreset(p) {
+      const sq = p.sq || "auto";
+      $("squelch").value = sq;
+      $("snrWrap").style.display = sq === "manual" ? "flex" : "none";
+      tune(p.freq);
+    }
+
+    function retune() { tune(current); }
 
     // טעינת השמע מחדש עם ניסיונות חוזרים (ה-mount חוזר כמה שניות אחרי restart)
     function reloadStream(tries = 8) {
@@ -130,6 +155,7 @@
     async function tune(freq) {
       freq = parseFloat(freq);
       if (!(freq >= 0.1 && freq <= 2000)) { setStatus("תדר לא תקין", false); return; }
+      current = freq;
       $("curFreq").textContent = freq.toFixed(3);
       $("freqInput").value = freq.toFixed(3);
       renderPresets(freq);
@@ -143,6 +169,8 @@
             mod: $("mod").value,
             agc: $("agc").checked,
             gain: parseInt($("gain").value, 10),
+            squelch_mode: $("squelch").value,
+            squelch_snr: parseInt($("snr").value, 10),
           }),
         });
         const data = await res.json();
@@ -159,6 +187,13 @@
     $("freqInput").addEventListener("keydown", (e) => { if (e.key === "Enter") tune($("freqInput").value); });
     $("agc").onchange = () => { $("gainWrap").style.display = $("agc").checked ? "none" : "flex"; };
     $("gain").oninput = () => { $("gainVal").textContent = $("gain").value; };
+    // שינוי squelch מצריך restart => מכווננים מחדש את התדר הנוכחי
+    $("squelch").onchange = () => {
+      $("snrWrap").style.display = $("squelch").value === "manual" ? "flex" : "none";
+      retune();
+    };
+    $("snr").oninput = () => { $("snrVal").textContent = $("snr").value; };  // משוב חי בלבד
+    $("snr").onchange = () => retune();                                      // החל רק בשחרור
 
     // אתחול: משוך מצב נוכחי
     fetch("/api/state").then((r) => r.json()).then((st) => {
@@ -168,6 +203,11 @@
       $("gain").value = st.gain || 40;
       $("gainVal").textContent = $("gain").value;
       $("gainWrap").style.display = $("agc").checked ? "none" : "flex";
+      $("squelch").value = st.squelch_mode || "auto";
+      $("snr").value = st.squelch_snr || 9;
+      $("snrVal").textContent = $("snr").value;
+      $("snrWrap").style.display = ($("squelch").value === "manual") ? "flex" : "none";
+      current = Number(st.freq);
       $("curFreq").textContent = Number(st.freq).toFixed(3);
       $("freqInput").value = Number(st.freq).toFixed(3);
       renderPresets(st.freq);

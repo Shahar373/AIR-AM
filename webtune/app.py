@@ -23,6 +23,9 @@ ICECAST_PORT = 8000
 SOURCE_PW = "airam"         # סיסמת source פנימית קבועה (המשתמש לא נחשף אליה)
 SAMPLE_RATE = 2.56          # Msps - ערוץ יחיד ממורכז, חלון צר מספיק
 GAIN_DEFAULT = 40
+SQUELCH_MODES = {"auto", "open", "manual"}
+SNR_MIN, SNR_MAX = 0.0, 60.0   # dB - תחום clamp ל-SNR ידני
+SNR_DEFAULT = 9.0              # ≈ סף ה-auto הפנימי של rtl_airband (~9.54 dB)
 
 APP_DIR = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=str(APP_DIR / "static"))
@@ -30,7 +33,7 @@ app = Flask(__name__, static_folder=str(APP_DIR / "static"))
 # פריסטים של נתב"ג / TMA (אפשר לערוך כרצונך)
 PRESETS = [
     {"name": "מגדל (Tower)",     "freq": 134.600},
-    {"name": "ATIS",             "freq": 132.500},
+    {"name": "ATIS",             "freq": 132.500, "sq": "open"},  # רציף => תמיד פתוח
     {"name": "קרקע מזרח",        "freq": 129.200},
     {"name": "גישה/המראה",       "freq": 120.500},
     {"name": "Tel Aviv Control", "freq": 121.400},
@@ -39,11 +42,28 @@ PRESETS = [
     {"name": "Guard (חירום)",    "freq": 121.500},
 ]
 
-DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True, "gain": GAIN_DEFAULT}
+DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True, "gain": GAIN_DEFAULT,
+                 "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}  # ברירת מחדל ATIS => תמיד פתוח
+
+
+# --- שורת ה-squelch: מקור אמת יחיד -----------------------------------------
+def _squelch_line(squelch_mode, squelch_snr):
+    """מחזיר את שורת ה-squelch (או None) לכל מצב. שנה כאן בלבד.
+      auto   -> None  (ללא שורה => squelch אוטומטי, ~9.54 dB מעל הרעש)
+      open   -> תמיד פתוח (ל-ATIS / שידור רציף)
+      manual -> סף SNR ידני ב-dB
+    תמיד squelch_snr_threshold (לא dBFS) => בלתי תלוי ב-gain/AGC, ואף פעם לא שני
+    הפרמטרים יחד.
+    """
+    if squelch_mode == "manual":
+        return f"        squelch_snr_threshold = {float(squelch_snr):.1f};"
+    if squelch_mode == "open":
+        return "        squelch_snr_threshold = 0;"   # 0 = תמיד פתוח
+    return None  # auto
 
 
 # --- בניית קובץ ההגדרות ל-rtl_airband ------------------------------------
-def render_config(freq, mod, agc, gain):
+def render_config(freq, mod, agc, gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT):
     f = float(freq)
     lines = [
         "# נוצר אוטומטית ע\"י AIR-AM web tuner. שינויים ידניים נדרסים בכל כיוונון.",
@@ -64,6 +84,11 @@ def render_config(freq, mod, agc, gain):
         "      {",
         f"        freq = {f:.4f};",
         f'        modulation = "{mod}";',
+    ]
+    sq = _squelch_line(squelch_mode, squelch_snr)
+    if sq is not None:
+        lines.append(sq)
+    lines += [
         "        outputs:",
         "        (",
         "          {",
@@ -85,9 +110,9 @@ def render_config(freq, mod, agc, gain):
     return "\n".join(lines)
 
 
-def write_config(freq, mod, agc, gain):
+def write_config(freq, mod, agc, gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(render_config(freq, mod, agc, gain))
+    CONFIG_PATH.write_text(render_config(freq, mod, agc, gain, squelch_mode, squelch_snr))
 
 
 def load_state():
@@ -135,8 +160,18 @@ def api_tune():
     except (TypeError, ValueError):
         gain = GAIN_DEFAULT
 
-    write_config(freq, mod, agc, gain)
-    save_state({"freq": freq, "mod": mod, "agc": agc, "gain": gain})
+    squelch_mode = str(data.get("squelch_mode", "auto")).lower()
+    if squelch_mode not in SQUELCH_MODES:
+        squelch_mode = "auto"
+    try:
+        squelch_snr = float(data.get("squelch_snr", SNR_DEFAULT))
+    except (TypeError, ValueError):
+        squelch_snr = SNR_DEFAULT
+    squelch_snr = max(SNR_MIN, min(SNR_MAX, squelch_snr))
+
+    write_config(freq, mod, agc, gain, squelch_mode, squelch_snr)
+    save_state({"freq": freq, "mod": mod, "agc": agc, "gain": gain,
+                "squelch_mode": squelch_mode, "squelch_snr": squelch_snr})
 
     r = subprocess.run(
         ["systemctl", "restart", "rtl_airband"],
@@ -145,12 +180,14 @@ def api_tune():
     if r.returncode != 0:
         return jsonify(ok=False, error=(r.stderr or "restart failed").strip()), 500
 
-    return jsonify(ok=True, freq=freq, mod=mod, agc=agc, gain=gain)
+    return jsonify(ok=True, freq=freq, mod=mod, agc=agc, gain=gain,
+                   squelch_mode=squelch_mode, squelch_snr=squelch_snr)
 
 
 if __name__ == "__main__":
     # ודא שקיים קובץ הגדרות התחלתי כדי ש-rtl_airband יעלה
     if not CONFIG_PATH.exists():
         st = load_state()
-        write_config(st["freq"], st["mod"], st["agc"], st["gain"])
+        write_config(st["freq"], st["mod"], st["agc"], st["gain"],
+                     st["squelch_mode"], st["squelch_snr"])
     app.run(host="0.0.0.0", port=8080)
