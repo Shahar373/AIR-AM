@@ -66,9 +66,10 @@ else
   BASE="$(basename "$LIB")"                       # libsdrplay_api.so.3.15
   ln -sf "/usr/local/lib/$BASE" /usr/local/lib/libsdrplay_api.so.3
   ln -sf /usr/local/lib/libsdrplay_api.so.3 /usr/local/lib/libsdrplay_api.so
-  # קבצי כותרת (נדרשים לבניית SoapySDRPlay3)
-  cp -f "$EXT"/*.h /usr/local/include/ 2>/dev/null || true
-  cp -f "$EXT"/inc/*.h /usr/local/include/ 2>/dev/null || true
+  # קבצי כותרת (נדרשים לבניית SoapySDRPlay3) - מוצאים איפה שהם, ונכשלים אם חסר
+  SDR_HDR="$(find "$EXT" -name sdrplay_api.h -print -quit)"
+  [[ -n "$SDR_HDR" ]] || die "sdrplay_api.h לא נמצא ב-API שחולץ ($EXT)."
+  cp -f "$(dirname "$SDR_HDR")"/*.h /usr/local/include/
   # שירות ה-API + כללי udev
   cp -f "$EXT/$APIARCH/sdrplay_apiService" /usr/local/bin/
   chmod 755 /usr/local/bin/sdrplay_apiService
@@ -106,9 +107,15 @@ fi
 # ----------------------------------------------------------------------------
 # 5. Icecast2  -  ללא סיסמה למאזין (סיסמת source פנימית קבועה)
 # ----------------------------------------------------------------------------
-log "מגדיר Icecast2 (מאזינים ללא סיסמה)..."
-# ברירת המחדל של דביאן משתמשת ב-'hackme' - מחליפים לערך הפנימי הקבוע שלנו
-sed -i "s/>hackme</>${SOURCE_PW}</g" /etc/icecast2/icecast.xml || true
+log "מגדיר Icecast2 (מאזינים ללא סיסמה, latency נמוך)..."
+ICE=/etc/icecast2/icecast.xml
+# סיסמת source פנימית (אידמפוטנטי - לא תלוי בערך ברירת המחדל)
+sed -i -E "s#<source-password>[^<]*</source-password>#<source-password>${SOURCE_PW}</source-password>#" "$ICE"
+# כיוונון latency נמוך: ברירת המחדל burst-size=65536 בייט ≈ 33 שניות ב-16kbps!
+sed -i -E 's#<burst-on-connect>[^<]*</burst-on-connect>#<burst-on-connect>0</burst-on-connect>#' "$ICE"
+sed -i -E 's#<burst-size>[^<]*</burst-size>#<burst-size>0</burst-size>#' "$ICE"
+sed -i -E 's#<queue-size>[^<]*</queue-size>#<queue-size>8192</queue-size>#' "$ICE"
+sed -i -E 's#<source-timeout>[^<]*</source-timeout>#<source-timeout>10</source-timeout>#' "$ICE"
 # אפשר את השירות
 [[ -f /etc/default/icecast2 ]] && sed -i 's/^ENABLE=.*/ENABLE=true/' /etc/default/icecast2 || true
 grep -q "^ENABLE=" /etc/default/icecast2 2>/dev/null || echo "ENABLE=true" >> /etc/default/icecast2
@@ -126,8 +133,14 @@ mkdir -p /etc/rtl_airband /var/lib/airam
 # 7. שרת בורר התדרים (web tuner)
 # ----------------------------------------------------------------------------
 log "מתקין את שרת הווב ל-/opt/airam ..."
-mkdir -p /opt/airam
-cp -r "$REPO_DIR/webtune" /opt/airam/
+mkdir -p /opt/airam/webtune
+cp -r "$REPO_DIR/webtune/." /opt/airam/webtune/   # אידמפוטנטי (לא יוצר webtune/webtune)
+# שער המוכנות ל-SDRplay (ExecStartPre של rtl_airband)
+cp "$REPO_DIR/scripts/airam-wait-sdrplay" /usr/local/bin/
+chmod 755 /usr/local/bin/airam-wait-sdrplay
+# כלל udev: הפעלה מחדש של שירותי ה-SDR בעת חיבור ה-RSP1B (התאוששות מהירה)
+cp "$REPO_DIR/udev/99-airam.rules" /etc/udev/rules.d/
+udevadm control --reload-rules 2>/dev/null || true
 
 # ----------------------------------------------------------------------------
 # 8. שירותי systemd
