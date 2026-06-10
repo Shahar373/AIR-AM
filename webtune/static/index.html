@@ -294,8 +294,10 @@
     /* ---------- segmented control ---------- */
     function segValue(id) { return $(id).querySelector(".on").dataset.v; }
     function segSet(id, v) {
-      for (const b of $(id).querySelectorAll("button"))
-        b.classList.toggle("on", b.dataset.v === v);
+      const btns = [...$(id).querySelectorAll("button")];
+      // ערך לא מוכר (state ישן/פגום) => נופלים לכפתור הראשון, אחרת segValue יקרוס
+      if (!btns.some((b) => b.dataset.v === v)) v = btns[0].dataset.v;
+      for (const b of btns) b.classList.toggle("on", b.dataset.v === v);
     }
     function segInit(id, onChange) {
       $(id).addEventListener("click", (e) => {
@@ -394,12 +396,11 @@
         if (!data.ok) {
           setStatus("שגיאה: " + (data.error || "כיוונון נכשל"), "err");
           showError(data.detail || null);
-          // השרת חזר לתדר האחרון שעבד => מיישרים את התצוגה למציאות
-          try {
-            const st = await (await fetch("/api/state")).json();
-            current = Number(st.freq);
+          // השרת חזר להגדרות האחרונות שעבדו (state בתשובה) => מיישרים תצוגה
+          if (data.state) {
+            current = Number(data.state.freq);
             updateDisplay(current);
-          } catch (_) {}
+          }
           return;
         }
         // השרת כבר וידא שהשירות נשאר חי => נותר רק לחכות שה-mount יחזור ב-Icecast
@@ -436,10 +437,14 @@
 
     // חזרה לטאב אחרי השהיה => סנכרון מחדש ל-live (נגן HTML5 נסחף מאחור).
     // iOS עוצר את הנגן ברקע, לכן בודקים את כוונת המשתמש (wantPlaying) ולא את player.paused.
+    // מסנכרנים רק אחרי היעדרות ממושכת (או נגן שנפל) - הצצה רגעית לאפליקציה אחרת
+    // לא מצדיקה ניתוק/חיבור מחדש של הסטרים.
     player.addEventListener("play", () => { wantPlaying = true; });
     player.addEventListener("pause", () => { if (!document.hidden) wantPlaying = false; });
+    let hiddenAt = 0;
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden && wantPlaying) reloadStream();
+      if (document.hidden) { hiddenAt = Date.now(); return; }
+      if (wantPlaying && (Date.now() - hiddenAt > 10000 || player.error)) reloadStream();
     });
 
     /* ---------- אתחול ---------- */
@@ -447,11 +452,13 @@
       cfg = st;
       segSet("modSeg", st.mod === "nfm" ? "nfm" : "am");
       $("agc").checked = st.agc !== false;
-      $("gain").value = st.gain || 40;
+      const g = Number(st.gain);                       // לא ||: ‏gain=0 הוא ערך חוקי
+      $("gain").value = Number.isFinite(g) ? g : 40;
       $("gainVal").textContent = $("gain").value;
       $("gainWrap").classList.toggle("show", !$("agc").checked);
       segSet("sqSeg", st.squelch_mode || "auto");
-      $("snr").value = st.squelch_snr || 9;
+      const s = Number(st.squelch_snr);                // לא ||: ‏snr=0 הוא ערך חוקי
+      $("snr").value = Number.isFinite(s) ? s : 9;
       $("snrVal").textContent = $("snr").value;
       $("snrWrap").classList.toggle("show", st.squelch_mode === "manual");
       current = Number(st.freq);

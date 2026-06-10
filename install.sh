@@ -13,7 +13,7 @@ export DEBIAN_FRONTEND=noninteractive
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -n "${SUDO_USER:-}" ]]; then BUILD_DIR="/home/$SUDO_USER/air-am-build"; else BUILD_DIR="/root/air-am-build"; fi
 SDRPLAY_VER="3.15.2"     # אם יצא עדכון: עדכן כאן (ודא שהקובץ קיים באתר sdrplay)
-SOURCE_PW="airam"        # סיסמת source פנימית (פנימי בלבד; מאזינים לא צריכים סיסמה)
+SOURCE_PW="airam"        # סיסמת source פנימית; חייבת להיות זהה ל-SOURCE_PW ב-webtune/app.py
 
 log()  { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
 warn() { printf '\n\033[1;33m[!] %s\033[0m\n' "$*"; }
@@ -95,35 +95,45 @@ fi
 # ----------------------------------------------------------------------------
 # 4. RTLSDR-Airband
 # ----------------------------------------------------------------------------
-# marker מגורסם: מסמן שהבינארי נבנה עם NFM + CBR. אם חסר (גרסה ישנה) => בונים מחדש.
-AIRAM_RTL_MARK="/usr/local/share/airam/.rtl_airband-build-v2"
-if command -v rtl_airband >/dev/null 2>&1 && [[ -f "$AIRAM_RTL_MARK" ]]; then
+# ה-patch ודגלי הבנייה מוגדרים כמשתנים כדי שחתימת הבנייה תיגזר מהם אוטומטית:
+# כל שינוי בהם => חתימה חדשה => בנייה מחדש בעדכון הבא (בלי לזכור לעדכן marker ידני).
+#
+# למה patch? ברירת המחדל של rtl_airband היא MP3 ב-VBR (vbr_mtrh), שבו LAME
+# *מתעלם* מ-brate: בשקט (squelch סגור) הזרם צונח ל-~1KB/s והדפדפן ממלא את
+# ה-buffer ההתחלתי שלו ~30 שניות (זה מקור ה-latency!). עוברים ל-CBR 48kbps
+# @ 16kHz - זרם קבוע וצפוף (6KB/s) => הנגן מתחיל תוך שניות. אין לזה שום knob
+# בהגדרות/בנייה של rtl_airband, ולכן patch על המקור. (אומת מול מקור LAME:
+# brate נאכף רק ב-vbr_off; ‏48kbps חוקי ל-MPEG-2 @ 16kHz.)
+RTL_PATCH='
+s/lame_set_VBR(lame, vbr_mtrh);/lame_set_VBR(lame, vbr_off);/
+s/lame_set_brate(lame, 16);/lame_set_brate(lame, 48);/
+s/lame_set_out_samplerate(lame, MP3_RATE);/lame_set_out_samplerate(lame, 16000);/
+s/sprintf(samplerates, "%d", MP3_RATE);/sprintf(samplerates, "%d", 16000);/'
+# -DNFM=ON: תמיכת NFM כבויה כברירת מחדל; הממשק מציע NFM אז חובה להפעיל,
+# אחרת בחירת NFM => "unknown modulation" וקריסה.
+RTL_CMAKE_FLAGS="-DPLATFORM=native -DNFM=ON"
+RTL_BUILD_SIG="$(printf '%s' "$RTL_PATCH $RTL_CMAKE_FLAGS" | sha256sum | awk '{print $1}')"
+AIRAM_RTL_MARK="/usr/local/share/airam/rtl_airband.build-sig"
+
+if command -v rtl_airband >/dev/null 2>&1 && [[ "$(cat "$AIRAM_RTL_MARK" 2>/dev/null)" == "$RTL_BUILD_SIG" ]]; then
   log "RTLSDR-Airband (NFM + CBR 48k) כבר מותקן - מדלג."
 else
   log "בונה RTLSDR-Airband (NFM + CBR 48kbps ל-latency נמוך)..."
   cd "$BUILD_DIR"
   [[ -d RTLSDR-Airband ]] || git clone https://github.com/rtl-airband/RTLSDR-Airband.git
   cd RTLSDR-Airband
-  # ברירת המחדל של rtl_airband היא MP3 ב-VBR (vbr_mtrh), שבו LAME *מתעלם* מ-brate:
-  # בשקט (squelch סגור) הזרם צונח ל-~1KB/s והדפדפן ממלא את ה-buffer ההתחלתי
-  # שלו ~30 שניות (זה מקור ה-latency!). עוברים ל-CBR 48kbps @ 16kHz - זרם קבוע
-  # וצפוף (6KB/s) => הנגן מתחיל תוך שניות. (אומת מול מקור LAME: brate נאכף רק
-  # ב-vbr_off; ‏48kbps חוקי ל-MPEG-2 @ 16kHz.)
   git checkout -- src/output.cpp 2>/dev/null || true   # איפוס לפני patch (אידמפוטנטי)
-  sed -i \
-    -e 's/lame_set_VBR(lame, vbr_mtrh);/lame_set_VBR(lame, vbr_off);/' \
-    -e 's/lame_set_brate(lame, 16);/lame_set_brate(lame, 48);/' \
-    -e 's/lame_set_out_samplerate(lame, MP3_RATE);/lame_set_out_samplerate(lame, 16000);/' \
-    -e 's/sprintf(samplerates, "%d", MP3_RATE);/sprintf(samplerates, "%d", 16000);/' \
-    src/output.cpp
-  grep -q 'lame_set_VBR(lame, vbr_off);' src/output.cpp \
-    && grep -q 'lame_set_brate(lame, 48);' src/output.cpp \
-    || warn "ה-patch ל-CBR לא נתפס (הקוד השתנה ב-upstream) - הזרם יישאר VBR דליל."
+  sed -i "$RTL_PATCH" src/output.cpp
+  # מאמתים את *כל* ההחלפות - החלפה שהוחמצה (upstream השתנה) חייבת להישמע, אחרת
+  # "הצלחה" שקטה משאירה בינארי חצי-מתוקן שקשה מאוד לאבחן.
+  for pat in 'lame_set_VBR(lame, vbr_off);' 'lame_set_brate(lame, 48);' \
+             'lame_set_out_samplerate(lame, 16000);' 'sprintf(samplerates, "%d", 16000);'; do
+    grep -qF "$pat" src/output.cpp || warn "ה-patch לא נתפס: '$pat' (הקוד השתנה ב-upstream?)"
+  done
   rm -rf build && mkdir build && cd build
-  # -DNFM=ON: תמיכת NFM כבויה כברירת מחדל ב-RTLSDR-Airband; הממשק מציע NFM
-  # אז חובה להפעיל אותה, אחרת בחירת NFM => "unknown modulation" וקריסה.
-  cmake -DPLATFORM=native -DNFM=ON .. && make -j"$(nproc)" && make install
-  mkdir -p "$(dirname "$AIRAM_RTL_MARK")"; touch "$AIRAM_RTL_MARK"
+  cmake $RTL_CMAKE_FLAGS .. && make -j"$(nproc)" && make install
+  mkdir -p "$(dirname "$AIRAM_RTL_MARK")"
+  printf '%s' "$RTL_BUILD_SIG" > "$AIRAM_RTL_MARK"
 fi
 
 # ----------------------------------------------------------------------------

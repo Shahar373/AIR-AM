@@ -23,7 +23,7 @@ CONFIG_PATH = Path("/etc/rtl_airband/airband.conf")
 STATE_PATH = Path("/var/lib/airam/state.json")
 MOUNT = "live.mp3"          # שם ה-stream הקבוע ב-Icecast
 ICECAST_PORT = 8000
-SOURCE_PW = "airam"         # סיסמת source פנימית קבועה (המשתמש לא נחשף אליה)
+SOURCE_PW = "airam"         # חייבת להיות זהה ל-SOURCE_PW ב-install.sh (נכתבת ל-Icecast שם)
 SAMPLE_RATE = 2.56          # Msps - ערוץ יחיד, חלון צר מספיק
 DC_OFFSET = 0.3             # MHz - מזיזים את centerfreq מהתדר כדי להתרחק מ-spike ה-DC
 GAIN_DEFAULT = 40
@@ -149,15 +149,17 @@ def _journal_tail(lines=8):
 
 
 def _restart_and_verify():
-    """מפעיל מחדש את rtl_airband ומוודא שנשאר חי. מחזיר (error, detail) או (None, None).
+    """מפעיל מחדש את rtl_airband ומוודא שנשאר חי.
+    מחזיר (error, detail, sdr_down): ‏sdr_down=True כשה-restart נתקע על המתנה
+    ל-SDR — במצב הזה גם רולבק נדון לאותו כישלון ואין טעם לנסות אותו.
     ה-restart עצמו יכול לחסום עד ~30 שניות (airam-wait-sdrplay) כשה-SDR מנותק."""
     try:
         r = subprocess.run(["systemctl", "restart", "rtl_airband"],
                            capture_output=True, text=True, timeout=45)
     except subprocess.TimeoutExpired:
-        return "ה-restart נתקע — בדוק שה-SDR מחובר", None
+        return "ה-restart נתקע — בדוק שה-SDR מחובר", None, True
     if r.returncode != 0:
-        return (r.stderr or "restart failed").strip(), _journal_tail()
+        return (r.stderr or "restart failed").strip(), _journal_tail(), False
     # restart מחזיר 0 כשהשירות עלה, אבל rtl_airband יכול לקרוס על config רע
     # גם ~2 שניות אחרי העלייה => פולינג (לא בדיקה בודדת שמפספסת קריסה מאוחרת).
     for _ in range(7):
@@ -165,8 +167,8 @@ def _restart_and_verify():
         chk = subprocess.run(["systemctl", "is-active", "rtl_airband"],
                              capture_output=True, text=True)
         if chk.stdout.strip() != "active":
-            return "rtl_airband נכשל לעלות — בדוק תדר/חיבור SDR", _journal_tail()
-    return None, None
+            return "rtl_airband נכשל לעלות — בדוק תדר/חיבור SDR", _journal_tail(), False
+    return None, None, False
 
 
 def _rollback(prev):
@@ -228,11 +230,13 @@ def api_tune():
         prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
         write_config(freq, mod, agc, gain, squelch_mode, squelch_snr)
 
-        err, detail = _restart_and_verify()
+        err, detail, sdr_down = _restart_and_verify()
         if err:
-            _rollback(prev)   # לא משאירים את השירות בלולאת קריסה על config רע
-            return jsonify(ok=False, error=err + " (חזרתי לתדר הקודם)",
-                           detail=detail), 500
+            if not sdr_down:   # SDR מנותק => גם רולבק ייתקע באותה המתנה; מדלגים
+                _rollback(prev)   # לא משאירים את השירות בלולאת קריסה על config רע
+                err += " (חזרתי לתדר הקודם)"
+            # state בתשובה => ה-UI מיישר תצוגה בלי בקשת /api/state נוספת
+            return jsonify(ok=False, error=err, detail=detail, state=prev), 500
 
         # נשמר רק אחרי שאומת שהשירות חי => state תמיד משקף הגדרות שעובדות
         save_state({"freq": freq, "mod": mod, "agc": agc, "gain": gain,
