@@ -61,6 +61,18 @@ sudo ./install.sh
 
 > אם SDRplay יוציאו גרסת API חדשה והקישור ישתנה — עדכן את `SDRPLAY_VER` בראש `install.sh`.
 
+### עדכון גרסה (Pi שכבר מותקן)
+
+```bash
+cd ~/AIR-AM
+git pull
+sudo ./install.sh
+```
+
+ההתקנה אידמפוטנטית: מדלגת על מה שכבר מותקן, בונה מחדש את `rtl_airband` רק כשצריך
+(ייקח כמה דקות), ובסוף **מפעילה מחדש את כל השירותים** כך שהבינארי, הקוד וההגדרות
+החדשים נקלטים מיד — בלי reboot.
+
 ---
 
 ## שימוש — בורר התדרים 🎛️
@@ -121,10 +133,10 @@ sudo ./install.sh
 | הדף לא נטען | `sudo systemctl status airam-web` · `sudo journalctl -u airam-web -f` |
 | המכשיר לא מזוהה | `SoapySDRUtil --probe="driver=sdrplay"` — אמור להראות RSP1B. ודא ש-`systemctl status sdrplay` רץ ושה-USB מחובר. |
 | אין סאונד | בחר ATIS 132.5 (משדר ברצף). בדוק `journalctl -u rtl_airband -f`. ודא שיש שידור בתדר. |
-| `unknown modulation` / קורס ב-NFM | תמיכת NFM כבויה כברירת מחדל בבנייה של RTLSDR-Airband. תעופה היא AM בלבד — בחר **AM**. כדי שאופציית NFM תעבוד, בנה מחדש: `cd ~/air-am-build/RTLSDR-Airband/build && cmake -DPLATFORM=native -DNFM=ON .. && make -j4 && sudo make install && sudo systemctl restart rtl_airband` |
+| `unknown modulation` / קורס ב-NFM | תמיכת NFM כבויה כברירת מחדל בבנייה של RTLSDR-Airband. תעופה היא AM בלבד — בחר **AM**. כדי שאופציית NFM תעבוד, הרץ שוב `sudo ./install.sh` (יבנה מחדש עם NFM אוטומטית). |
 | רעש/עיוות חזק | כבה AGC בממשק והורד Gain (נסה 20–30). |
 | הסטרים לא חוזר אחרי כיוונון | זה לוקח ~3 שניות; הדף מנסה שוב לבד. אם לא — לחץ ▶ בנגן. |
-| latency גבוה (עיכוב בשמיעה) | תוקן — `install.sh` מכוונן את Icecast (`burst-size=0`) ל-~2–4 שניות. אם עדכנת מגרסה ישנה, הרץ שוב את ההתקנה. חזרה לטאב מסנכרנת ל-live. |
+| latency גבוה (עיכוב בשמיעה) | שני גורמים: (1) Icecast `burst-size=0` — `install.sh` מבטיח זאת גם אם התג חסר או נמצא בהערה בקובץ ברירת המחדל. (2) rtl_airband מקודד MP3 ב-VBR שצונח ל-~1KB/s בשקט => הדפדפן ממלא את ה-buffer ההתחלתי ~30 שניות; ההתקנה בונה מחדש עם **CBR 48kbps** (זרם קבוע 6KB/s) => הנגן מתחיל תוך שניות. **הרץ `sudo ./install.sh` (עדכון)** כדי ששני התיקונים יחולו. כפתור "סנכרן ל-live" בממשק מחזיר ל-live אם הנגן נסחף מאחור. רצפה מעשית בנגן דפדפן: ~2–5 שניות. |
 | ניתקתי וחיברתי את ה-SDR | השירותים מתאוששים לבד (`Restart=always`, ללא StartLimit) + כלל udev מפעיל מחדש בחיבור. התאוששות תוך שניות. |
 | התקנת API נכשלה | ודא רשת; אם יצא API חדש, עדכן `SDRPLAY_VER` ב-`install.sh` והרץ שוב. |
 
