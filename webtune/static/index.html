@@ -202,6 +202,34 @@
     .sub-setting .val { direction: ltr; font-variant-numeric: tabular-nums;
       color: var(--accent); font-size: .9rem; min-width: 3.2em; text-align: center; }
 
+    /* ---------- בקרת רווח (Gain) ---------- */
+    .gain-head { gap: .6rem; }
+    .overload {
+      font-size: .68rem; font-weight: 700; letter-spacing: .02em;
+      color: #fff; background: var(--red); border-radius: 999px;
+      padding: .14rem .6rem; margin-inline-start: auto; white-space: nowrap;
+      box-shadow: 0 0 0 0 rgba(229,83,75,.5); animation: pulse-red 1.1s ease-out infinite;
+    }
+    @keyframes pulse-red {
+      0% { box-shadow: 0 0 0 0 rgba(229,83,75,.5); }
+      100% { box-shadow: 0 0 0 .5rem rgba(229,83,75,0); }
+    }
+    .gain-readout { display: flex; align-items: center; justify-content: space-between;
+      padding: .7rem 0; border-bottom: 1px solid var(--border); }
+    .gain-readout > span:first-child { font-size: .9rem; }
+    .gain-readout .val { direction: ltr; color: var(--dim); font-size: .85rem; }
+    .gain-readout .val b { font-size: 1.4rem; font-weight: 800; color: var(--accent-2);
+      font-variant-numeric: tabular-nums; margin-inline-end: .15rem; }
+    .gain-slider { display: flex; align-items: center; gap: .7rem;
+      padding: .6rem 0; border-bottom: 1px solid var(--border); transition: opacity .15s ease; }
+    .gain-slider:last-of-type { border-bottom: 0; }
+    .gain-slider > span:first-child { font-size: .88rem; color: var(--dim); min-width: 5em; }
+    .gain-slider input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
+    .gain-slider .val { direction: ltr; font-variant-numeric: tabular-nums;
+      color: var(--text); font-size: .9rem; min-width: 3.4em; text-align: end; }
+    .gain-slider.dim { opacity: .4; }
+    .gain-slider.dim input[type="range"] { cursor: not-allowed; }
+
     .hint { color: #5c6878; font-size: .78rem; line-height: 1.55; margin: .6rem 0 0; }
 
     /* ---------- שגיאות ---------- */
@@ -283,20 +311,33 @@
       </div>
     </div>
 
-    <div class="setting">
-      <span>AGC אוטומטי</span>
+    <!-- בקרת רווח (Gain) — בסגנון SDRplay: AGC, System/IF/RF gain + חיווי עומס -->
+    <div class="setting gain-head">
+      <span>IF AGC</span>
+      <span class="overload" id="overload" hidden>⚠ עומס יתר</span>
       <label class="switch">
         <input type="checkbox" id="agc" checked />
         <span class="track"></span>
       </label>
     </div>
-    <div class="sub-setting" id="gainWrap">
-      <span>Gain</span>
-      <input type="range" id="gain" min="0" max="60" value="40" />
-      <span class="val" id="gainVal">40</span>
+    <div class="gain-readout">
+      <span>System Gain</span>
+      <span class="val"><b id="sysGain">—</b><span id="sysGainUnit">dB</span></span>
     </div>
+    <div class="gain-slider" id="ifWrap">
+      <span>IF Gain</span>
+      <input type="range" id="ifGain" min="0" max="39" step="1" value="19" />
+      <span class="val"><span id="ifGainVal">19</span> dB</span>
+    </div>
+    <div class="gain-slider" id="rfWrap">
+      <span>RF Gain</span>
+      <input type="range" id="rfGain" min="0" max="9" step="1" value="5" />
+      <span class="val" id="rfGainVal">5/9</span>
+    </div>
+    <p class="hint">‏AGC דלוק = רווח אוטומטי (מומלץ). כבה כדי לכוון ידנית: <b>IF Gain</b> ו-<b>RF Gain</b>
+      (ימינה = רווח גבוה יותר). "עומס יתר" מופיע כשהאות חזק מדי וקרוב לרוויה — אז הורד רווח.</p>
 
-    <div class="setting">
+    <div class="setting" style="border-top:1px solid var(--border);margin-top:.4rem;padding-top:.9rem">
       <span>סקוולץ׳</span>
       <div class="seg" id="sqSeg">
         <button type="button" data-v="auto" class="on">אוטו׳</button>
@@ -352,6 +393,28 @@
         segSet(id, b.dataset.v);
         onChange(b.dataset.v);
       });
+    }
+
+    /* ---------- בקרת רווח (Gain) ----------
+       הסליידרים מוצגים ב"רווח" (ימינה = יותר), אך SDRplay עובד ב"הפחתת רווח":
+         IFGR 20–59  (קטן = רווח גדול)  => ערך סליידר 0–39  = 59 − IFGR
+         RFGR 0–9    (קטן = רווח גדול)  => ערך סליידר 0–9   = 9 − RFGR
+       System Gain הוא הערכה (RFGR ≈ 7dB לצעד, לא-לינארי) — חיווי יחסי, לא מדידה. */
+    const sliderToIFGR = () => 59 - parseInt($("ifGain").value, 10);
+    const sliderToRFGR = () => 9 - parseInt($("rfGain").value, 10);
+
+    function renderGainUI() {
+      const auto = $("agc").checked;
+      const ifDb = parseInt($("ifGain").value, 10);      // 0–39 dB
+      const rfStep = parseInt($("rfGain").value, 10);    // 0–9
+      $("ifGainVal").textContent = ifDb;
+      $("rfGainVal").textContent = rfStep + "/9";
+      // System Gain ≈ רווח IF + רווח LNA משוער (~7dB לצעד)
+      $("sysGain").textContent = auto ? "אוטו׳" : (ifDb + rfStep * 7);
+      $("sysGainUnit").textContent = auto ? "" : " dB";
+      for (const w of ["ifWrap", "rfWrap"]) $(w).classList.toggle("dim", auto);
+      $("ifGain").disabled = auto;
+      $("rfGain").disabled = auto;
     }
 
     /* ---------- פריסטים ---------- */
@@ -433,7 +496,8 @@
             freq,
             mod: segValue("modSeg"),
             agc: $("agc").checked,
-            gain: parseInt($("gain").value, 10),
+            if_gain: sliderToIFGR(),
+            rf_gain: sliderToRFGR(),
             squelch_mode: segValue("sqSeg"),
             squelch_snr: parseInt($("snr").value, 10),
           }),
@@ -491,14 +555,17 @@
         const panel = $("rfPanel");
         if (!m.ok || !m.fresh || m.snr == null) {
           panel.classList.add("stale");
+          $("overload").hidden = true;                 // אין נתונים => אין חיווי עומס
           return;
         }
         panel.classList.remove("stale");
+        $("overload").hidden = !m.overload;            // עומס יתר: אות קרוב לרוויה
         const snrEl = $("rfSnr");
         snrEl.textContent = m.snr.toFixed(1);
         snrEl.className = m.snr >= 10 ? "good" : (m.snr >= 4 ? "weak" : "");
         if (m.signal != null) {
           $("rfSigBar").style.width = dbfsPct(m.signal) + "%";
+          $("rfSigBar").style.background = m.overload ? "var(--red)" : "";
           $("rfSigVal").textContent = m.signal.toFixed(1) + " dBFS";
         }
         if (m.noise != null) {
@@ -528,12 +595,11 @@
       retune();
     });
 
-    $("agc").onchange = () => {
-      $("gainWrap").classList.toggle("show", !$("agc").checked);
-      retune();
-    };
-    $("gain").oninput = () => { $("gainVal").textContent = $("gain").value; };
-    $("gain").onchange = retune;                                  // החל רק בשחרור הסליידר
+    $("agc").onchange = () => { renderGainUI(); retune(); };
+    $("ifGain").oninput = renderGainUI;
+    $("ifGain").onchange = retune;                                // החל רק בשחרור הסליידר
+    $("rfGain").oninput = renderGainUI;
+    $("rfGain").onchange = retune;                                // החל רק בשחרור הסליידר
     $("snr").oninput = () => { $("snrVal").textContent = $("snr").value; };
     $("snr").onchange = retune;
 
@@ -554,10 +620,12 @@
       cfg = st;
       segSet("modSeg", st.mod === "nfm" ? "nfm" : "am");
       $("agc").checked = st.agc !== false;
-      const g = Number(st.gain);                       // לא ||: ‏gain=0 הוא ערך חוקי
-      $("gain").value = Number.isFinite(g) ? g : 40;
-      $("gainVal").textContent = $("gain").value;
-      $("gainWrap").classList.toggle("show", !$("agc").checked);
+      // state שומר ב-IFGR/RFGR (הפחתת רווח) => המרה לערכי הסליידר (רווח)
+      const ifgr = Number(st.if_gain);
+      $("ifGain").value = Number.isFinite(ifgr) ? (59 - ifgr) : 19;
+      const rfgr = Number(st.rf_gain);
+      $("rfGain").value = Number.isFinite(rfgr) ? (9 - rfgr) : 5;
+      renderGainUI();
       segSet("sqSeg", st.squelch_mode || "auto");
       const s = Number(st.squelch_snr);                // לא ||: ‏snr=0 הוא ערך חוקי
       $("snr").value = Number.isFinite(s) ? s : 9;
