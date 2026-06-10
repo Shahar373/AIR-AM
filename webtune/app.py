@@ -11,6 +11,7 @@
 # ============================================================================
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -30,6 +31,8 @@ GAIN_DEFAULT = 40
 SQUELCH_MODES = {"auto", "open", "manual"}
 SNR_MIN, SNR_MAX = 0.0, 60.0   # dB - תחום clamp ל-SNR ידני
 SNR_DEFAULT = 9.0              # ≈ סף ה-auto הפנימי של rtl_airband (~9.54 dB)
+STATS_PATH = Path("/run/rtl_airband_stats.txt")   # tmpfs - בלי שחיקת SD
+STATS_MAX_AGE = 45.0           # rtl_airband כותב כל ~15 שניות; פי-3 => לא טרי
 
 APP_DIR = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=str(APP_DIR / "static"))
@@ -74,6 +77,7 @@ def render_config(freq, mod, agc, gain, squelch_mode="auto", squelch_snr=SNR_DEF
     f = float(freq)
     lines = [
         "# נוצר אוטומטית ע\"י AIR-AM web tuner. שינויים ידניים נדרסים בכל כיוונון.",
+        f'stats_filepath = "{STATS_PATH}";   # מדדי RF (signal/noise) ל-/api/metrics',
         "devices:",
         "(",
         "  {",
@@ -206,6 +210,35 @@ def api_state():
     return jsonify(st)
 
 
+# שורת מדד בקובץ ה-stats של rtl_airband (פורמט Prometheus):
+#   channel_dbfs_signal_level{freq="132.500"}	-42.3
+_METRIC_RE = re.compile(r'^(\w+)\{freq="([0-9.]+)"[^}]*\}\s+(-?[0-9.]+)')
+
+
+@app.route("/api/metrics")
+def api_metrics():
+    """מדדי RF חיים לתדר הנוכחי. rtl_airband מרענן את הקובץ כל ~15 שניות."""
+    try:
+        age = time.time() - STATS_PATH.stat().st_mtime
+        text = STATS_PATH.read_text()
+    except OSError:
+        return jsonify(ok=True, fresh=False)   # עוד לא נכתב (אחרי restart/אתחול)
+
+    want = f"{load_state()['freq']:.3f}"       # מדדים מתויגים freq=MHz ב-3 ספרות
+    vals = {}
+    for line in text.splitlines():
+        m = _METRIC_RE.match(line)
+        if m and m.group(2) == want:
+            vals[m.group(1)] = float(m.group(3))
+
+    sig = vals.get("channel_dbfs_signal_level")
+    noise = vals.get("channel_dbfs_noise_level")
+    snr = round(sig - noise, 1) if (sig is not None and noise is not None) else None
+    return jsonify(ok=True, fresh=(age <= STATS_MAX_AGE and snr is not None),
+                   age=round(age, 1), signal=sig, noise=noise, snr=snr,
+                   squelch_opens=vals.get("channel_squelch_counter"))
+
+
 @app.route("/api/tune", methods=["POST"])
 def api_tune():
     data = request.get_json(force=True, silent=True) or {}
@@ -266,9 +299,20 @@ def api_tune():
 
 
 if __name__ == "__main__":
-    # ודא שקיים קובץ הגדרות התחלתי כדי ש-rtl_airband יעלה
-    if not CONFIG_PATH.exists():
+    # ודא קובץ הגדרות עדכני: חסר => כותבים; קיים בלי stats_filepath (שדרוג
+    # מגרסה ישנה) => משכתבים ומרימים את rtl_airband פעם אחת כדי שמדדי ה-RF יפעלו.
+    try:
+        _cur = CONFIG_PATH.read_text()
+    except OSError:
+        _cur = None
+    if _cur is None or "stats_filepath" not in _cur:
         st = load_state()
         write_config(st["freq"], st["mod"], st["agc"], st["gain"],
                      st["squelch_mode"], st["squelch_snr"])
+        if _cur is not None:   # שדרוג: השירות כבר רץ עם ההגדרות הישנות
+            try:
+                subprocess.run(["systemctl", "restart", "rtl_airband"],
+                               capture_output=True, timeout=60)
+            except Exception:
+                pass
     app.run(host="0.0.0.0", port=8080)

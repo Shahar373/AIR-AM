@@ -88,6 +88,32 @@
 
     audio { width: 100%; margin-top: .65rem; border-radius: 12px; }
 
+    /* ---------- מדדי RF ---------- */
+    .rf {
+      margin-top: .7rem; padding: .65rem .75rem; text-align: start;
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
+    }
+    .rf .top { display: flex; align-items: center; justify-content: space-between; gap: .6rem; }
+    .rf .snr { font-size: .8rem; color: var(--dim); white-space: nowrap; }
+    .rf .snr b {
+      font-size: 1.35rem; font-weight: 700; color: var(--text);
+      font-variant-numeric: tabular-nums; direction: ltr; display: inline-block; min-width: 2.2em;
+    }
+    .rf .snr b.good { color: var(--green); }
+    .rf .snr b.weak { color: var(--amber); }
+    .rf canvas { flex: 1; min-width: 0; height: 38px; }
+    .rf-row { display: flex; align-items: center; gap: .5rem; font-size: .72rem; color: var(--dim); margin-top: .45rem; }
+    .rf-row > span:first-child { min-width: 2.2em; }
+    .rf-row .bar { flex: 1; height: 6px; background: #1a212c; border-radius: 999px; overflow: hidden; }
+    .rf-row .bar i { display: block; height: 100%; width: 0%; border-radius: 999px;
+      background: linear-gradient(90deg, #2f81f7, #7cc4ff); transition: width .35s ease; }
+    .rf-row.noise .bar i { background: #59626e; }
+    .rf-row .val { direction: ltr; font-variant-numeric: tabular-nums; min-width: 5em;
+      text-align: end; color: var(--text); }
+    .rf.stale { opacity: .45; }
+    .rf .nodata { font-size: .72rem; color: #5c6878; margin: .2rem 0 0; display: none; }
+    .rf.stale .nodata { display: block; }
+
     .player-row { display: flex; gap: .5rem; margin-top: .6rem; }
     .player-row button { flex: 1; }
 
@@ -203,6 +229,26 @@
     <div class="freq-display"><span id="curFreq">—</span> <small>MHz</small></div>
     <div class="freq-name" id="freqName"></div>
     <audio id="player" controls preload="none"></audio>
+
+    <!-- מדדי RF חיים (statsd מ-rtl_airband) -->
+    <div class="rf stale" id="rfPanel">
+      <div class="top">
+        <span class="snr"><b id="rfSnr">—</b> dB SNR</span>
+        <canvas id="rfSpark"></canvas>
+      </div>
+      <div class="rf-row">
+        <span>אות</span>
+        <div class="bar"><i id="rfSigBar"></i></div>
+        <span class="val" id="rfSigVal">— dBFS</span>
+      </div>
+      <div class="rf-row noise">
+        <span>רעש</span>
+        <div class="bar"><i id="rfNoiseBar"></i></div>
+        <span class="val" id="rfNoiseVal">— dBFS</span>
+      </div>
+      <p class="nodata">אין נתוני RF — ממתין למקלט…</p>
+    </div>
+
     <div class="player-row">
       <button id="syncBtn" class="ghost" title="התחבר מחדש לנקודת השידור החיה">⟳ סנכרן ל-live</button>
     </div>
@@ -412,6 +458,62 @@
     }
 
     const retune = () => tune(current);
+
+    /* ---------- מדדי RF חיים ---------- */
+    const SNR_HIST_N = 60;          // 60 דגימות × 3 שניות = ‎~3 דקות אחורה
+    const snrHist = [];
+    const dbfsPct = (v) => Math.max(0, Math.min(100, ((v + 110) / 80) * 100)); // ‎-110..-30dBFS
+
+    function drawSpark() {
+      const cv = $("rfSpark");
+      const dpr = window.devicePixelRatio || 1;
+      const w = cv.clientWidth, h = cv.clientHeight;
+      if (!w) return;
+      if (cv.width !== w * dpr) { cv.width = w * dpr; cv.height = h * dpr; }
+      const ctx = cv.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      if (snrHist.length < 2) return;
+      const max = 30;                                  // סקאלה 0..30dB
+      ctx.beginPath();
+      snrHist.forEach((v, i) => {
+        const x = (i / (SNR_HIST_N - 1)) * w;
+        const y = h - Math.max(0, Math.min(max, v)) / max * (h - 3) - 1.5;
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      });
+      ctx.strokeStyle = "#4da3ff"; ctx.lineWidth = 1.6; ctx.lineJoin = "round";
+      ctx.stroke();
+    }
+
+    async function pollMetrics() {
+      try {
+        const m = await (await fetch("/api/metrics")).json();
+        const panel = $("rfPanel");
+        if (!m.ok || !m.fresh || m.snr == null) {
+          panel.classList.add("stale");
+          return;
+        }
+        panel.classList.remove("stale");
+        const snrEl = $("rfSnr");
+        snrEl.textContent = m.snr.toFixed(1);
+        snrEl.className = m.snr >= 10 ? "good" : (m.snr >= 4 ? "weak" : "");
+        if (m.signal != null) {
+          $("rfSigBar").style.width = dbfsPct(m.signal) + "%";
+          $("rfSigVal").textContent = m.signal.toFixed(1) + " dBFS";
+        }
+        if (m.noise != null) {
+          $("rfNoiseBar").style.width = dbfsPct(m.noise) + "%";
+          $("rfNoiseVal").textContent = m.noise.toFixed(1) + " dBFS";
+        }
+        snrHist.push(m.snr);
+        if (snrHist.length > SNR_HIST_N) snrHist.shift();
+        drawSpark();
+      } catch (e) { $("rfPanel").classList.add("stale"); }
+    }
+    // rtl_airband מרענן את הקובץ כל ~15 שניות => דגימה כל 3 שניות מספיקה,
+    // ורק כשהדף גלוי (חוסך סוללה בטלפון)
+    setInterval(() => { if (!document.hidden) pollMetrics(); }, 3000);
+    pollMetrics();
 
     /* ---------- אירועים ---------- */
     $("tuneBtn").onclick = () => tune($("freqInput").value);
