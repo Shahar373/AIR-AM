@@ -38,8 +38,9 @@ apt-get install -y \
 # ----------------------------------------------------------------------------
 # 2. SDRplay API  (הורדה + חילוץ + התקנה אוטומטית, ללא אישור רישיון אינטראקטיבי)
 # ----------------------------------------------------------------------------
-if ldconfig -p | grep -q libsdrplay_api; then
-  log "SDRplay API כבר מותקן - מדלג."
+# בדיקה תלוית-גרסה: עדכון SDRPLAY_VER + הרצה חוזרת אכן יתקינו את הגרסה החדשה
+if [[ -e "/usr/local/lib/libsdrplay_api.so.${SDRPLAY_VER%.*}" ]]; then
+  log "SDRplay API v${SDRPLAY_VER} כבר מותקן - מדלג."
 else
   log "מתקין SDRplay API v${SDRPLAY_VER}..."
   case "$(uname -m)" in
@@ -94,20 +95,30 @@ fi
 # ----------------------------------------------------------------------------
 # 4. RTLSDR-Airband
 # ----------------------------------------------------------------------------
-# marker: מסמן שהבינארי נבנה עם NFM + bitrate מוגבר. אם חסר (גרסה ישנה) => בונים מחדש.
-AIRAM_RTL_MARK="/usr/local/share/airam/.rtl_airband-build"
+# marker מגורסם: מסמן שהבינארי נבנה עם NFM + CBR. אם חסר (גרסה ישנה) => בונים מחדש.
+AIRAM_RTL_MARK="/usr/local/share/airam/.rtl_airband-build-v2"
 if command -v rtl_airband >/dev/null 2>&1 && [[ -f "$AIRAM_RTL_MARK" ]]; then
-  log "RTLSDR-Airband (NFM + bitrate) כבר מותקן - מדלג."
+  log "RTLSDR-Airband (NFM + CBR 48k) כבר מותקן - מדלג."
 else
-  log "בונה RTLSDR-Airband (NFM + bitrate 48k ל-latency נמוך)..."
+  log "בונה RTLSDR-Airband (NFM + CBR 48kbps ל-latency נמוך)..."
   cd "$BUILD_DIR"
   [[ -d RTLSDR-Airband ]] || git clone https://github.com/rtl-airband/RTLSDR-Airband.git
   cd RTLSDR-Airband
-  # bitrate קבוע-בקוד 16kbps => סטרים דליל => הדפדפן ממלא buffer התחלתי לאט (~30 שניות).
-  # מעלים ל-48kbps: סטרים צפוף פי-3 => הנגן מתחיל מהר יותר ו-latency צונח דרמטית.
-  git checkout -- src/output.cpp 2>/dev/null || true   # איפוס לפני sed (אידמפוטנטי)
-  sed -i 's/lame_set_brate(lame, 16);/lame_set_brate(lame, 48);/' src/output.cpp
-  grep -q 'lame_set_brate(lame, 48);' src/output.cpp || warn "לא הצלחתי להעלות bitrate (שורת lame_set_brate השתנתה ב-upstream)."
+  # ברירת המחדל של rtl_airband היא MP3 ב-VBR (vbr_mtrh), שבו LAME *מתעלם* מ-brate:
+  # בשקט (squelch סגור) הזרם צונח ל-~1KB/s והדפדפן ממלא את ה-buffer ההתחלתי
+  # שלו ~30 שניות (זה מקור ה-latency!). עוברים ל-CBR 48kbps @ 16kHz - זרם קבוע
+  # וצפוף (6KB/s) => הנגן מתחיל תוך שניות. (אומת מול מקור LAME: brate נאכף רק
+  # ב-vbr_off; ‏48kbps חוקי ל-MPEG-2 @ 16kHz.)
+  git checkout -- src/output.cpp 2>/dev/null || true   # איפוס לפני patch (אידמפוטנטי)
+  sed -i \
+    -e 's/lame_set_VBR(lame, vbr_mtrh);/lame_set_VBR(lame, vbr_off);/' \
+    -e 's/lame_set_brate(lame, 16);/lame_set_brate(lame, 48);/' \
+    -e 's/lame_set_out_samplerate(lame, MP3_RATE);/lame_set_out_samplerate(lame, 16000);/' \
+    -e 's/sprintf(samplerates, "%d", MP3_RATE);/sprintf(samplerates, "%d", 16000);/' \
+    src/output.cpp
+  grep -q 'lame_set_VBR(lame, vbr_off);' src/output.cpp \
+    && grep -q 'lame_set_brate(lame, 48);' src/output.cpp \
+    || warn "ה-patch ל-CBR לא נתפס (הקוד השתנה ב-upstream) - הזרם יישאר VBR דליל."
   rm -rf build && mkdir build && cd build
   # -DNFM=ON: תמיכת NFM כבויה כברירת מחדל ב-RTLSDR-Airband; הממשק מציע NFM
   # אז חובה להפעיל אותה, אחרת בחירת NFM => "unknown modulation" וקריסה.
@@ -120,17 +131,19 @@ fi
 # ----------------------------------------------------------------------------
 log "מגדיר Icecast2 (מאזינים ללא סיסמה, latency נמוך)..."
 ICE=/etc/icecast2/icecast.xml
-# סיסמת source פנימית (אידמפוטנטי - לא תלוי בערך ברירת המחדל)
-sed -i -E "s#<source-password>[^<]*</source-password>#<source-password>${SOURCE_PW}</source-password>#" "$ICE"
+# סיסמת source פנימית (אידמפוטנטי; מעוגן לתחילת שורה => לא נוגע בתגיות שבתוך הערות XML)
+sed -i -E "s#^([[:space:]]*)<source-password>[^<]*</source-password>#\1<source-password>${SOURCE_PW}</source-password>#" "$ICE"
 
-# מבטיח ערך לתג בתוך <limits>: מחליף אם קיים, אחרת מזריק לפני </limits>.
-# קריטי כי בחלק מגרסאות Debian התגיות חסרות בברירת המחדל => sed פשוט לא היה מוצא
-# מה להחליף, וה-burst נשאר 64KB ≈ 30 שניות latency (בדיוק התקלה שדווחה).
+# מבטיח ערך לתג בתוך <limits>: מחליף אם קיים *ולא בהערה*, אחרת מזריק לפני </limits>.
+# קריטי: ב-Debian חלק מהתגיות (burst-on-connect) מגיעות בהערה <!-- ... --> - sed
+# תמים "מחליף" את הערך בתוך ההערה ולא משנה כלום => burst נשאר 64KB ≈ 30 שניות latency.
 ensure_limit() {  # $1=tag  $2=value
-  if grep -q "<$1>" "$ICE"; then
-    sed -i -E "s#<$1>[^<]*</$1>#<$1>$2</$1>#" "$ICE"
+  if grep -Eq "^[[:space:]]*<$1>" "$ICE"; then
+    sed -i -E "s#^([[:space:]]*)<$1>[^<]*</$1>#\1<$1>$2</$1>#" "$ICE"
+  elif grep -q "</limits>" "$ICE"; then
+    sed -i -E "s#^([[:space:]]*)</limits>#\1    <$1>$2</$1>\n\1</limits>#" "$ICE"
   else
-    sed -i -E "s#</limits>#    <$1>$2</$1>\n</limits>#" "$ICE"
+    warn "לא נמצא <limits> ב-$ICE - הוסף ידנית: <$1>$2</$1>"
   fi
 }
 # burst-size=0 => אין prefill של buffer ישן בחיבור (זה היה מקור ה-30 שניות).
@@ -173,12 +186,15 @@ cp "$REPO_DIR/systemd/sdrplay.service"     /etc/systemd/system/
 cp "$REPO_DIR/systemd/rtl_airband.service" /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-web.service"   /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now sdrplay.service || warn "sdrplay.service לא עלה - בדוק חיבור ה-RSP1B."
+systemctl enable sdrplay.service rtl_airband.service airam-web.service
+# restart (ולא enable --now שהוא no-op לשירות שכבר רץ!) - אחרת בעדכון
+# הבינארי/הקוד/ה-units החדשים לא נטענים והשירותים ממשיכים לרוץ עם הישנים.
+systemctl restart sdrplay.service || warn "sdrplay.service לא עלה - בדוק חיבור ה-RSP1B."
 sleep 2
-systemctl enable --now rtl_airband.service || warn "rtl_airband לא עלה - בדוק journalctl -u rtl_airband"
-systemctl enable --now airam-web.service
+systemctl restart rtl_airband.service || warn "rtl_airband לא עלה - בדוק journalctl -u rtl_airband"
+systemctl restart airam-web.service
 
-IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 log "ההתקנה הסתיימה ✅"
 cat <<EOF
 

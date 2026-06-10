@@ -1,3 +1,4 @@
 # AIR-AM: בעת חיבור מכשיר SDRplay (Vendor ID 1df7) - הפעל מחדש את שירותי ה-SDR.
 # מאיץ התאוששות אחרי ניתוק/חיבור USB (לצד Restart=always של השירותים).
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1df7", RUN+="/usr/bin/systemctl --no-block restart sdrplay.service rtl_airband.service"
+# DEVTYPE=usb_device => הכלל רץ פעם אחת למכשיר (לא לכל interface)
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1df7", RUN+="/usr/bin/systemctl --no-block restart sdrplay.service rtl_airband.service"

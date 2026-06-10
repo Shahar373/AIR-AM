@@ -10,7 +10,9 @@
 #  מיועד לרשת פרטית מהימנה בלבד (רץ כ-root, ללא אימות).
 # ============================================================================
 import json
+import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -31,6 +33,9 @@ SNR_DEFAULT = 9.0              # ≈ סף ה-auto הפנימי של rtl_airband 
 
 APP_DIR = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=str(APP_DIR / "static"))
+
+# כיוונון אחד בכל רגע: שני POST-ים מקבילים => שני restart שלובים זה בזה
+TUNE_LOCK = threading.Lock()
 
 # פריסטים של נתב"ג / TMA (אפשר לערוך כרצונך)
 PRESETS = [
@@ -112,9 +117,17 @@ def render_config(freq, mod, agc, gain, squelch_mode="auto", squelch_snr=SNR_DEF
     return "\n".join(lines)
 
 
+def _atomic_write(path, text):
+    """כתיבה אטומית (tmp + rename): rtl_airband יכול לעלות בכל רגע
+    (Restart=always / udev) ואסור שיקרא קובץ חצי-כתוב."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
 def write_config(freq, mod, agc, gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT):
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(render_config(freq, mod, agc, gain, squelch_mode, squelch_snr))
+    _atomic_write(CONFIG_PATH, render_config(freq, mod, agc, gain, squelch_mode, squelch_snr))
 
 
 def load_state():
@@ -126,8 +139,45 @@ def load_state():
 
 
 def save_state(st):
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(st))
+    _atomic_write(STATE_PATH, json.dumps(st))
+
+
+# --- הפעלה מחדש מאומתת + רולבק --------------------------------------------
+def _journal_tail(lines=8):
+    return subprocess.run(["journalctl", "-u", "rtl_airband", "-n", str(lines), "--no-pager"],
+                          capture_output=True, text=True).stdout
+
+
+def _restart_and_verify():
+    """מפעיל מחדש את rtl_airband ומוודא שנשאר חי. מחזיר (error, detail) או (None, None).
+    ה-restart עצמו יכול לחסום עד ~30 שניות (airam-wait-sdrplay) כשה-SDR מנותק."""
+    try:
+        r = subprocess.run(["systemctl", "restart", "rtl_airband"],
+                           capture_output=True, text=True, timeout=45)
+    except subprocess.TimeoutExpired:
+        return "ה-restart נתקע — בדוק שה-SDR מחובר", None
+    if r.returncode != 0:
+        return (r.stderr or "restart failed").strip(), _journal_tail()
+    # restart מחזיר 0 כשהשירות עלה, אבל rtl_airband יכול לקרוס על config רע
+    # גם ~2 שניות אחרי העלייה => פולינג (לא בדיקה בודדת שמפספסת קריסה מאוחרת).
+    for _ in range(7):
+        time.sleep(0.5)
+        chk = subprocess.run(["systemctl", "is-active", "rtl_airband"],
+                             capture_output=True, text=True)
+        if chk.stdout.strip() != "active":
+            return "rtl_airband נכשל לעלות — בדוק תדר/חיבור SDR", _journal_tail()
+    return None, None
+
+
+def _rollback(prev):
+    """כיוונון נכשל => משחזרים את ההגדרות האחרונות שעבדו ומרימים מחדש (best-effort)."""
+    try:
+        write_config(prev["freq"], prev["mod"], prev["agc"], prev["gain"],
+                     prev["squelch_mode"], prev["squelch_snr"])
+        subprocess.run(["systemctl", "restart", "rtl_airband"],
+                       capture_output=True, text=True, timeout=45)
+    except Exception:
+        pass
 
 
 # --- נתיבים ----------------------------------------------------------------
@@ -156,7 +206,8 @@ def api_tune():
         return jsonify(ok=False, error="תדר מחוץ לטווח (0.1–1999.5 MHz)"), 400
 
     mod = "nfm" if str(data.get("mod", "am")).lower() == "nfm" else "am"
-    agc = bool(data.get("agc", True))
+    agc_raw = data.get("agc", True)   # עמיד גם ל-"false" טקסטואלי (curl), לא רק bool
+    agc = agc_raw if isinstance(agc_raw, bool) else str(agc_raw).lower() not in ("false", "0", "off", "no")
     try:
         gain = max(0, min(60, int(data.get("gain", GAIN_DEFAULT))))
     except (TypeError, ValueError):
@@ -171,30 +222,25 @@ def api_tune():
         squelch_snr = SNR_DEFAULT
     squelch_snr = max(SNR_MIN, min(SNR_MAX, squelch_snr))
 
-    write_config(freq, mod, agc, gain, squelch_mode, squelch_snr)
-    save_state({"freq": freq, "mod": mod, "agc": agc, "gain": gain,
-                "squelch_mode": squelch_mode, "squelch_snr": squelch_snr})
+    if not TUNE_LOCK.acquire(blocking=False):
+        return jsonify(ok=False, error="כיוונון אחר מתבצע כרגע — המתן שנייה ונסה שוב"), 409
+    try:
+        prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
+        write_config(freq, mod, agc, gain, squelch_mode, squelch_snr)
 
-    r = subprocess.run(
-        ["systemctl", "restart", "rtl_airband"],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        return jsonify(ok=False, error=(r.stderr or "restart failed").strip()), 500
+        err, detail = _restart_and_verify()
+        if err:
+            _rollback(prev)   # לא משאירים את השירות בלולאת קריסה על config רע
+            return jsonify(ok=False, error=err + " (חזרתי לתדר הקודם)",
+                           detail=detail), 500
 
-    # systemctl restart מחזיר 0 ברגע שהשירות הופעל; מוודאים שהוא באמת נשאר חי
-    # (תדר/מכשיר בעייתי גורם ל-rtl_airband לקרוס מיד) ומדווחים אמת ל-UI.
-    time.sleep(1.5)
-    chk = subprocess.run(["systemctl", "is-active", "rtl_airband"],
-                         capture_output=True, text=True)
-    if chk.stdout.strip() != "active":
-        log = subprocess.run(["journalctl", "-u", "rtl_airband", "-n", "5", "--no-pager"],
-                             capture_output=True, text=True).stdout
-        return jsonify(ok=False, error="rtl_airband נכשל לעלות — בדוק תדר/חיבור SDR",
-                       detail=log), 500
-
-    return jsonify(ok=True, freq=freq, mod=mod, agc=agc, gain=gain,
-                   squelch_mode=squelch_mode, squelch_snr=squelch_snr)
+        # נשמר רק אחרי שאומת שהשירות חי => state תמיד משקף הגדרות שעובדות
+        save_state({"freq": freq, "mod": mod, "agc": agc, "gain": gain,
+                    "squelch_mode": squelch_mode, "squelch_snr": squelch_snr})
+        return jsonify(ok=True, freq=freq, mod=mod, agc=agc, gain=gain,
+                       squelch_mode=squelch_mode, squelch_snr=squelch_snr)
+    finally:
+        TUNE_LOCK.release()
 
 
 if __name__ == "__main__":
