@@ -143,6 +143,15 @@ def save_state(st):
 
 
 # --- הפעלה מחדש מאומתת + רולבק --------------------------------------------
+def _sdr_present():
+    """בדיקת USB מהירה (vendor 1df7 = SDRplay) בלי לפתוח את המכשיר."""
+    try:
+        return subprocess.run(["lsusb", "-d", "1df7:"],
+                              capture_output=True, timeout=5).returncode == 0
+    except Exception:
+        return True   # אין lsusb / ספק => מניחים שמחובר (עדיף רולבק מיותר מאף-פעם)
+
+
 def _journal_tail(lines=8):
     return subprocess.run(["journalctl", "-u", "rtl_airband", "-n", str(lines), "--no-pager"],
                           capture_output=True, text=True).stdout
@@ -159,7 +168,9 @@ def _restart_and_verify():
     except subprocess.TimeoutExpired:
         return "ה-restart נתקע — בדוק שה-SDR מחובר", None, True
     if r.returncode != 0:
-        return (r.stderr or "restart failed").strip(), _journal_tail(), False
+        # המסלול הנפוץ כשה-SDR מנותק: airam-wait-sdrplay ממצה 30 ניסיונות
+        # וה-restart נכשל עם rc!=0 (לא timeout) => מזהים לפי נוכחות ה-USB.
+        return (r.stderr or "restart failed").strip(), _journal_tail(), not _sdr_present()
     # restart מחזיר 0 כשהשירות עלה, אבל rtl_airband יכול לקרוס על config רע
     # גם ~2 שניות אחרי העלייה => פולינג (לא בדיקה בודדת שמפספסת קריסה מאוחרת).
     for _ in range(7):
@@ -225,24 +236,31 @@ def api_tune():
     squelch_snr = max(SNR_MIN, min(SNR_MAX, squelch_snr))
 
     if not TUNE_LOCK.acquire(blocking=False):
-        return jsonify(ok=False, error="כיוונון אחר מתבצע כרגע — המתן שנייה ונסה שוב"), 409
+        # state בתשובה => ה-UI מיישר את התצוגה האופטימית חזרה למציאות
+        return jsonify(ok=False, error="כיוונון אחר מתבצע כרגע — המתן שנייה ונסה שוב",
+                       state=load_state()), 409
     try:
         prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
+        new_state = {"freq": freq, "mod": mod, "agc": agc, "gain": gain,
+                     "squelch_mode": squelch_mode, "squelch_snr": squelch_snr}
         write_config(freq, mod, agc, gain, squelch_mode, squelch_snr)
 
         err, detail, sdr_down = _restart_and_verify()
         if err:
-            if not sdr_down:   # SDR מנותק => גם רולבק ייתקע באותה המתנה; מדלגים
-                _rollback(prev)   # לא משאירים את השירות בלולאת קריסה על config רע
-                err += " (חזרתי לתדר הקודם)"
-            # state בתשובה => ה-UI מיישר תצוגה בלי בקשת /api/state נוספת
-            return jsonify(ok=False, error=err, detail=detail, state=prev), 500
+            if sdr_down:
+                # ה-SDR מנותק: רולבק ייתקע באותה המתנה בדיוק, אז מדלגים עליו.
+                # הקונפיג החדש נשאר על הדיסק וייקלט כשהמכשיר יחובר (udev מרים
+                # את השירותים) => שומרים state תואם לדיסק, לא את הקודם.
+                save_state(new_state)
+                return jsonify(ok=False, detail=detail, state=new_state,
+                               error=err + " — התדר יוחל אוטומטית כשה-SDR יחובר"), 500
+            _rollback(prev)   # config רע => לא משאירים את השירות בלולאת קריסה
+            return jsonify(ok=False, error=err + " (חזרתי לתדר הקודם)",
+                           detail=detail, state=prev), 500
 
         # נשמר רק אחרי שאומת שהשירות חי => state תמיד משקף הגדרות שעובדות
-        save_state({"freq": freq, "mod": mod, "agc": agc, "gain": gain,
-                    "squelch_mode": squelch_mode, "squelch_snr": squelch_snr})
-        return jsonify(ok=True, freq=freq, mod=mod, agc=agc, gain=gain,
-                       squelch_mode=squelch_mode, squelch_snr=squelch_snr)
+        save_state(new_state)
+        return jsonify(ok=True, **new_state)
     finally:
         TUNE_LOCK.release()
 

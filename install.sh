@@ -28,7 +28,7 @@ mkdir -p "$BUILD_DIR"
 log "מתקין תלויות (apt)..."
 apt-get update
 apt-get install -y \
-  git cmake build-essential pkg-config curl \
+  git cmake build-essential pkg-config curl usbutils \
   libusb-1.0-0-dev \
   libsoapysdr-dev soapysdr-tools \
   libmp3lame-dev libshout3-dev \
@@ -38,8 +38,10 @@ apt-get install -y \
 # ----------------------------------------------------------------------------
 # 2. SDRplay API  (הורדה + חילוץ + התקנה אוטומטית, ללא אישור רישיון אינטראקטיבי)
 # ----------------------------------------------------------------------------
-# בדיקה תלוית-גרסה: עדכון SDRPLAY_VER + הרצה חוזרת אכן יתקינו את הגרסה החדשה
-if [[ -e "/usr/local/lib/libsdrplay_api.so.${SDRPLAY_VER%.*}" ]]; then
+# בדיקה תלוית-גרסה *מלאה* (marker, לא שם קובץ ה-so שמכיל רק major.minor):
+# עדכון SDRPLAY_VER - גם patch level כמו 3.15.3 - יתקין מחדש בהרצה הבאה.
+SDRPLAY_MARK="/usr/local/share/airam/sdrplay-api.version"
+if ldconfig -p | grep -q libsdrplay_api && [[ "$(cat "$SDRPLAY_MARK" 2>/dev/null)" == "$SDRPLAY_VER" ]]; then
   log "SDRplay API v${SDRPLAY_VER} כבר מותקן - מדלג."
 else
   log "מתקין SDRplay API v${SDRPLAY_VER}..."
@@ -77,6 +79,8 @@ else
   cp -f "$EXT"/*.rules /etc/udev/rules.d/ 2>/dev/null || true
   udevadm control --reload-rules 2>/dev/null || true
   ldconfig
+  mkdir -p "$(dirname "$SDRPLAY_MARK")"
+  printf '%s' "$SDRPLAY_VER" > "$SDRPLAY_MARK"
 fi
 
 # ----------------------------------------------------------------------------
@@ -122,18 +126,30 @@ else
   cd "$BUILD_DIR"
   [[ -d RTLSDR-Airband ]] || git clone https://github.com/rtl-airband/RTLSDR-Airband.git
   cd RTLSDR-Airband
-  git checkout -- src/output.cpp 2>/dev/null || true   # איפוס לפני patch (אידמפוטנטי)
+  # איפוס לפני patch (אידמפוטנטי); עץ פגום (clone שנקטע) => משכפלים מחדש
+  git checkout -- src/output.cpp 2>/dev/null || {
+    warn "עץ ה-build פגום - משכפל מחדש את RTLSDR-Airband."
+    cd "$BUILD_DIR" && rm -rf RTLSDR-Airband
+    git clone https://github.com/rtl-airband/RTLSDR-Airband.git && cd RTLSDR-Airband
+  }
   sed -i "$RTL_PATCH" src/output.cpp
-  # מאמתים את *כל* ההחלפות - החלפה שהוחמצה (upstream השתנה) חייבת להישמע, אחרת
-  # "הצלחה" שקטה משאירה בינארי חצי-מתוקן שקשה מאוד לאבחן.
+  # מאמתים את *כל* ההחלפות. החלפה שהוחמצה (upstream השתנה) => בונים בכל זאת
+  # (רדיו עובד עדיף מהתקנה מתה) אבל *לא* כותבים marker, כדי שהבנייה תנוסה
+  # שוב בעדכון הבא ולא תישאר "הצלחה" שקטה עם בינארי חצי-מתוקן.
+  PATCH_OK=1
   for pat in 'lame_set_VBR(lame, vbr_off);' 'lame_set_brate(lame, 48);' \
              'lame_set_out_samplerate(lame, 16000);' 'sprintf(samplerates, "%d", 16000);'; do
-    grep -qF "$pat" src/output.cpp || warn "ה-patch לא נתפס: '$pat' (הקוד השתנה ב-upstream?)"
+    grep -qF "$pat" src/output.cpp || { PATCH_OK=0; warn "ה-patch לא נתפס: '$pat' (הקוד השתנה ב-upstream?)"; }
   done
   rm -rf build && mkdir build && cd build
   cmake $RTL_CMAKE_FLAGS .. && make -j"$(nproc)" && make install
-  mkdir -p "$(dirname "$AIRAM_RTL_MARK")"
-  printf '%s' "$RTL_BUILD_SIG" > "$AIRAM_RTL_MARK"
+  if [[ $PATCH_OK -eq 1 ]]; then
+    mkdir -p "$(dirname "$AIRAM_RTL_MARK")"
+    printf '%s' "$RTL_BUILD_SIG" > "$AIRAM_RTL_MARK"
+    rm -f /usr/local/share/airam/.rtl_airband-build*   # markers ישנים מגרסאות קודמות
+  else
+    warn "patch ה-CBR הוחל חלקית - ייתכן latency גבוה. עדכן את הריפו והרץ שוב."
+  fi
 fi
 
 # ----------------------------------------------------------------------------
@@ -202,7 +218,7 @@ systemctl enable sdrplay.service rtl_airband.service airam-web.service
 systemctl restart sdrplay.service || warn "sdrplay.service לא עלה - בדוק חיבור ה-RSP1B."
 sleep 2
 systemctl restart rtl_airband.service || warn "rtl_airband לא עלה - בדוק journalctl -u rtl_airband"
-systemctl restart airam-web.service
+systemctl restart airam-web.service || warn "airam-web לא עלה - בדוק journalctl -u airam-web"
 
 IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 log "ההתקנה הסתיימה ✅"
