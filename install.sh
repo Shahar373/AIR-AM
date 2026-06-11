@@ -205,7 +205,7 @@ systemctl restart icecast2
 # 6. קובץ הגדרות התחלתי + תיקיית state
 # ----------------------------------------------------------------------------
 log "מתקין קובץ הגדרות התחלתי..."
-mkdir -p /etc/rtl_airband /var/lib/airam
+mkdir -p /etc/rtl_airband /var/lib/airam /var/lib/airam/recordings
 [[ -f /etc/rtl_airband/airband.conf ]] || cp "$REPO_DIR/config/airband.conf" /etc/rtl_airband/airband.conf
 
 # ----------------------------------------------------------------------------

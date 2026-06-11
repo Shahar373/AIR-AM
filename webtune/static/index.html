@@ -204,6 +204,23 @@
 
     .hint { color: #5c6878; font-size: .78rem; line-height: 1.55; margin: .6rem 0 0; }
 
+    /* ---------- יומן שידורים ---------- */
+    .act-row { display: flex; align-items: center; gap: .55rem;
+      padding: .5rem 0; border-bottom: 1px solid var(--border); font-size: .88rem; }
+    .act-row:last-child { border-bottom: 0; }
+    .act-row .t { color: var(--dim); font-size: .76rem; min-width: 4.4em; flex: none; }
+    .act-row .f { direction: ltr; font-variant-numeric: tabular-nums;
+      color: var(--accent); font-size: .85rem; font-weight: 600; flex: none; }
+    .act-row .n { color: var(--dim); flex: 1; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .act-row .dur { color: var(--dim); font-size: .74rem; flex: none;
+      direction: ltr; font-variant-numeric: tabular-nums; }
+    .act-row button.play { flex: none; padding: .3rem .75rem; font-size: .8rem;
+      border-radius: 999px; }
+    .act-row button.play.playing { background: linear-gradient(180deg, #2f81f7, #1f6feb);
+      border-color: transparent; }
+    button:disabled { opacity: .35; cursor: default; }
+
     /* ---------- שגיאות ---------- */
     details.err { margin-top: .7rem; }
     details.err summary { color: var(--red); font-size: .85rem; cursor: pointer; }
@@ -272,6 +289,16 @@
   <section class="card">
     <p class="section-title">תדרי נתב״ג ו-TMA</p>
     <div class="presets" id="presets"></div>
+  </section>
+
+  <!-- יומן שידורים -->
+  <section class="card">
+    <p class="section-title">יומן שידורים</p>
+    <div class="activity" id="activity">
+      <p class="hint" style="margin:0">עוד אין שידורים — היומן מתמלא כשהסקוולץ׳ נפתח.</p>
+    </div>
+    <p class="hint">כל שידור מוקלט אוטומטית ונשמר זמנית (~200 אחרונים) ·
+      במצב סקוולץ׳ "פתוח" (ATIS) אין הקלטה.</p>
   </section>
 
   <!-- הגדרות -->
@@ -540,6 +567,77 @@
     setInterval(() => { if (!document.hidden) pollMetrics(); }, 3000);
     pollMetrics();
 
+    /* ---------- יומן שידורים ---------- */
+    // נגן משני להקלטות: לא נוגעים בנגן ה-live (שמחזיק חיבור Icecast רגיש-latency)
+    const replay = new Audio();
+    let replayBtn = null;
+    function stopReplay() {
+      replay.pause();
+      if (replayBtn) { replayBtn.textContent = "▶"; replayBtn.classList.remove("playing"); }
+      replayBtn = null;
+    }
+    replay.addEventListener("ended", stopReplay);
+    replay.addEventListener("error", stopReplay);
+
+    function playRecording(file, btn) {
+      if (replayBtn === btn) { stopReplay(); return; }   // לחיצה שנייה = עצירה
+      stopReplay();
+      player.pause();                                    // לא מנגנים live והקלטה יחד
+      replay.src = "/recordings/" + encodeURIComponent(file);
+      replay.play().catch(stopReplay);
+      btn.textContent = "⏸";
+      btn.classList.add("playing");
+      replayBtn = btn;
+    }
+
+    function fmtWhen(ts) {
+      const s = Date.now() / 1000 - ts;
+      if (s < 50) return "עכשיו";
+      if (s < 3600) return "לפני " + Math.round(s / 60) + " דק׳";
+      const d = new Date(ts * 1000);
+      const t = d.toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" });
+      return s < 86400 ? t : d.toLocaleDateString("he-IL", { day: "numeric", month: "numeric" }) + " " + t;
+    }
+    const fmtDur = (sec) =>
+      sec >= 60 ? Math.floor(sec / 60) + ":" + String(Math.round(sec % 60)).padStart(2, "0")
+                : Math.max(1, Math.round(sec)) + 's';
+
+    async function pollActivity() {
+      try {
+        const a = await (await fetch("/api/activity")).json();
+        if (!a.ok) return;
+        const box = $("activity");
+        box.innerHTML = "";
+        if (!a.events.length) {
+          box.innerHTML = '<p class="hint" style="margin:0">עוד אין שידורים — היומן מתמלא כשהסקוולץ׳ נפתח.</p>';
+          return;
+        }
+        for (const ev of a.events.slice(0, 15)) {   // בטלפון מספיק; השאר נשמר בשרת
+          const row = document.createElement("div");
+          row.className = "act-row";
+          const t = document.createElement("span");
+          t.className = "t"; t.textContent = fmtWhen(ev.ts);
+          t.title = new Date(ev.ts * 1000).toLocaleString("he-IL");
+          const f = document.createElement("span");
+          f.className = "f"; f.textContent = ev.freq != null ? ev.freq.toFixed(3) : "—";
+          const n = document.createElement("span");
+          n.className = "n";
+          const p = ev.freq != null && presetFor(ev.freq);
+          n.textContent = p ? p.name : "";
+          const dur = document.createElement("span");
+          dur.className = "dur"; dur.textContent = ev.dur ? fmtDur(ev.dur) : "";
+          const b = document.createElement("button");
+          b.type = "button"; b.className = "play"; b.textContent = "▶";
+          if (ev.exists && ev.file) b.onclick = () => playRecording(ev.file, b);
+          else { b.disabled = true; b.title = "ההקלטה כבר נמחקה"; }
+          row.append(t, f, n, dur, b);
+          box.appendChild(row);
+        }
+      } catch (e) { /* offline - הסטטוס הראשי כבר מציג שגיאת רשת */ }
+    }
+    setInterval(() => { if (!document.hidden) pollActivity(); }, 15000);
+    pollActivity();
+
     /* ---------- אירועים ---------- */
     // רמז (לא חסימה) כשהתדר מחוץ ל-air band — טעות נפוצה: הקלדת תדר FM/קשר
     const inAirBand = (f) => f >= 118 && f <= 137;
@@ -600,6 +698,7 @@
       updateDisplay(current);
       setStatus("מוכן — לחץ ▶ או בחר תדר");
       player.src = streamURL();
+      pollActivity();   // עכשיו כש-cfg.presets נטען, שמות הפריסטים יופיעו ביומן
     }).catch(() => setStatus("אין חיבור לשרת", "err"));
   </script>
 </body>

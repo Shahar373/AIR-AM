@@ -39,6 +39,17 @@ SNR_DEFAULT = 9.0              # ≈ סף ה-auto הפנימי של rtl_airband 
 STATS_PATH = Path("/run/rtl_airband_stats.txt")   # tmpfs - בלי שחיקת SD
 STATS_MAX_AGE = 45.0           # rtl_airband כותב כל ~15 שניות; פי-3 => לא טרי
 
+# הקלטות: rtl_airband כותב קובץ MP3 לכל שידור (split_on_transmission) בשם
+# airam_YYYYMMDD_HHMMSS_<Hz>.mp3 (.tmp בזמן כתיבה, rename בסגירה ~0.5ש' אחרי
+# שהסקוולץ' נסגר). קובץ שהסתיים = אירוע ביומן השידורים.
+REC_DIR = Path("/var/lib/airam/recordings")
+REC_MAX_FILES = 200            # retention - בקצב CBR 48k זה ~6KB/s לשידור
+REC_MAX_BYTES = 100 * 1024 * 1024
+ACTIVITY_PATH = Path("/var/lib/airam/activity.jsonl")
+ACTIVITY_KEEP = 500            # היומן שורד את מחיקת הקבצים (retention) - רק בלי נגינה
+ACTIVITY_RETURN = 50
+WATCH_INTERVAL = 10.0          # שניות בין סריקות של תיקיית ההקלטות
+
 APP_DIR = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=str(APP_DIR / "static"))
 
@@ -82,6 +93,7 @@ def render_config(freq, mod, agc, gain, squelch_mode="auto", squelch_snr=SNR_DEF
     f = float(freq)
     lines = [
         "# נוצר אוטומטית ע\"י AIR-AM web tuner. שינויים ידניים נדרסים בכל כיוונון.",
+        "localtime = true;   # חותמות הזמן בשמות קובצי ההקלטה בזמן מקומי",
         f'stats_filepath = "{STATS_PATH}";   # מדדי RF (signal/noise) ל-/api/metrics',
         "devices:",
         "(",
@@ -104,6 +116,7 @@ def render_config(freq, mod, agc, gain, squelch_mode="auto", squelch_snr=SNR_DEF
     sq = _squelch_line(squelch_mode, squelch_snr)
     if sq is not None:
         lines.append(sq)
+    record = squelch_mode != "open"   # "פתוח" (ATIS) => הסקוולץ' לא נסגר לעולם
     lines += [
         "        outputs:",
         "        (",
@@ -115,7 +128,19 @@ def render_config(freq, mod, agc, gain, squelch_mode="auto", squelch_snr=SNR_DEF
         f'            name = "AIR-AM {f:.3f}";',
         '            username = "source";',
         f'            password = "{SOURCE_PW}";',
-        "          }",
+        "          }" + ("," if record else ""),
+    ]
+    if record:
+        lines += [
+            "          {",
+            '            type = "file";',
+            f'            directory = "{REC_DIR}";',
+            '            filename_template = "airam";',
+            "            split_on_transmission = true;   # קובץ MP3 נפרד לכל שידור",
+            "            include_freq = true;            # התדר (Hz) בשם הקובץ",
+            "          }",
+        ]
+    lines += [
         "        );",
         "      }",
         "    );",
@@ -255,6 +280,120 @@ def parse_stats(text, want_freq):
     return vals
 
 
+# --- יומן שידורים והקלטות ---------------------------------------------------
+_REC_NAME_RE = re.compile(r"^airam_\d{8}_\d{6}_(\d+)\.mp3$")
+
+
+def _rec_freq_mhz(name):
+    """airam_20260611_203455_134600000.mp3 => 134.600 (MHz). אחר => None."""
+    m = _REC_NAME_RE.match(name)
+    return round(int(m.group(1)) / 1e6, 3) if m else None
+
+
+def _append_activity(rows):
+    """append + קיצוץ. הקובץ מוגבל (מאות שורות) => קריאה מלאה זולה, וכתיבה
+    אטומית כדי ש-/api/activity לא יקרא קובץ חצי-כתוב."""
+    try:
+        lines = ACTIVITY_PATH.read_text().splitlines()
+    except OSError:
+        lines = []
+    lines += [json.dumps(r, ensure_ascii=False) for r in rows]
+    if len(lines) > ACTIVITY_KEEP * 2:   # קיצוץ בהיסטרזיס - לא משכתבים בכל append
+        lines = lines[-ACTIVITY_KEEP:]
+    _atomic_write(ACTIVITY_PATH, "\n".join(lines) + "\n")
+
+
+def _last_logged_ts():
+    """ה-ts האחרון ביומן - ממנו ממשיכים אחרי restart (בלי לרשום כפולים)."""
+    try:
+        for ln in reversed(ACTIVITY_PATH.read_text().splitlines()):
+            try:
+                return float(json.loads(ln)["ts"])
+            except (ValueError, KeyError, TypeError):
+                continue
+    except OSError:
+        pass
+    return 0.0
+
+
+def _sweep_recordings():
+    """retention: עד REC_MAX_FILES / REC_MAX_BYTES (חדש=>ישן), ו-.tmp נטושים
+    (שידור שנקטע בקריסה משאיר .tmp שלעולם לא ייסגר ל-mp3)."""
+    try:
+        recs = sorted(REC_DIR.glob("*.mp3"),
+                      key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return
+    total = 0
+    for i, p in enumerate(recs):
+        try:
+            total += p.stat().st_size
+            if i >= REC_MAX_FILES or total > REC_MAX_BYTES:
+                p.unlink()
+        except OSError:
+            pass
+    now = time.time()
+    for p in REC_DIR.glob("*.tmp"):
+        try:
+            if now - p.stat().st_mtime > 3600:
+                p.unlink()
+        except OSError:
+            pass
+
+
+def _activity_watcher():
+    """לולאת רקע: הקלטה חדשה שהסתיימה => שורה ביומן; ואז retention.
+    בעלייה ממשיכים מה-ts האחרון שנרשם => הקלטות מהזמן שהשרת היה כבוי נקלטות."""
+    last_seen = _last_logged_ts()
+    while True:
+        try:
+            rows = []
+            try:
+                recs = sorted(REC_DIR.glob("*.mp3"), key=lambda p: p.stat().st_mtime)
+            except OSError:
+                recs = []
+            for p in recs:
+                stat = p.stat()
+                if stat.st_mtime > last_seen:
+                    # משך משוער מגודל הקובץ: ‏CBR 48kbps => ‏6000 בייט לשנייה
+                    rows.append({"ts": round(stat.st_mtime, 1),
+                                 "freq": _rec_freq_mhz(p.name), "file": p.name,
+                                 "dur": round(stat.st_size / 6000.0, 1)})
+                    last_seen = stat.st_mtime
+            if rows:
+                _append_activity(rows)
+            _sweep_recordings()
+        except Exception:
+            log.exception("activity watcher")
+        time.sleep(WATCH_INTERVAL)
+
+
+@app.route("/api/activity")
+def api_activity():
+    """אירועי השידור האחרונים, חדש=>ישן. exists=False כשההקלטה כבר נמחקה ב-retention."""
+    try:
+        lines = ACTIVITY_PATH.read_text().splitlines()
+    except OSError:
+        lines = []
+    events = []
+    for ln in reversed(lines):
+        if len(events) >= ACTIVITY_RETURN:
+            break
+        try:
+            ev = json.loads(ln)
+        except ValueError:
+            continue
+        ev["exists"] = bool(ev.get("file")) and (REC_DIR / ev["file"]).is_file()
+        events.append(ev)
+    return jsonify(ok=True, events=events)
+
+
+@app.route("/recordings/<name>")
+def recordings(name):
+    # send_from_directory חוסם path traversal; ‏<name> (לא <path:>) חוסם תתי-תיקיות
+    return send_from_directory(str(REC_DIR), name)
+
+
 @app.route("/api/metrics")
 def api_metrics():
     """מדדי RF חיים לתדר הנוכחי. rtl_airband מרענן את הקובץ כל ~15 שניות."""
@@ -338,13 +477,14 @@ def api_tune():
 
 
 if __name__ == "__main__":
-    # ודא קובץ הגדרות עדכני: חסר => כותבים; קיים בלי stats_filepath (שדרוג
-    # מגרסה ישנה) => משכתבים ומרימים את rtl_airband פעם אחת כדי שמדדי ה-RF יפעלו.
+    # ודא קובץ הגדרות עדכני: חסר => כותבים; קיים בלי תכונה שהממשק מסתמך עליה
+    # (שדרוג מגרסה ישנה: stats_filepath למדדי RF, localtime להקלטות) =>
+    # משכתבים ומרימים את rtl_airband פעם אחת כדי שהתכונות יפעלו.
     try:
         _cur = CONFIG_PATH.read_text()
     except OSError:
         _cur = None
-    if _cur is None or "stats_filepath" not in _cur:
+    if _cur is None or "stats_filepath" not in _cur or "localtime" not in _cur:
         st = load_state()
         write_config(st["freq"], st["mod"], st["agc"], st["gain"],
                      st["squelch_mode"], st["squelch_snr"])
@@ -354,4 +494,6 @@ if __name__ == "__main__":
                                capture_output=True, timeout=60)
             except Exception:
                 pass
+    REC_DIR.mkdir(parents=True, exist_ok=True)
+    threading.Thread(target=_activity_watcher, daemon=True).start()
     app.run(host="0.0.0.0", port=8080)
