@@ -237,7 +237,22 @@ def api_health():
 
 # שורת מדד בקובץ ה-stats של rtl_airband (פורמט Prometheus):
 #   channel_dbfs_signal_level{freq="132.500"}	-42.3
-_METRIC_RE = re.compile(r'^(\w+)\{freq="([0-9.]+)"[^}]*\}\s+(-?[0-9.]+)')
+# ה-label freq מאותר בתוך הסוגריים בנפרד => עמיד לשינוי סדר/הוספת labels ב-upstream.
+_METRIC_RE = re.compile(r'^(\w+)\{([^}]*)\}\s+(-?[0-9.]+)')
+_FREQ_LABEL_RE = re.compile(r'(?:^|[,{\s])freq="([0-9.]+)"')
+
+
+def parse_stats(text, want_freq):
+    """מחלץ {metric: value} לשורות שה-label freq שלהן תואם (MHz בפורמט 3 ספרות)."""
+    vals = {}
+    for line in text.splitlines():
+        m = _METRIC_RE.match(line)
+        if not m:
+            continue
+        fl = _FREQ_LABEL_RE.search(m.group(2))
+        if fl and fl.group(1) == want_freq:
+            vals[m.group(1)] = float(m.group(3))
+    return vals
 
 
 @app.route("/api/metrics")
@@ -250,11 +265,7 @@ def api_metrics():
         return jsonify(ok=True, fresh=False)   # עוד לא נכתב (אחרי restart/אתחול)
 
     want = f"{load_state()['freq']:.3f}"       # מדדים מתויגים freq=MHz ב-3 ספרות
-    vals = {}
-    for line in text.splitlines():
-        m = _METRIC_RE.match(line)
-        if m and m.group(2) == want:
-            vals[m.group(1)] = float(m.group(3))
+    vals = parse_stats(text, want)
 
     sig = vals.get("channel_dbfs_signal_level")
     noise = vals.get("channel_dbfs_noise_level")
