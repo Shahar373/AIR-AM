@@ -264,6 +264,9 @@
            placeholder="תדר חופשי, למשל 134.600" />
     <button id="tuneBtn" class="primary">כוונן</button>
   </section>
+  <!-- רמז לא-חוסם בלבד: השרת מקבל כל תדר חוקי (NFM למשל שימושי מחוץ לתחום) -->
+  <p class="hint hidden" id="bandHint" style="margin:-.55rem .2rem .9rem; color: var(--amber);">
+    ⚠️ מחוץ לתחום התעופה (118–137 MHz) — שידורי תעופה לא יישמעו שם</p>
 
   <!-- פריסטים -->
   <section class="card">
@@ -397,6 +400,7 @@
       const p = presetFor(freq);
       $("freqName").textContent = p ? p.name : "תדר חופשי";
       renderPresets(freq);
+      updateBandHint();   // הוכרז למטה (function declaration => hoisted)
     }
 
     /* ---------- נגן ---------- */
@@ -537,6 +541,14 @@
     pollMetrics();
 
     /* ---------- אירועים ---------- */
+    // רמז (לא חסימה) כשהתדר מחוץ ל-air band — טעות נפוצה: הקלדת תדר FM/קשר
+    const inAirBand = (f) => f >= 118 && f <= 137;
+    function updateBandHint() {
+      const f = parseFloat($("freqInput").value);
+      $("bandHint").classList.toggle("hidden", !(Number.isFinite(f) && !inAirBand(f)));
+    }
+    $("freqInput").addEventListener("input", updateBandHint);
+
     $("tuneBtn").onclick = () => tune($("freqInput").value);
     $("freqInput").addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.target.blur(); tune(e.target.value); }
