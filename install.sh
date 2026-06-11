@@ -187,6 +187,14 @@ ensure_limit burst-on-connect 0
 ensure_limit burst-size 0
 ensure_limit queue-size 65536
 ensure_limit source-timeout 10
+# tripwire: sed על XML עיוור להערות/שינויי פורמט - מוודאים שכל ערך באמת נקלט
+# כתג פעיל בתחילת שורה, אחרת מזהירים ברעש (burst שגוי => חזרת ה-latency של 30 שניות).
+for kv in "source-password ${SOURCE_PW}" "burst-on-connect 0" "burst-size 0" \
+          "queue-size 65536" "source-timeout 10"; do
+  tag="${kv% *}"; val="${kv#* }"
+  grep -Eq "^[[:space:]]*<$tag>$val</$tag>" "$ICE" \
+    || warn "אימות Icecast נכשל: <$tag> אינו $val ב-$ICE - תקן ידנית (פורמט הקובץ השתנה?)"
+done
 # אפשר את השירות
 [[ -f /etc/default/icecast2 ]] && sed -i 's/^ENABLE=.*/ENABLE=true/' /etc/default/icecast2 || true
 grep -q "^ENABLE=" /etc/default/icecast2 2>/dev/null || echo "ENABLE=true" >> /etc/default/icecast2
