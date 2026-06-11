@@ -16,6 +16,7 @@ import re
 import subprocess
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
@@ -445,6 +446,34 @@ def api_activity():
 def recordings(name):
     # send_from_directory חוסם path traversal; ‏<name> (לא <path:>) חוסם תתי-תיקיות
     return send_from_directory(str(REC_DIR), name)
+
+
+# --- METAR נתב"ג --------------------------------------------------------------
+METAR_URL = "https://aviationweather.gov/api/data/metar?ids=LLBG"
+METAR_TTL = 300.0              # ה-METAR מתעדכן ~כל חצי שעה; 5 דקות cache מנומס
+_metar = {"checked": 0.0, "fetched": 0.0, "text": None}
+_METAR_LOCK = threading.Lock()
+
+
+@app.route("/api/metar")
+def api_metar():
+    """METAR גולמי של LLBG. כשל (אין אינטרנט) => מחזירים את האחרון שיש + גילו,
+    וה-UI מחליט; אין retry לפני שעבר ה-TTL כדי לא להציק ל-API הציבורי."""
+    now = time.time()
+    with _METAR_LOCK:
+        if now - _metar["checked"] > METAR_TTL:
+            _metar["checked"] = now
+            try:
+                req = urllib.request.Request(METAR_URL, headers={"User-Agent": "AIR-AM tuner"})
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    text = r.read().decode("utf-8", "replace").strip()
+                if text:
+                    _metar.update(fetched=now, text=text)
+            except Exception:
+                pass   # שומרים את הישן; age בתשובה חושף שהוא לא טרי
+        text = _metar["text"]
+        age = round(now - _metar["fetched"], 1) if text else None
+    return jsonify(ok=True, metar=text, age=age)
 
 
 @app.route("/api/metrics")

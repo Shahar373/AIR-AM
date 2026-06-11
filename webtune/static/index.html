@@ -327,6 +327,14 @@
       במצב סקוולץ׳ "פתוח" (ATIS) אין הקלטה.</p>
   </section>
 
+  <!-- METAR נתב"ג (מוצג רק כשיש נתונים; דורש אינטרנט בצד ה-Pi) -->
+  <section class="card hidden" id="metarCard">
+    <p class="section-title">מזג אוויר נתב״ג · METAR</p>
+    <p id="metarDecoded" style="font-size:.92rem;margin:.2rem 0 .4rem"></p>
+    <p id="metarRaw" class="hint" style="direction:ltr;text-align:left;
+       font-variant-numeric:tabular-nums;margin:0;word-break:break-word"></p>
+  </section>
+
   <!-- הגדרות -->
   <section class="card">
     <p class="section-title">הגדרות קליטה</p>
@@ -712,6 +720,35 @@
     }
     setInterval(() => { if (!document.hidden) pollActivity(); }, 15000);
     pollActivity();
+
+    /* ---------- METAR ---------- */
+    // פענוח בסיסי בלבד - רוח/ראות/טמפ'/לחץ; הגולמי תמיד מוצג למטה
+    function decodeMetar(raw) {
+      const parts = [];
+      let m = raw.match(/\b(VRB|\d{3})(\d{2,3})(?:G(\d{2,3}))?KT\b/);
+      if (m) parts.push("רוח " + (m[1] === "VRB" ? "משתנה" : m[1] + "°") + " " +
+                        parseInt(m[2], 10) + (m[3] ? " (משבים " + parseInt(m[3], 10) + ")" : "") + " קשר");
+      if (/\bCAVOK\b/.test(raw)) parts.push("CAVOK");
+      else if ((m = raw.match(/\s(\d{4})\s/))) parts.push("ראות " +
+        (m[1] === "9999" ? "10+ ק״מ" : parseInt(m[1], 10) + " מ׳"));
+      if ((m = raw.match(/\s(M?\d{2})\/(M?\d{2})\s/)))
+        parts.push("טמפ׳ " + m[1].replace("M", "-") + "°");
+      if ((m = raw.match(/\bQ(\d{4})\b/))) parts.push("QNH " + parseInt(m[1], 10));
+      return parts.join(" · ");
+    }
+
+    async function pollMetar() {
+      try {
+        const d = await (await fetch("/api/metar")).json();
+        // בלי METAR בכלל, או ישן מ-3 שעות => מסתירים (עדיף כלום ממידע מטעה)
+        if (!d.metar || d.age > 3 * 3600) { $("metarCard").classList.add("hidden"); return; }
+        $("metarRaw").textContent = d.metar;
+        $("metarDecoded").textContent = decodeMetar(d.metar);
+        $("metarCard").classList.remove("hidden");
+      } catch (e) { /* offline */ }
+    }
+    setInterval(() => { if (!document.hidden) pollMetar(); }, 300000);
+    pollMetar();
 
     /* ---------- אירועים ---------- */
     // רמז (לא חסימה) כשהתדר מחוץ ל-air band — טעות נפוצה: הקלדת תדר FM/קשר
