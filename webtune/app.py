@@ -216,6 +216,25 @@ def api_state():
     return jsonify(st)
 
 
+@app.route("/api/health")
+def api_health():
+    """סטטוס המערכת — מאפשר ל-UI להבדיל בין "אין שידור" ל"משהו נפל"."""
+    services = {}
+    for svc in ("rtl_airband", "icecast2", "sdrplay"):
+        try:
+            r = subprocess.run(["systemctl", "is-active", svc],
+                               capture_output=True, text=True, timeout=5)
+            services[svc] = (r.stdout.strip() or "unknown")
+        except Exception:
+            services[svc] = "unknown"
+    try:
+        stats_age = round(time.time() - STATS_PATH.stat().st_mtime, 1)
+    except OSError:
+        stats_age = None     # עוד לא נכתב (rtl_airband לא עלה / זה עתה הופעל)
+    return jsonify(ok=(services["rtl_airband"] == "active" and services["icecast2"] == "active"),
+                   services=services, sdr_present=_sdr_present(), stats_age=stats_age)
+
+
 # שורת מדד בקובץ ה-stats של rtl_airband (פורמט Prometheus):
 #   channel_dbfs_signal_level{freq="132.500"}	-42.3
 _METRIC_RE = re.compile(r'^(\w+)\{freq="([0-9.]+)"[^}]*\}\s+(-?[0-9.]+)')

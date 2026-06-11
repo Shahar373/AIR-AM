@@ -485,12 +485,33 @@
       ctx.stroke();
     }
 
+    // כשאין מדדים טריים — שואלים את /api/health (לכל היותר כל 15ש') ומציגים
+    // את הסיבה האמיתית: SDR מנותק / שירות נפל, במקום "ממתין" גנרי.
+    let lastHealthAt = 0;
+    async function explainStale() {
+      if (Date.now() - lastHealthAt < 15000) return;
+      lastHealthAt = Date.now();
+      try {
+        const h = await (await fetch("/api/health")).json();
+        const el = document.querySelector("#rfPanel .nodata");
+        if (!h.sdr_present)
+          el.textContent = "ה-SDR מנותק — בדוק את חיבור ה-USB";
+        else if (h.services && h.services.rtl_airband !== "active")
+          el.textContent = "המקלט (rtl_airband) לא פעיל — נסה לכוונן מחדש";
+        else if (h.services && h.services.icecast2 !== "active")
+          el.textContent = "שרת הסטרים (Icecast) לא פעיל";
+        else
+          el.textContent = "אין נתוני RF — ממתין למקלט…";
+      } catch (e) { /* השרת עצמו לא עונה => הסטטוס הכללי כבר יראה שגיאת רשת */ }
+    }
+
     async function pollMetrics() {
       try {
         const m = await (await fetch("/api/metrics")).json();
         const panel = $("rfPanel");
         if (!m.ok || !m.fresh || m.snr == null) {
           panel.classList.add("stale");
+          explainStale();
           return;
         }
         panel.classList.remove("stale");
