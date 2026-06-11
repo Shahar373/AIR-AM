@@ -172,6 +172,13 @@
       background: linear-gradient(180deg, rgba(77,163,255,.16), rgba(77,163,255,.06));
     }
     .presets button .row1 { display: flex; width: 100%; align-items: center; gap: .4rem; }
+    .presets button .del {
+      margin-inline-start: auto; flex: none;
+      color: var(--red); font-size: .85rem; line-height: 1;
+      border: 1px solid rgba(229,83,75,.4); border-radius: 999px;
+      padding: .15rem .45rem;
+    }
+    .presets.editing button { border-style: dashed; }
 
     /* ---------- הגדרות ---------- */
     .setting { display: flex; align-items: center; justify-content: space-between; gap: .8rem;
@@ -287,8 +294,27 @@
 
   <!-- פריסטים -->
   <section class="card">
-    <p class="section-title">תדרי נתב״ג ו-TMA</p>
+    <p class="section-title" style="display:flex;align-items:center;gap:.5rem">תדרים שמורים
+      <button type="button" id="editPresetsBtn" class="ghost"
+              style="margin-inline-start:auto;padding:.25rem .65rem">✎ עריכה</button>
+    </p>
     <div class="presets" id="presets"></div>
+    <!-- טופס הוספה (מוצג רק במצב עריכה); עריכת שם = מחיקה והוספה מחדש -->
+    <div id="presetForm" class="hidden" style="margin-top:.7rem">
+      <div class="tune-row">
+        <input id="pName" type="text" maxlength="40" placeholder="שם (למשל: מגדל חיפה)"
+               style="direction:rtl;text-align:start;font-size:.95rem" />
+        <input id="pFreq" type="number" inputmode="decimal" step="0.005" min="0.1" max="1999.5"
+               placeholder="MHz" style="flex:0 1 8em" />
+      </div>
+      <label class="hint" style="display:flex;align-items:center;gap:.45rem;margin-top:.55rem;cursor:pointer">
+        <input type="checkbox" id="pCont" style="accent-color:var(--accent)" />
+        שידור רציף (כמו ATIS — סקוולץ׳ תמיד פתוח)
+      </label>
+      <div class="player-row">
+        <button type="button" id="pAdd" class="primary">הוסף פריסט</button>
+      </div>
+    </div>
   </section>
 
   <!-- יומן שידורים -->
@@ -388,10 +414,13 @@
     const presetFor = (freq) =>
       cfg.presets.find((p) => Math.abs(p.freq - freq) < 0.0005);
 
+    let editingPresets = false;
+
     function renderPresets(active) {
       const box = $("presets");
+      box.classList.toggle("editing", editingPresets);
       box.innerHTML = "";
-      for (const p of cfg.presets) {
+      cfg.presets.forEach((p, i) => {
         const b = document.createElement("button");
         b.type = "button";
         const row = document.createElement("div");
@@ -403,15 +432,61 @@
           badge.textContent = "רציף";
           row.appendChild(badge);
         }
+        if (editingPresets) {
+          const del = document.createElement("span");
+          del.className = "del";
+          del.textContent = "✖";
+          row.appendChild(del);
+        }
         const pf = document.createElement("span");
         pf.className = "pf";
         pf.textContent = p.freq.toFixed(3);
         b.append(row, pf);
         if (active && Math.abs(p.freq - active) < 0.0005) b.classList.add("active");
-        b.onclick = () => selectPreset(p);
+        // במצב עריכה לחיצה מוחקת (אין כיוונון בטעות); עריכת שם = מחיקה והוספה
+        b.onclick = editingPresets
+          ? () => savePresets(cfg.presets.filter((_, j) => j !== i))
+          : () => selectPreset(p);
         box.appendChild(b);
-      }
+      });
     }
+
+    /* ---------- עריכת פריסטים ---------- */
+    async function savePresets(next) {
+      try {
+        const res = await fetch("/api/presets", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(next),
+        });
+        const d = await res.json();
+        if (d.ok) cfg.presets = d.presets;
+        else setStatus("שגיאה: " + (d.error || "שמירת פריסטים נכשלה"), "err");
+      } catch (e) {
+        setStatus("שגיאת רשת — בדוק חיבור ל-Pi", "err");
+      }
+      renderPresets(current);
+    }
+
+    $("editPresetsBtn").onclick = () => {
+      editingPresets = !editingPresets;
+      $("editPresetsBtn").textContent = editingPresets ? "✔ סיום" : "✎ עריכה";
+      $("presetForm").classList.toggle("hidden", !editingPresets);
+      renderPresets(current);
+    };
+
+    $("pAdd").onclick = () => {
+      const name = $("pName").value.trim();
+      const freq = parseFloat($("pFreq").value);
+      if (!name || !(freq >= 0.1 && freq <= 1999.5)) {
+        setStatus("פריסט חדש: צריך שם ותדר תקין", "err");
+        return;
+      }
+      const item = { name, freq };
+      if ($("pCont").checked) item.sq = "open";
+      savePresets([...cfg.presets, item]);
+      $("pName").value = ""; $("pFreq").value = ""; $("pCont").checked = false;
+    };
 
     // פריסט עם רמז squelch (ATIS => "open") קובע את מצב הסקוולץ׳; אחרת אוטומטי.
     function selectPreset(p) {

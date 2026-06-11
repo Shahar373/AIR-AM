@@ -56,8 +56,9 @@ app = Flask(__name__, static_folder=str(APP_DIR / "static"))
 # כיוונון אחד בכל רגע: שני POST-ים מקבילים => שני restart שלובים זה בזה
 TUNE_LOCK = threading.Lock()
 
-# פריסטים של נתב"ג / TMA (אפשר לערוך כרצונך)
-PRESETS = [
+# פריסטים של נתב"ג / TMA - רק זריעה ראשונית; מרגע עריכה בממשק האמת היא
+# /var/lib/airam/presets.json (נטען בכל בקשה - הקובץ זעיר והעריכה נדירה)
+DEFAULT_PRESETS = [
     {"name": "מגדל (Tower)",     "freq": 134.600},
     {"name": "ATIS",             "freq": 132.500, "sq": "open"},  # רציף => תמיד פתוח
     {"name": "קרקע מזרח",        "freq": 129.200},
@@ -67,6 +68,44 @@ PRESETS = [
     {"name": "מסירה (Delivery)", "freq": 121.950},
     {"name": "Guard (חירום)",    "freq": 121.500},
 ]
+PRESETS_PATH = Path("/var/lib/airam/presets.json")
+PRESETS_MAX = 30
+
+
+def _validate_presets(lst):
+    """(ok, cleaned) - מנרמל ומאמת רשימת פריסטים מהלקוח/מהדיסק."""
+    if not isinstance(lst, list) or len(lst) > PRESETS_MAX:
+        return False, None
+    out = []
+    for p in lst:
+        if not isinstance(p, dict):
+            return False, None
+        name = str(p.get("name", "")).strip()
+        try:
+            freq = float(p.get("freq"))
+        except (TypeError, ValueError):
+            return False, None
+        if not name or len(name) > 40 or not (0.1 <= freq <= 1999.5):
+            return False, None
+        item = {"name": name, "freq": round(freq, 4)}
+        sq = p.get("sq")
+        if sq is not None:
+            sq = str(sq).lower()
+            if sq not in SQUELCH_MODES:
+                return False, None
+            item["sq"] = sq
+        out.append(item)
+    return True, out
+
+
+def load_presets():
+    try:
+        ok, cleaned = _validate_presets(json.loads(PRESETS_PATH.read_text()))
+        if ok:
+            return cleaned
+    except Exception:
+        pass   # אין קובץ / פגום => ברירת המחדל (הקובץ נכתב רק בעריכה הראשונה)
+    return [dict(p) for p in DEFAULT_PRESETS]
 
 DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True, "gain": GAIN_DEFAULT,
                  "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}  # ברירת מחדל ATIS => תמיד פתוח
@@ -237,8 +276,22 @@ def index():
 @app.route("/api/state")
 def api_state():
     st = load_state()
-    st.update(presets=PRESETS, mount=MOUNT, port=ICECAST_PORT)
+    st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT)
     return jsonify(st)
+
+
+@app.route("/api/presets", methods=["GET", "PUT"])
+def api_presets():
+    """PUT מחליף את הרשימה כולה - העריכה בממשק היא על הסט המלא, אין צורך ב-CRUD."""
+    if request.method == "GET":
+        return jsonify(ok=True, presets=load_presets())
+    data = request.get_json(silent=True)
+    ok, cleaned = _validate_presets(data)
+    if not ok:
+        return jsonify(ok=False, error="רשימת פריסטים לא תקינה", presets=load_presets()), 400
+    _atomic_write(PRESETS_PATH, json.dumps(cleaned, ensure_ascii=False))
+    log.info("presets updated (%d items, from %s)", len(cleaned), request.remote_addr)
+    return jsonify(ok=True, presets=cleaned)
 
 
 @app.route("/api/health")
