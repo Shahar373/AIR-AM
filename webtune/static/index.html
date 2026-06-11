@@ -461,6 +461,8 @@
 
     /* ---------- עריכת פריסטים ---------- */
     async function savePresets(next) {
+      cfg.presets = next;        // עדכון אופטימי: מחיקה+הוספה מהירות לא דורסות זו את זו
+      renderPresets(current);
       try {
         const res = await fetch("/api/presets", {
           method: "PUT",
@@ -469,7 +471,10 @@
         });
         const d = await res.json();
         if (d.ok) cfg.presets = d.presets;
-        else setStatus("שגיאה: " + (d.error || "שמירת פריסטים נכשלה"), "err");
+        else {
+          setStatus("שגיאה: " + (d.error || "שמירת פריסטים נכשלה"), "err");
+          if (d.presets) cfg.presets = d.presets;   // השרת דחה => חוזרים לרשימה שלו
+        }
       } catch (e) {
         setStatus("שגיאת רשת — בדוק חיבור ל-Pi", "err");
       }
@@ -685,6 +690,8 @@
       sec >= 60 ? Math.floor(sec / 60) + ":" + String(Math.round(sec % 60)).padStart(2, "0")
                 : Math.max(1, Math.round(sec)) + 's';
 
+    const emptyActivityHTML = $("activity").innerHTML;   // הודעת "עוד אין" מה-markup
+
     async function pollActivity() {
       try {
         const a = await (await fetch("/api/activity")).json();
@@ -692,7 +699,7 @@
         const box = $("activity");
         box.innerHTML = "";
         if (!a.events.length) {
-          box.innerHTML = '<p class="hint" style="margin:0">עוד אין שידורים — היומן מתמלא כשהסקוולץ׳ נפתח.</p>';
+          box.innerHTML = emptyActivityHTML;
           return;
         }
         for (const ev of a.events.slice(0, 15)) {   // בטלפון מספיק; השאר נשמר בשרת

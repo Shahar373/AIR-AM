@@ -222,7 +222,7 @@ def test_activity_log_and_api(client, paths):
     for p in sorted(app.REC_DIR.glob("*.mp3"), key=lambda p: p.stat().st_mtime):
         st = p.stat()
         rows.append({"ts": st.st_mtime, "freq": app._rec_freq_mhz(p.name),
-                     "file": p.name, "dur": round(st.st_size / 6000.0, 1)})
+                     "file": p.name, "dur": round(st.st_size / app.REC_BYTES_PER_SEC, 1)})
     app._append_activity(rows)
     evs = client.get("/api/activity").get_json()["events"]
     assert [e["freq"] for e in evs] == [121.5, 134.6]      # חדש => ישן

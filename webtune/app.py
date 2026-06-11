@@ -41,10 +41,12 @@ STATS_PATH = Path("/run/rtl_airband_stats.txt")   # tmpfs - בלי שחיקת SD
 STATS_MAX_AGE = 45.0           # rtl_airband כותב כל ~15 שניות; פי-3 => לא טרי
 
 # הקלטות: rtl_airband כותב קובץ MP3 לכל שידור (split_on_transmission) בשם
-# airam_YYYYMMDD_HHMMSS_<Hz>.mp3 (.tmp בזמן כתיבה, rename בסגירה ~0.5ש' אחרי
-# שהסקוולץ' נסגר). קובץ שהסתיים = אירוע ביומן השידורים.
+# <REC_BASENAME>_YYYYMMDD_HHMMSS_<Hz>.mp3 (.tmp בזמן כתיבה, rename בסגירה
+# ~0.5ש' אחרי שהסקוולץ' נסגר). קובץ שהסתיים = אירוע ביומן השידורים.
 REC_DIR = Path("/var/lib/airam/recordings")
-REC_MAX_FILES = 200            # retention - בקצב CBR 48k זה ~6KB/s לשידור
+REC_BASENAME = "airam"         # filename_template ב-config וגם עוגן הפרסור של השמות
+REC_BYTES_PER_SEC = 6000       # CBR 48kbps (ה-patch ב-install.sh) => הערכת משך מגודל
+REC_MAX_FILES = 200            # retention
 REC_MAX_BYTES = 100 * 1024 * 1024
 ACTIVITY_PATH = Path("/var/lib/airam/activity.jsonl")
 ACTIVITY_KEEP = 500            # היומן שורד את מחיקת הקבצים (retention) - רק בלי נגינה
@@ -175,7 +177,7 @@ def render_config(freq, mod, agc, gain, squelch_mode="auto", squelch_snr=SNR_DEF
             "          {",
             '            type = "file";',
             f'            directory = "{REC_DIR}";',
-            '            filename_template = "airam";',
+            f'            filename_template = "{REC_BASENAME}";',
             "            split_on_transmission = true;   # קובץ MP3 נפרד לכל שידור",
             "            include_freq = true;            # התדר (Hz) בשם הקובץ",
             "          }",
@@ -335,7 +337,7 @@ def parse_stats(text, want_freq):
 
 
 # --- יומן שידורים והקלטות ---------------------------------------------------
-_REC_NAME_RE = re.compile(r"^airam_\d{8}_\d{6}_(\d+)\.mp3$")
+_REC_NAME_RE = re.compile(rf"^{re.escape(REC_BASENAME)}_\d{{8}}_\d{{6}}_(\d+)\.mp3$")
 
 
 def _rec_freq_mhz(name):
@@ -409,10 +411,9 @@ def _activity_watcher():
             for p in recs:
                 stat = p.stat()
                 if stat.st_mtime > last_seen:
-                    # משך משוער מגודל הקובץ: ‏CBR 48kbps => ‏6000 בייט לשנייה
                     rows.append({"ts": round(stat.st_mtime, 1),
                                  "freq": _rec_freq_mhz(p.name), "file": p.name,
-                                 "dur": round(stat.st_size / 6000.0, 1)})
+                                 "dur": round(stat.st_size / REC_BYTES_PER_SEC, 1)})
                     last_seen = stat.st_mtime
             if rows:
                 _append_activity(rows)
