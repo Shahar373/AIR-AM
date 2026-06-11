@@ -10,6 +10,7 @@
 #  מיועד לרשת פרטית מהימנה בלבד (רץ כ-root, ללא אימות).
 # ============================================================================
 import json
+import logging
 import os
 import re
 import subprocess
@@ -18,6 +19,10 @@ import time
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
+
+# stdout => journald (השירות רץ תחת systemd); journalctl -u airam-web מציג הכל
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger("airam")
 
 # --- קבועים ---------------------------------------------------------------
 CONFIG_PATH = Path("/etc/rtl_airband/airband.conf")
@@ -188,6 +193,7 @@ def _restart_and_verify():
 
 def _rollback(prev):
     """כיוונון נכשל => משחזרים את ההגדרות האחרונות שעבדו ומרימים מחדש (best-effort)."""
+    log.warning("rollback to %.3f MHz", prev["freq"])
     try:
         write_config(prev["freq"], prev["mod"], prev["agc"], prev["gain"],
                      prev["squelch_mode"], prev["squelch_snr"])
@@ -276,10 +282,13 @@ def api_tune():
         prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
         new_state = {"freq": freq, "mod": mod, "agc": agc, "gain": gain,
                      "squelch_mode": squelch_mode, "squelch_snr": squelch_snr}
+        log.info("tune %.3f MHz mod=%s agc=%s gain=%d squelch=%s snr=%.1f (from %s)",
+                 freq, mod, agc, gain, squelch_mode, squelch_snr, request.remote_addr)
         write_config(freq, mod, agc, gain, squelch_mode, squelch_snr)
 
         err, detail, sdr_down = _restart_and_verify()
         if err:
+            log.warning("tune %.3f MHz failed: %s (sdr_down=%s)", freq, err, sdr_down)
             if sdr_down:
                 # ה-SDR מנותק: רולבק ייתקע באותה המתנה בדיוק, אז מדלגים עליו.
                 # הקונפיג החדש נשאר על הדיסק וייקלט כשהמכשיר יחובר (udev מרים
