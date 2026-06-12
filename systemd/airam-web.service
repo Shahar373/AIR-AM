@@ -9,7 +9,9 @@ WorkingDirectory=/opt/airam/webtune
 ExecStart=/usr/bin/python3 /opt/airam/webtune/app.py
 # רץ כ-root כדי לכתוב את ההגדרות ולהפעיל מחדש את rtl_airband (רשת פרטית בלבד)
 User=root
-Restart=on-failure
+# always (לא on-failure): זה משטח הבקרה היחיד — חייב לקום גם אחרי יציאה "נקייה"
+StartLimitIntervalSec=0
+Restart=always
 RestartSec=5
 
 [Install]

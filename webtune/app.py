@@ -10,14 +10,20 @@
 #  מיועד לרשת פרטית מהימנה בלבד (רץ כ-root, ללא אימות).
 # ============================================================================
 import json
+import logging
 import os
 import re
 import subprocess
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
+
+# stdout => journald (השירות רץ תחת systemd); journalctl -u airam-web מציג הכל
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger("airam")
 
 # --- קבועים ---------------------------------------------------------------
 CONFIG_PATH = Path("/etc/rtl_airband/airband.conf")
@@ -42,14 +48,28 @@ SNR_DEFAULT = 9.0              # ≈ סף ה-auto הפנימי של rtl_airband 
 STATS_PATH = Path("/run/rtl_airband_stats.txt")   # tmpfs - בלי שחיקת SD
 STATS_MAX_AGE = 45.0           # rtl_airband כותב כל ~15 שניות; פי-3 => לא טרי
 
+# הקלטות: rtl_airband כותב קובץ MP3 לכל שידור (split_on_transmission) בשם
+# <REC_BASENAME>_YYYYMMDD_HHMMSS_<Hz>.mp3 (.tmp בזמן כתיבה, rename בסגירה
+# ~0.5ש' אחרי שהסקוולץ' נסגר). קובץ שהסתיים = אירוע ביומן השידורים.
+REC_DIR = Path("/var/lib/airam/recordings")
+REC_BASENAME = "airam"         # filename_template ב-config וגם עוגן הפרסור של השמות
+REC_BYTES_PER_SEC = 6000       # CBR 48kbps (ה-patch ב-install.sh) => הערכת משך מגודל
+REC_MAX_FILES = 200            # retention
+REC_MAX_BYTES = 100 * 1024 * 1024
+ACTIVITY_PATH = Path("/var/lib/airam/activity.jsonl")
+ACTIVITY_KEEP = 500            # היומן שורד את מחיקת הקבצים (retention) - רק בלי נגינה
+ACTIVITY_RETURN = 50
+WATCH_INTERVAL = 10.0          # שניות בין סריקות של תיקיית ההקלטות
+
 APP_DIR = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=str(APP_DIR / "static"))
 
 # כיוונון אחד בכל רגע: שני POST-ים מקבילים => שני restart שלובים זה בזה
 TUNE_LOCK = threading.Lock()
 
-# פריסטים של נתב"ג / TMA (אפשר לערוך כרצונך)
-PRESETS = [
+# פריסטים של נתב"ג / TMA - רק זריעה ראשונית; מרגע עריכה בממשק האמת היא
+# /var/lib/airam/presets.json (נטען בכל בקשה - הקובץ זעיר והעריכה נדירה)
+DEFAULT_PRESETS = [
     {"name": "מגדל (Tower)",     "freq": 134.600},
     {"name": "ATIS",             "freq": 132.500, "sq": "open"},  # רציף => תמיד פתוח
     {"name": "קרקע מזרח",        "freq": 129.200},
@@ -59,6 +79,44 @@ PRESETS = [
     {"name": "מסירה (Delivery)", "freq": 121.950},
     {"name": "Guard (חירום)",    "freq": 121.500},
 ]
+PRESETS_PATH = Path("/var/lib/airam/presets.json")
+PRESETS_MAX = 30
+
+
+def _validate_presets(lst):
+    """(ok, cleaned) - מנרמל ומאמת רשימת פריסטים מהלקוח/מהדיסק."""
+    if not isinstance(lst, list) or len(lst) > PRESETS_MAX:
+        return False, None
+    out = []
+    for p in lst:
+        if not isinstance(p, dict):
+            return False, None
+        name = str(p.get("name", "")).strip()
+        try:
+            freq = float(p.get("freq"))
+        except (TypeError, ValueError):
+            return False, None
+        if not name or len(name) > 40 or not (0.1 <= freq <= 1999.5):
+            return False, None
+        item = {"name": name, "freq": round(freq, 4)}
+        sq = p.get("sq")
+        if sq is not None:
+            sq = str(sq).lower()
+            if sq not in SQUELCH_MODES:
+                return False, None
+            item["sq"] = sq
+        out.append(item)
+    return True, out
+
+
+def load_presets():
+    try:
+        ok, cleaned = _validate_presets(json.loads(PRESETS_PATH.read_text()))
+        if ok:
+            return cleaned
+    except Exception:
+        pass   # אין קובץ / פגום => ברירת המחדל (הקובץ נכתב רק בעריכה הראשונה)
+    return [dict(p) for p in DEFAULT_PRESETS]
 
 DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  "if_gain": IF_GAIN_DEFAULT, "rf_gain": RF_GAIN_DEFAULT,
@@ -86,6 +144,7 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
     f = float(freq)
     lines = [
         "# נוצר אוטומטית ע\"י AIR-AM web tuner. שינויים ידניים נדרסים בכל כיוונון.",
+        "localtime = true;   # חותמות הזמן בשמות קובצי ההקלטה בזמן מקומי",
         f'stats_filepath = "{STATS_PATH}";   # מדדי RF (signal/noise) ל-/api/metrics',
         "devices:",
         "(",
@@ -109,6 +168,7 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
     sq = _squelch_line(squelch_mode, squelch_snr)
     if sq is not None:
         lines.append(sq)
+    record = squelch_mode != "open"   # "פתוח" (ATIS) => הסקוולץ' לא נסגר לעולם
     lines += [
         "        outputs:",
         "        (",
@@ -120,7 +180,19 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
         f'            name = "AIR-AM {f:.3f}";',
         '            username = "source";',
         f'            password = "{SOURCE_PW}";',
-        "          }",
+        "          }" + ("," if record else ""),
+    ]
+    if record:
+        lines += [
+            "          {",
+            '            type = "file";',
+            f'            directory = "{REC_DIR}";',
+            f'            filename_template = "{REC_BASENAME}";',
+            "            split_on_transmission = true;   # קובץ MP3 נפרד לכל שידור",
+            "            include_freq = true;            # התדר (Hz) בשם הקובץ",
+            "          }",
+        ]
+    lines += [
         "        );",
         "      }",
         "    );",
@@ -198,6 +270,7 @@ def _restart_and_verify():
 
 def _rollback(prev):
     """כיוונון נכשל => משחזרים את ההגדרות האחרונות שעבדו ומרימים מחדש (best-effort)."""
+    log.warning("rollback to %.3f MHz", prev["freq"])
     try:
         write_config(prev["freq"], prev["mod"], prev["agc"], prev["if_gain"],
                      prev["rf_gain"], prev["squelch_mode"], prev["squelch_snr"])
@@ -216,13 +289,202 @@ def index():
 @app.route("/api/state")
 def api_state():
     st = load_state()
-    st.update(presets=PRESETS, mount=MOUNT, port=ICECAST_PORT)
+    st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT)
     return jsonify(st)
+
+
+@app.route("/api/presets", methods=["GET", "PUT"])
+def api_presets():
+    """PUT מחליף את הרשימה כולה - העריכה בממשק היא על הסט המלא, אין צורך ב-CRUD."""
+    if request.method == "GET":
+        return jsonify(ok=True, presets=load_presets())
+    data = request.get_json(silent=True)
+    ok, cleaned = _validate_presets(data)
+    if not ok:
+        return jsonify(ok=False, error="רשימת פריסטים לא תקינה", presets=load_presets()), 400
+    _atomic_write(PRESETS_PATH, json.dumps(cleaned, ensure_ascii=False))
+    log.info("presets updated (%d items, from %s)", len(cleaned), request.remote_addr)
+    return jsonify(ok=True, presets=cleaned)
+
+
+@app.route("/api/health")
+def api_health():
+    """סטטוס המערכת — מאפשר ל-UI להבדיל בין "אין שידור" ל"משהו נפל"."""
+    services = {}
+    for svc in ("rtl_airband", "icecast2", "sdrplay"):
+        try:
+            r = subprocess.run(["systemctl", "is-active", svc],
+                               capture_output=True, text=True, timeout=5)
+            services[svc] = (r.stdout.strip() or "unknown")
+        except Exception:
+            services[svc] = "unknown"
+    try:
+        stats_age = round(time.time() - STATS_PATH.stat().st_mtime, 1)
+    except OSError:
+        stats_age = None     # עוד לא נכתב (rtl_airband לא עלה / זה עתה הופעל)
+    return jsonify(ok=(services["rtl_airband"] == "active" and services["icecast2"] == "active"),
+                   services=services, sdr_present=_sdr_present(), stats_age=stats_age)
 
 
 # שורת מדד בקובץ ה-stats של rtl_airband (פורמט Prometheus):
 #   channel_dbfs_signal_level{freq="132.500"}	-42.3
-_METRIC_RE = re.compile(r'^(\w+)\{freq="([0-9.]+)"[^}]*\}\s+(-?[0-9.]+)')
+# ה-label freq מאותר בתוך הסוגריים בנפרד => עמיד לשינוי סדר/הוספת labels ב-upstream.
+_METRIC_RE = re.compile(r'^(\w+)\{([^}]*)\}\s+(-?[0-9.]+)')
+_FREQ_LABEL_RE = re.compile(r'(?:^|[,{\s])freq="([0-9.]+)"')
+
+
+def parse_stats(text, want_freq):
+    """מחלץ {metric: value} לשורות שה-label freq שלהן תואם (MHz בפורמט 3 ספרות)."""
+    vals = {}
+    for line in text.splitlines():
+        m = _METRIC_RE.match(line)
+        if not m:
+            continue
+        fl = _FREQ_LABEL_RE.search(m.group(2))
+        if fl and fl.group(1) == want_freq:
+            vals[m.group(1)] = float(m.group(3))
+    return vals
+
+
+# --- יומן שידורים והקלטות ---------------------------------------------------
+_REC_NAME_RE = re.compile(rf"^{re.escape(REC_BASENAME)}_\d{{8}}_\d{{6}}_(\d+)\.mp3$")
+
+
+def _rec_freq_mhz(name):
+    """airam_20260611_203455_134600000.mp3 => 134.600 (MHz). אחר => None."""
+    m = _REC_NAME_RE.match(name)
+    return round(int(m.group(1)) / 1e6, 3) if m else None
+
+
+def _append_activity(rows):
+    """append + קיצוץ. הקובץ מוגבל (מאות שורות) => קריאה מלאה זולה, וכתיבה
+    אטומית כדי ש-/api/activity לא יקרא קובץ חצי-כתוב."""
+    try:
+        lines = ACTIVITY_PATH.read_text().splitlines()
+    except OSError:
+        lines = []
+    lines += [json.dumps(r, ensure_ascii=False) for r in rows]
+    if len(lines) > ACTIVITY_KEEP * 2:   # קיצוץ בהיסטרזיס - לא משכתבים בכל append
+        lines = lines[-ACTIVITY_KEEP:]
+    _atomic_write(ACTIVITY_PATH, "\n".join(lines) + "\n")
+
+
+def _last_logged_ts():
+    """ה-ts האחרון ביומן - ממנו ממשיכים אחרי restart (בלי לרשום כפולים)."""
+    try:
+        for ln in reversed(ACTIVITY_PATH.read_text().splitlines()):
+            try:
+                return float(json.loads(ln)["ts"])
+            except (ValueError, KeyError, TypeError):
+                continue
+    except OSError:
+        pass
+    return 0.0
+
+
+def _sweep_recordings():
+    """retention: עד REC_MAX_FILES / REC_MAX_BYTES (חדש=>ישן), ו-.tmp נטושים
+    (שידור שנקטע בקריסה משאיר .tmp שלעולם לא ייסגר ל-mp3)."""
+    try:
+        recs = sorted(REC_DIR.glob("*.mp3"),
+                      key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return
+    total = 0
+    for i, p in enumerate(recs):
+        try:
+            total += p.stat().st_size
+            if i >= REC_MAX_FILES or total > REC_MAX_BYTES:
+                p.unlink()
+        except OSError:
+            pass
+    now = time.time()
+    for p in REC_DIR.glob("*.tmp"):
+        try:
+            if now - p.stat().st_mtime > 3600:
+                p.unlink()
+        except OSError:
+            pass
+
+
+def _activity_watcher():
+    """לולאת רקע: הקלטה חדשה שהסתיימה => שורה ביומן; ואז retention.
+    בעלייה ממשיכים מה-ts האחרון שנרשם => הקלטות מהזמן שהשרת היה כבוי נקלטות."""
+    last_seen = _last_logged_ts()
+    while True:
+        try:
+            rows = []
+            try:
+                recs = sorted(REC_DIR.glob("*.mp3"), key=lambda p: p.stat().st_mtime)
+            except OSError:
+                recs = []
+            for p in recs:
+                stat = p.stat()
+                if stat.st_mtime > last_seen:
+                    rows.append({"ts": round(stat.st_mtime, 1),
+                                 "freq": _rec_freq_mhz(p.name), "file": p.name,
+                                 "dur": round(stat.st_size / REC_BYTES_PER_SEC, 1)})
+                    last_seen = stat.st_mtime
+            if rows:
+                _append_activity(rows)
+            _sweep_recordings()
+        except Exception:
+            log.exception("activity watcher")
+        time.sleep(WATCH_INTERVAL)
+
+
+@app.route("/api/activity")
+def api_activity():
+    """אירועי השידור האחרונים, חדש=>ישן. exists=False כשההקלטה כבר נמחקה ב-retention."""
+    try:
+        lines = ACTIVITY_PATH.read_text().splitlines()
+    except OSError:
+        lines = []
+    events = []
+    for ln in reversed(lines):
+        if len(events) >= ACTIVITY_RETURN:
+            break
+        try:
+            ev = json.loads(ln)
+        except ValueError:
+            continue
+        ev["exists"] = bool(ev.get("file")) and (REC_DIR / ev["file"]).is_file()
+        events.append(ev)
+    return jsonify(ok=True, events=events)
+
+
+@app.route("/recordings/<name>")
+def recordings(name):
+    # send_from_directory חוסם path traversal; ‏<name> (לא <path:>) חוסם תתי-תיקיות
+    return send_from_directory(str(REC_DIR), name)
+
+
+# --- METAR נתב"ג --------------------------------------------------------------
+METAR_URL = "https://aviationweather.gov/api/data/metar?ids=LLBG"
+METAR_TTL = 300.0              # ה-METAR מתעדכן ~כל חצי שעה; 5 דקות cache מנומס
+_metar = {"checked": 0.0, "fetched": 0.0, "text": None}
+_METAR_LOCK = threading.Lock()
+
+
+@app.route("/api/metar")
+def api_metar():
+    """METAR גולמי של LLBG. כשל (אין אינטרנט) => מחזירים את האחרון שיש + גילו,
+    וה-UI מחליט; אין retry לפני שעבר ה-TTL כדי לא להציק ל-API הציבורי."""
+    now = time.time()
+    with _METAR_LOCK:
+        if now - _metar["checked"] > METAR_TTL:
+            _metar["checked"] = now
+            try:
+                req = urllib.request.Request(METAR_URL, headers={"User-Agent": "AIR-AM tuner"})
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    text = r.read().decode("utf-8", "replace").strip()
+                if text:
+                    _metar.update(fetched=now, text=text)
+            except Exception:
+                pass   # שומרים את הישן; age בתשובה חושף שהוא לא טרי
+        text = _metar["text"]
+        age = round(now - _metar["fetched"], 1) if text else None
+    return jsonify(ok=True, metar=text, age=age)
 
 
 @app.route("/api/metrics")
@@ -235,11 +497,7 @@ def api_metrics():
         return jsonify(ok=True, fresh=False)   # עוד לא נכתב (אחרי restart/אתחול)
 
     want = f"{load_state()['freq']:.3f}"       # מדדים מתויגים freq=MHz ב-3 ספרות
-    vals = {}
-    for line in text.splitlines():
-        m = _METRIC_RE.match(line)
-        if m and m.group(2) == want:
-            vals[m.group(1)] = float(m.group(3))
+    vals = parse_stats(text, want)
 
     sig = vals.get("channel_dbfs_signal_level")
     noise = vals.get("channel_dbfs_noise_level")
@@ -293,10 +551,13 @@ def api_tune():
         prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
         new_state = {"freq": freq, "mod": mod, "agc": agc, "if_gain": if_gain,
                      "rf_gain": rf_gain, "squelch_mode": squelch_mode, "squelch_snr": squelch_snr}
+        log.info("tune %.3f MHz mod=%s agc=%s if_gain=%d rf_gain=%d squelch=%s snr=%.1f (from %s)",
+                 freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr, request.remote_addr)
         write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr)
 
         err, detail, sdr_down = _restart_and_verify()
         if err:
+            log.warning("tune %.3f MHz failed: %s (sdr_down=%s)", freq, err, sdr_down)
             if sdr_down:
                 # ה-SDR מנותק: רולבק ייתקע באותה המתנה בדיוק, אז מדלגים עליו.
                 # הקונפיג החדש נשאר על הדיסק וייקלט כשהמכשיר יחובר (udev מרים
@@ -316,13 +577,14 @@ def api_tune():
 
 
 if __name__ == "__main__":
-    # ודא קובץ הגדרות עדכני: חסר => כותבים; קיים בלי stats_filepath (שדרוג
-    # מגרסה ישנה) => משכתבים ומרימים את rtl_airband פעם אחת כדי שמדדי ה-RF יפעלו.
+    # ודא קובץ הגדרות עדכני: חסר => כותבים; קיים בלי תכונה שהממשק מסתמך עליה
+    # (שדרוג מגרסה ישנה: stats_filepath למדדי RF, localtime להקלטות) =>
+    # משכתבים ומרימים את rtl_airband פעם אחת כדי שהתכונות יפעלו.
     try:
         _cur = CONFIG_PATH.read_text()
     except OSError:
         _cur = None
-    if _cur is None or "stats_filepath" not in _cur:
+    if _cur is None or "stats_filepath" not in _cur or "localtime" not in _cur:
         st = load_state()
         write_config(st["freq"], st["mod"], st["agc"], st["if_gain"],
                      st["rf_gain"], st["squelch_mode"], st["squelch_snr"])
@@ -332,4 +594,6 @@ if __name__ == "__main__":
                                capture_output=True, timeout=60)
             except Exception:
                 pass
+    REC_DIR.mkdir(parents=True, exist_ok=True)
+    threading.Thread(target=_activity_watcher, daemon=True).start()
     app.run(host="0.0.0.0", port=8080)
