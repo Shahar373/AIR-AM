@@ -261,8 +261,11 @@ def _restart_and_verify():
     # גם ~2 שניות אחרי העלייה => פולינג (לא בדיקה בודדת שמפספסת קריסה מאוחרת).
     for _ in range(7):
         time.sleep(0.5)
-        chk = subprocess.run(["systemctl", "is-active", "rtl_airband"],
-                             capture_output=True, text=True)
+        try:
+            chk = subprocess.run(["systemctl", "is-active", "rtl_airband"],
+                                 capture_output=True, text=True, timeout=5)
+        except subprocess.TimeoutExpired:
+            continue   # systemctl תקוע => מדלגים על הבדיקה הזו, לא תוקעים את הבקשה
         if chk.stdout.strip() != "active":
             return "rtl_airband נכשל לעלות — בדוק תדר/חיבור SDR", _journal_tail(), False
     return None, None, False
@@ -407,26 +410,38 @@ def _sweep_recordings():
             pass
 
 
+def _scan_new_recordings(last_seen):
+    """(rows, newest) - הקלטות שה-mtime שלהן מאוחר מ-last_seen, חדש=>ישן לפי mtime.
+    ה-ts מעוגל *לפני* ההשוואה - אותו עיגול שנכתב ליומן (ושחוזר מ-_last_logged_ts)
+    => סריקה חוזרת אחרי restart לא תייצר שורות כפולות."""
+    rows, newest = [], last_seen
+    try:
+        recs = sorted(REC_DIR.glob("*.mp3"), key=lambda p: p.stat().st_mtime)
+    except OSError:
+        recs = []
+    for p in recs:
+        try:
+            stat = p.stat()
+        except OSError:
+            continue   # נמחק בינתיים (retention) => מדלגים
+        ts = round(stat.st_mtime, 1)
+        if ts > last_seen:
+            rows.append({"ts": ts, "freq": _rec_freq_mhz(p.name), "file": p.name,
+                         "dur": round(stat.st_size / REC_BYTES_PER_SEC, 1)})
+            newest = max(newest, ts)
+    return rows, newest
+
+
 def _activity_watcher():
     """לולאת רקע: הקלטה חדשה שהסתיימה => שורה ביומן; ואז retention.
     בעלייה ממשיכים מה-ts האחרון שנרשם => הקלטות מהזמן שהשרת היה כבוי נקלטות."""
     last_seen = _last_logged_ts()
     while True:
         try:
-            rows = []
-            try:
-                recs = sorted(REC_DIR.glob("*.mp3"), key=lambda p: p.stat().st_mtime)
-            except OSError:
-                recs = []
-            for p in recs:
-                stat = p.stat()
-                if stat.st_mtime > last_seen:
-                    rows.append({"ts": round(stat.st_mtime, 1),
-                                 "freq": _rec_freq_mhz(p.name), "file": p.name,
-                                 "dur": round(stat.st_size / REC_BYTES_PER_SEC, 1)})
-                    last_seen = stat.st_mtime
+            rows, newest = _scan_new_recordings(last_seen)
             if rows:
                 _append_activity(rows)
+                last_seen = newest   # מקדמים רק אחרי כתיבה מוצלחת => כישלון append לא מאבד אירועים
             _sweep_recordings()
         except Exception:
             log.exception("activity watcher")
@@ -471,17 +486,23 @@ def api_metar():
     """METAR גולמי של LLBG. כשל (אין אינטרנט) => מחזירים את האחרון שיש + גילו,
     וה-UI מחליט; אין retry לפני שעבר ה-TTL כדי לא להציק ל-API הציבורי."""
     now = time.time()
+    # תופסים את ה-slot מתחת לנעילה (רק thread אחד מביא), אבל מבצעים את ה-fetch
+    # *מחוץ* לנעילה => בקשות /api/metar מקבילות לא נחסמות 5 שניות על ה-HTTP.
     with _METAR_LOCK:
-        if now - _metar["checked"] > METAR_TTL:
+        do_fetch = now - _metar["checked"] > METAR_TTL
+        if do_fetch:
             _metar["checked"] = now
-            try:
-                req = urllib.request.Request(METAR_URL, headers={"User-Agent": "AIR-AM tuner"})
-                with urllib.request.urlopen(req, timeout=5) as r:
-                    text = r.read().decode("utf-8", "replace").strip()
-                if text:
+    if do_fetch:
+        try:
+            req = urllib.request.Request(METAR_URL, headers={"User-Agent": "AIR-AM tuner"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                text = r.read().decode("utf-8", "replace").strip()
+            if text:
+                with _METAR_LOCK:
                     _metar.update(fetched=now, text=text)
-            except Exception:
-                pass   # שומרים את הישן; age בתשובה חושף שהוא לא טרי
+        except Exception:
+            pass   # שומרים את הישן; age בתשובה חושף שהוא לא טרי
+    with _METAR_LOCK:
         text = _metar["text"]
         age = round(now - _metar["fetched"], 1) if text else None
     return jsonify(ok=True, metar=text, age=age)
@@ -512,7 +533,9 @@ def api_metrics():
 
 @app.route("/api/tune", methods=["POST"])
 def api_tune():
-    data = request.get_json(force=True, silent=True) or {}
+    # בלי force=True: מחייב Content-Type: application/json => דפדפן זר (CSRF) לא
+    # יכול לשלוח טופס text/plain שמכוונן את הרדיו (כמו ב-/api/presets).
+    data = request.get_json(silent=True) or {}
 
     # ולידציה של התדר (נכתב כ-float מפורמט => ללא סיכון הזרקה)
     try:

@@ -49,7 +49,7 @@ else
     aarch64) APIARCH="arm64" ;;
     armv7l)  APIARCH="armv7l" ;;
     x86_64)  APIARCH="x86_64" ;;
-    *)       APIARCH="arm64" ;;
+    *)       die "ארכיטקטורה לא נתמכת: $(uname -m). נתמכות: aarch64 / armv7l / x86_64." ;;
   esac
   RUN="/tmp/sdrplay.run"; EXT="/tmp/sdrplay_api"
   curl -fSL --retry 4 -o "$RUN" \
@@ -60,11 +60,23 @@ else
   # חילוץ ללא הרצה (makeself) => עוקפים את אישור הרישיון האינטראקטיבי
   "$RUN" --noexec --target "$EXT"
 
-  [[ -d "$EXT/$APIARCH" ]] || APIARCH="$(basename "$(find "$EXT" -maxdepth 1 -type d -name '*64*' | head -1)")"
+  # שם הספרייה בארכיון לא תאם בדיוק => מאתרים לפי דפוס הארכיטקטורה הספציפי
+  # (לא "כל 64" - אחרת על armv7l היינו בוחרים בטעות ספריית arm64).
+  if [[ ! -d "$EXT/$APIARCH" ]]; then
+    case "$APIARCH" in
+      arm64)  ALT="$(find "$EXT" -maxdepth 1 -type d \( -name '*aarch64*' -o -name '*arm64*' \) | head -1)" ;;
+      armv7l) ALT="$(find "$EXT" -maxdepth 1 -type d -name '*armv7*' | head -1)" ;;
+      x86_64) ALT="$(find "$EXT" -maxdepth 1 -type d \( -name '*x86_64*' -o -name '*amd64*' \) | head -1)" ;;
+    esac
+    [[ -n "${ALT:-}" ]] && APIARCH="$(basename "$ALT")"
+  fi
   [[ -n "$APIARCH" && -d "$EXT/$APIARCH" ]] || die "לא נמצאה ספריית ארכיטקטורה בתוך ה-API."
 
-  # ספריות
-  LIB="$(ls "$EXT/$APIARCH"/libsdrplay_api.so.* | head -1)"
+  # ספריות: בוחרים את הקובץ המלא libsdrplay_api.so.MAJOR.MINOR (שני מקטעי גרסה),
+  # לא את ה-symlink הקצר .so.3 - אחרת ה-ln למטה היה מצביע על עצמו.
+  LIB="$(ls "$EXT/$APIARCH"/libsdrplay_api.so.*.* 2>/dev/null | head -1)"
+  [[ -n "$LIB" ]] || LIB="$(ls "$EXT/$APIARCH"/libsdrplay_api.so.* 2>/dev/null | head -1)"
+  [[ -n "$LIB" ]] || die "לא נמצאה ספריית libsdrplay_api ב-API שחולץ."
   cp -f "$LIB" /usr/local/lib/
   BASE="$(basename "$LIB")"                       # libsdrplay_api.so.3.15
   ln -sf "/usr/local/lib/$BASE" /usr/local/lib/libsdrplay_api.so.3

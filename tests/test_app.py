@@ -242,6 +242,19 @@ def test_activity_trim(paths):
     assert json.loads(lines[-1])["ts"] == app.ACTIVITY_KEEP * 2 + 4   # החדשים נשמרו
 
 
+def test_scan_no_duplicate_after_restart(paths):
+    # mtime עם שבר עשיריות שמתעגל כלפי מטה - המקרה שגרם לכפילות:
+    # ה-ts הנשמר ביומן מעוגל, אבל פעם השוואנו מולו את ה-mtime הלא-מעוגל.
+    p = _mk_rec(paths, "airam_20260611_120001_134600000.mp3")
+    os.utime(p, (1000.04, 1000.04))   # מתעגל ל-1000.0
+    rows, newest = app._scan_new_recordings(0.0)
+    assert len(rows) == 1 and rows[0]["ts"] == 1000.0
+    app._append_activity(rows)
+    # restart: ממשיכים מה-ts שנכתב ביומן => אותה הקלטה לא נסרקת שוב
+    rows2, _ = app._scan_new_recordings(app._last_logged_ts())
+    assert rows2 == []
+
+
 def test_sweep_retention(paths):
     for i in range(app.REC_MAX_FILES + 10):
         _mk_rec(paths, f"airam_20260611_13{i:04d}_134600000.mp3", size=10, age=i)
