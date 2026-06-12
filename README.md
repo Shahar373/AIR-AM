@@ -111,6 +111,35 @@ sudo ./install.sh
 
 ---
 
+## מסלולים פעילים ואינדיקציית GPS ✈️📡
+
+כרטיס "מסלולים פעילים · נתב״ג" מציג איזה מסלול משמש כרגע **לנחיתות** ואיזה
+**להמראות** (בדרך כלל 26 להמראות), ולצדו אינדיקציית **שיבוש GPS** באזור.
+
+**מאיפה הנתונים?** אף API חינמי לא מדווח "מסלול בשימוש", אז `webtune/adsb.py`
+מסיק אותו בעצמו: thread ברקע מושך פעם בדקה את כל המטוסים ברדיוס 50nm מנתב"ג
+ממקור ADS-B קהילתי חופשי — [adsb.lol](https://api.adsb.lol/docs) (גיבוי אוטומטי:
+[adsb.fi](https://github.com/adsbfi/opendata)) — ומזהה מטוסים בגישה סופית
+(יורדים, במהירות גישה, מיושרים לקו המסלול המוארך עם track בכיוון המסלול).
+המסלול עם הגישות העדכניות ביותר הוא הפעיל; בשעות שיא, כשנוחתים על שני מסלולים
+במקביל, מוצג גם מסלול משני (למשל `30 +21`). אותו עיקרון, על מטוסים מטפסים,
+קובע את מסלול ההמראות.
+
+**שיבוש GPS:** כל מטוס משדר ב-ADS-B את רמת שלמות הניווט שלו (NIC).
+כשמערך ה-GPS משובש, מטוסים רבים משדרים NIC נמוך — זו בדיוק השיטה של
+[gpsjam.org](https://gpsjam.org/about), רק שכאן היא מחושבת בזמן אמת מאותם
+נתונים: אחוז המטוסים מעל 5,000 רגל באזור עם NIC&lt;7, באותם ספים
+(🟢 תקין &lt;2% · 🟡 חשד 2–10% · 🔴 שיבוש &gt;10%). זהו אינדיקטור סטטיסטי,
+לא מקור רשמי.
+
+- אין אינטרנט / המקור נפל? הכרטיס דוהה עם "ממתין לרשת" — **הרדיו לא מושפע**.
+- אין תנועה (לילה)? מוצג המסלול האחרון הידוע וכמה זמן עבר.
+- אימות מהיר: כוונן ל-**מגדל 134.600** ושמע איזה מסלול ניתן בקליראנס,
+  או הרץ `python3 /opt/airam/webtune/adsb.py` לדו"ח סיווג חי בטרמינל
+  (`--selftest` לבדיקה ללא רשת).
+
+---
+
 ## תדרי נתב"ג (LLBG) ו-TMA תל-אביב
 
 הפריסטים מבוססים על מאגרים ציבוריים (OurAirports / SkyVector / RadioReference) —
@@ -137,6 +166,8 @@ sudo ./install.sh
 
 - **`webtune/app.py`** — שרת Flask קטן. בכל `POST /api/tune` הוא כותב `/etc/rtl_airband/airband.conf`
   עם ערוץ יחיד ממורכז על התדר הנבחר (ולכן תמיד בתוך החלון), ומריץ `systemctl restart rtl_airband`.
+- **`webtune/adsb.py`** — ניתוח ADS-B (מסלול פעיל + GPS) ב-thread נפרד; מגיש את
+  `GET /api/airspace` מהזיכרון בלבד, כך שתקלת רשת לא נוגעת בנתיב הרדיו.
 - **`config/airband.conf`** — קובץ ברירת מחדל לאתחול ראשון (ATIS 132.5). נדרס ע"י הבורר בכל כיוונון.
 - **שלושה שירותים:** `sdrplay` (שירות ה-API), `rtl_airband` (הפענוח), `airam-web` (הממשק).
 
@@ -181,3 +212,6 @@ sudo ./install.sh
 - [SoapySDRPlay3](https://github.com/pothosware/SoapySDRPlay3) ·
   [SDRplay API](https://www.sdrplay.com/api/)
 - [install-libsdrplay (שיטת ההתקנה האוטומטית)](https://github.com/sdr-enthusiasts/install-libsdrplay)
+- [adsb.lol API](https://api.adsb.lol/docs) · [adsb.fi opendata](https://github.com/adsbfi/opendata) ·
+  [gpsjam.org — השיטה לזיהוי שיבוש GPS מ-NIC](https://gpsjam.org/about) ·
+  [OurAirports — גאומטריית מסלולי LLBG](https://ourairports.com/airports/LLBG/)

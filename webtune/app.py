@@ -21,6 +21,8 @@ from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
 
+import adsb   # מסלול פעיל + אינדיקציית GPS מנתוני ADS-B (thread נפרד)
+
 # stdout => journald (השירות רץ תחת systemd); journalctl -u airam-web מציג הכל
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("airam")
@@ -531,6 +533,13 @@ def api_metrics():
                    squelch_opens=vals.get("channel_squelch_counter"))
 
 
+@app.route("/api/airspace")
+def api_airspace():
+    """מסלול נחיתות/המראות פעיל ומצב GPS, מנותחים מ-ADS-B (ראה adsb.py).
+    קורא snapshot בזיכרון בלבד - אף פעם לא חוסם ואף פעם לא 500."""
+    return jsonify(adsb.snapshot())
+
+
 @app.route("/api/tune", methods=["POST"])
 def api_tune():
     # בלי force=True: מחייב Content-Type: application/json => דפדפן זר (CSRF) לא
@@ -619,4 +628,5 @@ if __name__ == "__main__":
                 pass
     REC_DIR.mkdir(parents=True, exist_ok=True)
     threading.Thread(target=_activity_watcher, daemon=True).start()
+    adsb.start()   # רק כשרצים כשרת (לא בזמן import) - דמון, לא מעכב עלייה
     app.run(host="0.0.0.0", port=8080)

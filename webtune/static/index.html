@@ -114,6 +114,32 @@
     .rf .nodata { font-size: .72rem; color: #5c6878; margin: .2rem 0 0; display: none; }
     .rf.stale .nodata { display: block; }
 
+    /* ---------- מסלולים פעילים (ADS-B) ---------- */
+    .aw-head { display: flex; align-items: center; justify-content: space-between; gap: .6rem; margin-bottom: .55rem; }
+    .aw-head .section-title { margin: 0; }
+    .aw-cols { display: flex; gap: .55rem; }
+    .aw-col {
+      flex: 1; text-align: center; padding: .55rem .6rem .65rem;
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
+    }
+    .aw-label { font-size: .75rem; color: var(--dim); }
+    .aw-rwy {
+      direction: ltr; font-variant-numeric: tabular-nums;
+      font-weight: 800; font-size: 2.2rem; line-height: 1.2;
+      display: flex; align-items: baseline; justify-content: center; gap: .35rem;
+      background: linear-gradient(180deg, var(--accent-2), var(--accent));
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+    }
+    .aw-sec {
+      font-size: 1rem; font-weight: 600;
+      -webkit-text-fill-color: var(--accent); color: var(--accent);
+    }
+    .aw-meta { margin-top: .55rem; min-height: 1.2em; }
+    .aw.stale .aw-cols, .aw.stale .aw-meta { opacity: .45; }
+    .aw .nodata { font-size: .72rem; color: #5c6878; margin: .35rem 0 0; display: none; }
+    .aw.stale .nodata { display: block; }
+
     .player-row { display: flex; gap: .5rem; margin-top: .6rem; }
     .player-row button { flex: 1; }
 
@@ -361,6 +387,28 @@
     <p id="metarDecoded" style="font-size:.92rem;margin:.2rem 0 .4rem"></p>
     <p id="metarRaw" class="hint" style="direction:ltr;text-align:left;
        font-variant-numeric:tabular-nums;margin:0;word-break:break-word"></p>
+  </section>
+
+  <!-- מסלולים פעילים + GPS (מוסק מ-ADS-B, ראה /api/airspace) -->
+  <section class="card">
+    <div class="aw-head">
+      <p class="section-title">מסלולים פעילים · נתב״ג</p>
+      <span id="gpsPill" class="pill"><span class="dot"></span><span id="gpsTxt">GPS — אין נתונים</span></span>
+    </div>
+    <div class="aw stale" id="awBody">
+      <div class="aw-cols">
+        <div class="aw-col">
+          <span class="aw-label">נחיתות</span>
+          <div class="aw-rwy"><span id="rwyLand">—</span><span id="rwyLandSec" class="aw-sec hidden"></span></div>
+        </div>
+        <div class="aw-col">
+          <span class="aw-label">המראות</span>
+          <div class="aw-rwy"><span id="rwyTo">—</span></div>
+        </div>
+      </div>
+      <p class="hint aw-meta" id="awMeta"></p>
+      <p class="nodata">אין נתוני ADS-B — ממתין לרשת…</p>
+    </div>
   </section>
 
   <!-- הגדרות -->
@@ -725,6 +773,52 @@
     // ורק כשהדף גלוי (חוסך סוללה בטלפון)
     setInterval(() => { if (!document.hidden) pollMetrics(); }, 3000);
     pollMetrics();
+
+    /* ---------- מסלולים פעילים + GPS (ADS-B) ---------- */
+    const GPS_PILL = {          // status -> [סוג pill, טקסט]
+      ok:       ["live", "GPS תקין"],
+      moderate: ["busy", "חשד לשיבוש GPS"],
+      severe:   ["err",  "שיבוש GPS באזור"],
+    };
+    const fmtAge = (min) =>
+      min < 1 ? "פחות מדק׳" :
+      min < 90 ? `${Math.round(min)} דק׳` : `${(min / 60).toFixed(1)} שע׳`;
+
+    async function pollAirspace() {
+      const body = $("awBody");
+      try {
+        const a = await (await fetch("/api/airspace")).json();
+        // ה-pill של ה-GPS מתעדכן תמיד (גם unknown), הכרטיס דוהה כשאין נתונים
+        const g = a.gps && GPS_PILL[a.gps.status];
+        $("gpsPill").className = "pill" + (g ? " " + g[0] : "");
+        $("gpsTxt").textContent = g ? g[1] : "GPS — אין נתונים";
+        if (!a.ok || !a.fresh) { body.classList.add("stale"); return; }
+        body.classList.remove("stale");
+
+        const r = a.runway || {};
+        $("rwyLand").textContent = r.landing || "—";
+        $("rwyTo").textContent = r.takeoff || "—";
+        const sec = $("rwyLandSec");   // נחיתות על שני מסלולים בשעות שיא
+        sec.classList.toggle("hidden", !r.landing_secondary);
+        if (r.landing_secondary) sec.textContent = "+" + r.landing_secondary;
+
+        let meta;
+        if (!r.landing) {
+          meta = "אין תנועת נחיתות כרגע";
+          if (r.last_known)
+            meta += ` · מסלול אחרון: ${r.last_known.landing} (לפני ${fmtAge(r.last_known.age_min)})`;
+        } else {
+          meta = `${r.landing_count} גישות ב-40 הדקות האחרונות`;
+          if (r.last_landing_age_min != null)
+            meta += ` · נחיתה אחרונה לפני ${fmtAge(r.last_landing_age_min)}`;
+        }
+        $("awMeta").textContent = meta;
+      } catch (e) { body.classList.add("stale"); }
+    }
+    // ה-backend מושך מ-adsb.lol פעם בדקה => דגימה כל 30 שניות מספיקה,
+    // ורק כשהדף גלוי (אותו דפוס כמו מדדי ה-RF)
+    setInterval(() => { if (!document.hidden) pollAirspace(); }, 30000);
+    pollAirspace();
 
     /* ---------- יומן שידורים ---------- */
     // נגן משני להקלטות: לא נוגעים בנגן ה-live (שמחזיק חיבור Icecast רגיש-latency)
