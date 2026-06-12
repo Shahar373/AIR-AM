@@ -131,14 +131,37 @@
       -webkit-background-clip: text; background-clip: text;
       -webkit-text-fill-color: transparent; color: transparent;
     }
+    /* מספר הנחיתות ירוק - תואם את צבע המסלול המודגש במפה */
+    .aw-col:first-child .aw-rwy { background: linear-gradient(180deg, #7ee2a8, var(--green));
+      -webkit-background-clip: text; background-clip: text; }
     .aw-sec {
       font-size: 1rem; font-weight: 600;
       -webkit-text-fill-color: var(--accent); color: var(--accent);
     }
+    .aw-col:first-child .aw-sec { -webkit-text-fill-color: #2e8f43; color: #2e8f43; }
     .aw-meta { margin-top: .55rem; min-height: 1.2em; }
     .aw.stale .aw-cols, .aw.stale .aw-meta { opacity: .45; }
     .aw .nodata { font-size: .72rem; color: #5c6878; margin: .35rem 0 0; display: none; }
     .aw.stale .nodata { display: block; }
+
+    /* מפת המסלולים: SVG בקנה מידה, נבנה ב-JS מאותן קואורדינטות של adsb.py */
+    .aw-map { display: block; width: 100%; height: 190px; margin-top: .55rem; direction: ltr; }
+    .aw.stale .aw-map { opacity: .45; }
+    .aw-map .rwy { stroke: #3a4453; stroke-width: 7; stroke-linecap: round; }
+    .aw-map .rwy.land { stroke: var(--green); filter: drop-shadow(0 0 4px rgba(63,185,80,.55)); }
+    .aw-map .rwy.land-sec { stroke: #2e8f43; }
+    .aw-map .rwy.to { stroke: var(--accent); }
+    .aw-map .rwy-lbl { fill: var(--dim); font-size: 11px; font-weight: 600; }
+    .aw-map .north { fill: #5c6878; font-size: 10px; }
+    .aw-map .arr { display: none; color: var(--green); }
+    .aw-map .arr.on { display: inline; }
+    .aw-map .arr.sec { color: #2e8f43; opacity: .75; }
+    .aw-map .arr.to { color: var(--accent); }
+    .aw-map .arr line { stroke: currentColor; stroke-width: 2; stroke-dasharray: 6 5;
+      animation: aw-flow 1.1s linear infinite; }
+    .aw-map .arr path { fill: currentColor; }
+    @keyframes aw-flow { to { stroke-dashoffset: -11; } }
+    @media (prefers-reduced-motion: reduce) { .aw-map .arr line { animation: none; } }
 
     .player-row { display: flex; gap: .5rem; margin-top: .6rem; }
     .player-row button { flex: 1; }
@@ -774,6 +797,124 @@
     setInterval(() => { if (!document.hidden) pollMetrics(); }, 3000);
     pollMetrics();
 
+    /* ---------- מפת המסלולים (SVG בקנה מידה) ---------- */
+    // לשמור מסונכרן עם RUNWAYS ב-webtune/adsb.py: כיוון -> [thr lat, lon, קורס אמיתי]
+    const AW_RWYS = {
+      "03": [31.99622, 34.88608, 29.0], "21": [32.01812, 34.90023, 209.0],
+      "08": [32.01300, 34.86040, 80.0], "26": [32.01890, 34.89860, 260.0],
+      "12": [32.01470, 34.86580, 121.4], "30": [31.99990, 34.89420, 301.4],
+    };
+    const AW_RECIP = { "03": "21", "21": "03", "08": "26", "26": "08", "12": "30", "30": "12" };
+
+    const awLine = {}, awArr = {};   // כיוון -> אלמנטים (קו משותף לשני הכיוונים)
+
+    function buildAwMap() {
+      // הקרנת ENU שטוחה סביב ה-ARP ב-nm (כמו _enu_nm ב-adsb.py), צפון למעלה
+      const COS = Math.cos(32.0114 * Math.PI / 180);
+      const enu = {}, uvec = {};
+      for (const d in AW_RWYS) {
+        const [lat, lon, crs] = AW_RWYS[d];
+        enu[d] = [(lon - 34.8867) * 60 * COS, (lat - 32.0114) * 60];
+        const r = crs * Math.PI / 180;
+        uvec[d] = [Math.sin(r), Math.cos(r)];     // וקטור יחידה בכיוון הגישה
+      }
+      // כל הנקודות שיצוירו (כולל קצות החצים) => viewBox שמכיל הכל
+      const pts = [];
+      const off = (d, t) => [enu[d][0] - t * uvec[d][0], enu[d][1] - t * uvec[d][1]];
+      for (const d in enu) { pts.push(enu[d], off(d, 0.62), off(d, -0.2)); }
+      const K = 100, PAD = 0.15;    // px לכל nm + שוליים
+      const xmin = Math.min(...pts.map(p => p[0])) - PAD, xmax = Math.max(...pts.map(p => p[0])) + PAD;
+      const ymin = Math.min(...pts.map(p => p[1])) - PAD, ymax = Math.max(...pts.map(p => p[1])) + PAD;
+      const px = (p) => [(p[0] - xmin) * K, (ymax - p[1]) * K];   // SVG: ‏y הפוך
+
+      const NS = "http://www.w3.org/2000/svg";
+      const el = (tag, attrs, cls) => {
+        const e = document.createElementNS(NS, tag);
+        for (const k in attrs) e.setAttribute(k, attrs[k]);
+        if (cls) e.setAttribute("class", cls);
+        return e;
+      };
+      const svg = el("svg", {
+        id: "awMap",
+        viewBox: `0 0 ${((xmax - xmin) * K).toFixed(0)} ${((ymax - ymin) * K).toFixed(0)}`,
+        preserveAspectRatio: "xMidYMid meet",
+      }, "aw-map");
+
+      // 3 קווי מסלול - אלמנט אחד לכל זוג, נגיש משני הכיוונים
+      for (const [a, b] of [["03", "21"], ["08", "26"], ["12", "30"]]) {
+        const [x1, y1] = px(enu[a]), [x2, y2] = px(enu[b]);
+        const ln = el("line", { x1, y1, x2, y2 }, "rwy");
+        svg.appendChild(ln);
+        awLine[a] = awLine[b] = ln;
+      }
+
+      // ה-thresholds של 21 ו-26 כמעט צמודים => הזזת פיקסלים ידנית למניעת חפיפה
+      const LBL_NUDGE = { "21": [4, -6], "26": [8, 12] };
+      for (const d in enu) {
+        // תווית הכיוון מעט מחוץ ל-threshold (בצד הגישה)
+        let [lx, ly] = px(off(d, 0.14));
+        const n = LBL_NUDGE[d];
+        if (n) { lx += n[0]; ly += n[1]; }
+        const lbl = el("text", { x: lx, y: ly, "text-anchor": "middle", "dominant-baseline": "middle" }, "rwy-lbl");
+        lbl.textContent = d;
+        svg.appendChild(lbl);
+
+        // ראש-חץ: משולש בפיקסלים סביב נקודת חוד, בכיוון נתון (וקטור יחידה ENU)
+        const head = (tipP, u) => {
+          const [tx, ty] = px(tipP);
+          const dx = u[0], dy = -u[1];                 // לכיווני מסך (y הפוך)
+          const bx = tx - 7 * dx, by = ty - 7 * dy;    // בסיס 7px אחורה מהחוד
+          return el("path", { d: `M${tx.toFixed(1)},${ty.toFixed(1)} L${(bx - 3.5 * dy).toFixed(1)},${(by + 3.5 * dx).toFixed(1)} L${(bx + 3.5 * dy).toFixed(1)},${(by - 3.5 * dx).toFixed(1)} Z` });
+        };
+        const dash = (fromP, toP) => {
+          const [x1, y1] = px(fromP), [x2, y2] = px(toP);
+          return el("line", { x1, y1, x2, y2 });
+        };
+
+        // חץ נחיתה: זורם מבחוץ אל ה-threshold של הכיוון
+        const land = el("g", {}, "arr");
+        land.append(dash(off(d, 0.58), off(d, 0.3)), head(off(d, 0.26), uvec[d]));
+        svg.appendChild(land);
+
+        // חץ המראה: מעבר לקצה הרחוק, ממשיך החוצה בכיוון הקורס
+        const far = AW_RECIP[d];
+        const out = (t) => [enu[far][0] + t * uvec[d][0], enu[far][1] + t * uvec[d][1]];
+        const to = el("g", {}, "arr to");
+        to.append(dash(out(0.22), out(0.5)), head(out(0.54), uvec[d]));
+        svg.appendChild(to);
+
+        awArr[d] = { land, to };
+      }
+
+      const north = el("text", { x: 8, y: 16 }, "north");
+      north.textContent = "N ↑";
+      svg.appendChild(north);
+
+      $("awMeta").before(svg);
+    }
+    buildAwMap();
+
+    function updateAwMap(r) {
+      for (const d in awArr) {
+        awArr[d].land.classList.remove("on", "sec");
+        awArr[d].to.classList.remove("on");
+      }
+      for (const d of ["03", "08", "12"]) awLine[d].setAttribute("class", "rwy");
+      if (r.landing && awLine[r.landing]) {
+        awLine[r.landing].classList.add("land");
+        awArr[r.landing].land.classList.add("on");
+      }
+      const sec = r.landing_secondary;
+      if (sec && awLine[sec]) {
+        if (!awLine[sec].classList.contains("land")) awLine[sec].classList.add("land-sec");
+        awArr[sec].land.classList.add("on", "sec");
+      }
+      if (r.takeoff && awLine[r.takeoff]) {
+        awArr[r.takeoff].to.classList.add("on");
+        if (!awLine[r.takeoff].classList.contains("land")) awLine[r.takeoff].classList.add("to");
+      }
+    }
+
     /* ---------- מסלולים פעילים + GPS (ADS-B) ---------- */
     const GPS_PILL = {          // status -> [סוג pill, טקסט]
       ok:       ["live", "GPS תקין"],
@@ -796,6 +937,7 @@
         body.classList.remove("stale");
 
         const r = a.runway || {};
+        updateAwMap(r);
         $("rwyLand").textContent = r.landing || "—";
         $("rwyTo").textContent = r.takeoff || "—";
         const sec = $("rwyLandSec");   // נחיתות על שני מסלולים בשעות שיא
