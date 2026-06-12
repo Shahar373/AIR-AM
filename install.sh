@@ -49,7 +49,7 @@ else
     aarch64) APIARCH="arm64" ;;
     armv7l)  APIARCH="armv7l" ;;
     x86_64)  APIARCH="x86_64" ;;
-    *)       APIARCH="arm64" ;;
+    *)       die "ארכיטקטורה לא נתמכת: $(uname -m). נתמכות: aarch64 / armv7l / x86_64." ;;
   esac
   RUN="/tmp/sdrplay.run"; EXT="/tmp/sdrplay_api"
   curl -fSL --retry 4 -o "$RUN" \
@@ -60,11 +60,23 @@ else
   # חילוץ ללא הרצה (makeself) => עוקפים את אישור הרישיון האינטראקטיבי
   "$RUN" --noexec --target "$EXT"
 
-  [[ -d "$EXT/$APIARCH" ]] || APIARCH="$(basename "$(find "$EXT" -maxdepth 1 -type d -name '*64*' | head -1)")"
+  # שם הספרייה בארכיון לא תאם בדיוק => מאתרים לפי דפוס הארכיטקטורה הספציפי
+  # (לא "כל 64" - אחרת על armv7l היינו בוחרים בטעות ספריית arm64).
+  if [[ ! -d "$EXT/$APIARCH" ]]; then
+    case "$APIARCH" in
+      arm64)  ALT="$(find "$EXT" -maxdepth 1 -type d \( -name '*aarch64*' -o -name '*arm64*' \) | head -1)" ;;
+      armv7l) ALT="$(find "$EXT" -maxdepth 1 -type d -name '*armv7*' | head -1)" ;;
+      x86_64) ALT="$(find "$EXT" -maxdepth 1 -type d \( -name '*x86_64*' -o -name '*amd64*' \) | head -1)" ;;
+    esac
+    [[ -n "${ALT:-}" ]] && APIARCH="$(basename "$ALT")"
+  fi
   [[ -n "$APIARCH" && -d "$EXT/$APIARCH" ]] || die "לא נמצאה ספריית ארכיטקטורה בתוך ה-API."
 
-  # ספריות
-  LIB="$(ls "$EXT/$APIARCH"/libsdrplay_api.so.* | head -1)"
+  # ספריות: בוחרים את הקובץ המלא libsdrplay_api.so.MAJOR.MINOR (שני מקטעי גרסה),
+  # לא את ה-symlink הקצר .so.3 - אחרת ה-ln למטה היה מצביע על עצמו.
+  LIB="$(ls "$EXT/$APIARCH"/libsdrplay_api.so.*.* 2>/dev/null | head -1)"
+  [[ -n "$LIB" ]] || LIB="$(ls "$EXT/$APIARCH"/libsdrplay_api.so.* 2>/dev/null | head -1)"
+  [[ -n "$LIB" ]] || die "לא נמצאה ספריית libsdrplay_api ב-API שחולץ."
   cp -f "$LIB" /usr/local/lib/
   BASE="$(basename "$LIB")"                       # libsdrplay_api.so.3.15
   ln -sf "/usr/local/lib/$BASE" /usr/local/lib/libsdrplay_api.so.3
@@ -115,22 +127,31 @@ s/lame_set_out_samplerate(lame, MP3_RATE);/lame_set_out_samplerate(lame, 16000);
 s/sprintf(samplerates, "%d", MP3_RATE);/sprintf(samplerates, "%d", 16000);/'
 # -DNFM=ON: תמיכת NFM כבויה כברירת מחדל; הממשק מציע NFM אז חובה להפעיל,
 # אחרת בחירת NFM => "unknown modulation" וקריסה.
+# RTL_VER נעוץ ל-release ידוע-טוב: ה-patch הוא sed על המקור, ו-clone של ענף
+# ברירת המחדל היה נשבר בכל שינוי upstream. הגרסה חלק מחתימת הבנייה =>
+# העלאת RTL_VER כאן מספיקה כדי לגרור בנייה מחדש בעדכון הבא.
+RTL_VER="v5.2.0"   # תבניות ה-patch אומתו מול src/output.cpp של ה-tag הזה
 RTL_CMAKE_FLAGS="-DPLATFORM=native -DNFM=ON"
-RTL_BUILD_SIG="$(printf '%s' "$RTL_PATCH $RTL_CMAKE_FLAGS" | sha256sum | awk '{print $1}')"
+RTL_BUILD_SIG="$(printf '%s' "$RTL_VER $RTL_PATCH $RTL_CMAKE_FLAGS" | sha256sum | awk '{print $1}')"
 AIRAM_RTL_MARK="/usr/local/share/airam/rtl_airband.build-sig"
 
 if command -v rtl_airband >/dev/null 2>&1 && [[ "$(cat "$AIRAM_RTL_MARK" 2>/dev/null)" == "$RTL_BUILD_SIG" ]]; then
-  log "RTLSDR-Airband (NFM + CBR 48k) כבר מותקן - מדלג."
+  log "RTLSDR-Airband ${RTL_VER} (NFM + CBR 48k) כבר מותקן - מדלג."
 else
-  log "בונה RTLSDR-Airband (NFM + CBR 48kbps ל-latency נמוך)..."
+  log "בונה RTLSDR-Airband ${RTL_VER} (NFM + CBR 48kbps ל-latency נמוך)..."
   cd "$BUILD_DIR"
-  [[ -d RTLSDR-Airband ]] || git clone https://github.com/rtl-airband/RTLSDR-Airband.git
+  # עץ קיים שאינו על ה-tag הנעוץ (התקנה ישנה לא-נעוצה / העלאת גרסה) => משכפלים מחדש
+  if [[ -d RTLSDR-Airband ]] && \
+     [[ "$(git -C RTLSDR-Airband describe --tags --exact-match 2>/dev/null)" != "$RTL_VER" ]]; then
+    rm -rf RTLSDR-Airband
+  fi
+  [[ -d RTLSDR-Airband ]] || git clone --depth 1 --branch "$RTL_VER" https://github.com/rtl-airband/RTLSDR-Airband.git
   cd RTLSDR-Airband
   # איפוס לפני patch (אידמפוטנטי); עץ פגום (clone שנקטע) => משכפלים מחדש
   git checkout -- src/output.cpp 2>/dev/null || {
     warn "עץ ה-build פגום - משכפל מחדש את RTLSDR-Airband."
     cd "$BUILD_DIR" && rm -rf RTLSDR-Airband
-    git clone https://github.com/rtl-airband/RTLSDR-Airband.git && cd RTLSDR-Airband
+    git clone --depth 1 --branch "$RTL_VER" https://github.com/rtl-airband/RTLSDR-Airband.git && cd RTLSDR-Airband
   }
   sed -i "$RTL_PATCH" src/output.cpp
   # מאמתים את *כל* ההחלפות. החלפה שהוחמצה (upstream השתנה) => בונים בכל זאת
@@ -178,6 +199,14 @@ ensure_limit burst-on-connect 0
 ensure_limit burst-size 0
 ensure_limit queue-size 65536
 ensure_limit source-timeout 10
+# tripwire: sed על XML עיוור להערות/שינויי פורמט - מוודאים שכל ערך באמת נקלט
+# כתג פעיל בתחילת שורה, אחרת מזהירים ברעש (burst שגוי => חזרת ה-latency של 30 שניות).
+for kv in "source-password ${SOURCE_PW}" "burst-on-connect 0" "burst-size 0" \
+          "queue-size 65536" "source-timeout 10"; do
+  tag="${kv% *}"; val="${kv#* }"
+  grep -Eq "^[[:space:]]*<$tag>$val</$tag>" "$ICE" \
+    || warn "אימות Icecast נכשל: <$tag> אינו $val ב-$ICE - תקן ידנית (פורמט הקובץ השתנה?)"
+done
 # אפשר את השירות
 [[ -f /etc/default/icecast2 ]] && sed -i 's/^ENABLE=.*/ENABLE=true/' /etc/default/icecast2 || true
 grep -q "^ENABLE=" /etc/default/icecast2 2>/dev/null || echo "ENABLE=true" >> /etc/default/icecast2
@@ -188,7 +217,7 @@ systemctl restart icecast2
 # 6. קובץ הגדרות התחלתי + תיקיית state
 # ----------------------------------------------------------------------------
 log "מתקין קובץ הגדרות התחלתי..."
-mkdir -p /etc/rtl_airband /var/lib/airam
+mkdir -p /etc/rtl_airband /var/lib/airam /var/lib/airam/recordings
 [[ -f /etc/rtl_airband/airband.conf ]] || cp "$REPO_DIR/config/airband.conf" /etc/rtl_airband/airband.conf
 
 # ----------------------------------------------------------------------------

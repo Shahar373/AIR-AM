@@ -1,0 +1,20 @@
+# בדיקות לשרת בורר התדרים + בדיקת תחביר לסקריפט ההתקנה.
+# בלי חומרה: כל מה שתלוי ב-SDR/systemd ממוקף בבדיקות עצמן.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # Raspberry Pi OS Bookworm
+      - run: pip install flask pytest
+      - run: python -m pytest tests/ -v
+      - name: bash syntax check
+        run: bash -n install.sh scripts/airam-wait-sdrplay
