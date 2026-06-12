@@ -33,7 +33,15 @@ ICECAST_PORT = 8000
 SOURCE_PW = "airam"         # חייבת להיות זהה ל-SOURCE_PW ב-install.sh (נכתבת ל-Icecast שם)
 SAMPLE_RATE = 2.56          # Msps - ערוץ יחיד, חלון צר מספיק
 DC_OFFSET = 0.3             # MHz - מזיזים את centerfreq מהתדר כדי להתרחק מ-spike ה-DC
-GAIN_DEFAULT = 40
+# רווח SDRplay (מודל legacy של SoapySDRPlay3): שני אלמנטים נפרדים, וקטן יותר = רווח גדול יותר.
+#   IFGR - הפחתת רווח בתדר הביניים, 20–59 dB.
+#   RFGR - מצב ה-LNA (הפחתת רווח RF), 0–9 (לא-לינארי, ~7dB לצעד).
+# כש-AGC כבוי כותבים gain = "IFGR=..,RFGR=.."; כש-AGC דלוק משמיטים את gain => AGC חומרתי.
+IFGR_MIN, IFGR_MAX = 20, 59
+RFGR_MIN, RFGR_MAX = 0, 9
+IF_GAIN_DEFAULT = 40            # IFGR - אמצע הטווח, בטוח מפני עומס יתר
+RF_GAIN_DEFAULT = 4            # RFGR - מצב LNA בינוני
+OVERLOAD_DBFS = -3.0          # סף "עומס יתר": אות ערוץ קרוב ל-full scale של ה-ADC
 SQUELCH_MODES = {"auto", "open", "manual"}
 SNR_MIN, SNR_MAX = 0.0, 60.0   # dB - תחום clamp ל-SNR ידני
 SNR_DEFAULT = 9.0              # ≈ סף ה-auto הפנימי של rtl_airband (~9.54 dB)
@@ -110,7 +118,8 @@ def load_presets():
         pass   # אין קובץ / פגום => ברירת המחדל (הקובץ נכתב רק בעריכה הראשונה)
     return [dict(p) for p in DEFAULT_PRESETS]
 
-DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True, "gain": GAIN_DEFAULT,
+DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
+                 "if_gain": IF_GAIN_DEFAULT, "rf_gain": RF_GAIN_DEFAULT,
                  "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}  # ברירת מחדל ATIS => תמיד פתוח
 
 
@@ -131,7 +140,7 @@ def _squelch_line(squelch_mode, squelch_snr):
 
 
 # --- בניית קובץ ההגדרות ל-rtl_airband ------------------------------------
-def render_config(freq, mod, agc, gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT):
+def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT):
     f = float(freq)
     lines = [
         "# נוצר אוטומטית ע\"י AIR-AM web tuner. שינויים ידניים נדרסים בכל כיוונון.",
@@ -144,7 +153,8 @@ def render_config(freq, mod, agc, gain, squelch_mode="auto", squelch_snr=SNR_DEF
         '    device_string = "driver=sdrplay";',
     ]
     if not agc:
-        lines.append(f"    gain = {int(gain)};")  # אחרת AGC אוטומטי
+        # רווח ידני => שני אלמנטים. הגדרת gain מבטלת אוטומטית את ה-AGC בדרייבר.
+        lines.append(f'    gain = "IFGR={int(if_gain)},RFGR={int(rf_gain)}";')  # אחרת AGC אוטומטי
     lines += [
         f"    sample_rate = {SAMPLE_RATE};",
         '    mode = "multichannel";',
@@ -202,8 +212,8 @@ def _atomic_write(path, text):
     os.replace(tmp, path)
 
 
-def write_config(freq, mod, agc, gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT):
-    _atomic_write(CONFIG_PATH, render_config(freq, mod, agc, gain, squelch_mode, squelch_snr))
+def write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT):
+    _atomic_write(CONFIG_PATH, render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr))
 
 
 def load_state():
@@ -262,8 +272,8 @@ def _rollback(prev):
     """כיוונון נכשל => משחזרים את ההגדרות האחרונות שעבדו ומרימים מחדש (best-effort)."""
     log.warning("rollback to %.3f MHz", prev["freq"])
     try:
-        write_config(prev["freq"], prev["mod"], prev["agc"], prev["gain"],
-                     prev["squelch_mode"], prev["squelch_snr"])
+        write_config(prev["freq"], prev["mod"], prev["agc"], prev["if_gain"],
+                     prev["rf_gain"], prev["squelch_mode"], prev["squelch_snr"])
         subprocess.run(["systemctl", "restart", "rtl_airband"],
                        capture_output=True, text=True, timeout=45)
     except Exception:
@@ -492,8 +502,11 @@ def api_metrics():
     sig = vals.get("channel_dbfs_signal_level")
     noise = vals.get("channel_dbfs_noise_level")
     snr = round(sig - noise, 1) if (sig is not None and noise is not None) else None
+    # עומס יתר: רמת האות בערוץ מתקרבת ל-full scale (0 dBFS) => ה-ADC/רווח רווי.
+    overload = sig is not None and sig >= OVERLOAD_DBFS
     return jsonify(ok=True, fresh=(age <= STATS_MAX_AGE and snr is not None),
                    age=round(age, 1), signal=sig, noise=noise, snr=snr,
+                   overload=overload, overload_dbfs=OVERLOAD_DBFS,
                    squelch_opens=vals.get("channel_squelch_counter"))
 
 
@@ -513,9 +526,13 @@ def api_tune():
     agc_raw = data.get("agc", True)   # עמיד גם ל-"false" טקסטואלי (curl), לא רק bool
     agc = agc_raw if isinstance(agc_raw, bool) else str(agc_raw).lower() not in ("false", "0", "off", "no")
     try:
-        gain = max(0, min(60, int(data.get("gain", GAIN_DEFAULT))))
+        if_gain = max(IFGR_MIN, min(IFGR_MAX, int(data.get("if_gain", IF_GAIN_DEFAULT))))
     except (TypeError, ValueError):
-        gain = GAIN_DEFAULT
+        if_gain = IF_GAIN_DEFAULT
+    try:
+        rf_gain = max(RFGR_MIN, min(RFGR_MAX, int(data.get("rf_gain", RF_GAIN_DEFAULT))))
+    except (TypeError, ValueError):
+        rf_gain = RF_GAIN_DEFAULT
 
     squelch_mode = str(data.get("squelch_mode", "auto")).lower()
     if squelch_mode not in SQUELCH_MODES:
@@ -532,11 +549,11 @@ def api_tune():
                        state=load_state()), 409
     try:
         prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
-        new_state = {"freq": freq, "mod": mod, "agc": agc, "gain": gain,
-                     "squelch_mode": squelch_mode, "squelch_snr": squelch_snr}
-        log.info("tune %.3f MHz mod=%s agc=%s gain=%d squelch=%s snr=%.1f (from %s)",
-                 freq, mod, agc, gain, squelch_mode, squelch_snr, request.remote_addr)
-        write_config(freq, mod, agc, gain, squelch_mode, squelch_snr)
+        new_state = {"freq": freq, "mod": mod, "agc": agc, "if_gain": if_gain,
+                     "rf_gain": rf_gain, "squelch_mode": squelch_mode, "squelch_snr": squelch_snr}
+        log.info("tune %.3f MHz mod=%s agc=%s if_gain=%d rf_gain=%d squelch=%s snr=%.1f (from %s)",
+                 freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr, request.remote_addr)
+        write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr)
 
         err, detail, sdr_down = _restart_and_verify()
         if err:
@@ -569,8 +586,8 @@ if __name__ == "__main__":
         _cur = None
     if _cur is None or "stats_filepath" not in _cur or "localtime" not in _cur:
         st = load_state()
-        write_config(st["freq"], st["mod"], st["agc"], st["gain"],
-                     st["squelch_mode"], st["squelch_snr"])
+        write_config(st["freq"], st["mod"], st["agc"], st["if_gain"],
+                     st["rf_gain"], st["squelch_mode"], st["squelch_snr"])
         if _cur is not None:   # שדרוג: השירות כבר רץ עם ההגדרות הישנות
             try:
                 subprocess.run(["systemctl", "restart", "rtl_airband"],

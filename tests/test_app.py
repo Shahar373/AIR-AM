@@ -35,39 +35,39 @@ def client(paths):
 # --- render_config ----------------------------------------------------------
 
 def test_render_config_basic_structure():
-    cfg = app.render_config(134.6, "am", True, 40)
+    cfg = app.render_config(134.6, "am", True, 40, 4)
     assert 'freq = 134.6000;' in cfg
     assert f'centerfreq = {134.6 + app.DC_OFFSET:.4f};' in cfg   # הסטת DC-spike
     assert 'modulation = "am";' in cfg
     assert 'localtime = true;' in cfg
     assert 'stats_filepath' in cfg
     assert 'mountpoint = "live.mp3";' in cfg
-    # AGC פעיל => אין שורת gain
+    # AGC פעיל => אין שורת gain (השמטה = AGC חומרתי של SDRplay)
     assert "gain =" not in cfg
     # סוגריים מאוזנים (תחביר libconfig)
     assert cfg.count("(") == cfg.count(")") and cfg.count("{") == cfg.count("}")
 
 
 def test_render_config_manual_gain():
-    cfg = app.render_config(120.5, "nfm", False, 38)
-    assert "gain = 38;" in cfg
+    cfg = app.render_config(120.5, "nfm", False, 38, 6)
+    assert 'gain = "IFGR=38,RFGR=6";' in cfg
     assert 'modulation = "nfm";' in cfg
 
 
 def test_render_config_squelch_modes():
-    assert "squelch_snr_threshold" not in app.render_config(120.5, "am", True, 40, "auto")
-    assert "squelch_snr_threshold = 0;" in app.render_config(120.5, "am", True, 40, "open")
-    assert "squelch_snr_threshold = 12.0;" in app.render_config(120.5, "am", True, 40, "manual", 12)
+    assert "squelch_snr_threshold" not in app.render_config(120.5, "am", True, 40, 4, "auto")
+    assert "squelch_snr_threshold = 0;" in app.render_config(120.5, "am", True, 40, 4, "open")
+    assert "squelch_snr_threshold = 12.0;" in app.render_config(120.5, "am", True, 40, 4, "manual", 12)
 
 
 def test_render_config_recording_only_when_squelch_closes():
     # סקוולץ' שנסגר => מקליטים כל שידור
-    rec = app.render_config(120.5, "am", True, 40, "auto")
+    rec = app.render_config(120.5, "am", True, 40, 4, "auto")
     assert 'type = "file";' in rec
     assert "split_on_transmission = true;" in rec
     assert "include_freq = true;" in rec
     # "פתוח" (ATIS) => הסקוולץ' לעולם לא נסגר => קובץ אינסופי => אין הקלטה
-    open_cfg = app.render_config(132.5, "am", True, 40, "open")
+    open_cfg = app.render_config(132.5, "am", True, 40, 4, "open")
     assert 'type = "file";' not in open_cfg
     assert open_cfg.count("(") == open_cfg.count(")")
 
@@ -130,25 +130,27 @@ def test_tune_validation(client):
 
 def test_tune_success_persists_state(client, paths, tuned_ok):
     r = client.post("/api/tune", json={"freq": 134.6, "mod": "am", "agc": False,
-                                       "gain": 30, "squelch_mode": "manual",
-                                       "squelch_snr": 11})
+                                       "if_gain": 30, "rf_gain": 2,
+                                       "squelch_mode": "manual", "squelch_snr": 11})
     assert r.status_code == 200 and r.get_json()["ok"]
     st = app.load_state()
-    assert st["freq"] == 134.6 and st["gain"] == 30 and st["squelch_mode"] == "manual"
+    assert st["freq"] == 134.6 and st["if_gain"] == 30 and st["rf_gain"] == 2
+    assert st["squelch_mode"] == "manual"
     cfg = app.CONFIG_PATH.read_text()
-    assert "freq = 134.6000;" in cfg and "gain = 30;" in cfg
+    assert "freq = 134.6000;" in cfg and 'gain = "IFGR=30,RFGR=2";' in cfg
 
 
 def test_tune_sanitizes_inputs(client, paths, tuned_ok):
     r = client.post("/api/tune", json={"freq": 120.5, "mod": "weird", "agc": "false",
-                                       "gain": 999, "squelch_mode": "nope",
-                                       "squelch_snr": -5})
+                                       "if_gain": 999, "rf_gain": -5,
+                                       "squelch_mode": "nope", "squelch_snr": -5})
     body = r.get_json()
-    assert body["mod"] == "am"             # אפנון לא מוכר => AM
-    assert body["agc"] is False            # "false" טקסטואלי מזוהה
-    assert body["gain"] == 60              # clamp לתקרה
-    assert body["squelch_mode"] == "auto"  # מצב לא מוכר => auto
-    assert body["squelch_snr"] == 0.0      # clamp לרצפה
+    assert body["mod"] == "am"                    # אפנון לא מוכר => AM
+    assert body["agc"] is False                   # "false" טקסטואלי מזוהה
+    assert body["if_gain"] == app.IFGR_MAX        # clamp לתקרה
+    assert body["rf_gain"] == app.RFGR_MIN        # clamp לרצפה
+    assert body["squelch_mode"] == "auto"         # מצב לא מוכר => auto
+    assert body["squelch_snr"] == 0.0             # clamp לרצפה
 
 
 def test_tune_failure_rolls_back(client, paths, monkeypatch):
