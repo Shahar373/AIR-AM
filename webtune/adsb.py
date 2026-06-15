@@ -2,11 +2,12 @@
 # ============================================================================
 #  AIR-AM  -  ניתוח ADS-B: מסלול פעיל לנחיתות/המראות + אינדיקציית שיבוש GPS
 # ----------------------------------------------------------------------------
-#  thread דמון מושך כל ~60 שניות את המטוסים ברדיוס 50nm סביב נתב"ג ממקור
+#  thread דמון מושך כל ~60 שניות את המטוסים ברדיוס רחב סביב נתב"ג ממקור
 #  ADS-B קהילתי חופשי (adsb.lol, גיבוי adsb.fi) ומסיק:
-#   1. מסלול נחיתות פעיל - מטוסים בגישה סופית (יורדים, מיושרים לקו המסלול
-#      המוארך) נצברים כאירועים; המסלול עם הציון הגבוה (דעיכה אקספוננציאלית)
-#      הוא הפעיל. אין API שמדווח "מסלול בשימוש" - זו הסקה סטטיסטית.
+#   1. מסלול נחיתות פעיל - מטוסים בגישה סופית נצברים כאירועים; המסלול עם
+#      הציון הגבוה (דעיכה אקספוננציאלית) הוא הפעיל. עמיד לשיבוש GPS האזורי:
+#      מטוס שמיקומו מזויף (nic=0, "קופץ" ללבנון/ירדן) מזוהה לפי הכיוון (track)
+#      והגובה הברומטרי - ששורדים את השיבוש. אין API ל"מסלול בשימוש" - הסקה.
 #   2. מסלול המראות פעיל - אותו עיקרון על מטוסים מטפסים.
 #   3. שיבוש GPS - אחוז המטוסים באזור שמשדרים NIC נמוך (<7), אותה שיטה
 #      וספים כמו gpsjam.org (ירוק <2%, צהוב 2-10%, אדום >10%).
@@ -40,7 +41,7 @@ RUNWAYS = {
 
 # --- כוונון האלגוריתם -------------------------------------------------------
 POLL_SEC = 60            # adsb.lol מבקשים עד ~1 בקשה/שנייה; פעם בדקה נדיב
-RADIUS_NM = 50           # קריאה אחת משרתת גם את זיהוי המסלול וגם את ה-GPS
+RADIUS_NM = 250          # רחב בכוונה: מטוסים מזויפים "קופצים" ללבנון/ירדן (>50nm)
 HTTP_TIMEOUT = 10.0
 FRESH_SEC = 180.0        # משיכה ישנה מזה => fresh:false ב-API וכרטיס דהוי
 FAILS_TO_SWITCH = 3      # כשלים רצופים עד מעבר למקור הגיבוי
@@ -53,6 +54,19 @@ SECONDARY_MIN = 20.0     # מסלול משני: נדרשות >=2 גישות ב-2
 GPS_WINDOW_MIN = 15.0    # החלקה של יחס ה-NIC הפגום
 GPS_MIN_SAMPLE = 10      # פחות מדגימות מזה => "אין נתונים" ולא ירוק כוזב
 GPS_ALT_MIN = 5000.0     # מתחת לזה NIC נמוך נפוץ גם בלי שיבוש (multipath)
+
+# גילוי עמיד-שיבוש: באזור נתב"ג השיבוש מתמשך - מטוסים בגישה משדרים מיקום
+# מזויף או nic=0, אבל שדות ה-baro וה-track שורדים. nic=0 הוא בעצמו אות איתור:
+# השיבוש מקומי => המטוס פיזית קרוב לשדה (מטוסים על הקרקע כלל לא מושפעים).
+SPOOF_NIC = 2            # nic < זה => מיקום מזויף; מניחים שהמטוס קרוב לנתב"ג
+NEAR_NM = 25.0           # מיקום אמין בתוך הרדיוס הזה = אזור המסוף של נתב"ג
+TRACK_TOL = 25.0         # track בתוך כך מקורס המסלול => אותו מסלול (הקורסים רחוקים >40°)
+LAND_RATE = -300.0       # קצב ירידה מרבי לגישה (ft/min)
+LAND_GS_MIN, LAND_GS_MAX = 90.0, 200.0
+ALT_MIN, ALT_MAX = 200.0, 6500.0   # גובה לחץ (טווח רחב - אין תיקון QNH)
+TO_RATE = 500.0          # קצב טיפוס מזערי להמראה
+TO_GS_MIN = 100.0
+TO_ALT_MAX = 6000.0
 
 # גישה סופית: שיפוע 5° סביב הקו המוארך, עד 12nm מה-threshold
 _TAN_GLIDE = math.tan(math.radians(5.0))
@@ -91,10 +105,61 @@ def _num(v):
     return float(v) if isinstance(v, (int, float)) else None
 
 
-# --- סיווג מטוס בודד --------------------------------------------------------
+# --- התאמת מסלול ------------------------------------------------------------
+def _match_track(track):
+    """המסלול שהקורס שלו הכי קרוב ל-track (בתוך TRACK_TOL), אחרת None.
+    עמיד-שיבוש: track נגזר ממדידת מהירות, לא מ-lat/lon המזויף. הקורסים בנתב"ג
+    רחוקים זה מזה (>40°) => אין דו-משמעות בתוך הטולרנס."""
+    best = None
+    for rwy, (_la, _lo, crs) in RUNWAYS.items():
+        d = abs(_norm180(track - crs))
+        if d < TRACK_TOL and (best is None or d < best[1]):
+            best = (rwy, d)
+    return best[0] if best else None
+
+
+def _match_landing_pos(lat, lon, track):
+    """מסלול נחיתה לפי גאומטריית הקו המוארך (משפך 5°) - כשהמיקום אמין."""
+    best = None
+    for rwy in RUNWAYS:
+        along, cross = _final_geometry(lat, lon, rwy)
+        if not (0.3 <= along <= 12.0):
+            continue
+        if cross >= max(0.6, along * _TAN_GLIDE):
+            continue
+        if abs(_norm180(track - RUNWAYS[rwy][2])) >= TRACK_TOL:
+            continue
+        if best is None or cross < best[1]:   # פיינלים מתכנסים => הקרוב לקו
+            best = (rwy, cross)
+    return best[0] if best else None
+
+
+def _match_takeoff_pos(lat, lon, track):
+    """מסלול המראה: טיפוס מעבר ל-threshold בכיוון המסלול, קרוב לשדה."""
+    if math.hypot(*_enu_nm(lat, lon, ARP_LAT, ARP_LON)) > 8.0:
+        return None
+    best = None
+    for rwy in RUNWAYS:
+        along, cross = _final_geometry(lat, lon, rwy)
+        if not (-0.5 <= -along <= 8.0):   # ‎-along = מרחק מעבר ל-threshold
+            continue
+        if cross >= 1.5 or abs(_norm180(track - RUNWAYS[rwy][2])) >= TRACK_TOL:
+            continue
+        if best is None or cross < best[1]:
+            best = (rwy, cross)
+    return best[0] if best else None
+
+
+# --- סיווג מטוס בודד (עמיד לשיבוש GPS) --------------------------------------
 def classify(ac):
-    """("landing"|"takeoff", rwy) אם המטוס בגישה סופית / המראה, אחרת None."""
-    lat, lon = _num(ac.get("lat")), _num(ac.get("lon"))
+    """מחזיר (kind, rwy, mode) או None.
+    kind: "landing"|"takeoff" · mode: "pos" (מיקום אמין) | "track" (לפי כיוון).
+
+    איתור המטוס לאזור נתב"ג:
+      • מיקום אמין (nic תקין) וקרוב => משתמשים בגאומטריית הקו המוארך (mode=pos).
+      • מיקום אמין אך רחוק (לרנקה/עמאן) => המטוס באמת במקום אחר => מתעלמים.
+      • מזויף (nic<SPOOF_NIC) => אין מיקום שמיש, אבל השיבוש מקומי => המטוס קרוב;
+        מסווגים לפי ה-track והגובה הברומטרי בלבד (mode=track)."""
     track = _num(ac.get("track"))
     gs = _num(ac.get("gs"))
     alt = _num(ac.get("alt_baro"))
@@ -103,43 +168,33 @@ def classify(ac):
     rate = _num(ac.get("baro_rate"))
     if rate is None:
         rate = _num(ac.get("geom_rate"))
-    seen_pos = _num(ac.get("seen_pos"))
-    if None in (lat, lon, track, gs, alt, rate) or (seen_pos or 0) > 30:
+
+    nic = _num(ac.get("nic"))
+    spoofed = nic is not None and nic < SPOOF_NIC
+    lat, lon = _num(ac.get("lat")), _num(ac.get("lon"))
+    seen_pos = _num(ac.get("seen_pos")) or 0.0
+    has_pos = lat is not None and lon is not None and seen_pos <= 60 and not spoofed
+
+    if has_pos:
+        if math.hypot(*_enu_nm(lat, lon, ARP_LAT, ARP_LON)) > NEAR_NM:
+            return None                 # אמין ורחוק => לא בנתב"ג
+    elif not spoofed:
+        return None                     # אין מיקום אמין ואין דגל שיבוש => אי-אפשר לאתר
+
+    if None in (track, gs, alt, rate):
         return None
 
-    # גישה סופית: ירידה, מהירות גישה, גובה לחץ נמוך (טווח רחב - אין QNH),
-    # בתוך משפך של 5° סביב הקו המוארך ועם track בכיוון המסלול.
-    if rate <= -300 and 90 <= gs <= 220 and 200 <= alt <= 6500:
-        best = None
-        for rwy in RUNWAYS:
-            along, cross = _final_geometry(lat, lon, rwy)
-            if not (0.3 <= along <= 12.0):
-                continue
-            if cross >= max(0.6, along * _TAN_GLIDE):
-                continue
-            if abs(_norm180(track - RUNWAYS[rwy][2])) >= 20:
-                continue
-            if best is None or cross < best[1]:   # פיינלים מתכנסים => הקרוב לקו
-                best = (rwy, cross)
-        if best:
-            return ("landing", best[0])
+    # נחיתה: יורד במהירות גישה בגובה לחץ נמוך
+    if rate <= LAND_RATE and LAND_GS_MIN <= gs <= LAND_GS_MAX and ALT_MIN <= alt <= ALT_MAX:
+        rwy = _match_landing_pos(lat, lon, track) if has_pos else _match_track(track)
+        if rwy:
+            return ("landing", rwy, "pos" if has_pos else "track")
 
-    # המראה: טיפוס מעבר ל-threshold בכיוון ההמראה, קרוב לשדה.
-    if rate >= 500 and gs >= 100 and 200 <= alt <= 6000:
-        ax, ay = _enu_nm(lat, lon, ARP_LAT, ARP_LON)
-        if math.hypot(ax, ay) <= 8.0:
-            best = None
-            for rwy in RUNWAYS:
-                along, cross = _final_geometry(lat, lon, rwy)
-                # ‎-along = המרחק מעבר ל-threshold בכיוון ההמראה
-                if not (-0.5 <= -along <= 8.0):
-                    continue
-                if cross >= 1.5 or abs(_norm180(track - RUNWAYS[rwy][2])) >= 20:
-                    continue
-                if best is None or cross < best[1]:
-                    best = (rwy, cross)
-            if best:
-                return ("takeoff", best[0])
+    # המראה: מטפס מעל השדה בכיוון המסלול
+    if rate >= TO_RATE and gs >= TO_GS_MIN and ALT_MIN <= alt <= TO_ALT_MAX:
+        rwy = _match_takeoff_pos(lat, lon, track) if has_pos else _match_track(track)
+        if rwy:
+            return ("takeoff", rwy, "pos" if has_pos else "track")
     return None
 
 
@@ -157,6 +212,7 @@ _S = {
     "fails": 0,
     "src_idx": 0,
     "ac_count": 0,
+    "spoofed_now": 0,         # מטוסים מזויפים (nic<SPOOF_NIC) בדגימה האחרונה
 }
 
 
@@ -173,31 +229,34 @@ def process(ac_list, now=None):
     now = time.monotonic() if now is None else now
     events, last_event = _S["events"], _S["last_event"]
 
-    bad = total = 0
+    bad = total = spoofed = 0
     for ac in ac_list:
+        nic = _num(ac.get("nic"))
+        # ספירת מזויפים (להצגה): מטוסים באוויר עם nic נמוך
+        if ac.get("alt_baro") != "ground" and nic is not None and nic < SPOOF_NIC:
+            spoofed += 1
         # אינדיקציית GPS: דגימת NIC מעל GPS_ALT_MIN (nac_p רק כשאין nic)
         alt = _num(ac.get("alt_baro"))
         if alt is None:
             alt = _num(ac.get("alt_geom"))
         if alt is not None and alt > GPS_ALT_MIN and (_num(ac.get("seen_pos")) or 0) < 60:
-            integ = _num(ac.get("nic"))
-            if integ is None:
-                integ = _num(ac.get("nac_p"))
+            integ = nic if nic is not None else _num(ac.get("nac_p"))
             if integ is not None:
                 total += 1
                 bad += integ < 7
 
         hit = classify(ac)
         if hit:
-            kind, rwy = hit
+            kind, rwy, mode = hit
             key = (ac.get("hex"), kind)
             prev = last_event.get(key)
             if prev is None or now - prev >= DEDUP_MIN * 60:
                 last_event[key] = now
-                events.append((now, rwy, kind))
+                events.append((now, rwy, kind, mode))
                 _S["last_known"][kind] = (rwy, now)
 
     _S["gps_hist"].append((now, bad, total))
+    _S["spoofed_now"] = spoofed
 
     # גיזום חלונות + מפתחות dedup ישנים
     while events and now - events[0][0] > WINDOW_MIN * 60:
@@ -210,16 +269,20 @@ def process(ac_list, now=None):
 
 
 def _decide_runway(kind, now):
-    """המסלול הפעיל לסוג אירוע: ציון עם דעיכה + override לרצף עדכני."""
-    evs = [(t, rwy) for t, rwy, k in _S["events"] if k == kind]
+    """המסלול הפעיל לסוג אירוע: ציון עם דעיכה + override לרצף עדכני.
+    מחזיר (primary, secondary, count, last_age_min, pos_confirmed)."""
+    evs = [(t, rwy, mode) for t, rwy, k, mode in _S["events"] if k == kind]
     if not evs:
-        return None, None, 0, None
+        return None, None, 0, None, False
     scores = {}
-    for t, rwy in evs:
-        scores[rwy] = scores.get(rwy, 0.0) + math.exp(-(now - t) / 60.0 / DECAY_TAU_MIN)
+    for t, rwy, m in evs:
+        # זיהוי-מיקום אמין יותר מזיהוי-כיוון => משקל מעט גבוה (שובר תיקו לטובתו,
+        # אך נפח של זיהויי-כיוון בשיבוש כבד עדיין גובר)
+        w = 1.0 if m == "pos" else 0.7
+        scores[rwy] = scores.get(rwy, 0.0) + w * math.exp(-(now - t) / 60.0 / DECAY_TAU_MIN)
     primary = max(scores, key=scores.get)
     # החלפת מסלול באמצע החלון: 3 מתוך 4 האירועים האחרונים גוברים על הציון
-    last4 = [rwy for _, rwy in evs[-4:]]
+    last4 = [rwy for _t, rwy, _m in evs[-4:]]
     if len(last4) == 4:
         for rwy in set(last4):
             if rwy != primary and last4.count(rwy) >= 3:
@@ -229,11 +292,12 @@ def _decide_runway(kind, now):
     if kind == "landing":   # בשעות שיא נוחתים בנתב"ג על שני מסלולים במקביל
         cand = {r: s for r, s in scores.items()
                 if r != primary and s >= 0.3 * scores[primary]
-                and sum(1 for t, rw in evs if rw == r and now - t <= SECONDARY_MIN * 60) >= 2}
+                and sum(1 for t, rw, _m in evs if rw == r and now - t <= SECONDARY_MIN * 60) >= 2}
         if cand:
             secondary = max(cand, key=cand.get)
-    last_age_min = (now - max(t for t, _ in evs)) / 60.0
-    return primary, secondary, len(evs), last_age_min
+    last_age_min = (now - max(t for t, _r, _m in evs)) / 60.0
+    pos_confirmed = any(m == "pos" for _t, rw, m in evs if rw == primary)
+    return primary, secondary, len(evs), last_age_min, pos_confirmed
 
 
 def snapshot():
@@ -243,11 +307,13 @@ def snapshot():
         ok_age = None if _S["last_ok"] is None else now - _S["last_ok"]
         fresh = ok_age is not None and ok_age <= FRESH_SEC
 
-        landing, secondary, n_land, land_age = _decide_runway("landing", now)
-        takeoff, _, _, to_age = _decide_runway("takeoff", now)
+        landing, secondary, n_land, land_age, land_pos = _decide_runway("landing", now)
+        takeoff, _, _, to_age, _ = _decide_runway("takeoff", now)
+        method = ("position" if land_pos else "track") if landing else None
         confidence = "none"
         if landing:
-            confidence = "high" if (n_land >= 3 and land_age < 15) else "low"
+            # ביטחון גבוה דורש אישור מיקום; זיהוי לפי כיוון בלבד (שיבוש) => "low"
+            confidence = "high" if (land_pos and n_land >= 3 and land_age < 15) else "low"
         lk = _S["last_known"].get("landing")
         last_known = ({"landing": lk[0], "age_min": round((now - lk[1]) / 60.0, 1)}
                       if lk else None)
@@ -275,11 +341,13 @@ def snapshot():
                 "last_landing_age_min": None if land_age is None else round(land_age, 1),
                 "last_takeoff_age_min": None if to_age is None else round(to_age, 1),
                 "confidence": confidence,
+                "method": method,
                 "last_known": last_known,
             },
             "gps": {"status": gps_status,
                     "bad_ratio": None if ratio is None else round(ratio, 4),
-                    "sample_n": g_total},
+                    "sample_n": g_total,
+                    "spoofed_count": _S["spoofed_now"]},
         }
 
 
@@ -341,7 +409,7 @@ def _selftest():
     # גישה סופית תקינה לכל מסלול
     for rwy, (_la, _lo, crs) in RUNWAYS.items():
         got = classify(ac(rwy, 6.0, 0.1, crs, -700, 2200))
-        assert got == ("landing", rwy), f"{rwy}: {got}"
+        assert got == ("landing", rwy, "pos"), f"{rwy}: {got}"
     # track הפוך / סטייה הצידה / גבוה מדי / לא יורד => לא גישה
     assert classify(ac("30", 6.0, 0.1, 121.4, -700, 2200)) is None
     assert classify(ac("30", 6.0, 2.0, 301.4, -700, 2200)) is None
@@ -351,9 +419,24 @@ def _selftest():
     assert classify({"hex": "x", "lat": 32.0, "lon": 34.88, "alt_baro": "ground"}) is None
     # המראה: 3nm מעבר ל-threshold של 26, מטפס בכיוון 260
     got = classify(ac("26", -3.0, 0.2, 260.0, 1800, 2500, gs=170))
-    assert got == ("takeoff", "26"), got
+    assert got == ("takeoff", "26", "pos"), got
     # מטוס יורד בגובה שיוט רחוק => כלום
     assert classify(ac("30", 11.0, 0.1, 301.4, -700, 2200, gs=300)) is None
+
+    # --- עמידות לשיבוש GPS: בלי מיקום אמין (nic=0), זיהוי לפי track בלבד -------
+    # ה-lat/lon מזויף ללבנון (33.8,35.5) - מתעלמים ממנו, מסווגים לפי הכיוון.
+    spoof = lambda trk, rate, alt, gs=160: {
+        "hex": "5p00f", "track": trk, "baro_rate": rate, "alt_baro": alt,
+        "gs": gs, "nic": 0, "lat": 33.8, "lon": 35.5, "seen_pos": 2}
+    assert classify(spoof(209.0, -700, 2500)) == ("landing", "21", "track")
+    assert classify(spoof(301.4, -700, 2500)) == ("landing", "30", "track")
+    assert classify(spoof(260.0, 1500, 2000, gs=180)) == ("takeoff", "26", "track")
+    # track דו-משמעי (בין 029 ל-080, מעל 25° משניהם) => לא מסווג
+    assert classify(spoof(55.0, -700, 2500)) is None
+    # מיקום אמין אך רחוק (לרנקה) => המטוס באמת במקום אחר => לא אצלנו
+    assert classify({"hex": "cy", "lat": 34.9, "lon": 33.6, "track": 184.0,
+                     "baro_rate": -800, "alt_baro": 4000, "gs": 250,
+                     "nic": 7, "seen_pos": 1}) is None
 
     # ‏pipeline מלא: 5 נחיתות על 30, המראה על 26, ו-15% מטוסים עם nic פגום
     _S["events"].clear(); _S["gps_hist"].clear()
@@ -397,8 +480,8 @@ def _print_report(data, source):
     hits = [(a.get("hex"), a.get("flight", "").strip(), *c)
             for a in acs if (c := classify(a))]
     print(f"{len(acs)} aircraft from {source}; classified:")
-    for hex_, flight, kind, rwy in hits:
-        print(f"  {hex_}  {flight or '-':<9} {kind:<8} RWY {rwy}")
+    for hex_, flight, kind, rwy, mode in hits:
+        print(f"  {hex_}  {flight or '-':<9} {kind:<8} RWY {rwy:<3} [{mode}]")
     print(json.dumps(snapshot(), indent=2, ensure_ascii=False))
 
 

@@ -932,7 +932,10 @@
         // ה-pill של ה-GPS מתעדכן תמיד (גם unknown), הכרטיס דוהה כשאין נתונים
         const g = a.gps && GPS_PILL[a.gps.status];
         $("gpsPill").className = "pill" + (g ? " " + g[0] : "");
-        $("gpsTxt").textContent = g ? g[1] : "GPS — אין נתונים";
+        const spoofed = a.gps && a.gps.spoofed_count || 0;
+        let gpsTxt = g ? g[1] : "GPS — אין נתונים";
+        if (spoofed > 0) gpsTxt += ` · ${spoofed} מזויפים`;
+        $("gpsTxt").textContent = gpsTxt;
         if (!a.ok || !a.fresh) { body.classList.add("stale"); return; }
         body.classList.remove("stale");
 
@@ -953,6 +956,8 @@
           meta = `${r.landing_count} גישות ב-40 הדקות האחרונות`;
           if (r.last_landing_age_min != null)
             meta += ` · נחיתה אחרונה לפני ${fmtAge(r.last_landing_age_min)}`;
+          // זוהה לפי כיוון+גובה בלבד => המיקום מזויף (רשת הביטחון פעלה)
+          if (r.method === "track") meta += " · זוהה לפי כיוון (GPS משובש)";
         }
         $("awMeta").textContent = meta;
       } catch (e) { body.classList.add("stale"); }
