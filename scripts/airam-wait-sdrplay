@@ -2,13 +2,34 @@
 # ============================================================================
 #  AIR-AM  -  שער מוכנות ל-SDRplay (ExecStartPre של rtl_airband)
 # ----------------------------------------------------------------------------
-#  חוסם עד שה-SDRplay API מגיב ומכשיר ניתן לפתיחה, או עד timeout.
+#  חוסם עד שה-SDRplay API מגיב *ומכשיר ניתן לאיתור*, או עד timeout.
 #  מונע מרוץ אתחול שבו rtl_airband עולה לפני ש-sdrplay_apiService מוכן.
+#
+#  התאוששות מ-daemon תקוע: ה-sdrplay_apiService יכול להיות "active" ב-systemd
+#  אך להחזיר sdrplay_api_ServiceNotResponding ללקוחות (מרוץ אתחול / אחרי
+#  התקנת/עדכון ה-API). במצב הזה probe חוזר *לעולם לא* יתאושש לבד - חייבים
+#  restart ל-sdrplay. לכן: אם אחרי כמה ניסיונות עדיין אין מענה, מפעילים מחדש
+#  את sdrplay פעם אחת וממשיכים לבדוק. (אומת בשטח: restart פותר את התקיעה.)
+#
 #  יציאה != 0 => systemd ינסה שוב (Restart=always).
 # ============================================================================
-for _ in $(seq 1 30); do
-  if SoapySDRUtil --probe="driver=sdrplay" >/dev/null 2>&1; then
+
+# --find קל מ---probe (לא פותח/מגדיר את המכשיר) ועושה בדיוק את handshake ה-
+# ApiVersion שנכשל כשה-daemon תקוע. grep מוודא שמכשיר *באמת* נמצא, לא רק שה-API ענה.
+device_ready() {
+  SoapySDRUtil --find="driver=sdrplay" 2>/dev/null | grep -q "driver = sdrplay"
+}
+
+for attempt in $(seq 1 30); do
+  if device_ready; then
     exit 0
+  fi
+  # אמצע הדרך: daemon שלא ענה ~8 שניות לא יתאושש לבד => בועטים בו פעם אחת.
+  # --no-block: לא חוסם את השער; אם ה-restart מפיל את ההפעלה הנוכחית של
+  # rtl_airband (תלות Requires), הוא יעלה שוב לבד (Restart=always) וכבר ימצא
+  # API בריא. כתיבה בריאה (device_ready בניסיון 1) לא מגיעה לכאן כלל.
+  if [ "$attempt" -eq 8 ]; then
+    systemctl restart --no-block sdrplay.service 2>/dev/null || true
   fi
   sleep 1
 done

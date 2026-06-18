@@ -5,6 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0a0e14" />
   <title>AIR-AM · בורר תדרים</title>
+  <!-- PWA: התקנה כאפליקציה ("הוסף למסך הבית") + שמע ברקע -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon-192.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="AIR-AM" />
   <style>
     :root {
       color-scheme: dark;
@@ -257,6 +265,26 @@
     .sub-setting input[type="range"] { flex: 1; accent-color: var(--accent); }
     .sub-setting .val { direction: ltr; font-variant-numeric: tabular-nums;
       color: var(--accent); font-size: .9rem; min-width: 3.2em; text-align: center; }
+    .sub-setting .numval { width: 4.4em; flex: none; direction: ltr; text-align: center;
+      font: inherit; font-size: .95rem; font-variant-numeric: tabular-nums;
+      color: var(--accent); background: var(--panel-2);
+      border: 1px solid var(--border); border-radius: 8px; padding: .38rem .3rem; }
+    .sub-setting .numval:focus { outline: none; border-color: var(--accent); }
+    .sub-setting .unit { font-size: .85rem; color: var(--dim); flex: none; }
+    .manual-hint b { color: var(--accent); font-variant-numeric: tabular-nums; }
+
+    /* ---------- חיווי מתח (Raspberry Pi power) ---------- */
+    .pwr { display: flex; align-items: center; gap: .45rem; margin-top: .6rem;
+      font-size: .78rem; color: var(--dim); text-align: start;
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 10px; padding: .45rem .65rem; }
+    .pwr .pdot { width: .55rem; height: .55rem; border-radius: 50%; background: #59626e; flex: none; }
+    .pwr.ok { color: #9fe3b1; border-color: rgba(63,185,80,.35); }
+    .pwr.ok .pdot { background: var(--green); }
+    .pwr.warn { color: #ecd49a; border-color: rgba(217,169,61,.4); }
+    .pwr.warn .pdot { background: var(--amber); }
+    .pwr.bad { color: #f1a49e; border-color: rgba(229,83,75,.45); }
+    .pwr.bad .pdot { background: var(--red); animation: pulse 1.2s ease-out infinite; }
 
     /* ---------- בקרת רווח (Gain) ---------- */
     .gain-head { gap: .6rem; }
@@ -352,6 +380,11 @@
 
     <div class="player-row">
       <button id="syncBtn" class="ghost" title="התחבר מחדש לנקודת השידור החיה">⟳ סנכרן ל-live</button>
+    </div>
+
+    <!-- חיווי מתח ל-Raspberry Pi (קריטי בהזנה מסוללה ניידת) -->
+    <div class="pwr hidden" id="pwrChip" title="מתח האספקה ל-Raspberry Pi">
+      <span class="pdot"></span><span id="pwrText">בודק מתח…</span>
     </div>
     <details class="err hidden" id="errBox">
       <summary>פרטי שגיאה</summary>
@@ -482,9 +515,15 @@
     </div>
     <div class="sub-setting" id="snrWrap">
       <span>סף SNR</span>
-      <input type="range" id="snr" min="3" max="25" step="1" value="9" />
-      <span class="val"><span id="snrVal">9</span> dB</span>
+      <input type="range" id="snr" min="0" max="40" step="0.5" value="9" />
+      <input type="number" id="snrNum" class="numval" min="0" max="60" step="0.5"
+             value="9" inputmode="decimal" />
+      <span class="unit">dB</span>
     </div>
+    <p class="hint manual-hint" id="snrHint" style="display:none">
+      SNR נוכחי: <b id="snrNow" dir="ltr">—</b> dB · הסקוולץ׳ נפתח כשה-SNR עולה מעל הסף.
+      הקלד ערך מדויק או גרור את הסליידר (0–60 dB).
+    </p>
 
     <p class="hint">אוטומטי מתאים לרוב התדרים · ל-ATIS ושידור רציף בחר "פתוח" ·
       "ידני" אם הסקוולץ׳ נפתח על רעש או חותך דיבור. שינוי הגדרה מוחל מיד על התדר הנוכחי.</p>
@@ -511,6 +550,23 @@
     function showError(detail) {
       if (detail) { $("errDetail").textContent = detail; $("errBox").classList.remove("hidden"); }
       else $("errBox").classList.add("hidden");
+    }
+
+    /* ---------- סקוולץ׳ ידני (סף SNR) ---------- */
+    // שדה המספר הוא מקור האמת (מאפשר ערך מדויק 0–60), הסליידר רק משקף אותו.
+    const clampSnr = (v) => Math.max(0, Math.min(60, v));
+    function getSnr() {
+      const v = parseFloat($("snrNum").value);
+      return Number.isFinite(v) ? clampSnr(v) : 9;
+    }
+    function setSnr(v) {
+      v = clampSnr(Number.isFinite(+v) ? +v : 9);
+      $("snrNum").value = v;
+      $("snr").value = Math.min(40, v);   // לסליידר תקרה 40 dB; לשדה המלא 60
+    }
+    function showManual(on) {              // מציג/מסתיר את פקדי הסף + רמז ה-SNR החי
+      $("snrWrap").classList.toggle("show", on);
+      $("snrHint").style.display = on ? "" : "none";
     }
 
     /* ---------- segmented control ---------- */
@@ -639,7 +695,7 @@
     function selectPreset(p) {
       const sq = p.sq || "auto";
       segSet("sqSeg", sq);
-      $("snrWrap").classList.toggle("show", sq === "manual");
+      showManual(sq === "manual");
       tune(p.freq);
     }
 
@@ -650,6 +706,25 @@
       $("freqName").textContent = p ? p.name : "תדר חופשי";
       renderPresets(freq);
       updateBandHint();   // הוכרז למטה (function declaration => hoisted)
+      updateMediaSession();
+    }
+
+    /* ---------- MediaSession: שמע ברקע + פקדים במסך נעול ---------- */
+    // ה-API שגורם למערכת ההפעלה להתייחס לסטרים כ-media מתמשך (כמו נגן מוזיקה),
+    // כך שהוא ממשיך לרוץ ברקע ומקבל פקדי הפעלה/עצירה במסך הנעול ובמרכז הבקרה.
+    function updateMediaSession() {
+      if (!("mediaSession" in navigator)) return;
+      const p = presetFor(current);
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: current.toFixed(3) + " MHz" + (p ? " · " + p.name : ""),
+          artist: "AIR-AM · האזנת תעופה",
+          artwork: [
+            { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+            { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+          ],
+        });
+      } catch (e) { /* MediaMetadata לא נתמך => מתעלמים */ }
     }
 
     /* ---------- נגן ---------- */
@@ -691,7 +766,7 @@
             if_gain: sliderToIFGR(),
             rf_gain: sliderToRFGR(),
             squelch_mode: segValue("sqSeg"),
-            squelch_snr: parseInt($("snr").value, 10),
+            squelch_snr: getSnr(),
           }),
         });
         const data = await res.json();
@@ -718,8 +793,9 @@
     const retune = () => tune(current);
 
     /* ---------- מדדי RF חיים ---------- */
-    const SNR_HIST_N = 60;          // 60 דגימות × 3 שניות = ‎~3 דקות אחורה
+    const SNR_HIST_N = 90;          // 90 דגימות × 1 שנייה = ‎~90 שניות אחורה (חלון רספונסיבי לכיוון אנטנה)
     const snrHist = [];
+    let metricsInFlight = false;    // מונע ערימת בקשות אם רשת איטית בקצב פולינג 1s
     const dbfsPct = (v) => Math.max(0, Math.min(100, ((v + 110) / 80) * 100)); // ‎-110..-30dBFS
 
     function drawSpark() {
@@ -764,6 +840,8 @@
     }
 
     async function pollMetrics() {
+      if (metricsInFlight) return;   // בקשה קודמת עדיין פתוחה (רשת איטית) => מדלגים על המחזור
+      metricsInFlight = true;
       try {
         const m = await (await fetch("/api/metrics")).json();
         const panel = $("rfPanel");
@@ -771,6 +849,7 @@
           panel.classList.add("stale");
           explainStale();
           $("overload").hidden = true;                 // אין נתונים => אין חיווי עומס
+          $("snrNow").textContent = "—";
           return;
         }
         panel.classList.remove("stale");
@@ -778,6 +857,7 @@
         const snrEl = $("rfSnr");
         snrEl.textContent = m.snr.toFixed(1);
         snrEl.className = m.snr >= 10 ? "good" : (m.snr >= 4 ? "weak" : "");
+        $("snrNow").textContent = m.snr.toFixed(1);    // עוגן חי לבחירת סף ידני
         if (m.signal != null) {
           $("rfSigBar").style.width = dbfsPct(m.signal) + "%";
           $("rfSigBar").style.background = m.overload ? "var(--red)" : "";
@@ -791,11 +871,41 @@
         if (snrHist.length > SNR_HIST_N) snrHist.shift();
         drawSpark();
       } catch (e) { $("rfPanel").classList.add("stale"); }
+      finally { metricsInFlight = false; }
     }
-    // rtl_airband מרענן את הקובץ כל ~15 שניות => דגימה כל 3 שניות מספיקה,
-    // ורק כשהדף גלוי (חוסך סוללה בטלפון)
-    setInterval(() => { if (!document.hidden) pollMetrics(); }, 3000);
+    // rtl_airband מרענן את הקובץ כל ~1 שנייה => פולינג כל שנייה למשוב כמעט-רציף
+    // (לכיוון אנטנה בזמן אמת), ורק כשהדף גלוי (חוסך סוללה בטלפון)
+    setInterval(() => { if (!document.hidden) pollMetrics(); }, 1000);
     pollMetrics();
+
+    /* ---------- חיווי מתח ל-Pi ---------- */
+    // המתח משתנה לאט => פולינג כל 5 שניות. החיווי החשוב ביותר לסוללה ניידת הוא
+    // דגל ה-undervoltage (vcgencmd get_throttled) שעובד בכל דגם Pi; מתח 5V בפועל
+    // זמין רק ב-Pi 5. כשאין vcgencmd (לא Pi) ה-API מחזיר ok:false והחיווי מוסתר.
+    async function pollPower() {
+      try {
+        const p = await (await fetch("/api/power")).json();
+        const chip = $("pwrChip");
+        if (!p.ok) { chip.className = "pwr hidden"; return; }
+        const v = (p.volts_in != null) ? p.volts_in.toFixed(2) + "V" : null;
+        const t = (p.temp != null) ? " · " + p.temp.toFixed(0) + "°C" : "";
+        let cls, txt;
+        if (p.undervolt_now || p.throttle_now) {
+          cls = "bad";
+          txt = "⚠️ מתח נמוך! האספקה חלשה מדי" + (v ? " (" + v + ")" : "");
+        } else if (p.undervolt_ever || p.throttle_ever) {
+          cls = "warn";
+          txt = "מתח צנח בעבר — בדוק אספקה" + (v ? " · כעת " + v : "") + t;
+        } else {
+          cls = "ok";
+          txt = "מתח תקין" + (v ? " · " + v : "") + t;
+        }
+        chip.className = "pwr " + cls;
+        $("pwrText").textContent = txt;
+      } catch (e) { /* משאירים מצב קודם */ }
+    }
+    setInterval(() => { if (!document.hidden) pollPower(); }, 5000);
+    pollPower();
 
     /* ---------- מפת המסלולים (SVG בקנה מידה) ---------- */
     // לשמור מסונכרן עם RUNWAYS ב-webtune/adsb.py: כיוון -> [thr lat, lon, קורס אמיתי]
@@ -1087,7 +1197,7 @@
 
     segInit("modSeg", retune);
     segInit("sqSeg", (v) => {
-      $("snrWrap").classList.toggle("show", v === "manual");
+      showManual(v === "manual");
       retune();
     });
 
@@ -1096,15 +1206,34 @@
     $("ifGain").onchange = retune;                                // החל רק בשחרור הסליידר
     $("rfGain").oninput = renderGainUI;
     $("rfGain").onchange = retune;                                // החל רק בשחרור הסליידר
-    $("snr").oninput = () => { $("snrVal").textContent = $("snr").value; };
+    // סליידר ושדה-מספר מסונכרנים דו-כיוונית; retune רק בשחרור/אישור הערך
+    $("snr").oninput = () => { $("snrNum").value = $("snr").value; };
     $("snr").onchange = retune;
+    $("snrNum").oninput = () => {
+      const v = parseFloat($("snrNum").value);
+      if (Number.isFinite(v)) $("snr").value = Math.min(40, Math.max(0, v));
+    };
+    $("snrNum").onchange = () => { setSnr(getSnr()); retune(); };
+
+    // פקדי MediaSession מהמסך הנעול: play => חיבור-מחדש ל-live, pause/stop => עצירה
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.setActionHandler("play", () => reloadStream());
+      navigator.mediaSession.setActionHandler("pause", () => player.pause());
+      navigator.mediaSession.setActionHandler("stop", () => player.pause());
+    }
 
     // חזרה לטאב אחרי השהיה => סנכרון מחדש ל-live (נגן HTML5 נסחף מאחור).
     // iOS עוצר את הנגן ברקע, לכן בודקים את כוונת המשתמש (wantPlaying) ולא את player.paused.
     // מסנכרנים רק אחרי היעדרות ממושכת (או נגן שנפל) - הצצה רגעית לאפליקציה אחרת
     // לא מצדיקה ניתוק/חיבור מחדש של הסטרים.
-    player.addEventListener("play", () => { wantPlaying = true; });
-    player.addEventListener("pause", () => { if (!document.hidden) wantPlaying = false; });
+    player.addEventListener("play", () => {
+      wantPlaying = true;
+      if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+    });
+    player.addEventListener("pause", () => {
+      if (!document.hidden) wantPlaying = false;
+      if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
+    });
     let hiddenAt = 0;
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) { hiddenAt = Date.now(); return; }
@@ -1124,15 +1253,19 @@
       renderGainUI();
       segSet("sqSeg", st.squelch_mode || "auto");
       const s = Number(st.squelch_snr);                // לא ||: ‏snr=0 הוא ערך חוקי
-      $("snr").value = Number.isFinite(s) ? s : 9;
-      $("snrVal").textContent = $("snr").value;
-      $("snrWrap").classList.toggle("show", st.squelch_mode === "manual");
+      setSnr(Number.isFinite(s) ? s : 9);
+      showManual(st.squelch_mode === "manual");
       current = Number(st.freq);
       updateDisplay(current);
       setStatus("מוכן — לחץ ▶ או בחר תדר");
       player.src = streamURL();
       pollActivity();   // עכשיו כש-cfg.presets נטען, שמות הפריסטים יופיעו ביומן
     }).catch(() => setStatus("אין חיבור לשרת", "err"));
+
+    // רישום ה-service worker => מאפשר "הוסף למסך הבית" כאפליקציה. לא מטמיין כלום.
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
   </script>
 </body>
 </html>
