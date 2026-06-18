@@ -120,11 +120,18 @@ fi
 # @ 16kHz - זרם קבוע וצפוף (6KB/s) => הנגן מתחיל תוך שניות. אין לזה שום knob
 # בהגדרות/בנייה של rtl_airband, ולכן patch על המקור. (אומת מול מקור LAME:
 # brate נאכף רק ב-vbr_off; ‏48kbps חוקי ל-MPEG-2 @ 16kHz.)
+#
+# patch שני (STATS_FILE_TIMING): rtl_airband חונק את כתיבת קובץ ה-stats לכל
+# 15 שניות (קבוע קשיח ב-output.cpp). מדדי ה-signal/noise עצמם מתעדכנים בכל
+# דגימה (moving-average ב-squelch.cpp), אז 15 שניות רק *מסתירים* נתון טרי =>
+# כיוון אנטנה בזמן אמת בלתי אפשרי. מורידים ל-1 שנייה: הקובץ ב-/run (tmpfs,
+# בלי שחיקת SD) וכתיבה לערוץ יחיד זניחה על Pi.
 RTL_PATCH='
 s/lame_set_VBR(lame, vbr_mtrh);/lame_set_VBR(lame, vbr_off);/
 s/lame_set_brate(lame, 16);/lame_set_brate(lame, 48);/
 s/lame_set_out_samplerate(lame, MP3_RATE);/lame_set_out_samplerate(lame, 16000);/
-s/sprintf(samplerates, "%d", MP3_RATE);/sprintf(samplerates, "%d", 16000);/'
+s/sprintf(samplerates, "%d", MP3_RATE);/sprintf(samplerates, "%d", 16000);/
+s/static const double STATS_FILE_TIMING = 15.0;/static const double STATS_FILE_TIMING = 1.0;/'
 # -DNFM=ON: תמיכת NFM כבויה כברירת מחדל; הממשק מציע NFM אז חובה להפעיל,
 # אחרת בחירת NFM => "unknown modulation" וקריסה.
 # RTL_VER נעוץ ל-release ידוע-טוב: ה-patch הוא sed על המקור, ו-clone של ענף
@@ -136,9 +143,9 @@ RTL_BUILD_SIG="$(printf '%s' "$RTL_VER $RTL_PATCH $RTL_CMAKE_FLAGS" | sha256sum 
 AIRAM_RTL_MARK="/usr/local/share/airam/rtl_airband.build-sig"
 
 if command -v rtl_airband >/dev/null 2>&1 && [[ "$(cat "$AIRAM_RTL_MARK" 2>/dev/null)" == "$RTL_BUILD_SIG" ]]; then
-  log "RTLSDR-Airband ${RTL_VER} (NFM + CBR 48k) כבר מותקן - מדלג."
+  log "RTLSDR-Airband ${RTL_VER} (NFM + CBR 48k + stats 1s) כבר מותקן - מדלג."
 else
-  log "בונה RTLSDR-Airband ${RTL_VER} (NFM + CBR 48kbps ל-latency נמוך)..."
+  log "בונה RTLSDR-Airband ${RTL_VER} (NFM + CBR 48kbps + stats כל 1s)..."
   cd "$BUILD_DIR"
   # עץ קיים שאינו על ה-tag הנעוץ (התקנה ישנה לא-נעוצה / העלאת גרסה) => משכפלים מחדש
   if [[ -d RTLSDR-Airband ]] && \
@@ -159,7 +166,8 @@ else
   # שוב בעדכון הבא ולא תישאר "הצלחה" שקטה עם בינארי חצי-מתוקן.
   PATCH_OK=1
   for pat in 'lame_set_VBR(lame, vbr_off);' 'lame_set_brate(lame, 48);' \
-             'lame_set_out_samplerate(lame, 16000);' 'sprintf(samplerates, "%d", 16000);'; do
+             'lame_set_out_samplerate(lame, 16000);' 'sprintf(samplerates, "%d", 16000);' \
+             'static const double STATS_FILE_TIMING = 1.0;'; do
     grep -qF "$pat" src/output.cpp || { PATCH_OK=0; warn "ה-patch לא נתפס: '$pat' (הקוד השתנה ב-upstream?)"; }
   done
   rm -rf build && mkdir build && cd build

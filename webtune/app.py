@@ -19,7 +19,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, abort
 
 import adsb   # מסלול פעיל + אינדיקציית GPS מנתוני ADS-B (thread נפרד)
 
@@ -48,7 +48,7 @@ SQUELCH_MODES = {"auto", "open", "manual"}
 SNR_MIN, SNR_MAX = 0.0, 60.0   # dB - תחום clamp ל-SNR ידני
 SNR_DEFAULT = 9.0              # ≈ סף ה-auto הפנימי של rtl_airband (~9.54 dB)
 STATS_PATH = Path("/run/rtl_airband_stats.txt")   # tmpfs - בלי שחיקת SD
-STATS_MAX_AGE = 45.0           # rtl_airband כותב כל ~15 שניות; פי-3 => לא טרי
+STATS_MAX_AGE = 5.0            # rtl_airband כותב כל ~1 שנייה; ~5 כתיבות => סובל ג'יטר אך עדיין מזהה restart
 
 # הקלטות: rtl_airband כותב קובץ MP3 לכל שידור (split_on_transmission) בשם
 # <REC_BASENAME>_YYYYMMDD_HHMMSS_<Hz>.mp3 (.tmp בזמן כתיבה, rename בסגירה
@@ -291,6 +291,29 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+# נכסי PWA המוגשים מהשורש (לא מ-/static): ה-service worker *חייב* להיות מהשורש
+# כדי שה-scope שלו יכסה את כל האתר, וה-manifest/אייקונים נוחים בשורש לצדו.
+_ROOT_ASSETS = {
+    "manifest.webmanifest": "application/manifest+json",
+    "sw.js": "text/javascript",
+    "icon-192.png": "image/png",
+    "icon-512.png": "image/png",
+    "apple-touch-icon.png": "image/png",
+}
+
+
+@app.route("/<path:fname>")
+def root_asset(fname):
+    mimetype = _ROOT_ASSETS.get(fname)
+    if mimetype is None:
+        abort(404)
+    resp = send_from_directory(app.static_folder, fname, mimetype=mimetype)
+    if fname == "sw.js":
+        resp.headers["Service-Worker-Allowed"] = "/"   # scope לכל האתר
+        resp.headers["Cache-Control"] = "no-cache"      # עדכון UI נקלט מיד
+    return resp
+
+
 @app.route("/api/state")
 def api_state():
     st = load_state()
@@ -512,7 +535,7 @@ def api_metar():
 
 @app.route("/api/metrics")
 def api_metrics():
-    """מדדי RF חיים לתדר הנוכחי. rtl_airband מרענן את הקובץ כל ~15 שניות."""
+    """מדדי RF חיים לתדר הנוכחי. rtl_airband מרענן את הקובץ כל ~1 שנייה."""
     try:
         age = time.time() - STATS_PATH.stat().st_mtime
         text = STATS_PATH.read_text()
@@ -538,6 +561,52 @@ def api_airspace():
     """מסלול נחיתות/המראות פעיל ומצב GPS, מנותחים מ-ADS-B (ראה adsb.py).
     קורא snapshot בזיכרון בלבד - אף פעם לא חוסם ואף פעם לא 500."""
     return jsonify(adsb.snapshot())
+
+
+def _vcgencmd(*args):
+    """מריץ vcgencmd ומחזיר stdout (או None אם לא Pi / לא מותקן / נכשל)."""
+    try:
+        r = subprocess.run(["vcgencmd", *args], capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+@app.route("/api/power")
+def api_power():
+    """מצב אספקת המתח ל-Pi (שימושי במיוחד עם סוללה ניידת):
+      get_throttled  -> דגלי undervoltage/throttling (כל דגמי Pi)
+      pmic_read_adc  -> מתח כניסה 5V בפועל (Pi 5 בלבד)
+      measure_temp   -> טמפ' ליבה
+    ביטים של get_throttled: 0=under-volt עכשיו · 2=throttled עכשיו ·
+    16=under-volt קרה מאז אתחול · 18=throttling קרה."""
+    out = _vcgencmd("get_throttled")
+    if out is None:
+        return jsonify(ok=False)   # אין vcgencmd (לא Pi / חסר) => הממשק מסתיר את החיווי
+
+    flags = 0
+    m = re.search(r"0x([0-9a-fA-F]+)", out)
+    if m:
+        flags = int(m.group(1), 16)
+
+    volts_in = None
+    adc = _vcgencmd("pmic_read_adc")          # Pi 5 בלבד
+    if adc:
+        mv = re.search(r"EXT5V_V\s+volt\([^)]*\)=([0-9.]+)", adc)
+        if mv:
+            volts_in = round(float(mv.group(1)), 2)
+
+    temp = None
+    mt = re.search(r"=([0-9.]+)", _vcgencmd("measure_temp") or "")
+    if mt:
+        temp = round(float(mt.group(1)), 1)
+
+    return jsonify(ok=True, throttled=hex(flags),
+                   undervolt_now=bool(flags & 0x1),
+                   throttle_now=bool(flags & 0x4),
+                   undervolt_ever=bool(flags & 0x10000),
+                   throttle_ever=bool(flags & 0x40000),
+                   volts_in=volts_in, temp=temp)
 
 
 @app.route("/api/tune", methods=["POST"])

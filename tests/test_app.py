@@ -287,3 +287,48 @@ def test_api_health(client, paths, monkeypatch):
     assert h["ok"] is True
     assert h["services"]["rtl_airband"] == "active"
     assert h["stats_age"] is not None
+
+
+# --- power (vcgencmd) ---------------------------------------------------------
+
+def test_api_power_absent_when_not_pi(client, monkeypatch):
+    monkeypatch.setattr(app, "_vcgencmd", lambda *a: None)   # אין vcgencmd => לא Pi
+    assert client.get("/api/power").get_json() == {"ok": False}
+
+
+def test_api_power_parses_flags_volts_temp(client, monkeypatch):
+    def fake_vc(*args):
+        if args[0] == "get_throttled":
+            return "throttled=0x50005"          # ביטים 0,2,16,18 => now+ever
+        if args[0] == "pmic_read_adc":
+            return "EXT5V_V volt(24)=5.07V\nVDD_CORE_V volt(1)=0.8V"
+        if args[0] == "measure_temp":
+            return "temp=47.2'C"
+        return None
+    monkeypatch.setattr(app, "_vcgencmd", fake_vc)
+    p = client.get("/api/power").get_json()
+    assert p["ok"] is True
+    assert p["undervolt_now"] and p["undervolt_ever"]
+    assert p["throttle_now"] and p["throttle_ever"]
+    assert p["volts_in"] == 5.07 and p["temp"] == 47.2
+
+
+def test_api_power_ok_clean_flags(client, monkeypatch):
+    monkeypatch.setattr(app, "_vcgencmd",
+                        lambda *a: "throttled=0x0" if a[0] == "get_throttled" else None)
+    p = client.get("/api/power").get_json()
+    assert p["ok"] is True
+    assert not any(p[k] for k in ("undervolt_now", "undervolt_ever",
+                                  "throttle_now", "throttle_ever"))
+    assert p["volts_in"] is None   # אין pmic (לא Pi 5)
+
+
+# --- PWA root assets ----------------------------------------------------------
+
+def test_pwa_assets_served_from_root(client):
+    r = client.get("/manifest.webmanifest")
+    assert r.status_code == 200 and "manifest" in r.headers["Content-Type"]
+    sw = client.get("/sw.js")
+    assert sw.status_code == 200 and sw.headers.get("Service-Worker-Allowed") == "/"
+    assert client.get("/icon-192.png").status_code == 200
+    assert client.get("/nope-asset.foo").status_code == 404   # catch-all לא מגיש זבל
