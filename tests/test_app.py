@@ -300,6 +300,26 @@ def test_transcribe_file_handles_failure(paths, monkeypatch):
     assert app._transcribe_file(p) is None             # כשל => None, בלי לזרוק
 
 
+# --- stream proxy (same-origin עבור HTTPS) -----------------------------------
+
+def test_stream_proxy_passthrough(client, monkeypatch):
+    class FakeUp:
+        def __init__(self): self._chunks = [b"ID3 audio bytes", b""]
+        def read(self, n): return self._chunks.pop(0)
+        def close(self): pass
+    monkeypatch.setattr(app.urllib.request, "urlopen", lambda *a, **k: FakeUp())
+    r = client.get("/stream")
+    assert r.status_code == 200 and r.mimetype == "audio/mpeg"
+    assert r.get_data() == b"ID3 audio bytes"
+
+
+def test_stream_proxy_upstream_down(client, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("connection refused")
+    monkeypatch.setattr(app.urllib.request, "urlopen", boom)
+    assert client.get("/stream").status_code == 502
+
+
 def test_recordings_served_and_traversal_blocked(client, paths):
     _mk_rec(paths, "airam_20260611_120001_134600000.mp3")
     (paths / "secret.txt").write_text("x")

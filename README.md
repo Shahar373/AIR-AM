@@ -78,6 +78,33 @@ sudo ./install.sh
 
 ---
 
+## HTTPS והתקנה כאפליקציה (PWA) 🔒📱
+
+ב-HTTP אפשר להאזין מהדפדפן, אבל **התקנה מלאה כאפליקציה (PWA) ו-Service Worker
+דורשים HTTPS**. הדרך הפשוטה והמומלצת — אתה כבר על **Tailscale** — היא
+`tailscale serve`, שנותן תעודת HTTPS אמיתית ומהימנה (Let's Encrypt) על שם
+ה-MagicDNS של ה-Pi, בלי אזהרות ובלי להתקין CA:
+
+```bash
+# פעם אחת בלוח הבקרה של Tailscale: להפעיל MagicDNS + HTTPS Certificates.
+# ואז על ה-Pi:
+sudo tailscale serve --bg 8080
+tailscale serve status        # יציג את כתובת ה-https://<machine>.<tailnet>.ts.net
+```
+
+מעכשיו נכנסים מהטלפון ל-**`https://<machine>.<tailnet>.ts.net`** (במקום `IP:8080`),
+ואפשר "הוסף למסך הבית" → האפליקציה נפתחת במסך מלא.
+
+> **למה זה נדרש לשמע:** בדף HTTPS הדפדפן חוסם סטרים HTTP ישיר מ-Icecast
+> (mixed-content). לכן כשהדף מוגש ב-HTTPS, נגן הדפדפן עובר אוטומטית ל-proxy
+> same-origin (`/stream`) שמגיש את אותו סטרים דרך שרת הווב. ב-HTTP/LAN הנגן
+> ממשיך לגשת ל-Icecast ישירות (latency נמוך יותר). אין צורך בהגדרה — זה אוטומטי.
+
+> גישה מ-LAN בלבד (בלי Tailscale) תישאר HTTP. להתקנת PWA מ-LAN צריך תעודה
+> מהימנה (למשל `mkcert` עם CA שמותקן בטלפון) — מעבר לתחום של הקובץ הזה.
+
+---
+
 ## שימוש — בורר התדרים 🎛️
 
 פתח בטלפון: **`http://<IP-של-ה-Pi>:8080`**
