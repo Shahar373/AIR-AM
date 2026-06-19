@@ -272,6 +272,31 @@ cp "$REPO_DIR/udev/99-airam.rules" /etc/udev/rules.d/
 udevadm control --reload-rules 2>/dev/null || true
 
 # ----------------------------------------------------------------------------
+# 7b. תמלול ATC (אופציונלי) - whisper.cpp + מודל base.en
+#     הפעלה:  INSTALL_WHISPER=1 sudo ./install.sh   (בנייה ארוכה => לא ברירת מחדל)
+# ----------------------------------------------------------------------------
+if [[ "${INSTALL_WHISPER:-0}" == "1" ]]; then
+  log "מתקין תמלול ATC (whisper.cpp + base.en) - עשוי לקחת כמה דקות ..."
+  apt-get install -y ffmpeg
+  WHISPER_SRC="$BUILD_DIR/whisper.cpp"
+  [[ -d "$WHISPER_SRC" ]] || git clone --depth 1 https://github.com/ggml-org/whisper.cpp "$WHISPER_SRC"
+  cmake -S "$WHISPER_SRC" -B "$WHISPER_SRC/build" -DCMAKE_BUILD_TYPE=Release
+  cmake --build "$WHISPER_SRC/build" -j"$(nproc)" --target whisper-cli
+  install -m755 "$WHISPER_SRC/build/bin/whisper-cli" /usr/local/bin/whisper-cli
+  mkdir -p /opt/airam/models
+  MODEL="/opt/airam/models/ggml-base.en.bin"
+  [[ -f "$MODEL" ]] || curl -fL --retry 3 -o "$MODEL" \
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+  chown -R airam:airam /opt/airam/models
+  # הפעלת התמלול בקובץ ה-environment (אידמפוטנטי)
+  grep -q '^AIRAM_TRANSCRIBE=' /etc/airam/airam.env 2>/dev/null || \
+    printf 'AIRAM_TRANSCRIBE=1\n' >> /etc/airam/airam.env
+  log "תמלול ATC הופעל (לכבות: ערוך /etc/airam/airam.env והסר AIRAM_TRANSCRIBE)."
+else
+  log "תמלול ATC לא הותקן (להפעלה: INSTALL_WHISPER=1 sudo ./install.sh)."
+fi
+
+# ----------------------------------------------------------------------------
 # 8. שירותי systemd
 # ----------------------------------------------------------------------------
 log "מתקין שירותי systemd ..."

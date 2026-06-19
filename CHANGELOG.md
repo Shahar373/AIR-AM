@@ -9,6 +9,17 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-19
+### נוסף
+- **תמלול ATC (אופציונלי)**: `whisper.cpp` מקומי (מודל `base.en`) מתמלל כל שידור
+  מוקלט; הטקסט מוצג מתחת לשידור ביומן וניתן לחיפוש (תיבת חיפוש ביומן). רץ ב-thread
+  רקע נפרד וכותב קובץ-צד `<file>.mp3.txt`. **כבוי כברירת מחדל** — הפעלה:
+  `INSTALL_WHISPER=1 sudo ./install.sh` (מתקין `ffmpeg`, בונה `whisper.cpp`, מוריד
+  מודל, ומפעיל `AIRAM_TRANSCRIBE=1`). התקנות קיימות לא מושפעות.
+- **נגן חיצוני**: כפתור "🎧 נגן חיצוני" ונתיב `/live.m3u` לפתיחת השידור בנגן שמע
+  חיצוני (ניגון ברקע חסין); באנדרואיד דרך Android Intent (פותח VLC).
+- **פקדי מסך נעילה**: מעבר בין פריסטים (previous/next) דרך Media Session.
+
 ## [1.0.0] - 2026-06-19
 גרסה ראשונה מתויגת — לוכדת את המצב היציב הקיים של המערכת.
 
@@ -25,5 +36,6 @@
   אופציונלי (`AIRAM_PIN`), והגנת Origin/CSRF.
 - **בדיקות + CI** (pytest + `bash -n`).
 
-[Unreleased]: https://github.com/Shahar373/AIR-AM/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Shahar373/AIR-AM/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/Shahar373/AIR-AM/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Shahar373/AIR-AM/releases/tag/v1.0.0
