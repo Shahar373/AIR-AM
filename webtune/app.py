@@ -7,7 +7,8 @@
 #   2. מפעיל מחדש את שירות rtl_airband.
 #   3. הדפדפן מנגן את הסטרים מ-Icecast (mountpoint קבוע: live.mp3).
 #
-#  מיועד לרשת פרטית מהימנה בלבד (רץ כ-root, ללא אימות).
+#  מיועד לרשת פרטית מהימנה בלבד. רץ כמשתמש לא-root (airam) עם sudoers ממוקד
+#  ל-restart בלבד; אימות PIN אופציונלי (AIRAM_PIN), כבוי כברירת מחדל.
 # ============================================================================
 import json
 import logging
@@ -18,6 +19,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 from flask import Flask, request, jsonify, send_from_directory, abort
 
@@ -68,6 +70,30 @@ app = Flask(__name__, static_folder=str(APP_DIR / "static"))
 
 # כיוונון אחד בכל רגע: שני POST-ים מקבילים => שני restart שלובים זה בזה
 TUNE_LOCK = threading.Lock()
+
+# הרצה כמשתמש לא-root (חיזוק אבטחה): ה-restart עובר דרך sudoers ממוקד.
+# כ-root אין צורך ב-sudo => פריסות ישנות (טרם re-install) ממשיכות לעבוד.
+SUDO = [] if os.geteuid() == 0 else ["sudo", "-n"]
+
+# אימות אופציונלי: פעיל אך ורק אם AIRAM_PIN הוגדר ב-environment של השירות.
+# לא הוגדר => אפס שינוי בחוויה ("בלי סיסמאות" כברירת מחדל).
+AIRAM_PIN = os.environ.get("AIRAM_PIN", "").strip()
+
+
+@app.before_request
+def _guard():
+    """הגנות קלות על בקשות משנות-מצב (POST/PUT/DELETE):
+      1. CSRF / DNS-rebinding: אם נשלח Origin/Referer הוא חייב להתאים ל-Host.
+      2. אימות אופציונלי: אם AIRAM_PIN הוגדר, נדרש header X-AIRAM-PIN תואם.
+    בקשות GET (סטרים/מדדים/health/activity/airspace/metar/power) לא מושפעות."""
+    if request.method not in ("POST", "PUT", "DELETE"):
+        return None
+    origin = request.headers.get("Origin") or request.headers.get("Referer")
+    if origin and urlparse(origin).netloc != request.host:
+        return jsonify(ok=False, error="מקור הבקשה לא תואם (Origin)"), 403
+    if AIRAM_PIN and request.headers.get("X-AIRAM-PIN", "") != AIRAM_PIN:
+        return jsonify(ok=False, error="נדרש PIN", auth=True), 401
+    return None
 
 # פריסטים של נתב"ג / TMA - רק זריעה ראשונית; מרגע עריכה בממשק האמת היא
 # /var/lib/airam/presets.json (נטען בכל בקשה - הקובץ זעיר והעריכה נדירה)
@@ -251,7 +277,7 @@ def _restart_and_verify():
     ל-SDR — במצב הזה גם רולבק נדון לאותו כישלון ואין טעם לנסות אותו.
     ה-restart עצמו יכול לחסום עד ~30 שניות (airam-wait-sdrplay) כשה-SDR מנותק."""
     try:
-        r = subprocess.run(["systemctl", "restart", "rtl_airband"],
+        r = subprocess.run([*SUDO, "systemctl", "restart", "rtl_airband"],
                            capture_output=True, text=True, timeout=45)
     except subprocess.TimeoutExpired:
         return "ה-restart נתקע — בדוק שה-SDR מחובר", None, True
@@ -279,7 +305,7 @@ def _rollback(prev):
     try:
         write_config(prev["freq"], prev["mod"], prev["agc"], prev["if_gain"],
                      prev["rf_gain"], prev["squelch_mode"], prev["squelch_snr"])
-        subprocess.run(["systemctl", "restart", "rtl_airband"],
+        subprocess.run([*SUDO, "systemctl", "restart", "rtl_airband"],
                        capture_output=True, text=True, timeout=45)
     except Exception:
         pass
@@ -691,7 +717,7 @@ if __name__ == "__main__":
                      st["rf_gain"], st["squelch_mode"], st["squelch_snr"])
         if _cur is not None:   # שדרוג: השירות כבר רץ עם ההגדרות הישנות
             try:
-                subprocess.run(["systemctl", "restart", "rtl_airband"],
+                subprocess.run([*SUDO, "systemctl", "restart", "rtl_airband"],
                                capture_output=True, timeout=60)
             except Exception:
                 pass

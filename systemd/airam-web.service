@@ -6,9 +6,14 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/airam/webtune
+# PIN אופציונלי (AIRAM_PIN=...) - הקובץ אופציונלי (-), נוצר ע"י install.sh
+EnvironmentFile=-/etc/airam/airam.env
 ExecStart=/usr/bin/python3 /opt/airam/webtune/app.py
-# רץ כ-root כדי לכתוב את ההגדרות ולהפעיל מחדש את rtl_airband (רשת פרטית בלבד)
-User=root
+# חיזוק אבטחה: רץ כמשתמש לא-root. כתיבת ההגדרות מתאפשרת ע"י chown של
+# /etc/rtl_airband ו-/var/lib/airam, וה-restart של rtl_airband דרך sudoers ממוקד.
+# קבוצות journal/video (journalctl, vcgencmd) מגיעות מחברות המשתמש (install.sh).
+User=airam
+Group=airam
 # always (לא on-failure): זה משטח הבקרה היחיד — חייב לקום גם אחרי יציאה "נקייה"
 StartLimitIntervalSec=0
 Restart=always

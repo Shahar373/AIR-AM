@@ -538,6 +538,27 @@
     let connectTimer = null;
     let wantPlaying = false;      // iOS עוצר את הנגן ברקע => זוכרים את כוונת המשתמש
 
+    /* ---------- API + PIN אופציונלי ---------- */
+    // PIN פעיל רק אם השרת הוגדר עם AIRAM_PIN. אחרת לעולם לא נתבקש => חוויה זהה.
+    let pin = localStorage.getItem("airam_pin") || "";
+    function apiHeaders() {
+      const h = { "Content-Type": "application/json" };
+      if (pin) h["X-AIRAM-PIN"] = pin;
+      return h;
+    }
+    async function apiSend(method, url, body) {
+      let res = await fetch(url, { method, headers: apiHeaders(), body: JSON.stringify(body) });
+      if (res.status === 401) {                 // השרת דורש PIN => בקש פעם אחת ונסה שוב
+        const entered = prompt("נדרש PIN לשינוי הגדרות:");
+        if (entered) {
+          pin = entered.trim();
+          localStorage.setItem("airam_pin", pin);
+          res = await fetch(url, { method, headers: apiHeaders(), body: JSON.stringify(body) });
+        }
+      }
+      return res;
+    }
+
     const streamURL = () =>
       `http://${location.hostname}:${cfg.port}/${cfg.mount}?t=${Date.now()}`;
 
@@ -654,11 +675,7 @@
       cfg.presets = next;        // עדכון אופטימי: מחיקה+הוספה מהירות לא דורסות זו את זו
       renderPresets(current);
       try {
-        const res = await fetch("/api/presets", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(next),
-        });
+        const res = await apiSend("PUT", "/api/presets", next);
         const d = await res.json();
         if (d.ok) cfg.presets = d.presets;
         else {
@@ -756,18 +773,14 @@
       clearTimeout(retryTimer);
       setStatus("מכוונן…", "busy");
       try {
-        const res = await fetch("/api/tune", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            freq,
-            mod: segValue("modSeg"),
-            agc: $("agc").checked,
-            if_gain: sliderToIFGR(),
-            rf_gain: sliderToRFGR(),
-            squelch_mode: segValue("sqSeg"),
-            squelch_snr: getSnr(),
-          }),
+        const res = await apiSend("POST", "/api/tune", {
+          freq,
+          mod: segValue("modSeg"),
+          agc: $("agc").checked,
+          if_gain: sliderToIFGR(),
+          rf_gain: sliderToRFGR(),
+          squelch_mode: segValue("sqSeg"),
+          squelch_snr: getSnr(),
         });
         const data = await res.json();
         if (!data.ok) {

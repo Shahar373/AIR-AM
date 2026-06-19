@@ -229,6 +229,35 @@ mkdir -p /etc/rtl_airband /var/lib/airam /var/lib/airam/recordings
 [[ -f /etc/rtl_airband/airband.conf ]] || cp "$REPO_DIR/config/airband.conf" /etc/rtl_airband/airband.conf
 
 # ----------------------------------------------------------------------------
+# 6b. חיזוק אבטחה: משתמש לא-root לשרת הווב + sudoers ממוקד ל-restart
+# ----------------------------------------------------------------------------
+log "מגדיר משתמש 'airam' לשרת הווב (הרצה ללא root)..."
+id -u airam >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin airam
+# הבעלות מאפשרת ל-airam לכתוב את airband.conf, ה-state, הפריסטים וההקלטות
+# (rtl_airband כ-root עדיין כותב לתיקיית ההקלטות; airam מוחק/קורא דרך בעלות התיקייה)
+chown -R airam:airam /etc/rtl_airband /var/lib/airam
+# חברות בקבוצות (אם קיימות): journal לקריאת journalctl, video ל-vcgencmd (api/power)
+for grp in systemd-journal video; do
+  getent group "$grp" >/dev/null 2>&1 && usermod -aG "$grp" airam || true
+done
+# sudoers: מתיר ל-airam *רק* את ההפעלה-מחדש של rtl_airband (NOPASSWD), לא יותר
+cat > /etc/sudoers.d/airam <<'EOF'
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart rtl_airband
+EOF
+chmod 440 /etc/sudoers.d/airam
+visudo -cf /etc/sudoers.d/airam >/dev/null || die "קובץ sudoers לא תקין (/etc/sudoers.d/airam)."
+# קובץ environment ל-PIN אופציונלי (כבוי כברירת מחדל => חוויית 'בלי סיסמאות' נשמרת)
+mkdir -p /etc/airam
+if [[ ! -f /etc/airam/airam.env ]]; then
+  cat > /etc/airam/airam.env <<'EOF'
+# AIR-AM web tuner - משתני סביבה.
+# כדי לדרוש PIN לשינוי תדר/הגדרות, בטל את ההערה והגדר ערך (ואז: systemctl restart airam-web):
+# AIRAM_PIN=1234
+EOF
+fi
+chown -R airam:airam /etc/airam
+
+# ----------------------------------------------------------------------------
 # 7. שרת בורר התדרים (web tuner)
 # ----------------------------------------------------------------------------
 log "מתקין את שרת הווב ל-/opt/airam ..."
