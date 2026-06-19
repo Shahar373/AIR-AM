@@ -172,10 +172,10 @@
     @media (prefers-reduced-motion: reduce) { .aw-map .arr line { animation: none; } }
 
     .player-row { display: flex; gap: .5rem; margin-top: .6rem; }
-    .player-row button { flex: 1; }
+    .player-row button, .player-row a { flex: 1; }
 
     /* ---------- כפתורים ---------- */
-    button {
+    button, a.ghost {
       font: inherit; font-weight: 600; cursor: pointer;
       color: var(--text);
       background: rgba(255,255,255,.05);
@@ -184,12 +184,16 @@
       padding: .72rem 1rem;
       transition: transform .06s ease, background .15s ease, border-color .15s ease;
     }
-    button:active { transform: scale(.97); }
+    button:active, a.ghost:active { transform: scale(.97); }
     button.primary {
       background: linear-gradient(180deg, #2f81f7, #1f6feb);
       border-color: transparent;
     }
-    button.ghost { color: var(--dim); font-weight: 500; font-size: .85rem; padding: .55rem .9rem; }
+    button.ghost, a.ghost {
+      color: var(--dim); font-weight: 500; font-size: .85rem; padding: .55rem .9rem;
+      text-decoration: none; text-align: center; display: inline-flex;
+      align-items: center; justify-content: center;
+    }
 
     /* ---------- תדר חופשי ---------- */
     .tune-row { display: flex; gap: .55rem; }
@@ -380,6 +384,8 @@
 
     <div class="player-row">
       <button id="syncBtn" class="ghost" title="התחבר מחדש לנקודת השידור החיה">⟳ סנכרן ל-live</button>
+      <a id="extBtn" class="ghost" href="/live.m3u" role="button"
+         title="פתח את הסטרים בנגן שמע חיצוני (ממשיך לנגן ברקע)">🎧 נגן חיצוני</a>
     </div>
 
     <!-- חיווי מתח ל-Raspberry Pi (קריטי בהזנה מסוללה ניידת) -->
@@ -1228,11 +1234,26 @@
     };
     $("snrNum").onchange = () => { setSnr(getSnr()); retune(); };
 
-    // פקדי MediaSession מהמסך הנעול: play => חיבור-מחדש ל-live, pause/stop => עצירה
+    // מעבר בין פריסטים מפקדי המדיה (קודם/הבא) בלי לפתוח את הדפדפן
+    function stepPreset(dir) {
+      const list = cfg.presets || [];
+      if (!list.length) return;
+      let i = list.findIndex((p) => Math.abs(p.freq - current) < 0.0005);
+      i = i < 0 ? 0 : (i + dir + list.length) % list.length;
+      selectPreset(list[i]);
+    }
+
+    // פקדי MediaSession מהמסך הנעול: play => חיבור-מחדש ל-live, pause/stop => עצירה,
+    // קודם/הבא => מעבר בין פריסטים
     if ("mediaSession" in navigator) {
-      navigator.mediaSession.setActionHandler("play", () => reloadStream());
-      navigator.mediaSession.setActionHandler("pause", () => player.pause());
-      navigator.mediaSession.setActionHandler("stop", () => player.pause());
+      const set = (a, h) => {
+        try { navigator.mediaSession.setActionHandler(a, h); } catch (e) {}
+      };
+      set("play", () => reloadStream());
+      set("pause", () => player.pause());
+      set("stop", () => player.pause());
+      set("previoustrack", () => stepPreset(-1));
+      set("nexttrack", () => stepPreset(1));
     }
 
     // חזרה לטאב אחרי השהיה => סנכרון מחדש ל-live (נגן HTML5 נסחף מאחור).
