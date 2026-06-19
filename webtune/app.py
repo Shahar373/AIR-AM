@@ -65,6 +65,20 @@ ACTIVITY_KEEP = 500            # היומן שורד את מחיקת הקבצי�
 ACTIVITY_RETURN = 50
 WATCH_INTERVAL = 10.0          # שניות בין סריקות של תיקיית ההקלטות
 
+# תמלול ATC (אופציונלי): whisper.cpp מקומי. לכל הקלטה שמסתיימת נכתב קובץ-צד
+# <file>.mp3.txt עם הטקסט. פעיל רק אם AIRAM_TRANSCRIBE=1 וגם הבינארי+המודל קיימים
+# (install.sh בונה אותם רק עם INSTALL_WHISPER=1) => התקנות קיימות לא מושפעות.
+TRANSCRIBE = os.environ.get("AIRAM_TRANSCRIBE", "").strip().lower() in ("1", "true", "yes", "on")
+WHISPER_BIN = os.environ.get("AIRAM_WHISPER_BIN", "/usr/local/bin/whisper-cli")
+WHISPER_MODEL = os.environ.get("AIRAM_WHISPER_MODEL", "/opt/airam/models/ggml-base.en.bin")
+WHISPER_LANG = os.environ.get("AIRAM_WHISPER_LANG", "en")   # ATC בישראל = אנגלית
+TRANSCRIBE_TIMEOUT = 120.0     # שניות לקובץ בודד (המרה + תמלול)
+# רמז הקשר => מטה את המודל לפרזיולוגיית ATC ושמות מקומיים (משפר דיוק משמעותית)
+WHISPER_PROMPT = ("Air traffic control radio between pilots and Ben Gurion / Tel Aviv "
+                  "tower, ground, approach. Phrases: cleared for takeoff, line up and wait, "
+                  "taxi to runway, hold short, contact tower, squawk, climb, descend, "
+                  "heading, knots, QNH, wind, runway 03 12 21 26 30.")
+
 APP_DIR = Path(__file__).resolve().parent
 
 
@@ -459,9 +473,60 @@ def _last_logged_ts():
     return 0.0
 
 
+def _transcript_path(mp3):
+    """קובץ-צד התמלול לצד ההקלטה: airam_....mp3 => airam_....mp3.txt."""
+    return mp3.parent / (mp3.name + ".txt")
+
+
+def _transcribe_file(mp3):
+    """ממיר MP3 ל-WAV 16kHz מונו (ffmpeg) ומריץ whisper.cpp. מחזיר טקסט או None.
+    כל כשל (ffmpeg/whisper/timeout) מטופל בשקט => לולאת הרקע ממשיכה."""
+    wav = mp3.parent / (mp3.name + ".wav.tmp")
+    try:
+        subprocess.run(["ffmpeg", "-nostdin", "-y", "-i", str(mp3),
+                        "-ar", "16000", "-ac", "1", str(wav)],
+                       capture_output=True, timeout=TRANSCRIBE_TIMEOUT, check=True)
+        out = subprocess.run([WHISPER_BIN, "-m", WHISPER_MODEL, "-f", str(wav),
+                              "-l", WHISPER_LANG, "-nt", "--prompt", WHISPER_PROMPT],
+                             capture_output=True, text=True,
+                             timeout=TRANSCRIBE_TIMEOUT, check=True)
+        return " ".join(out.stdout.split()).strip() or None
+    except Exception:
+        log.exception("transcribe %s", mp3.name)
+        return None
+    finally:
+        try:
+            wav.unlink()
+        except OSError:
+            pass
+
+
+def _transcribe_worker():
+    """לולאת רקע: מתמלל הקלטות שעוד אין להן קובץ-צד .txt (חדש=>ישן).
+    כותב גם תמלול ריק => לא מנסים שוב את אותו קובץ בלולאה הבאה."""
+    if not (Path(WHISPER_BIN).exists() and Path(WHISPER_MODEL).exists()):
+        log.warning("transcription on, but whisper missing (%s / %s) - מדלג",
+                    WHISPER_BIN, WHISPER_MODEL)
+        return
+    log.info("transcription worker started (model=%s)", WHISPER_MODEL)
+    while True:
+        try:
+            recs = sorted(REC_DIR.glob("*.mp3"),
+                          key=lambda p: p.stat().st_mtime, reverse=True)
+            for mp3 in recs:
+                txt = _transcript_path(mp3)
+                if txt.exists():
+                    continue
+                _atomic_write(txt, (_transcribe_file(mp3) or "") + "\n")
+        except Exception:
+            log.exception("transcribe worker")
+        time.sleep(WATCH_INTERVAL)
+
+
 def _sweep_recordings():
     """retention: עד REC_MAX_FILES / REC_MAX_BYTES (חדש=>ישן), ו-.tmp נטושים
-    (שידור שנקטע בקריסה משאיר .tmp שלעולם לא ייסגר ל-mp3)."""
+    (שידור שנקטע בקריסה משאיר .tmp שלעולם לא ייסגר ל-mp3). קובץ-צד התמלול
+    (.txt) נמחק יחד עם ההקלטה שלו."""
     try:
         recs = sorted(REC_DIR.glob("*.mp3"),
                       key=lambda p: p.stat().st_mtime, reverse=True)
@@ -473,6 +538,7 @@ def _sweep_recordings():
             total += p.stat().st_size
             if i >= REC_MAX_FILES or total > REC_MAX_BYTES:
                 p.unlink()
+                _transcript_path(p).unlink(missing_ok=True)
         except OSError:
             pass
     now = time.time()
@@ -538,6 +604,12 @@ def api_activity():
         except ValueError:
             continue
         ev["exists"] = bool(ev.get("file")) and (REC_DIR / ev["file"]).is_file()
+        ev["text"] = None
+        if ev.get("file"):
+            try:
+                ev["text"] = (REC_DIR / (ev["file"] + ".txt")).read_text().strip() or None
+            except OSError:
+                pass   # אין תמלול (כבוי, עדיין מעובד, או נמחק) => None
         events.append(ev)
     return jsonify(ok=True, events=events)
 
@@ -746,5 +818,7 @@ if __name__ == "__main__":
                 pass
     REC_DIR.mkdir(parents=True, exist_ok=True)
     threading.Thread(target=_activity_watcher, daemon=True).start()
+    if TRANSCRIBE:   # תמלול ATC אופציונלי - דמון נפרד (לא חוסם את היומן/retention)
+        threading.Thread(target=_transcribe_worker, daemon=True).start()
     adsb.start()   # רק כשרצים כשרת (לא בזמן import) - דמון, לא מעכב עלייה
     app.run(host="0.0.0.0", port=8080)

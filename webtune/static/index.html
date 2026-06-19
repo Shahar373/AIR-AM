@@ -335,6 +335,19 @@
       border-radius: 999px; }
     .act-row button.play.playing { background: linear-gradient(180deg, #2f81f7, #1f6feb);
       border-color: transparent; }
+    .act-item { border-bottom: 1px solid var(--border); }
+    .act-item:last-child { border-bottom: 0; }
+    .act-item .act-row { border-bottom: 0; }
+    .act-tx { direction: ltr; text-align: left; color: var(--dim);
+      font-size: .8rem; line-height: 1.45; padding: 0 0 .55rem; margin-top: -.15rem;
+      word-break: break-word; }
+    .act-search {
+      width: 100%; margin: 0 0 .3rem;
+      direction: rtl; font: inherit; font-size: .85rem; color: var(--text);
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 10px; padding: .5rem .7rem;
+    }
+    .act-search:focus { outline: none; border-color: var(--accent); }
     button:disabled { opacity: .35; cursor: default; }
 
     /* ---------- שגיאות ---------- */
@@ -436,6 +449,8 @@
   <!-- יומן שידורים -->
   <section class="card">
     <p class="section-title">יומן שידורים</p>
+    <input id="actSearch" class="act-search" type="search"
+           placeholder="חיפוש בתמלול…" autocomplete="off" />
     <div class="activity" id="activity">
       <p class="hint" style="margin:0">עוד אין שידורים — היומן מתמלא כשהסקוולץ׳ נפתח.</p>
     </div>
@@ -1148,39 +1163,64 @@
 
     const emptyActivityHTML = $("activity").innerHTML;   // הודעת "עוד אין" מה-markup
 
+    let actEvents = [];   // נשמר כדי לסנן לפי חיפוש בלי למשוך שוב מהשרת
+
+    function renderActivity() {
+      const box = $("activity");
+      if (!actEvents.length) { box.innerHTML = emptyActivityHTML; return; }
+      const q = ($("actSearch").value || "").trim().toLowerCase();
+      const matches = actEvents.filter((ev) => {
+        if (!q) return true;
+        const p = ev.freq != null && presetFor(ev.freq);
+        const hay = (ev.text || "") + " " +
+          (ev.freq != null ? ev.freq.toFixed(3) : "") + " " + (p ? p.name : "");
+        return hay.toLowerCase().includes(q);
+      });
+      box.innerHTML = "";
+      if (!matches.length) {
+        box.innerHTML = '<p class="hint" style="margin:0">אין תוצאות לחיפוש.</p>';
+        return;
+      }
+      for (const ev of matches.slice(0, 15)) {   // בטלפון מספיק; השאר נשמר בשרת
+        const item = document.createElement("div");
+        item.className = "act-item";
+        const row = document.createElement("div");
+        row.className = "act-row";
+        const t = document.createElement("span");
+        t.className = "t"; t.textContent = fmtWhen(ev.ts);
+        t.title = new Date(ev.ts * 1000).toLocaleString("he-IL");
+        const f = document.createElement("span");
+        f.className = "f"; f.textContent = ev.freq != null ? ev.freq.toFixed(3) : "—";
+        const n = document.createElement("span");
+        n.className = "n";
+        const p = ev.freq != null && presetFor(ev.freq);
+        n.textContent = p ? p.name : "";
+        const dur = document.createElement("span");
+        dur.className = "dur"; dur.textContent = ev.dur ? fmtDur(ev.dur) : "";
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "play"; b.textContent = "▶";
+        if (ev.exists && ev.file) b.onclick = () => playRecording(ev.file, b);
+        else { b.disabled = true; b.title = "ההקלטה כבר נמחקה"; }
+        row.append(t, f, n, dur, b);
+        item.appendChild(row);
+        if (ev.text) {   // תמלול ATC (whisper) - מוצג מתחת לשידור אם קיים
+          const tx = document.createElement("div");
+          tx.className = "act-tx"; tx.textContent = ev.text;
+          item.appendChild(tx);
+        }
+        box.appendChild(item);
+      }
+    }
+
     async function pollActivity() {
       try {
         const a = await (await fetch("/api/activity")).json();
         if (!a.ok) return;
-        const box = $("activity");
-        box.innerHTML = "";
-        if (!a.events.length) {
-          box.innerHTML = emptyActivityHTML;
-          return;
-        }
-        for (const ev of a.events.slice(0, 15)) {   // בטלפון מספיק; השאר נשמר בשרת
-          const row = document.createElement("div");
-          row.className = "act-row";
-          const t = document.createElement("span");
-          t.className = "t"; t.textContent = fmtWhen(ev.ts);
-          t.title = new Date(ev.ts * 1000).toLocaleString("he-IL");
-          const f = document.createElement("span");
-          f.className = "f"; f.textContent = ev.freq != null ? ev.freq.toFixed(3) : "—";
-          const n = document.createElement("span");
-          n.className = "n";
-          const p = ev.freq != null && presetFor(ev.freq);
-          n.textContent = p ? p.name : "";
-          const dur = document.createElement("span");
-          dur.className = "dur"; dur.textContent = ev.dur ? fmtDur(ev.dur) : "";
-          const b = document.createElement("button");
-          b.type = "button"; b.className = "play"; b.textContent = "▶";
-          if (ev.exists && ev.file) b.onclick = () => playRecording(ev.file, b);
-          else { b.disabled = true; b.title = "ההקלטה כבר נמחקה"; }
-          row.append(t, f, n, dur, b);
-          box.appendChild(row);
-        }
+        actEvents = a.events;
+        renderActivity();
       } catch (e) { /* offline - הסטטוס הראשי כבר מציג שגיאת רשת */ }
     }
+    $("actSearch").addEventListener("input", renderActivity);
     setInterval(() => { if (!document.hidden) pollActivity(); }, 15000);
     pollActivity();
 

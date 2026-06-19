@@ -265,6 +265,41 @@ def test_sweep_retention(paths):
     assert not stale_tmp.exists() and fresh_tmp.exists()
 
 
+# --- transcription (תמלול ATC) -----------------------------------------------
+
+def test_activity_includes_transcript(client, paths):
+    p = _mk_rec(paths, "airam_20260611_120001_134600000.mp3")
+    app._transcript_path(p).write_text("cleared for takeoff runway 26\n")
+    app._append_activity([{"ts": p.stat().st_mtime, "freq": 134.6,
+                           "file": p.name, "dur": 1.0}])
+    ev = client.get("/api/activity").get_json()["events"][0]
+    assert ev["text"] == "cleared for takeoff runway 26"
+
+
+def test_activity_text_none_without_sidecar(client, paths):
+    p = _mk_rec(paths, "airam_20260611_120001_134600000.mp3")
+    app._append_activity([{"ts": p.stat().st_mtime, "freq": 134.6, "file": p.name}])
+    assert client.get("/api/activity").get_json()["events"][0]["text"] is None
+
+
+def test_sweep_removes_transcript_sidecar(paths, monkeypatch):
+    monkeypatch.setattr(app, "REC_MAX_FILES", 1)
+    for i in range(3):
+        p = _mk_rec(paths, f"airam_2026061{i}_120001_134600000.mp3", size=10, age=30 - i)
+        app._transcript_path(p).write_text("t")
+    app._sweep_recordings()
+    assert len(list(app.REC_DIR.glob("*.mp3"))) == 1
+    assert len(list(app.REC_DIR.glob("*.txt"))) == 1   # קובץ-הצד של הנמחק הוסר איתו
+
+
+def test_transcribe_file_handles_failure(paths, monkeypatch):
+    p = _mk_rec(paths, "airam_20260611_120001_134600000.mp3")
+    def boom(*a, **k):
+        raise FileNotFoundError("ffmpeg")
+    monkeypatch.setattr(app.subprocess, "run", boom)
+    assert app._transcribe_file(p) is None             # כשל => None, בלי לזרוק
+
+
 def test_recordings_served_and_traversal_blocked(client, paths):
     _mk_rec(paths, "airam_20260611_120001_134600000.mp3")
     (paths / "secret.txt").write_text("x")
