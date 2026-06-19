@@ -263,6 +263,7 @@ chown -R airam:airam /etc/airam
 log "מתקין את שרת הווב ל-/opt/airam ..."
 mkdir -p /opt/airam/webtune
 cp -r "$REPO_DIR/webtune/." /opt/airam/webtune/   # אידמפוטנטי (לא יוצר webtune/webtune)
+[[ -f "$REPO_DIR/VERSION" ]] && cp "$REPO_DIR/VERSION" /opt/airam/webtune/VERSION   # הגרסה להצגה בממשק
 # שער המוכנות ל-SDRplay (ExecStartPre של rtl_airband)
 cp "$REPO_DIR/scripts/airam-wait-sdrplay" /usr/local/bin/
 chmod 755 /usr/local/bin/airam-wait-sdrplay

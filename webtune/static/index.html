@@ -349,7 +349,7 @@
   <header>
     <span class="logo">✈️</span>
     <h1>AIR-AM</h1>
-    <span class="tag">SDRplay RSP1B</span>
+    <span class="tag" id="verTag">SDRplay RSP1B</span>
   </header>
 
   <!-- תצוגת הרדיו -->
@@ -1256,6 +1256,7 @@
     /* ---------- אתחול ---------- */
     fetch("/api/state").then((r) => r.json()).then((st) => {
       cfg = st;
+      if (st.version) $("verTag").textContent = "v" + st.version + " · SDRplay RSP1B";
       segSet("modSeg", st.mod === "nfm" ? "nfm" : "am");
       $("agc").checked = st.agc !== false;
       // state שומר ב-IFGR/RFGR (הפחתת רווח) => המרה לערכי הסליידר (רווח)

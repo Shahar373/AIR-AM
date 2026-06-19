@@ -66,6 +66,19 @@ ACTIVITY_RETURN = 50
 WATCH_INTERVAL = 10.0          # שניות בין סריקות של תיקיית ההקלטות
 
 APP_DIR = Path(__file__).resolve().parent
+
+
+def _read_version():
+    # VERSION יושב בשורש המאגר (פיתוח) או לצד app.py (ב-Pi: install.sh מעתיק אותו)
+    for p in (APP_DIR / "VERSION", APP_DIR.parent / "VERSION"):
+        try:
+            return p.read_text().strip()
+        except OSError:
+            continue
+    return "dev"
+
+
+VERSION = _read_version()
 app = Flask(__name__, static_folder=str(APP_DIR / "static"))
 
 # כיוונון אחד בכל רגע: שני POST-ים מקבילים => שני restart שלובים זה בזה
@@ -343,7 +356,7 @@ def root_asset(fname):
 @app.route("/api/state")
 def api_state():
     st = load_state()
-    st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT)
+    st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT, version=VERSION)
     return jsonify(st)
 
 
