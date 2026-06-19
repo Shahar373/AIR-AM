@@ -330,6 +330,16 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+@app.route("/live.m3u")
+def live_playlist():
+    """Playlist המצביע על סטרים ה-Icecast. פתיחה בנגן שמע חיצוני (VLC וכו')
+    מנגנת ברקע בצורה חסינה, ללא תלות בדפדפן."""
+    host = request.host.split(":", 1)[0]          # רק ה-hostname, בלי פורט ה-web
+    url = f"http://{host}:{ICECAST_PORT}/{MOUNT}"
+    body = "#EXTM3U\n#EXTINF:-1,AIR-AM live\n" + url + "\n"
+    return app.response_class(body, mimetype="audio/x-mpegurl")
+
+
 # נכסי PWA המוגשים מהשורש (לא מ-/static): ה-service worker *חייב* להיות מהשורש
 # כדי שה-scope שלו יכסה את כל האתר, וה-manifest/אייקונים נוחים בשורש לצדו.
 _ROOT_ASSETS = {
