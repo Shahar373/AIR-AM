@@ -568,6 +568,20 @@
     const streamURL = () =>
       `http://${location.hostname}:${cfg.port}/${cfg.mount}?t=${Date.now()}`;
 
+    // קישור לנגן חיצוני. באנדרואיד: Android Intent => מערכת ההפעלה מציגה בורר
+    // אפליקציות (VLC וכו') ומעבירה את הסטרים החוצה, במקום שכרום ינגן בכרטיסייה.
+    // בשאר המכשירים: playlist רגיל (/live.m3u).
+    function appStreamHref() {
+      const path = `${location.hostname}:${cfg.port}/${cfg.mount}`;
+      if (/Android/i.test(navigator.userAgent)) {
+        const fb = encodeURIComponent(`http://${path}`);
+        return "intent://" + path + "#Intent;scheme=http;" +
+          "action=android.intent.action.VIEW;type=audio/mpeg;" +
+          "S.browser_fallback_url=" + fb + ";end";
+      }
+      return "/live.m3u";
+    }
+
     /* ---------- סטטוס ---------- */
     // mode: "live" | "busy" | "off" | "err"
     function setStatus(text, mode = "off") {
@@ -1294,6 +1308,7 @@
       updateDisplay(current);
       setStatus("מוכן — לחץ ▶ או בחר תדר");
       player.src = streamURL();
+      $("extBtn").href = appStreamHref();   // אנדרואיד => intent ל-VLC; אחרת /live.m3u
       pollActivity();   // עכשיו כש-cfg.presets נטען, שמות הפריסטים יופיעו ביומן
     }).catch(() => setStatus("אין חיבור לשרת", "err"));
 
