@@ -580,8 +580,13 @@
       return res;
     }
 
+    // בדף HTTPS (למשל מאחורי tailscale serve) ניגשים לסטרים same-origin דרך
+    // ה-proxy => סטרים HTTP ישיר מ-Icecast היה נחסם כ-mixed-content. ב-HTTP/LAN
+    // ניגשים ל-Icecast ישירות (פחות עומס ו-latency נמוך).
     const streamURL = () =>
-      `http://${location.hostname}:${cfg.port}/${cfg.mount}?t=${Date.now()}`;
+      location.protocol === "https:"
+        ? `/stream?t=${Date.now()}`
+        : `http://${location.hostname}:${cfg.port}/${cfg.mount}?t=${Date.now()}`;
 
     // קישור לנגן חיצוני. באנדרואיד: Android Intent => מערכת ההפעלה מציגה בורר
     // אפליקציות (VLC וכו') ומעבירה את הסטרים החוצה, במקום שכרום ינגן בכרטיסייה.

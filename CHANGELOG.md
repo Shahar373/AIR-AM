@@ -9,6 +9,14 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-19
+### נוסף
+- **תמיכת HTTPS + PWA מלא**: כשהדף מוגש ב-HTTPS (למשל מאחורי `tailscale serve`),
+  נגן הדפדפן עובר אוטומטית ל-proxy same-origin (`/stream`) שמגיש את סטרים
+  ה-Icecast דרך שרת הווב — נמנע חסימת mixed-content. ב-HTTP/LAN הגישה ל-Icecast
+  נשארת ישירה (latency נמוך). שרת הווב רץ כעת ב-`threaded` (סטרים ארוך-טווח לא
+  חוסם בקשות). תיעוד `tailscale serve` ל-HTTPS מהימן והתקנת אפליקציה בטלפון.
+
 ## [1.1.0] - 2026-06-19
 ### נוסף
 - **תמלול ATC (אופציונלי)**: `whisper.cpp` מקומי (מודל `base.en`) מתמלל כל שידור
@@ -36,6 +44,7 @@
   אופציונלי (`AIRAM_PIN`), והגנת Origin/CSRF.
 - **בדיקות + CI** (pytest + `bash -n`).
 
-[Unreleased]: https://github.com/Shahar373/AIR-AM/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Shahar373/AIR-AM/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/Shahar373/AIR-AM/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Shahar373/AIR-AM/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Shahar373/AIR-AM/releases/tag/v1.0.0

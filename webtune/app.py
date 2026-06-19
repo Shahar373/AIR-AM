@@ -354,6 +354,33 @@ def live_playlist():
     return app.response_class(body, mimetype="audio/x-mpegurl")
 
 
+@app.route("/stream")
+def stream_proxy():
+    """Reverse-proxy לסטרים ה-Icecast, same-origin => עובד גם בדף HTTPS בלי
+    mixed-content. נחוץ כשהדף מוגש ב-HTTPS (למשל מאחורי 'tailscale serve'):
+    סטרים HTTP ישיר מ-Icecast היה נחסם. ב-HTTP/LAN הנגן ניגש ל-Icecast ישירות."""
+    upstream = f"http://127.0.0.1:{ICECAST_PORT}/{MOUNT}"
+    try:
+        up = urllib.request.urlopen(upstream, timeout=10)   # noqa: S310 (לוקאלהוסט בלבד)
+    except Exception:
+        abort(502)
+
+    def gen():
+        try:
+            while True:
+                chunk = up.read(8192)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            up.close()
+
+    resp = app.response_class(gen(), mimetype="audio/mpeg")
+    resp.headers["Cache-Control"] = "no-store"
+    resp.direct_passthrough = True   # בלי באפורינג של Werkzeug => latency נמוך
+    return resp
+
+
 # נכסי PWA המוגשים מהשורש (לא מ-/static): ה-service worker *חייב* להיות מהשורש
 # כדי שה-scope שלו יכסה את כל האתר, וה-manifest/אייקונים נוחים בשורש לצדו.
 _ROOT_ASSETS = {
@@ -821,4 +848,5 @@ if __name__ == "__main__":
     if TRANSCRIBE:   # תמלול ATC אופציונלי - דמון נפרד (לא חוסם את היומן/retention)
         threading.Thread(target=_transcribe_worker, daemon=True).start()
     adsb.start()   # רק כשרצים כשרת (לא בזמן import) - דמון, לא מעכב עלייה
-    app.run(host="0.0.0.0", port=8080)
+    # threaded: סטרים /stream הוא חיבור ארוך-טווח => חייב לא לחסום בקשות אחרות
+    app.run(host="0.0.0.0", port=8080, threaded=True)
