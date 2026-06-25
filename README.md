@@ -182,11 +182,25 @@ tailscale serve status        # יציג את כתובת ה-https://<machine>.<t
 ### שימוש
 
 1. לחץ **📡 ACARS** למעלה — ה-Pi מפעיל את `acarsdec` על תדרי ה-ACARS.
-2. ההודעות מופיעות בדף ככל שמתפענחות (זמן, תדר, זנב, טיסה, label, וטקסט).
+2. ההודעות מופיעות בדף ככל שמתפענחות, בכרטיס **אחיד לכל הפורמטים**: קטגוריה קריאה
+   (label / CPDLC / ADS-C), badge צבעוני, זמן, תדר, זנב, טיסה וטקסט. פענוח ARINC-622
+   (דרך `libacars`) מוצג בולט, והגולמי מתקפל מתחתיו.
 3. כדי לחזור לשמע — לחץ **🎧 האזן למגדל (134.600)** או החלף בחזרה ל-**📻 קול** למעלה.
 
 > **ACARS משדר בבזקים קצרים**, לא ברצף — ייתכנו דקות של שקט בין הודעות. זה תקין.
 > לבדיקה ראשונה, השאר את המצב פעיל כמה דקות סמוך לתנועה אווירית.
+
+### שמירה, ייצוא ומפה
+
+- **שמירה**: כל הודעה נשמרת ל-`/var/lib/airam/acars.jsonl` ו**שורדת אתחול** — בכניסה
+  חוזרת למצב ACARS ההיסטוריה נטענת ומוצגת ממוינת לפי זמן.
+- **ייצוא** לניתוח offline: כפתורי **⬇ CSV / JSON** (או `GET /api/acars/export?format=csv|json`).
+  ה-CSV כולל BOM כך ש-Excel מציג עברית נכון.
+- **מפה** (Leaflet + OpenStreetMap): מטוסים עם **מיקום** מ-ACARS (בעיקר ADS-C/CPDLC,
+  דלילים יחסית ב-נתב״ג — מתמלאת לאט). chip **📍** בכרטיס ממקד את המטוס במפה. אם אין
+  אינטרנט בטלפון, המפה נופלת חיננית והמיקומים נשארים זמינים כ-📍 בכרטיסים.
+- **חיפוש וסינון**: תיבת חיפוש (זנב/טיסה/label/טקסט) + צ'יפים לסינון לפי קטגוריה,
+  עם שורת סטטיסטיקה (הודעות · הודעות/דק׳ · מטוסים · עם מיקום).
 
 ### תדרי ACARS (סט אירופה/ישראל)
 
@@ -303,6 +317,8 @@ ACARS_RATEMULT=160                             # 160 => 2.0 MS/s, 192 => 2.4 MS/
 | ניתקתי וחיברתי את ה-SDR | השירותים מתאוששים לבד (`Restart=always`, ללא StartLimit) + כלל udev מפעיל מחדש בחיבור. התאוששות תוך שניות. הערה: replug במצב ACARS מחזיר אוטומטית לקול — בחר שוב 📡 ACARS. |
 | מצב ACARS לא עולה | `sudo journalctl -u airam-acars -f`. ודא ש-`acarsdec` נבנה (`command -v acarsdec`) ושה-SDR פנוי (rtl_airband נעצר). אפשר להריץ ידנית: `sudo systemctl restart airam-acars`. |
 | אין הודעות ACARS | תקין שיש שקט — ACARS משדר בבזקים. ודא תנועה אווירית סמוכה, אמת את `ACARS_FREQS` מול מקור מקומי, ונסה `ACARS_GAIN` ידני (למשל 40) במקום AGC ב-`/etc/airam/acars.env`. |
+| מפת ה-ACARS לא נטענת / ריקה | המפה דורשת **אינטרנט בטלפון** (אריחי OpenStreetMap). בלי חיבור היא נופלת חיננית והמיקומים נשארים כ-📍 בכרטיסים. שים לב: הודעות עם מיקום (ADS-C/CPDLC) **דלילות** ב-נתב״ג — תקין שהמפה מתמלאת לאט או נשארת ריקה לאורך זמן. |
+| איפה נשמרות הודעות ה-ACARS | ב-`/var/lib/airam/acars.jsonl` (JSONL, שורד אתחול, retention ~5000 אחרונות). ייצוא מסודר: כפתורי **CSV/JSON** בממשק או `GET /api/acars/export?format=csv`. |
 | rtl_airband לא עולה / `ServiceNotResponding` | ה-`sdrplay_apiService` יכול להיראות `active` ב-systemd אך לא להגיב ללקוחות (`SoapySDRUtil --find="driver=sdrplay"` מחזיר `sdrplay_api_ServiceNotResponding`). שער המוכנות (`airam-wait-sdrplay`) מזהה זאת ועושה `systemctl restart sdrplay` אוטומטית. ידנית: `sudo systemctl restart sdrplay && sudo systemctl restart rtl_airband`. |
 | התקנת API נכשלה | ודא רשת; אם יצא API חדש, עדכן `SDRPLAY_VER` ב-`install.sh` והרץ שוב. |
 

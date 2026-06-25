@@ -11,6 +11,8 @@
 #  ל-restart בלבד; אימות PIN אופציונלי (AIRAM_PIN), כבוי כברירת מחדל.
 # ============================================================================
 import collections
+import csv
+import io
 import json
 import logging
 import os
@@ -65,8 +67,33 @@ ACARS_UDP_PORT = 5556                 # חייב להתאים ל-ACARS_UDP ב-ac
 ACARS_FREQS_DEFAULT = ["131.525", "131.550", "131.725", "131.825"]  # אירופה/ישראל
 ACARS_GAIN_DEFAULT = -10              # ‎-10 => AGC (מוסכמת acarsdec)
 ACARS_RATEMULT_DEFAULT = 160          # 160 => 2.0 MS/s (חלון ±1MHz)
-ACARS_BUF_MAX = 200                   # הודעות אחרונות שנשמרות בזיכרון
+ACARS_BUF_MAX = 500                   # הודעות אחרונות בזיכרון (נטענות לקליינט בעלייה)
 _FREQ_RE = re.compile(r"^\d{2,3}\.\d{1,3}$")   # ולידציית תדר ACARS (MHz) לפני כתיבה ל-env
+
+# התמדה: כל הודעה מפוענחת נכתבת ל-acars.jsonl (כמו activity.jsonl) => שורדת restart.
+# קורא ב-/api/acars/export ובטעינה הראשונית; thread ה-listener הוא הכותב היחיד.
+ACARS_LOG_PATH = Path("/var/lib/airam/acars.jsonl")
+ACARS_LOG_KEEP = 5000                 # retention על הדיסק (זנב נשמר; ייצוא לניתוח)
+
+# מילון labels נפוץ של ACARS (best-effort, חלקי בכוונה — הלא-מוכרים נופלים ל-"Label X").
+# ערך = (תיאור עברי, קבוצה). הקבוצה קובעת צבע badge ב-UI ואת עמודת category בייצוא:
+#   position(ירוק) · clearance(כחול) · oooi(ענבר) · tech(אפור) · comm(אפור) · text(ברירת מחדל)
+ACARS_LABELS = {
+    "Q0": ("בדיקת קישור (link test)", "comm"),
+    "_d": ("אישור קישור (link ack)", "comm"),
+    "SA": ("ניהול מדיה (media advisory)", "comm"),
+    "SQ": ("התחברות (login)", "comm"),
+    "H1": ("הודעת מערכת/חברה (H1)", "text"),
+    "5Z": ("שירות חברה (airline)", "text"),
+    "RA": ("תקשורת אוויר/קרקע", "text"),
+    "RB": ("תקשורת אוויר/קרקע", "text"),
+    "QA": ("OOOI · יציאה (Out)", "oooi"),
+    "QB": ("OOOI · המראה (Off)", "oooi"),
+    "QC": ("OOOI · נחיתה (On)", "oooi"),
+    "QD": ("OOOI · חניה (In)", "oooi"),
+    "B9": ("בקשת אישור ATC", "clearance"),
+    "BA": ("אישור ATC (clearance)", "clearance"),
+}
 
 # הקלטות: rtl_airband כותב קובץ MP3 לכל שידור (split_on_transmission) בשם
 # <REC_BASENAME>_YYYYMMDD_HHMMSS_<Hz>.mp3 (.tmp בזמן כתיבה, rename בסגירה
@@ -362,9 +389,104 @@ _acars_msgs = collections.deque(maxlen=ACARS_BUF_MAX)
 _acars_seq = 0                 # מזהה רץ גלובלי (cursor ל-UI: "תן לי הודעות חדשות מ-id")
 
 
+def _scan_latlon(obj):
+    """סורק רקורסיבית מבנה libacars אחר זוג lat/lon תקין (ADS-C/CPDLC). מחזיר
+    (lat, lon) או None. הגנתי לשינויי סכמה בין גרסאות — מזהה לפי שם המפתח, לא מבנה."""
+    lat = lon = None
+
+    def walk(o):
+        nonlocal lat, lon
+        if lat is not None and lon is not None:
+            return
+        if isinstance(o, dict):
+            for k, v in o.items():
+                kl = str(k).lower()
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    if lat is None and kl in ("lat", "latitude"):
+                        lat = float(v)
+                    elif lon is None and kl in ("lon", "lng", "long", "longitude"):
+                        lon = float(v)
+                else:
+                    walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    walk(obj)
+    if lat is None or lon is None:
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+        return None                           # 0/0 = "אין מיקום" טיפוסי, לא מרכז האוקיינוס
+    return round(lat, 5), round(lon, 5)
+
+
+# מיקום מקודד בטקסט חופשי (דיווחי position נפוצים): N3200.0E03450.0 / 3200N 03450E
+_TEXT_POS_RE = re.compile(
+    r"([NS])\s*(\d{2,4})(?:[.\s](\d{1,3}))?\s*([EW])\s*(\d{2,5})(?:[.\s](\d{1,3}))?"
+    r"|(\d{2,4}(?:\.\d+)?)\s*([NS])[ /]+(\d{2,5}(?:\.\d+)?)\s*([EW])")
+
+
+def _text_latlon(text):
+    """heuristic שמרני לחילוץ מיקום מטקסט חופשי. מחזיר (lat, lon) או None.
+    מכוון לדיוק על פני כיסוי => מחזיר רק כשהתבנית ברורה (פחות false positives)."""
+    if not text:
+        return None
+    m = _TEXT_POS_RE.search(text)
+    if not m:
+        return None
+    try:
+        if m.group(1):                        # פורמט N3200.0E03450.0 (NS קודם)
+            ns, lat_d, lat_m, ew, lon_d, lon_m = m.group(1, 2, 3, 4, 5, 6)
+            lat = float(lat_d[:2]) + float((lat_d[2:] or "0") + "." + (lat_m or "0")) / 60
+            lon = float(lon_d[:3]) + float((lon_d[3:] or "0") + "." + (lon_m or "0")) / 60
+        else:                                 # פורמט 3200.0N/03450.0E (מספר קודם)
+            lat_v, ns, lon_v, ew = m.group(7, 8, 9, 10)
+            lat, lon = float(lat_v), float(lon_v)
+            if lat > 90:                      # DDMM.m => המר לדרגות עשרוניות
+                lat = int(lat // 100) + (lat % 100) / 60
+            if lon > 180:
+                lon = int(lon // 100) + (lon % 100) / 60
+        if ns == "S":
+            lat = -lat
+        if ew == "W":
+            lon = -lon
+    except (ValueError, IndexError):
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+        return None
+    return round(lat, 5), round(lon, 5)
+
+
+def _libacars_decode(obj):
+    """(kind, text) ממבנה libacars: kind ל-badge ('CPDLC'/'ADS-C'/'ARINC-622'),
+    ו-text קצר קריא (CPDLC clearance וכו') אם נמצא. הגנתי לשינויי סכמה."""
+    blob = json.dumps(obj, ensure_ascii=False).lower()
+    kind = ("CPDLC" if "cpdlc" in blob
+            else "ADS-C" if ("adsc" in blob or "ads-c" in blob)
+            else "ARINC-622")
+    texts = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if (isinstance(v, str) and len(v.strip()) > 3
+                        and any(t in str(k).lower() for t in ("text", "msg", "message"))):
+                    texts.append(v.strip())
+                else:
+                    walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    walk(obj)
+    text = " · ".join(dict.fromkeys(texts))[:300] or None   # dedup בשמירת סדר
+    return kind, text
+
+
 def _normalize_acars(m):
-    """מצמצם הודעת acarsdec JSON לשדות שה-UI מציג. עמיד לשדות חסרים (הרבה
-    הודעות ACARS הן ACK ריק בלי tail/flight/text)."""
+    """מצמצם הודעת acarsdec JSON לשדות שה-UI מציג, בפורמט *אחיד* לכל סוגי ההודעות:
+    קטגוריה קריאה (label => תיאור), קבוצה (לצבע), ומיקום (lat/lon) כשזמין. עמיד
+    לשדות חסרים (הרבה הודעות ACARS הן ACK ריק בלי tail/flight/text)."""
     def g(*keys):
         for k in keys:
             v = m.get(k)
@@ -375,23 +497,99 @@ def _normalize_acars(m):
     text = g("text")
     if isinstance(text, str):
         text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    label = g("label")
+    desc, group = ACARS_LABELS.get(label, (None, "text")) if label else (None, "comm")
+    category = desc or (f"Label {label}" if label else "הודעה")
+
+    # פענוח ARINC-622 (libacars): kind => badge וקבוצה, וטקסט קריא אם יש.
+    lat = lon = pos_src = decoded = None
+    libacars = m.get("libacars")
+    if libacars:
+        kind, dtext = _libacars_decode(libacars)
+        category, decoded = kind, dtext
+        group = "clearance" if kind == "CPDLC" else "position" if kind == "ADS-C" else group
+        pos = _scan_latlon(libacars)
+        if pos:
+            lat, lon, pos_src = pos[0], pos[1], "adsc"
+
+    if lat is None:                           # נפילה: מיקום מקודד בטקסט חופשי
+        pos = _text_latlon(text)
+        if pos:
+            lat, lon, pos_src = pos[0], pos[1], "text"
+
+    if lat is not None:
+        group = "position"                    # יש מיקום => תמיד ירוק (קבוצת position)
+
     return {
         "t": g("timestamp"),                  # epoch seconds (float) מ-acarsdec
         "freq": g("freq"),                    # MHz
         "level": g("level"),                  # dBFS
-        "label": g("label"),
+        "label": label,
+        "category": category,                 # תיאור קריא אחיד (label/ARINC-622)
+        "group": group,                       # קבוצה לצבע ב-UI / עמודה בייצוא
         "tail": g("tail", "registration"),
         "flight": g("flight", "fid"),
         "mode": g("mode"),
         "msgno": g("msgno"),
+        "lat": lat,
+        "lon": lon,
+        "pos_src": pos_src,                   # "adsc" | "text" | None
+        "decoded": decoded,                   # טקסט מפוענח קצר (CPDLC וכו') או None
         "text": text,
         "error": m.get("error"),
     }
 
 
+def _append_acars_log(rec):
+    """מוסיף הודעה מנורמלת ל-acars.jsonl (append; thread ה-listener הוא הכותב היחיד).
+    נכשל בשקט (דיסק מלא וכו') => הפיד החי ממשיך לפעול."""
+    try:
+        ACARS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with ACARS_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError:
+        log.exception("acars log append")
+
+
+def _trim_acars_log():
+    """קיצוץ ל-ACARS_LOG_KEEP שורות (rewrite אטומי). נקרא מדי פעם מ-thread ה-listener
+    (הכותב היחיד => אין מרוץ). קוראים (ייצוא) סובלים שורה אחרונה חלקית."""
+    try:
+        lines = ACARS_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    if len(lines) > ACARS_LOG_KEEP:
+        _atomic_write(ACARS_LOG_PATH, "\n".join(lines[-ACARS_LOG_KEEP:]) + "\n")
+
+
+def _load_acars_history():
+    """טוען את זנב acars.jsonl ל-ring buffer בעלייה => הודעות שורדות restart, ממוינות
+    לפי זמן (t עולה) עם id רץ. נקרא *לפני* הפעלת thread ה-listener (אין מרוץ)."""
+    global _acars_seq
+    try:
+        lines = ACARS_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    recs = []
+    for ln in lines[-ACARS_BUF_MAX:]:
+        try:
+            recs.append(json.loads(ln))
+        except ValueError:
+            continue                          # שורה פגומה (כתיבה חלקית) => דילוג
+    recs.sort(key=lambda r: r.get("t") or 0)
+    with _acars_lock:
+        for r in recs:
+            _acars_seq += 1
+            r["id"] = _acars_seq
+            _acars_msgs.append(r)
+    if recs:
+        log.info("ACARS: נטענו %d הודעות מההיסטוריה", len(recs))
+
+
 def _acars_listener():
-    """thread רקע: מאזין ל-UDP מ-acarsdec (-j) ומכניס הודעות ל-ring buffer.
-    רץ תמיד (גם במצב קול) — פשוט לא יגיעו דאטהגרמות כש-acarsdec כבוי."""
+    """thread רקע: מאזין ל-UDP מ-acarsdec (-j), שומר ל-acars.jsonl, ומכניס ל-ring
+    buffer. רץ תמיד (גם במצב קול) — פשוט לא יגיעו דאטהגרמות כש-acarsdec כבוי."""
     global _acars_seq
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -399,6 +597,7 @@ def _acars_listener():
     except OSError:
         log.warning("ACARS listener: port %d busy - /api/acars יחזיר ריק", ACARS_UDP_PORT)
         return
+    seen = 0
     while True:
         try:
             data, _ = sock.recvfrom(65535)
@@ -409,10 +608,14 @@ def _acars_listener():
         except (ValueError, UnicodeError):
             continue                          # דאטהגרם לא-JSON => מתעלמים
         rec = _normalize_acars(msg)
+        _append_acars_log(rec)                # התמדה לפני הקצאת id הזמני (הקובץ נקי מ-id)
         with _acars_lock:
             _acars_seq += 1
             rec["id"] = _acars_seq
             _acars_msgs.append(rec)
+        seen += 1
+        if seen % 200 == 0:                   # קיצוץ תקופתי (הכותב היחיד)
+            _trim_acars_log()
 
 
 def _is_active(service):
@@ -1010,6 +1213,60 @@ def api_acars():
                    cursor=cursor, messages=msgs)
 
 
+ACARS_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "mode", "label",
+                     "category", "group", "tail", "flight", "msgno", "error",
+                     "lat", "lon", "pos_src", "text"]
+
+
+def _read_acars_log():
+    """כל ההודעות מ-acars.jsonl, ממוינות לפי זמן (t עולה). סובל שורות פגומות
+    (כתיבה חלקית של ההודעה האחרונה בזמן הקריאה)."""
+    try:
+        lines = ACARS_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out = []
+    for ln in lines:
+        try:
+            out.append(json.loads(ln))
+        except ValueError:
+            continue
+    out.sort(key=lambda r: r.get("t") or 0)
+    return out
+
+
+@app.route("/api/acars/export")
+def api_acars_export():
+    """ייצוא כל הודעות ה-ACARS השמורות לקובץ מסודר (לניתוח offline).
+    ?format=csv (ברירת מחדל) | json. GET => בלי PIN (כמו שאר ה-GET)."""
+    fmt = (request.args.get("format") or "csv").lower()
+    recs = _read_acars_log()
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    if fmt == "json":
+        resp = app.response_class(json.dumps(recs, ensure_ascii=False, indent=1),
+                                  mimetype="application/json")
+        fname = f"airam-acars-{stamp}.json"
+    else:
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(ACARS_EXPORT_COLS)
+        for r in recs:
+            t = r.get("t")
+            iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)) if t else ""
+            txt = (r.get("text") or "").replace("\r", " ").replace("\n", " ")
+            w.writerow([iso, t, r.get("freq"), r.get("level"), r.get("mode"),
+                        r.get("label"), r.get("category"), r.get("group"),
+                        r.get("tail"), r.get("flight"), r.get("msgno"), r.get("error"),
+                        r.get("lat"), r.get("lon"), r.get("pos_src"), txt])
+        # BOM => Excel מזהה UTF-8 ומציג עברית (category) נכון
+        resp = app.response_class("﻿" + buf.getvalue(),
+                                  mimetype="text/csv; charset=utf-8")
+        fname = f"airam-acars-{stamp}.csv"
+    resp.headers["Content-Disposition"] = f'attachment; filename="{fname}"'
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @app.route("/api/mode", methods=["POST"])
 def api_mode():
     """מעבר בין מצב קול (rtl_airband) למצב ACARS (acarsdec). SDR אחד בהחלפה.
@@ -1075,6 +1332,7 @@ if __name__ == "__main__":
                 pass
     REC_DIR.mkdir(parents=True, exist_ok=True)
     threading.Thread(target=_activity_watcher, daemon=True).start()
+    _load_acars_history()                                           # היסטוריית ACARS שורדת restart (לפני ה-listener)
     threading.Thread(target=_acars_listener, daemon=True).start()   # פיד UDP מ-acarsdec (שקט במצב קול)
     if TRANSCRIBE:   # תמלול ATC אופציונלי - דמון נפרד (לא חוסם את היומן/retention)
         threading.Thread(target=_transcribe_worker, daemon=True).start()
