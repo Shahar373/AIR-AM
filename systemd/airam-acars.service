@@ -1,0 +1,33 @@
+[Unit]
+Description=AIR-AM - ACARS decoder (acarsdec, SDRplay RSP1B)
+Documentation=https://github.com/TLeconte/acarsdec
+After=network-online.target sdrplay.service
+Wants=network-online.target
+# Requires (לא Wants) => הפעלה מחדש של ה-API גוררת את acarsdec
+Requires=sdrplay.service
+# מצב משולב = SDR אחד בהחלפה: רק צרכן-SDR אחד פעיל בכל רגע. Conflicts => הפעלת
+# acarsdec עוצרת אוטומטית את rtl_airband (וההפך), כך שלעולם אין שני תהליכים
+# שמתחרים על ה-RSP1B. ההצהרה כאן בלבד מספיקה (Conflicts דו-כיווני).
+Conflicts=rtl_airband.service
+# בלי הגבלת קצב-הפעלה => מתאושש לנצח (ניתוק/חיבור USB, מרוץ אתחול)
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# קובץ ההגדרות (אופציונלי, '-') - airam-web כותב אותו לפי בחירת התדרים בממשק.
+# systemd מנתח KEY=VALUE *בבטחה* (לא מריץ shell) => קובץ הניתן-לכתיבה ע"י airam
+# לא יכול להסליל הרצת קוד כ-root (בניגוד ל-source בבash).
+EnvironmentFile=-/etc/airam/acars.env
+# שער מוכנות: מחכה שה-SDRplay API באמת יענה לפני הרצת acarsdec (כמו rtl_airband)
+ExecStartPre=/usr/local/bin/airam-wait-sdrplay
+# ‎$ACARS_FREQS *ללא* סוגריים => systemd מפצל אותו למספר ארגומנטים (רשימת התדרים).
+# ‎${ACARS_GAIN} וכו' *עם* סוגריים => ארגומנט יחיד. ‎-d אחרון לפני התדרים (כפי שב-README).
+# ללא ‎-c: acarsdec בוחר center אוטומטית (chooseFc) שמכסה את הערוצים ונמנע מ-DC spike.
+ExecStart=/usr/local/bin/acarsdec -g ${ACARS_GAIN} -m ${ACARS_RATEMULT} -o 1 -j ${ACARS_UDP} -d driver=sdrplay $ACARS_FREQS
+# גישת חומרה (SDR) => כמו rtl_airband, רץ כ-root
+User=root
+Restart=always
+RestartSec=10
+
+# שים לב: השירות *לא* enabled (לא עולה באתחול). מצב ברירת המחדל הוא קול
+# (rtl_airband). airam-web מפעיל/עוצר אותו לפי בחירת המצב בממשק (דרך sudoers ממוקד).

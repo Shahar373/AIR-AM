@@ -9,6 +9,21 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-25
+### נוסף
+- **מצב משולב — קול + ACARS 📡**: מתג מצב בראש הממשק (📻 קול / 📡 ACARS). מצב
+  ACARS מריץ `acarsdec` על אותו RSP1B (בהחלפה עם `rtl_airband` — מקלט אחד, לכן
+  לא בו-זמני) ומציג הודעות ACARS מפוענחות חיות בדף (זמן, תדר, זנב, טיסה, label,
+  טקסט). כפתור "🎧 האזן למגדל" חוזר לקול ומכוונן ל-134.6.
+  - שירות `airam-acars` (לא enabled; מופעל לפי המצב) עם `Conflicts=rtl_airband`
+    => לעולם לא שני צרכני-SDR יחד. `acarsdec -j` שולח JSON ב-UDP ל-`airam-web`
+    (listener + ring-buffer), והדף מושך מ-`/api/acars`.
+  - הגדרות ב-`/etc/airam/acars.env` (פורמט EnvironmentFile של systemd — מנותח
+    בבטחה, בלי הסלמת airam→root). סט אירופה/ישראל: 131.525/131.550/131.725/131.825.
+  - `install.sh` בונה `libacars` + `acarsdec` (`-Dsoapy=ON`); sudoers הורחב
+    לפעולות ה-systemctl המדויקות בלבד (stop rtl_airband, restart/stop airam-acars).
+  - נתיבים חדשים: `POST /api/mode` (מעבר קול↔ACARS, מוגן Origin+PIN) ו-`GET /api/acars`.
+
 ## [1.2.0] - 2026-06-19
 ### נוסף
 - **תמיכת HTTPS + PWA מלא**: כשהדף מוגש ב-HTTPS (למשל מאחורי `tailscale serve`),
