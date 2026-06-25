@@ -9,6 +9,21 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-06-25
+### נוסף
+- **ACARS — שמירה, ייצוא ותצוגה ויזואלית 🗺️**: הודעות ה-ACARS עכשיו **נשמרות ושורדות
+  אתחול** (`/var/lib/airam/acars.jsonl`, ממוין לפי זמן; זנב נטען לזיכרון בעלייה), עם
+  **ייצוא** מסודר לניתוח (`GET /api/acars/export?format=csv|json` — CSV עם BOM לעברית
+  ב-Excel).
+  - **תצוגה אחידה לכל הפורמטים**: כל הודעה מקבלת **קטגוריה קריאה** (מילון labels + פענוח
+    ARINC-622/CPDLC/ADS-C דרך `libacars`) ו-**badge צבעוני** לפי קבוצה (מיקום/ATC/OOOI/
+    טכני/תקשורת/טקסט). פענוח (CPDLC וכו') מוצג בולט, והגולמי מתקפל.
+  - **מפת Leaflet** (vendored מקומית, אריחי OpenStreetMap; נפילה חיננית לרשימת מיקומים
+    אם אין אינטרנט) — מטוסים עם מיקום מ-ACARS (ADS-C/CPDLC, וגם heuristic לטקסט). chip
+    `📍` בכרטיס ממקד את המפה.
+  - **פוליש UI**: חיפוש (זנב/טיסה/label/טקסט) + צ'יפים לסינון קטגוריה, שורת סטטיסטיקה
+    (הודעות · הודעות/דק׳ · מטוסים · עם מיקום), שימור מיקום גלילה, ומצבים ריקים ברורים.
+
 ## [1.3.0] - 2026-06-25
 ### נוסף
 - **מצב משולב — קול + ACARS 📡**: מתג מצב בראש הממשק (📻 קול / 📡 ACARS). מצב
@@ -59,7 +74,9 @@
   אופציונלי (`AIRAM_PIN`), והגנת Origin/CSRF.
 - **בדיקות + CI** (pytest + `bash -n`).
 
-[Unreleased]: https://github.com/Shahar373/AIR-AM/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/Shahar373/AIR-AM/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/Shahar373/AIR-AM/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/Shahar373/AIR-AM/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/Shahar373/AIR-AM/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Shahar373/AIR-AM/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Shahar373/AIR-AM/releases/tag/v1.0.0

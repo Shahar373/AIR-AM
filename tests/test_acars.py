@@ -19,6 +19,7 @@ def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "airband.conf")
     monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "ACARS_ENV_PATH", tmp_path / "acars.env")
+    monkeypatch.setattr(app, "ACARS_LOG_PATH", tmp_path / "acars.jsonl")
     return tmp_path
 
 
@@ -183,3 +184,111 @@ def test_api_state_reports_live_mode(client, paths, monkeypatch):
     body = client.get("/api/state").get_json()
     assert body["app_mode"] == "voice"
     assert body["acars_freqs"] == list(app.ACARS_FREQS_DEFAULT)
+
+
+# --- התמדה: acars.jsonl + טעינה בעלייה --------------------------------------
+
+def _reset_buffer():
+    with app._acars_lock:
+        app._acars_msgs.clear()
+        app._acars_seq = 0
+
+
+def test_acars_log_append_and_load_history(paths):
+    _reset_buffer()
+    for t in (3.0, 1.0, 2.0):                       # סדר כתיבה לא-ממוין בזמן
+        app._append_acars_log({"t": t, "freq": 131.55, "tail": "4X-A%d" % int(t)})
+    app._load_acars_history()
+    with app._acars_lock:
+        msgs = list(app._acars_msgs)
+    assert [m["t"] for m in msgs] == [1.0, 2.0, 3.0]   # ממוין עולה לפי t
+    assert [m["id"] for m in msgs] == [1, 2, 3]        # id רץ הוקצה
+    assert app._acars_seq == 3
+
+
+def test_acars_log_trim(paths, monkeypatch):
+    monkeypatch.setattr(app, "ACARS_LOG_KEEP", 5)
+    for i in range(12):
+        app._append_acars_log({"t": float(i), "freq": 131.55})
+    app._trim_acars_log()
+    lines = app.ACARS_LOG_PATH.read_text().splitlines()
+    assert len(lines) == 5                             # נחתך ל-KEEP
+    assert json.loads(lines[0])["t"] == 7.0            # נשמר הזנב (7..11)
+    assert json.loads(lines[-1])["t"] == 11.0
+
+
+def test_load_history_tolerates_garbage(paths):
+    _reset_buffer()
+    app.ACARS_LOG_PATH.write_text('{"t": 1.0, "freq": 131.5}\nnot-json\n{"t": 2.0}\n')
+    app._load_acars_history()
+    with app._acars_lock:
+        msgs = list(app._acars_msgs)
+    assert [m["t"] for m in msgs] == [1.0, 2.0]        # השורה הפגומה דולגה
+
+
+# --- נרמול עשיר: קטגוריה + מיקום --------------------------------------------
+
+def test_normalize_category_from_labels():
+    q0 = app._normalize_acars({"timestamp": 1.0, "label": "Q0"})
+    assert q0["category"] == "בדיקת קישור (link test)" and q0["group"] == "comm"
+    assert app._normalize_acars({"timestamp": 1.0, "label": "QA"})["group"] == "oooi"
+    unk = app._normalize_acars({"timestamp": 1.0, "label": "ZZ"})   # לא מוכר => fallback
+    assert unk["category"] == "Label ZZ" and unk["group"] == "text"
+    assert app._normalize_acars({"timestamp": 1.0})["category"] == "הודעה"   # בלי label
+
+
+def test_normalize_position_from_libacars():
+    m = {"timestamp": 1.0, "label": "B9",
+         "libacars": {"arinc622": {"adsc": {"basic_report": {"lat": 32.1, "lon": 34.9}}}}}
+    n = app._normalize_acars(m)
+    assert (n["lat"], n["lon"], n["pos_src"]) == (32.1, 34.9, "adsc")
+    assert n["group"] == "position"                    # מיקום => תמיד ירוק
+
+
+def test_normalize_cpdlc_decoded_and_group():
+    n = app._normalize_acars({"timestamp": 1.0, "libacars": {"cpdlc": {"msg": "CLIMB TO FL350"}}})
+    assert n["category"] == "CPDLC" and n["group"] == "clearance"
+    assert n["decoded"] == "CLIMB TO FL350"
+
+
+def test_normalize_rejects_bad_latlon():
+    assert app._normalize_acars({"timestamp": 1.0, "libacars": {"x": {"lat": 0, "lon": 0}}})["lat"] is None
+    assert app._normalize_acars({"timestamp": 1.0, "libacars": {"x": {"lat": 999, "lon": 34}}})["lat"] is None
+
+
+def test_normalize_position_from_text():
+    n = app._normalize_acars({"timestamp": 1.0, "text": "POS N3206.0E03450.0 FL350"})
+    assert n["pos_src"] == "text"
+    assert 31 < n["lat"] < 33 and 34 < n["lon"] < 35
+
+
+def test_text_latlon_rejects_noise_and_parses_arinc():
+    assert app._text_latlon("FUEL 5678 KG PART N1278E56789") is None   # דקות 78>59 => נדחה
+    assert app._text_latlon("CODE N32E034") is None                    # בלי DDMM מלא => נדחה
+    lat, lon = app._text_latlon("POS S3206.5W03450.0 FL350")           # דרום/מערב
+    assert -33 < lat < -31 and -35 < lon < -34
+
+
+# --- ייצוא ------------------------------------------------------------------
+
+def test_acars_export_csv(client, paths):
+    app.ACARS_LOG_PATH.write_text(
+        json.dumps({"t": 2.0, "freq": 131.55, "tail": "4X-B", "category": "ADS-C",
+                    "group": "position", "lat": 32.1, "lon": 34.9, "text": "line1\nline2"}) + "\n"
+        + json.dumps({"t": 1.0, "freq": 131.72, "tail": "4X-A", "category": "Label H1"}) + "\n")
+    r = client.get("/api/acars/export?format=csv")
+    assert r.status_code == 200
+    assert r.headers["Content-Disposition"].startswith("attachment;")
+    body = r.data.decode("utf-8-sig")                  # מתעלם מ-BOM
+    lines = body.splitlines()
+    assert lines[0].startswith("time_iso,timestamp,freq")
+    assert "4X-A" in lines[1] and "4X-B" in lines[2]   # ממוין לפי t עולה
+    assert len(lines) == 3                             # newline בטקסט לא שובר שורה
+    assert "line1 line2" in body
+
+
+def test_acars_export_json(client, paths):
+    app.ACARS_LOG_PATH.write_text(
+        json.dumps({"t": 2.0, "tail": "B"}) + "\n" + json.dumps({"t": 1.0, "tail": "A"}) + "\n")
+    data = json.loads(client.get("/api/acars/export?format=json").data)
+    assert [d["tail"] for d in data] == ["A", "B"]     # ממוין לפי t
