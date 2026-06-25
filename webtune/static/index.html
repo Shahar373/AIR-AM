@@ -1627,6 +1627,16 @@
         if (!data.ok) return;
         setAcarsStatus(data.active);
         if (data.freqs) renderAcarsFreqs(data.freqs);
+        // השרת אותחל (ה-cursor שלו ירד מתחת ל-acarsLastId שלנו => seq התאפס וההיסטוריה
+        // נטענה מחדש) => מאפסים קליינט כדי לא לפספס הודעות. המחזור הבא (since=0) ימשוך הכל.
+        if (typeof data.cursor === "number" && data.cursor < acarsLastId) {
+          acarsLastId = 0;
+          acarsMsgs.length = 0;
+          for (const id in acarsMarkers) {
+            if (acarsMap) acarsMap.removeLayer(acarsMarkers[id]);
+            delete acarsMarkers[id];
+          }
+        }
         if (data.messages && data.messages.length) {
           for (const m of data.messages) {
             acarsMsgs.push(m);

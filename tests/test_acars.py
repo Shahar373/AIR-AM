@@ -262,6 +262,13 @@ def test_normalize_position_from_text():
     assert 31 < n["lat"] < 33 and 34 < n["lon"] < 35
 
 
+def test_text_latlon_rejects_noise_and_parses_arinc():
+    assert app._text_latlon("FUEL 5678 KG PART N1278E56789") is None   # דקות 78>59 => נדחה
+    assert app._text_latlon("CODE N32E034") is None                    # בלי DDMM מלא => נדחה
+    lat, lon = app._text_latlon("POS S3206.5W03450.0 FL350")           # דרום/מערב
+    assert -33 < lat < -31 and -35 < lon < -34
+
+
 # --- ייצוא ------------------------------------------------------------------
 
 def test_acars_export_csv(client, paths):

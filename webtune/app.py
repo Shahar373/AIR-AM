@@ -420,38 +420,31 @@ def _scan_latlon(obj):
     return round(lat, 5), round(lon, 5)
 
 
-# מיקום מקודד בטקסט חופשי (דיווחי position נפוצים): N3200.0E03450.0 / 3200N 03450E
+# מיקום בפורמט ARINC קומפקטי בטקסט חופשי: N3206.0E03450.0 (DDMM.m / DDDMM.m, hemisphere קודם).
+# שמרני בכוונה — הדקות נאכפות 00–59 ברמת ה-regex (‎[0-5]\d) => כמעט בלי false positives
+# מרצפי-ספרות מקריים. פורמטים אחרים (עשרוני) נדירים בטקסט ACARS ולא נתמכים (עדיף דיוק).
 _TEXT_POS_RE = re.compile(
-    r"([NS])\s*(\d{2,4})(?:[.\s](\d{1,3}))?\s*([EW])\s*(\d{2,5})(?:[.\s](\d{1,3}))?"
-    r"|(\d{2,4}(?:\.\d+)?)\s*([NS])[ /]+(\d{2,5}(?:\.\d+)?)\s*([EW])")
+    r"([NS])\s?(\d{2})([0-5]\d)(?:\.(\d{1,3}))?\s?([EW])\s?(\d{3})([0-5]\d)(?:\.(\d{1,3}))?")
 
 
 def _text_latlon(text):
-    """heuristic שמרני לחילוץ מיקום מטקסט חופשי. מחזיר (lat, lon) או None.
-    מכוון לדיוק על פני כיסוי => מחזיר רק כשהתבנית ברורה (פחות false positives)."""
+    """heuristic שמרני לחילוץ מיקום מטקסט חופשי (פורמט ARINC קומפקטי). מחזיר (lat, lon)
+    או None. מכוון לדיוק על פני כיסוי => מחזיר רק כשהתבנית מלאה וברורה."""
     if not text:
         return None
     m = _TEXT_POS_RE.search(text)
     if not m:
         return None
     try:
-        if m.group(1):                        # פורמט N3200.0E03450.0 (NS קודם)
-            ns, lat_d, lat_m, ew, lon_d, lon_m = m.group(1, 2, 3, 4, 5, 6)
-            lat = float(lat_d[:2]) + float((lat_d[2:] or "0") + "." + (lat_m or "0")) / 60
-            lon = float(lon_d[:3]) + float((lon_d[3:] or "0") + "." + (lon_m or "0")) / 60
-        else:                                 # פורמט 3200.0N/03450.0E (מספר קודם)
-            lat_v, ns, lon_v, ew = m.group(7, 8, 9, 10)
-            lat, lon = float(lat_v), float(lon_v)
-            if lat > 90:                      # DDMM.m => המר לדרגות עשרוניות
-                lat = int(lat // 100) + (lat % 100) / 60
-            if lon > 180:
-                lon = int(lon // 100) + (lon % 100) / 60
-        if ns == "S":
-            lat = -lat
-        if ew == "W":
-            lon = -lon
-    except (ValueError, IndexError):
+        ns, la_d, la_m, la_f, ew, lo_d, lo_m, lo_f = m.groups()
+        lat = int(la_d) + float(la_m + "." + (la_f or "0")) / 60
+        lon = int(lo_d) + float(lo_m + "." + (lo_f or "0")) / 60
+    except (ValueError, TypeError):
         return None
+    if ns == "S":
+        lat = -lat
+    if ew == "W":
+        lon = -lon
     if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
         return None
     return round(lat, 5), round(lon, 5)
