@@ -33,6 +33,7 @@ apt-get install -y \
   libsoapysdr-dev soapysdr-tools \
   libmp3lame-dev libshout3-dev \
   libconfig++-dev libfftw3-dev \
+  zlib1g-dev libxml2-dev \
   icecast2 python3 python3-flask
 
 # ----------------------------------------------------------------------------
@@ -182,6 +183,40 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+# 4b. libacars + acarsdec  (מצב משולב: פענוח ACARS דרך SoapySDR/SDRplay)
+# ----------------------------------------------------------------------------
+# מצב ה-ACARS בממשק מריץ acarsdec על אותו RSP1B (בהחלפה עם rtl_airband).
+# libacars נותן פענוח ARINC-622 (אופציונלי אך מומלץ); acarsdec נבנה עם -Dsoapy=ON.
+if pkg-config --exists libacars-2 2>/dev/null; then
+  log "libacars כבר מותקן - מדלג."
+else
+  log "בונה libacars..."
+  cd "$BUILD_DIR"
+  [[ -d libacars ]] || git clone https://github.com/szpajder/libacars.git
+  cd libacars && rm -rf build && mkdir build && cd build
+  cmake .. && make -j"$(nproc)" && make install && ldconfig
+fi
+
+# acarsdec: בנייה מחדש כשמשתנים דגלי ה-cmake (חתימה => אידמפוטנטי כמו rtl_airband)
+ACARS_CMAKE_FLAGS="-Dsoapy=ON"
+ACARS_BUILD_SIG="$(printf '%s' "$ACARS_CMAKE_FLAGS" | sha256sum | awk '{print $1}')"
+AIRAM_ACARS_MARK="/usr/local/share/airam/acarsdec.build-sig"
+if command -v acarsdec >/dev/null 2>&1 && [[ "$(cat "$AIRAM_ACARS_MARK" 2>/dev/null)" == "$ACARS_BUILD_SIG" ]]; then
+  log "acarsdec (SoapySDR) כבר מותקן - מדלג."
+else
+  log "בונה acarsdec (SoapySDR)..."
+  cd "$BUILD_DIR"
+  [[ -d acarsdec ]] || git clone https://github.com/TLeconte/acarsdec.git
+  cd acarsdec && rm -rf build && mkdir build && cd build
+  # PKG_CONFIG_PATH => כדי ש-cmake ימצא את libacars-2 שהותקן ל-/usr/local
+  PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
+    cmake $ACARS_CMAKE_FLAGS .. && make -j"$(nproc)" && make install
+  command -v acarsdec >/dev/null 2>&1 || die "בניית acarsdec נכשלה (בדוק SoapySDR/libacars)."
+  mkdir -p "$(dirname "$AIRAM_ACARS_MARK")"
+  printf '%s' "$ACARS_BUILD_SIG" > "$AIRAM_ACARS_MARK"
+fi
+
+# ----------------------------------------------------------------------------
 # 5. Icecast2  -  ללא סיסמה למאזין (סיסמת source פנימית קבועה)
 # ----------------------------------------------------------------------------
 log "מגדיר Icecast2 (מאזינים ללא סיסמה, latency נמוך)..."
@@ -240,9 +275,13 @@ chown -R airam:airam /etc/rtl_airband /var/lib/airam
 for grp in systemd-journal video; do
   getent group "$grp" >/dev/null 2>&1 && usermod -aG "$grp" airam || true
 done
-# sudoers: מתיר ל-airam *רק* את ההפעלה-מחדש של rtl_airband (NOPASSWD), לא יותר
+# sudoers: מתיר ל-airam *רק* את פקודות ה-systemctl המדויקות הדרושות (NOPASSWD), לא יותר.
+# מצב משולב: stop rtl_airband + restart/stop airam-acars => מעבר קול<->ACARS על SDR אחד.
 cat > /etc/sudoers.d/airam <<'EOF'
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart rtl_airband
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop rtl_airband
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-acars
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-acars
 EOF
 chmod 440 /etc/sudoers.d/airam
 visudo -cf /etc/sudoers.d/airam >/dev/null || die "קובץ sudoers לא תקין (/etc/sudoers.d/airam)."
@@ -255,6 +294,8 @@ if [[ ! -f /etc/airam/airam.env ]]; then
 # AIRAM_PIN=1234
 EOF
 fi
+# הגדרות ACARS (ברירת מחדל; airam-web דורס בכל מעבר למצב ACARS). בבעלות airam => airam-web יכול לכתוב.
+[[ -f /etc/airam/acars.env ]] || cp "$REPO_DIR/config/acars.env" /etc/airam/acars.env
 chown -R airam:airam /etc/airam
 
 # ----------------------------------------------------------------------------
@@ -300,10 +341,13 @@ fi
 # 8. שירותי systemd
 # ----------------------------------------------------------------------------
 log "מתקין שירותי systemd ..."
-cp "$REPO_DIR/systemd/sdrplay.service"     /etc/systemd/system/
-cp "$REPO_DIR/systemd/rtl_airband.service" /etc/systemd/system/
-cp "$REPO_DIR/systemd/airam-web.service"   /etc/systemd/system/
+cp "$REPO_DIR/systemd/sdrplay.service"      /etc/systemd/system/
+cp "$REPO_DIR/systemd/rtl_airband.service"  /etc/systemd/system/
+cp "$REPO_DIR/systemd/airam-web.service"    /etc/systemd/system/
+cp "$REPO_DIR/systemd/airam-acars.service"  /etc/systemd/system/
 systemctl daemon-reload
+# airam-acars *לא* enabled בכוונה: מצב ברירת המחדל הוא קול (rtl_airband), ו-airam-web
+# מפעיל/עוצר את acarsdec לפי בחירת המצב. Conflicts ב-unit מבטיח שלא ירוצו יחד.
 systemctl enable sdrplay.service rtl_airband.service airam-web.service
 # restart (ולא enable --now שהוא no-op לשירות שכבר רץ!) - אחרת בעדכון
 # הבינארי/הקוד/ה-units החדשים לא נטענים והשירותים ממשיכים לרוץ עם הישנים.

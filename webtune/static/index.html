@@ -359,6 +359,32 @@
       background: var(--panel-2); border: 1px solid var(--border);
       border-radius: 10px; padding: .6rem; max-height: 9rem; overflow: auto;
     }
+    /* ---------- מתג מצב (קול / ACARS) ---------- */
+    .modebar { margin-bottom: .9rem; }
+    .modebar .seg { width: 100%; }
+    .modebar .seg button { flex: 1; padding: .6rem; font-size: .95rem; }
+
+    /* ---------- ACARS ---------- */
+    .acars-head { display: flex; align-items: center; justify-content: space-between;
+      gap: .6rem; flex-wrap: wrap; }
+    .acars-freqs { direction: ltr; font-variant-numeric: tabular-nums;
+      font-size: .78rem; color: var(--dim); }
+    .acars-feed { margin-top: .6rem; display: flex; flex-direction: column; gap: .5rem;
+      max-height: 62vh; overflow: auto; }
+    .amsg { background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 12px; padding: .55rem .65rem; }
+    .amsg-top { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; font-size: .85rem; }
+    .amsg-tail { font-weight: 700; color: var(--accent-2); direction: ltr; }
+    .amsg-flight { color: var(--text); direction: ltr; }
+    .amsg-freq { color: var(--accent); direction: ltr; font-variant-numeric: tabular-nums; font-size: .78rem; }
+    .amsg-time { margin-inline-start: auto; color: var(--dim); font-size: .72rem;
+      direction: ltr; font-variant-numeric: tabular-nums; }
+    .amsg-meta { color: var(--dim); font-size: .7rem; margin-top: .15rem; direction: ltr; }
+    .amsg-text { direction: ltr; text-align: left; white-space: pre-wrap; word-break: break-word;
+      font-size: .78rem; color: var(--text); margin-top: .35rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .acars-empty { color: #5c6878; font-size: .8rem; text-align: center; margin: .8rem 0 .2rem; }
+
     .hidden { display: none !important; }
   </style>
 </head>
@@ -369,6 +395,16 @@
     <span class="tag" id="verTag">SDRplay RSP1B</span>
   </header>
 
+  <!-- מתג מצב: קול (rtl_airband) / ACARS (acarsdec) — SDR אחד בהחלפה -->
+  <div class="modebar">
+    <div class="seg" id="modeSeg">
+      <button type="button" data-v="voice" class="on">📻 קול</button>
+      <button type="button" data-v="acars">📡 ACARS</button>
+    </div>
+  </div>
+
+  <!-- ===================== תצוגת קול ===================== -->
+  <div id="voiceView">
   <!-- תצוגת הרדיו -->
   <section class="card radio">
     <span id="pill" class="pill"><span class="dot"></span><span id="status">טוען…</span></span>
@@ -549,6 +585,21 @@
     <p class="hint">אוטומטי מתאים לרוב התדרים · ל-ATIS ושידור רציף בחר "פתוח" ·
       "ידני" אם הסקוולץ׳ נפתח על רעש או חותך דיבור. שינוי הגדרה מוחל מיד על התדר הנוכחי.</p>
   </section>
+  </div><!-- /voiceView -->
+
+  <!-- ===================== תצוגת ACARS ===================== -->
+  <section class="card hidden" id="acarsView">
+    <div class="acars-head">
+      <span id="acarsPill" class="pill"><span class="dot"></span><span id="acarsStatus">טוען…</span></span>
+      <span class="acars-freqs" id="acarsFreqs"></span>
+    </div>
+    <button id="towerBtn" class="primary" style="width:100%; margin:.7rem 0 .2rem">🎧 האזן למגדל (134.600)</button>
+    <p class="hint">מצב ACARS תופס את ה-SDR לפענוח הודעות נתונים — לכן אי אפשר לשמוע קול במקביל
+      (מקלט אחד). לחזרה לשמע: "האזן למגדל" או החלף ל"קול" למעלה. ACARS משדר בבזקים קצרים,
+      אז ייתכנו דקות של שקט.</p>
+    <div class="acars-feed" id="acarsFeed"></div>
+    <p class="acars-empty" id="acarsEmpty">ממתין להודעות…</p>
+  </section>
 
   <script>
     const $ = (id) => document.getElementById(id);
@@ -558,6 +609,9 @@
     let retryTimer = null;
     let connectTimer = null;
     let wantPlaying = false;      // iOS עוצר את הנגן ברקע => זוכרים את כוונת המשתמש
+    let appMode = "voice";        // "voice" (rtl_airband) | "acars" (acarsdec)
+    let acarsTimer = null;
+    let acarsLastId = 0;          // cursor: ה-id האחרון שקיבלנו מ-/api/acars
 
     /* ---------- API + PIN אופציונלי ---------- */
     // PIN פעיל רק אם השרת הוגדר עם AIRAM_PIN. אחרת לעולם לא נתבקש => חוויה זהה.
@@ -928,7 +982,7 @@
     }
     // rtl_airband מרענן את הקובץ כל ~1 שנייה => פולינג כל שנייה למשוב כמעט-רציף
     // (לכיוון אנטנה בזמן אמת), ורק כשהדף גלוי (חוסך סוללה בטלפון)
-    setInterval(() => { if (!document.hidden) pollMetrics(); }, 1000);
+    setInterval(() => { if (!document.hidden && appMode === "voice") pollMetrics(); }, 1000);
     pollMetrics();
 
     /* ---------- חיווי מתח ל-Pi ---------- */
@@ -957,7 +1011,7 @@
         $("pwrText").textContent = txt;
       } catch (e) { /* משאירים מצב קודם */ }
     }
-    setInterval(() => { if (!document.hidden) pollPower(); }, 5000);
+    setInterval(() => { if (!document.hidden && appMode === "voice") pollPower(); }, 5000);
     pollPower();
 
     /* ---------- מפת המסלולים (SVG בקנה מידה) ---------- */
@@ -1127,7 +1181,7 @@
     }
     // ה-backend מושך מ-adsb.lol פעם בדקה => דגימה כל 30 שניות מספיקה,
     // ורק כשהדף גלוי (אותו דפוס כמו מדדי ה-RF)
-    setInterval(() => { if (!document.hidden) pollAirspace(); }, 30000);
+    setInterval(() => { if (!document.hidden && appMode === "voice") pollAirspace(); }, 30000);
     pollAirspace();
 
     /* ---------- יומן שידורים ---------- */
@@ -1226,7 +1280,7 @@
       } catch (e) { /* offline - הסטטוס הראשי כבר מציג שגיאת רשת */ }
     }
     $("actSearch").addEventListener("input", renderActivity);
-    setInterval(() => { if (!document.hidden) pollActivity(); }, 15000);
+    setInterval(() => { if (!document.hidden && appMode === "voice") pollActivity(); }, 15000);
     pollActivity();
 
     /* ---------- METAR ---------- */
@@ -1255,8 +1309,112 @@
         $("metarCard").classList.remove("hidden");
       } catch (e) { /* offline */ }
     }
-    setInterval(() => { if (!document.hidden) pollMetar(); }, 300000);
+    setInterval(() => { if (!document.hidden && appMode === "voice") pollMetar(); }, 300000);
     pollMetar();
+
+    /* ---------- מצב: קול / ACARS ---------- */
+    // SDR אחד => החלפה: מצב ACARS עוצר את rtl_airband ומריץ acarsdec (ולהפך).
+    function showView(mode) {
+      appMode = mode;
+      $("voiceView").classList.toggle("hidden", mode !== "voice");
+      $("acarsView").classList.toggle("hidden", mode !== "acars");
+      segSet("modeSeg", mode);
+      if (mode === "acars") {
+        wantPlaying = false;
+        player.pause();                       // אין שמע במצב ACARS (מקלט תפוס)
+        startAcarsPolling();
+      } else {
+        stopAcarsPolling();
+      }
+    }
+
+    async function applyMode(mode, extra) {
+      showView(mode);                         // עדכון אופטימי; אם השרת נכשל נסנכרן חזרה
+      setStatus(mode === "acars" ? "מפעיל ACARS…" : "חוזר לקול…", "busy");
+      try {
+        const res = await apiSend("POST", "/api/mode", { mode, ...(extra || {}) });
+        const data = await res.json();
+        if (!data.ok) {
+          setStatus("שגיאה: " + (data.error || "מעבר מצב נכשל"), "err");
+          showError(data.detail || null);
+          showView((data.state && data.state.app_mode) || "voice");
+          return false;
+        }
+        showError(null);
+        if (mode === "voice") {
+          if (data.freq != null) { current = Number(data.freq); updateDisplay(current); }
+          setStatus("מתחבר לסטרים…", "busy");
+          clearTimeout(connectTimer);
+          connectTimer = setTimeout(() => reloadStream(), 1500);
+        } else {
+          if (data.acars_freqs) renderAcarsFreqs(data.acars_freqs);
+          setAcarsStatus(true);
+          pollAcars();                        // רענון מיידי אחרי ש-acarsdec עלה
+        }
+        return true;
+      } catch (e) {
+        setStatus("שגיאת רשת — בדוק חיבור ל-Pi", "err");
+        return false;
+      }
+    }
+
+    function renderAcarsFreqs(freqs) {
+      $("acarsFreqs").textContent = (freqs || []).join(" · ");
+    }
+    function setAcarsStatus(active) {
+      $("acarsStatus").textContent = active ? "מאזין · ACARS" : "ACARS כבוי";
+      $("acarsPill").className = "pill " + (active ? "live" : "err");
+    }
+    function fmtTime(epoch) {
+      const d = epoch ? new Date(epoch * 1000) : new Date();
+      return d.toLocaleTimeString("he-IL", { hour12: false });
+    }
+
+    function renderAcarsMsg(m) {
+      const el = document.createElement("div");
+      el.className = "amsg";
+      const top = document.createElement("div");
+      top.className = "amsg-top";
+      const mk = (cls, txt) => { const s = document.createElement("span"); s.className = cls; s.textContent = txt; return s; };
+      if (m.tail)   top.appendChild(mk("amsg-tail", m.tail));
+      if (m.flight) top.appendChild(mk("amsg-flight", m.flight));
+      if (m.freq != null) top.appendChild(mk("amsg-freq", Number(m.freq).toFixed(3)));
+      top.appendChild(mk("amsg-time", fmtTime(m.t)));
+      el.appendChild(top);
+      const meta = [];
+      if (m.label) meta.push("label " + m.label);
+      if (m.mode)  meta.push("mode " + m.mode);
+      if (m.msgno) meta.push("#" + m.msgno);
+      if (meta.length) el.appendChild(mk("amsg-meta", meta.join(" · ")));
+      if (m.text) el.appendChild(mk("amsg-text", m.text));
+      return el;
+    }
+
+    async function pollAcars() {
+      try {
+        const data = await (await fetch("/api/acars?since=" + acarsLastId)).json();
+        if (!data.ok) return;
+        setAcarsStatus(data.active);
+        if (data.freqs) renderAcarsFreqs(data.freqs);
+        const feed = $("acarsFeed");
+        if (data.messages && data.messages.length) {
+          $("acarsEmpty").style.display = "none";
+          for (const m of data.messages) {        // חדשה ביותר תמיד למעלה
+            feed.insertBefore(renderAcarsMsg(m), feed.firstChild);
+            if (m.id > acarsLastId) acarsLastId = m.id;
+          }
+          while (feed.children.length > 200) feed.removeChild(feed.lastChild);
+        }
+      } catch (e) { /* רשת זמנית => המחזור הבא ינסה שוב */ }
+    }
+    function startAcarsPolling() {
+      stopAcarsPolling();
+      pollAcars();
+      acarsTimer = setInterval(() => { if (!document.hidden) pollAcars(); }, 3000);
+    }
+    function stopAcarsPolling() {
+      if (acarsTimer) { clearInterval(acarsTimer); acarsTimer = null; }
+    }
 
     /* ---------- אירועים ---------- */
     // רמז (לא חסימה) כשהתדר מחוץ ל-air band — טעות נפוצה: הקלדת תדר FM/קשר
@@ -1277,6 +1435,15 @@
     segInit("sqSeg", (v) => {
       showManual(v === "manual");
       retune();
+    });
+
+    // מתג מצב קול/ACARS — מעבר מיידי (השרת מחליף את השירות שמחזיק את ה-SDR)
+    segInit("modeSeg", (v) => applyMode(v));
+    // "האזן למגדל" מתוך מצב ACARS: חוזר לקול ומכוונן ל-134.6 בבת אחת
+    $("towerBtn").onclick = () => applyMode("voice", {
+      freq: 134.6, mod: "am", agc: true,
+      if_gain: sliderToIFGR(), rf_gain: sliderToRFGR(),
+      squelch_mode: "auto", squelch_snr: getSnr(),
     });
 
     $("agc").onchange = () => { renderGainUI(); retune(); };
@@ -1330,6 +1497,7 @@
     let hiddenAt = 0;
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) { hiddenAt = Date.now(); return; }
+      if (appMode !== "voice") return;   // במצב ACARS אין סטרים שמע לסנכרן
       if (wantPlaying && (Date.now() - hiddenAt > 10000 || player.error)) reloadStream();
     });
 
@@ -1351,10 +1519,18 @@
       showManual(st.squelch_mode === "manual");
       current = Number(st.freq);
       updateDisplay(current);
-      setStatus("מוכן — לחץ ▶ או בחר תדר");
-      player.src = streamURL();
       $("extBtn").href = appStreamHref();   // אנדרואיד => intent ל-VLC; אחרת /live.m3u
-      pollActivity();   // עכשיו כש-cfg.presets נטען, שמות הפריסטים יופיעו ביומן
+      if (st.acars_freqs) renderAcarsFreqs(st.acars_freqs);
+      // app_mode מגיע מהמציאות (השירות הפעיל) => מציגים את התצוגה הנכונה בטעינה
+      if (st.app_mode === "acars") {
+        showView("acars");
+        setStatus("מצב ACARS פעיל", "live");
+      } else {
+        showView("voice");
+        setStatus("מוכן — לחץ ▶ או בחר תדר");
+        player.src = streamURL();
+        pollActivity();   // עכשיו כש-cfg.presets נטען, שמות הפריסטים יופיעו ביומן
+      }
     }).catch(() => setStatus("אין חיבור לשרת", "err"));
 
     // רישום ה-service worker => מאפשר "הוסף למסך הבית" כאפליקציה. לא מטמיין כלום.
