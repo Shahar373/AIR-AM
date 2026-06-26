@@ -433,11 +433,16 @@ def _scan_latlon(obj):
     return round(lat, 5), round(lon, 5)
 
 
-# מיקום בפורמט ARINC קומפקטי בטקסט חופשי: N3206.0E03450.0 (DDMM.m / DDDMM.m, hemisphere קודם).
-# שמרני בכוונה — הדקות נאכפות 00–59 ברמת ה-regex (‎[0-5]\d) => כמעט בלי false positives
-# מרצפי-ספרות מקריים. פורמטים אחרים (עשרוני) נדירים בטקסט ACARS ולא נתמכים (עדיף דיוק).
+# מיקום בפורמט ARINC קומפקטי בטקסט חופשי. שני פורמטים נתמכים:
+# 1. עם נקודה עשרונית (ואופציונלית פסיק בין lat ל-lon): N3206.0,E03450.0 או N3206.0 E03450.0
+# 2. ספרה עשרונית ללא נקודה (DDMMf / DDDMMf): N32042E034560 = N 32°04.2' E 034°56.0'
+# שמרני בכוונה — [0-5]\d אוכף דקות 00–59 => כמעט בלי false positives ממרצפי-ספרות מקריים.
 _TEXT_POS_RE = re.compile(
-    r"([NS])\s?(\d{2})([0-5]\d)(?:\.(\d{1,3}))?\s?([EW])\s?(\d{3})([0-5]\d)(?:\.(\d{1,3}))?")
+    r"([NS])\s?(\d{2})([0-5]\d)\.(\d{1,3})[,\s]?([EW])\s?(\d{3})([0-5]\d)\.(\d{1,3})")
+# פורמט קומפקטי ללא נקודה: N32042E034560 — ספרת עשרון מחוברת ישירות אחרי הדקות.
+# מנסים אחרי הפורמט עם נקודה (עדיפות נמוכה) כי הוא מדויק פחות.
+_TEXT_POS_COMPACT_RE = re.compile(
+    r"([NS])(\d{2})([0-5]\d)(\d)([EW])(\d{3})([0-5]\d)(\d)")
 
 
 def _text_latlon(text):
@@ -445,22 +450,33 @@ def _text_latlon(text):
     או None. מכוון לדיוק על פני כיסוי => מחזיר רק כשהתבנית מלאה וברורה."""
     if not text:
         return None
+
+    def _parse(groups, compact=False):
+        try:
+            ns, la_d, la_m, la_f, ew, lo_d, lo_m, lo_f = groups
+            if compact:
+                lat = int(la_d) + (int(la_m) + int(la_f) / 10) / 60
+                lon = int(lo_d) + (int(lo_m) + int(lo_f) / 10) / 60
+            else:
+                lat = int(la_d) + float(la_m + "." + (la_f or "0")) / 60
+                lon = int(lo_d) + float(lo_m + "." + (lo_f or "0")) / 60
+        except (ValueError, TypeError):
+            return None
+        if ns == "S":
+            lat = -lat
+        if ew == "W":
+            lon = -lon
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+            return None
+        return round(lat, 5), round(lon, 5)
+
     m = _TEXT_POS_RE.search(text)
-    if not m:
-        return None
-    try:
-        ns, la_d, la_m, la_f, ew, lo_d, lo_m, lo_f = m.groups()
-        lat = int(la_d) + float(la_m + "." + (la_f or "0")) / 60
-        lon = int(lo_d) + float(lo_m + "." + (lo_f or "0")) / 60
-    except (ValueError, TypeError):
-        return None
-    if ns == "S":
-        lat = -lat
-    if ew == "W":
-        lon = -lon
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
-        return None
-    return round(lat, 5), round(lon, 5)
+    if m:
+        return _parse(m.groups())
+    m = _TEXT_POS_COMPACT_RE.search(text)
+    if m:
+        return _parse(m.groups(), compact=True)
+    return None
 
 
 def _libacars_decode(obj):

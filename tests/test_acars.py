@@ -290,6 +290,27 @@ def test_text_latlon_rejects_noise_and_parses_arinc():
     assert -33 < lat < -31 and -35 < lon < -34
 
 
+def test_text_latlon_comma_separated():
+    """פורמט H1 של B737: N3203.7,E03455.7 (פסיק בין lat ל-lon, בלי רווח)."""
+    lat, lon = app._text_latlon("10.17.24,DC,3201,01167,155.6,.240,024.0,027.5,N3203.7,E03455.7,138480")
+    assert abs(lat - 32.0617) < 0.001 and abs(lon - 34.9283) < 0.001
+
+
+def test_text_latlon_compact_no_decimal():
+    """פורמט קומפקטי ללא נקודה עשרונית: N32042E034560 = N32°04.2' E034°56.0'."""
+    # embedded mid-string with trailing digits (D56A style)
+    lat, lon = app._text_latlon("N32042E03456010170135P238245007GXXXX22000HAB,")
+    assert abs(lat - 32.07) < 0.001 and abs(lon - 34.9333) < 0.001
+    # POS prefix (F50A style)
+    lat, lon = app._text_latlon("POSN32010E034540,RW21,103458,2,1000,,GEMDA")
+    assert abs(lat - 32.0167) < 0.001 and abs(lon - 34.9) < 0.001
+    # FPON prefix, 3-digit degree lon (F00A style — Turkish airspace)
+    lat, lon = app._text_latlon("LTAA.AFN/FMHIGT1166,.4L-GIT,,062600/FPON39428E038506,1/FCOADS")
+    assert abs(lat - 39.7133) < 0.001 and abs(lon - 38.8433) < 0.001
+    # SQ logon must NOT extract (ground-station address, not aircraft position)
+    assert app._text_latlon("02XSTLVLLBG03200N03452EV136975/") is None
+
+
 # --- ייצוא ------------------------------------------------------------------
 
 def test_acars_export_csv(client, paths):
