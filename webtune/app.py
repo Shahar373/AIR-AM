@@ -85,15 +85,34 @@ ACARS_LABELS = {
     "SQ": ("התחברות (login)", "comm"),
     "H1": ("הודעת מערכת/חברה (H1)", "text"),
     "5Z": ("שירות חברה (airline)", "text"),
+    "C1": ("הודעת חברה (C1)", "text"),
     "RA": ("תקשורת אוויר/קרקע", "text"),
     "RB": ("תקשורת אוויר/קרקע", "text"),
     "QA": ("OOOI · יציאה (Out)", "oooi"),
     "QB": ("OOOI · המראה (Off)", "oooi"),
     "QC": ("OOOI · נחיתה (On)", "oooi"),
     "QD": ("OOOI · חניה (In)", "oooi"),
+    "80": ("OOOI · דוח OFFRP/INRP (80)", "oooi"),
+    "A9": ("ATIS · מידע שדה (A9)", "comm"),
     "B9": ("בקשת אישור ATC", "clearance"),
     "BA": ("אישור ATC (clearance)", "clearance"),
 }
+
+# כיוון ההודעה (best-effort, חלקי בכוונה — כמו ACARS_LABELS): downlink = מטוס→קרקע
+# (דיווח/בקשה מהמטוס), uplink = קרקע→מטוס (אישור/הודעת חברה אל המטוס). רק labels שאנו
+# בטוחים בהם; השאר נופלים ל-heuristic של header או ל-None (לא מנחשים).
+_ACARS_DIR_BY_LABEL = {
+    "H1": "downlink", "SQ": "downlink", "5Z": "downlink", "C1": "downlink",
+    "QA": "downlink", "QB": "downlink", "QC": "downlink", "QD": "downlink",
+    "80": "downlink",   # דוח OOOI (OFFRP/INRP) מהמטוס
+    "Q0": "downlink",   # link test ממטוס
+    "B9": "downlink",   # בקשת אישור מהמטוס
+    "BA": "uplink",     # מתן אישור מהקרקע אל המטוס
+    "A9": "uplink",     # ATIS משודר מהקרקע
+}
+# header ניתוב של תחנת קרקע בתחילת הטקסט (למשל ‎.ATSXCXA או ‎/TLVATYA) => uplink.
+# שמרני: דורש ‎. או ‎/ בתחילת השורה ואחריו מזהה תחנה אותיות-גדולות/ספרות.
+_UPLINK_HEADER_RE = re.compile(r"^[./][A-Z][A-Z0-9]{3,7}\b")
 
 # הקלטות: rtl_airband כותב קובץ MP3 לכל שידור (split_on_transmission) בשם
 # <REC_BASENAME>_YYYYMMDD_HHMMSS_<Hz>.mp3 (.tmp בזמן כתיבה, rename בסגירה
@@ -420,11 +439,16 @@ def _scan_latlon(obj):
     return round(lat, 5), round(lon, 5)
 
 
-# מיקום בפורמט ARINC קומפקטי בטקסט חופשי: N3206.0E03450.0 (DDMM.m / DDDMM.m, hemisphere קודם).
-# שמרני בכוונה — הדקות נאכפות 00–59 ברמת ה-regex (‎[0-5]\d) => כמעט בלי false positives
-# מרצפי-ספרות מקריים. פורמטים אחרים (עשרוני) נדירים בטקסט ACARS ולא נתמכים (עדיף דיוק).
+# מיקום בפורמט ARINC קומפקטי בטקסט חופשי. שני פורמטים נתמכים:
+# 1. עם נקודה עשרונית (ואופציונלית פסיק בין lat ל-lon): N3206.0,E03450.0 או N3206.0 E03450.0
+# 2. ספרה עשרונית ללא נקודה (DDMMf / DDDMMf): N32042E034560 = N 32°04.2' E 034°56.0'
+# שמרני בכוונה — [0-5]\d אוכף דקות 00–59 => כמעט בלי false positives ממרצפי-ספרות מקריים.
 _TEXT_POS_RE = re.compile(
-    r"([NS])\s?(\d{2})([0-5]\d)(?:\.(\d{1,3}))?\s?([EW])\s?(\d{3})([0-5]\d)(?:\.(\d{1,3}))?")
+    r"([NS])\s?(\d{2})([0-5]\d)\.(\d{1,3})[,\s]?([EW])\s?(\d{3})([0-5]\d)\.(\d{1,3})")
+# פורמט קומפקטי ללא נקודה: N32042E034560 — ספרת עשרון מחוברת ישירות אחרי הדקות.
+# מנסים אחרי הפורמט עם נקודה (עדיפות נמוכה) כי הוא מדויק פחות.
+_TEXT_POS_COMPACT_RE = re.compile(
+    r"([NS])(\d{2})([0-5]\d)(\d)([EW])(\d{3})([0-5]\d)(\d)")
 
 
 def _text_latlon(text):
@@ -432,22 +456,33 @@ def _text_latlon(text):
     או None. מכוון לדיוק על פני כיסוי => מחזיר רק כשהתבנית מלאה וברורה."""
     if not text:
         return None
+
+    def _parse(groups, compact=False):
+        try:
+            ns, la_d, la_m, la_f, ew, lo_d, lo_m, lo_f = groups
+            if compact:
+                lat = int(la_d) + (int(la_m) + int(la_f) / 10) / 60
+                lon = int(lo_d) + (int(lo_m) + int(lo_f) / 10) / 60
+            else:
+                lat = int(la_d) + float(la_m + "." + (la_f or "0")) / 60
+                lon = int(lo_d) + float(lo_m + "." + (lo_f or "0")) / 60
+        except (ValueError, TypeError):
+            return None
+        if ns == "S":
+            lat = -lat
+        if ew == "W":
+            lon = -lon
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+            return None
+        return round(lat, 5), round(lon, 5)
+
     m = _TEXT_POS_RE.search(text)
-    if not m:
-        return None
-    try:
-        ns, la_d, la_m, la_f, ew, lo_d, lo_m, lo_f = m.groups()
-        lat = int(la_d) + float(la_m + "." + (la_f or "0")) / 60
-        lon = int(lo_d) + float(lo_m + "." + (lo_f or "0")) / 60
-    except (ValueError, TypeError):
-        return None
-    if ns == "S":
-        lat = -lat
-    if ew == "W":
-        lon = -lon
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
-        return None
-    return round(lat, 5), round(lon, 5)
+    if m:
+        return _parse(m.groups())
+    m = _TEXT_POS_COMPACT_RE.search(text)
+    if m:
+        return _parse(m.groups(), compact=True)
+    return None
 
 
 def _libacars_decode(obj):
@@ -474,6 +509,66 @@ def _libacars_decode(obj):
     walk(obj)
     text = " · ".join(dict.fromkeys(texts))[:300] or None   # dedup בשמירת סדר
     return kind, text
+
+
+def _acars_direction(label, text):
+    """heuristic שמרני לכיוון ההודעה: 'uplink' (קרקע→מטוס) / 'downlink' (מטוס→קרקע) / None.
+    label מוכר קודם (אמין), אחרת header ניתוב בטקסט => uplink. None כשלא חד-משמעי (לא מנחשים)."""
+    d = _ACARS_DIR_BY_LABEL.get(label)
+    if d:
+        return d
+    if isinstance(text, str) and _UPLINK_HEADER_RE.match(text.lstrip()):
+        return "uplink"
+    return None
+
+
+_ATIS_WIND_RE = re.compile(r"(\d{3})/(\d{2,3}KT)|WIND\s+(\d+)/(\d+)")
+_ATIS_RWY_RE = re.compile(r"R(?:WY|/W)\s?(\d{1,2}[LRC]?)", re.IGNORECASE)
+_ATIS_QNH_RE = re.compile(r"Q(?:NH\s?)?(\d{4})")
+_ACTYPE_RE = re.compile(r"\b(B7[3-9]\d|A[23][0-9]\d|E[17][0-9]\d|CRJ\d|AT[57]\d)\b")
+# זוגות OUT/OFF/ON/IN + זמן (HHMM עם/בלי :) — \b לפני הכותרת, בלי \b אחריה כי הזמן
+# עלול להיות צמוד (OUT1420). IN לא בתחילת מילה לפני ספרה אבל הפורמטים בשטח לא מופרדים.
+_OOOI_PAIR_RE = re.compile(r"\b(OUT|OFF|ON|IN)\s?(\d{2}[:.]\d{2}|\d{4})", re.IGNORECASE)
+
+
+def _parse_atis(text):
+    """Best-effort: מחלץ wind/runway/QNH מטקסט A9 (ATIS). מחזיר string קצר או None."""
+    if not text:
+        return None
+    parts = []
+    m = _ATIS_RWY_RE.search(text)
+    if m:
+        parts.append(f"מסלול {m.group(1)}")
+    m = _ATIS_WIND_RE.search(text)
+    if m:
+        wind = (m.group(1) + "/" + m.group(2)) if m.group(1) else (m.group(3) + "/" + m.group(4))
+        parts.append(f"רוח {wind}")
+    m = _ATIS_QNH_RE.search(text)
+    if m:
+        parts.append(f"QNH {m.group(1)}")
+    return " · ".join(parts) if parts else None
+
+
+def _parse_oooi_80(text):
+    """Best-effort: מחלץ זמני OUT/OFF/ON/IN מהודעות OFFRP/INRP (label 80)."""
+    if not text:
+        return None
+    pairs = []
+    for m in _OOOI_PAIR_RE.finditer(text):
+        k = m.group(1).upper()
+        t = m.group(2).replace(".", "").replace(":", "")
+        if len(t) == 4:
+            t = t[:2] + ":" + t[2:]
+        pairs.append(f"{k} {t}")
+    return " · ".join(pairs) if pairs else None
+
+
+def _extract_actype(label, text):
+    """Best-effort: מחלץ סוג מטוס (למשל B738, A320) מטקסט H1/C1. מחזיר string או None."""
+    if label not in ("H1", "C1") or not text:
+        return None
+    m = _ACTYPE_RE.search(text)
+    return m.group(1) if m else None
 
 
 def _normalize_acars(m):
@@ -514,6 +609,13 @@ def _normalize_acars(m):
     if lat is not None:
         group = "position"                    # יש מיקום => תמיד ירוק (קבוצת position)
 
+    # פענוח מבנה label-ספציפי (רק אם libacars לא סיפק decoded כבר)
+    if decoded is None:
+        if label == "80":
+            decoded = _parse_oooi_80(text)
+        elif label == "A9":
+            decoded = _parse_atis(text)
+
     return {
         "t": g("timestamp"),                  # epoch seconds (float) מ-acarsdec
         "freq": g("freq"),                    # MHz
@@ -525,12 +627,14 @@ def _normalize_acars(m):
         "flight": g("flight", "fid"),
         "mode": g("mode"),
         "msgno": g("msgno"),
+        "dir": _acars_direction(label, text),  # "uplink" | "downlink" | None (best-effort)
         "lat": lat,
         "lon": lon,
         "pos_src": pos_src,                   # "adsc" | "text" | None
-        "decoded": decoded,                   # טקסט מפוענח קצר (CPDLC וכו') או None
+        "decoded": decoded,                   # טקסט מפוענח קצר (CPDLC/ATIS/OOOI וכו') או None
         "text": text,
         "error": m.get("error"),
+        "actype": _extract_actype(label, text),  # סוג מטוס best-effort (H1/C1) או None
     }
 
 
@@ -1207,7 +1311,7 @@ def api_acars():
 
 
 ACARS_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "mode", "label",
-                     "category", "group", "tail", "flight", "msgno", "error",
+                     "category", "group", "dir", "tail", "flight", "actype", "msgno", "error",
                      "lat", "lon", "pos_src", "text"]
 
 
@@ -1248,8 +1352,8 @@ def api_acars_export():
             iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)) if t else ""
             txt = (r.get("text") or "").replace("\r", " ").replace("\n", " ")
             w.writerow([iso, t, r.get("freq"), r.get("level"), r.get("mode"),
-                        r.get("label"), r.get("category"), r.get("group"),
-                        r.get("tail"), r.get("flight"), r.get("msgno"), r.get("error"),
+                        r.get("label"), r.get("category"), r.get("group"), r.get("dir"),
+                        r.get("tail"), r.get("flight"), r.get("actype"), r.get("msgno"), r.get("error"),
                         r.get("lat"), r.get("lon"), r.get("pos_src"), txt])
         # BOM => Excel מזהה UTF-8 ומציג עברית (category) נכון
         resp = app.response_class("﻿" + buf.getvalue(),
