@@ -45,6 +45,36 @@
       min-height: 100%;
     }
 
+    /* ---------- פריסה רספונסיבית (טלפון / טאבלט / מחשב) ---------- */
+    /* ברירת מחדל (טלפון / טאבלט portrait): עמודה אחת, הכרטיסים נערמים כרגיל */
+    .layout { display: flex; flex-direction: column; }
+    .col { display: flex; flex-direction: column; }
+
+    /* טאבלט landscape (Lenovo M8 ~853px) / לפטופ קטן: דאשבורד דו-עמודתי */
+    @media (min-width: 700px) {
+      body { max-width: 940px; }
+      .layout { flex-direction: row; align-items: flex-start; gap: 1rem; }
+      .col-main { flex: 1.1 1 0; min-width: 0; }
+      .col-side { flex: 1 1 0; min-width: 0; }
+      /* המספר הגדול מתאים לרוחב העמודה ולא לרוחב המסך המלא */
+      .freq-display { font-size: clamp(2.6rem, 6vw, 3.6rem); }
+
+      /* ACARS: מפה גדולה לצד הפיד */
+      .acars-body { display: flex; align-items: flex-start; gap: 1rem; }
+      .acars-col-map { flex: 1.3 1 0; min-width: 0; position: sticky; top: .5rem; }
+      .acars-col-feed { flex: 1 1 0; min-width: 0; }
+      .acars-map { height: clamp(360px, 60vh, 560px); }
+      .acars-feed { max-height: 62vh; overflow-y: auto; }
+    }
+
+    /* מחשב נייד / דסקטופ: עמודות רחבות יותר + הגדלת ממשק פרופורציונלית */
+    @media (min-width: 1024px) {
+      html { font-size: 17px; }
+      body { max-width: 1180px; }
+      .layout { gap: 1.4rem; }
+      .acars-body { gap: 1.4rem; }
+    }
+
     /* ---------- כותרת ---------- */
     header { display: flex; align-items: baseline; gap: .55rem; margin: .2rem 0 1rem; }
     header h1 { font-size: 1.25rem; margin: 0; letter-spacing: .02em; }
@@ -471,6 +501,8 @@
 
   <!-- ===================== תצוגת קול ===================== -->
   <div id="voiceView">
+  <div class="layout">
+  <div class="col col-main">
   <!-- תצוגת הרדיו -->
   <section class="card radio">
     <span id="pill" class="pill"><span class="dot"></span><span id="status">טוען…</span></span>
@@ -547,7 +579,9 @@
       </div>
     </div>
   </section>
+  </div><!-- /col-main -->
 
+  <div class="col col-side">
   <!-- יומן שידורים -->
   <section class="card">
     <p class="section-title">יומן שידורים</p>
@@ -651,6 +685,8 @@
     <p class="hint">אוטומטי מתאים לרוב התדרים · ל-ATIS ושידור רציף בחר "פתוח" ·
       "ידני" אם הסקוולץ׳ נפתח על רעש או חותך דיבור. שינוי הגדרה מוחל מיד על התדר הנוכחי.</p>
   </section>
+  </div><!-- /col-side -->
+  </div><!-- /layout -->
   </div><!-- /voiceView -->
 
   <!-- ===================== תצוגת ACARS ===================== -->
@@ -664,10 +700,14 @@
       (מקלט אחד). לחזרה לשמע: "האזן למגדל" או החלף ל"קול" למעלה. ACARS משדר בבזקים קצרים,
       אז ייתכנו דקות של שקט. ההודעות נשמרות ושורדות אתחול.</p>
 
+    <div class="acars-body">
+    <div class="acars-col-map">
     <!-- מפה (Leaflet) — מטוסים עם מיקום מ-ACARS (ADS-C/CPDLC); מתמלאת לאט -->
     <div id="acarsMap" class="acars-map"></div>
     <p class="acars-map-note hidden" id="acarsMapNote"></p>
+    </div><!-- /acars-col-map -->
 
+    <div class="acars-col-feed">
     <!-- סטטיסטיקה -->
     <div class="acars-stats">
       <div class="acars-stat"><b id="acStTotal">0</b><span>הודעות</span></div>
@@ -692,6 +732,8 @@
 
     <div class="acars-feed" id="acarsFeed"></div>
     <p class="acars-empty" id="acarsEmpty">ממתין להודעות…</p>
+    </div><!-- /acars-col-feed -->
+    </div><!-- /acars-body -->
   </section>
 
   <script>
@@ -1521,6 +1563,17 @@
         for (const m of acarsMsgs) upsertMarker(m);
       } catch (e) { mapFail("שגיאה בטעינת המפה"); }
     }
+    // שינוי גודל חלון / סיבוב טאבלט (portrait<->landscape) => הקונטיינר של המפה משתנה;
+    // Leaflet חייב invalidateSize אחרת האריחים נחתכים. רק כשהמפה קיימת ומוצגת.
+    let acarsResizeT = null;
+    function relayoutAcarsMap() {
+      if (!acarsMap || appMode !== "acars") return;
+      clearTimeout(acarsResizeT);
+      acarsResizeT = setTimeout(() => acarsMap.invalidateSize(), 200);
+    }
+    window.addEventListener("resize", relayoutAcarsMap);
+    window.addEventListener("orientationchange", relayoutAcarsMap);
+
     function buildPopup(m) {                // DOM (לא HTML גולמי) => טקסט ACARS (קלט חיצוני) לא מוזרק כ-HTML
       const d = document.createElement("div");
       const h = document.createElement("div");
