@@ -29,6 +29,12 @@
       --red: #e5534b;
       --text: #e8eef6;
       --dim: #8b99ab;
+      /* טוקנים עזר */
+      --green-fg: #9fe3b1;
+      --amber-fg: #ecd49a;
+      --red-fg: #f1a49e;
+      --text-faint: #5c6878;
+      --hover: #1d2636;
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html { height: 100%; }
@@ -119,9 +125,10 @@
       font-size: clamp(2.9rem, 14vw, 3.8rem);
       line-height: 1.05;
       margin: .5rem 0 .1rem;
+      color: var(--accent-2);                 /* fallback למקרה שclip לא נתמך */
       background: linear-gradient(180deg, var(--accent-2), var(--accent));
       -webkit-background-clip: text; background-clip: text;
-      -webkit-text-fill-color: transparent; color: transparent;
+      -webkit-text-fill-color: transparent;
     }
     .freq-display small { font-size: 1.05rem; font-weight: 500; -webkit-text-fill-color: var(--dim); color: var(--dim); }
     .freq-name { color: var(--dim); font-size: .9rem; min-height: 1.3em; margin-bottom: .3rem; }
@@ -214,8 +221,11 @@
       border: 1px solid var(--border);
       border-radius: 12px;
       padding: .72rem 1rem;
+      min-height: 40px;
       transition: transform .06s ease, background .15s ease, border-color .15s ease;
     }
+    button:hover, a.ghost:hover { background: var(--hover); border-color: #2d3a4a; }
+    button.primary:hover { background: linear-gradient(180deg, #3d8ef7, #1a5ede); }
     button:active, a.ghost:active { transform: scale(.97); }
     button.primary {
       background: linear-gradient(180deg, #2f81f7, #1f6feb);
@@ -282,7 +292,8 @@
       border-radius: 10px; padding: .18rem; gap: .18rem; }
     .seg button { border: 0; border-radius: 8px; background: transparent;
       color: var(--dim); font-size: .85rem; font-weight: 500; padding: .42rem .8rem; }
-    .seg button.on { background: #27303e; color: var(--text); font-weight: 600; }
+    .seg button.on { background: linear-gradient(180deg, rgba(77,163,255,.18), rgba(77,163,255,.08));
+      color: var(--text); font-weight: 600; border: 1px solid rgba(77,163,255,.25); }
 
     .switch { position: relative; width: 46px; height: 27px; flex: none; }
     .switch input { opacity: 0; width: 100%; height: 100%; margin: 0; position: absolute; inset: 0; cursor: pointer; }
@@ -395,6 +406,16 @@
     .modebar { margin-bottom: .9rem; }
     .modebar .seg { width: 100%; }
     .modebar .seg button { flex: 1; padding: .6rem; font-size: .95rem; }
+    /* נקודה ירוקה על הכרטיסייה שה-SDR באמת פעיל בה (ייתכן שונה מהתצוגה) */
+    .seg button .live-pip { display: none; width: 7px; height: 7px; border-radius: 50%;
+      background: #3fb950; vertical-align: middle; margin-inline-end: 5px; }
+    .seg button.sdr-live .live-pip { display: inline-block; }
+    /* סרגל בקרת SDR בתצוגת ACARS */
+    .acars-sdr-bar { padding: .5rem 0 .6rem; border-bottom: 1px solid var(--border);
+      margin-bottom: .5rem; }
+    .acars-sdr-bar .sdr-btns { display: flex; gap: .5rem; flex-wrap: wrap; }
+    .acars-sdr-bar .sdr-btns button { flex: 1; min-width: 120px; }
+    .acars-sdr-bar .sdr-hint { margin: .4rem 0 0; font-size: .8rem; color: var(--dim); }
 
     /* ---------- ACARS ---------- */
     .acars-head { display: flex; align-items: center; justify-content: space-between;
@@ -406,6 +427,16 @@
     .acars-map { width: 100%; height: 240px; border-radius: 12px; margin-top: .6rem;
       border: 1px solid var(--border); background: var(--panel-2); }
     .leaflet-container { background: var(--panel-2); font: inherit; }
+    /* אריחי OSM כהים (filter: invert + hue) */
+    .leaflet-tile { filter: brightness(.5) invert(1) contrast(.85) hue-rotate(180deg) saturate(.65); }
+    /* Popup כהה */
+    .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+      background: var(--panel); color: var(--text); box-shadow: 0 3px 14px rgba(0,0,0,.55); }
+    .leaflet-popup-content a { color: var(--accent); }
+    /* כפתורי zoom כהים */
+    .leaflet-bar a, .leaflet-bar a:hover {
+      background: var(--panel); color: var(--text); border-bottom-color: var(--border); }
+    .leaflet-bar a.leaflet-disabled { background: var(--panel-2); color: var(--text-faint); }
     .acars-map-note { font-size: .74rem; color: var(--dim); margin: .45rem 0 0; text-align: center; }
 
     /* שורת סטטיסטיקה */
@@ -438,9 +469,9 @@
       font-size: .82rem; color: var(--text); direction: ltr;
       background: linear-gradient(180deg, rgba(77,163,255,.16), rgba(77,163,255,.06));
       border: 1px solid var(--accent); border-radius: 999px; padding: .25rem .35rem .25rem .8rem; }
-    .acars-focus-x { flex: none; padding: .1rem .5rem; font-size: .8rem; line-height: 1;
+    .acars-focus-x { flex: none; min-height: 40px; padding: .25rem .7rem; font-size: .8rem;
       border-radius: 999px; color: var(--dim); }
-    .acars-pop-btn { margin-top: .4rem; padding: .25rem .6rem; font-size: .78rem; border-radius: 8px; }
+    .acars-pop-btn { margin-top: .4rem; min-height: 38px; padding: .35rem .7rem; font-size: .78rem; border-radius: 8px; }
 
     /* רשימת מטוסים (roster) */
     .acars-roster-wrap { margin-top: .55rem; }
@@ -515,6 +546,9 @@
     .amsg.g-position { border-inline-start-color: var(--green); }
     .amsg.g-clearance { border-inline-start-color: var(--accent); }
     .amsg.g-oooi { border-inline-start-color: var(--amber); }
+    .amsg.g-tech { border-inline-start-color: #a371f7; }
+    .amsg.g-comm { border-inline-start-color: #2dd4bf; }
+    .amsg.g-text { border-inline-start-color: var(--text-faint); }
 
     /* chip מיקום (לחיצה => מיקוד במפה) */
     .amsg-pos { font-size: .68rem; color: #9fe3b1; cursor: pointer; direction: ltr;
@@ -549,6 +583,7 @@
     .rr-actype { color: var(--dim); font-size: .68rem; direction: ltr; }
 
     .hidden { display: none !important; }
+    .flex-col { display: flex; flex-direction: column; gap: .5rem; align-items: flex-start; }
   </style>
 </head>
 <body>
@@ -561,8 +596,8 @@
   <!-- מתג מצב: קול (rtl_airband) / ACARS (acarsdec) — SDR אחד בהחלפה -->
   <div class="modebar">
     <div class="seg" id="modeSeg">
-      <button type="button" data-v="voice" class="on">📻 קול</button>
-      <button type="button" data-v="acars">📡 ACARS</button>
+      <button type="button" data-v="voice" class="on"><span class="live-pip"></span>📻 קול</button>
+      <button type="button" data-v="acars"><span class="live-pip"></span>📡 ACARS</button>
     </div>
   </div>
 
@@ -576,6 +611,14 @@
     <div class="freq-display"><span id="curFreq">—</span> <small>MHz</small></div>
     <div class="freq-name" id="freqName"></div>
     <audio id="player" controls preload="none"></audio>
+    <!-- מוצג כשה-SDR תפוס על-ידי ACARS (acarsActive=true) ומשתמש בכרטיסיית קול -->
+    <div id="voiceAcarsBanner" class="hidden flex-col" style="margin:.6rem 0; padding:.65rem .9rem;
+      background:rgba(77,163,255,.08); border:1px solid rgba(77,163,255,.25); border-radius:12px">
+      <span style="font-size:.85rem; color:var(--accent-2)">📡 המקלט כעת במצב ACARS — אין שמע זמין</span>
+      <button id="voiceActivateBtn" class="primary" style="font-size:.85rem; padding:.55rem .9rem">
+        🎧 חזור לקול
+      </button>
+    </div>
 
     <!-- מדדי RF חיים (statsd מ-rtl_airband) -->
     <div class="rf stale" id="rfPanel">
@@ -762,10 +805,22 @@
       <span id="acarsPill" class="pill"><span class="dot"></span><span id="acarsStatus">טוען…</span></span>
       <span class="acars-freqs" id="acarsFreqs"></span>
     </div>
-    <button id="towerBtn" class="primary" style="width:100%; margin:.7rem 0 .2rem">🎧 האזן למגדל (134.600)</button>
-    <p class="hint">מצב ACARS תופס את ה-SDR לפענוח הודעות נתונים — לכן אי אפשר לשמוע קול במקביל
-      (מקלט אחד). לחזרה לשמע: "האזן למגדל" או החלף ל"קול" למעלה. ACARS משדר בבזקים קצרים,
-      אז ייתכנו דקות של שקט. ההודעות נשמרות ושורדות אתחול.</p>
+    <!-- סרגל בקרת SDR: מתעדכן לפי acarsActive (מצב ה-SDR האמיתי, לא הכרטיסייה) -->
+    <div id="acarsSdrBar" class="acars-sdr-bar">
+      <!-- כשה-SDR בקול ומעיינים בהיסטוריה -->
+      <div id="sdrInactive">
+        <button id="acarsActivateBtn" class="primary" style="width:100%">▶ הפעל קליטת ACARS חיה</button>
+        <p class="sdr-hint">מציג היסטוריה · השמע ממשיך לרוץ. לחץ כדי להעביר את ה-SDR ל-ACARS (השמע ייפסק).</p>
+      </div>
+      <!-- כש-acarsdec פעיל -->
+      <div id="sdrActiveCtrl" class="hidden">
+        <div class="sdr-btns">
+          <button id="acarsStopBtn">⏹ עצור / חזור לקול</button>
+          <button id="towerBtn">🎧 האזן למגדל (134.600)</button>
+        </div>
+        <p class="sdr-hint">ACARS פעיל — ה-SDR מפענח נתונים. השמע אינו זמין.</p>
+      </div>
+    </div>
 
     <div class="acars-body">
     <div class="acars-col-map">
@@ -821,7 +876,9 @@
     let retryTimer = null;
     let connectTimer = null;
     let wantPlaying = false;      // iOS עוצר את הנגן ברקע => זוכרים את כוונת המשתמש
-    let appMode = "voice";        // "voice" (rtl_airband) | "acars" (acarsdec)
+    let appMode = "voice";        // "voice" (rtl_airband) | "acars" (acarsdec) — תצוגה נוכחית
+    let acarsActive = false;      // האם acarsdec פעיל בפועל ב-SDR (עשוי להיות שונה מ-appMode)
+    let applyModeInFlight = false; // מניעת לחיצות כפולות בזמן מעבר SDR (3-5 שניות)
     let acarsTimer = null;
     let acarsLastId = 0;          // cursor: ה-id האחרון שקיבלנו מ-/api/acars
 
@@ -1053,6 +1110,7 @@
     /* ---------- נגן ---------- */
     // טעינת השמע מחדש עם ניסיונות חוזרים (ה-mount חוזר כמה שניות אחרי restart)
     function reloadStream(tries = 10) {
+      if (acarsActive) return;     // SDR תפוס — ה-banner מסביר ומציע מעבר מפורש
       stopReplay();                 // חזרה ל-live עוצרת הקלטה מתנגנת (לא שני זרמים יחד)
       clearTimeout(retryTimer);
       player.onerror = null;
@@ -1531,9 +1589,9 @@
       $("voiceView").classList.toggle("hidden", mode !== "voice");
       $("acarsView").classList.toggle("hidden", mode !== "acars");
       segSet("modeSeg", mode);
+      renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acarsActive — עדכן בכל מעבר
       if (mode === "acars") {
-        wantPlaying = false;
-        player.pause();                       // אין שמע במצב ACARS (מקלט תפוס)
+        // האזנה נמשכת — ה-SDR ייעצר רק אם המשתמש ילחץ "הפעל ACARS" במפורש
         ensureAcarsMap();                     // אתחול עצלן של המפה (פעם אחת)
         renderAcarsStats(); renderAcarsFilters(); renderAcarsRoster();
         renderAcarsDetail(); renderAcarsFeed();   // הצגת ההיסטוריה הטעונה מיד
@@ -1544,7 +1602,11 @@
     }
 
     async function applyMode(mode, extra) {
+      if (applyModeInFlight) return false;    // מניעת לחיצות כפולות בזמן החלפת SDR
+      applyModeInFlight = true;
+      _setModeButtons(true);                  // נטרל כפתורי SDR בזמן המעבר
       showView(mode);                         // עדכון אופטימי; אם השרת נכשל נסנכרן חזרה
+      if (mode === "acars") { wantPlaying = false; player.pause(); }  // ה-SDR עובר ל-ACARS
       setStatus(mode === "acars" ? "מפעיל ACARS…" : "חוזר לקול…", "busy");
       try {
         const res = await apiSend("POST", "/api/mode", { mode, ...(extra || {}) });
@@ -1557,6 +1619,7 @@
         }
         showError(null);
         if (mode === "voice") {
+          setAcarsStatus(false);              // SDR יצא ממצב ACARS
           if (data.freq != null) { current = Number(data.freq); updateDisplay(current); }
           setStatus("מתחבר לסטרים…", "busy");
           clearTimeout(connectTimer);
@@ -1570,7 +1633,16 @@
       } catch (e) {
         setStatus("שגיאת רשת — בדוק חיבור ל-Pi", "err");
         return false;
+      } finally {
+        applyModeInFlight = false;
+        _setModeButtons(false);             // שחרר כפתורים
       }
+    }
+    function _setModeButtons(disabled) {
+      ["acarsActivateBtn", "acarsStopBtn", "towerBtn", "voiceActivateBtn"].forEach(id => {
+        const el = $(id); if (el) el.disabled = disabled;
+      });
+      document.querySelectorAll("#modeSeg button").forEach(b => { b.disabled = disabled; });
     }
 
     /* ---------- ACARS: נתונים, תצוגה אחידה, מפה ---------- */
@@ -1592,6 +1664,7 @@
     /* ----- צבירת מצב לכל מטוס (roster + detail), נגזר מ-acarsMsgs ----- */
     const acarsCraft = {};                // מזהה-מטוס -> { tail, flight, count, firstT, lastT, ... }
     const ACARS_STALE_MS = 10 * 60 * 1000;  // לא נשמע מעל 10 דק' => "יצא מטווח" (דהוי ב-roster/מפה)
+    const ACARS_MAP_AGE_MS = 4 * 60 * 60 * 1000; // 4 שעות — מטוסים ישנים יותר לא מוצגים במפה
     let acarsStaleTimer = null;
     const DIR_INFO = {                    // כיוון => אייקון/תווית/צבע
       uplink:   { ch: "↑", cls: "dir-uplink",   title: "uplink · קרקע→מטוס" },
@@ -1619,6 +1692,11 @@
       if (m.dir) { c.lastDir = m.dir; if (m.dir === "uplink") c.up++; else if (m.dir === "downlink") c.down++; }
       if (m.lat != null) { c.hasPos = true; c.lastLat = m.lat; c.lastLon = m.lon; c.lastPosSrc = m.pos_src || null; }
     }
+    function craftTooOldForMap(id) {
+      const c = acarsCraft[id];
+      if (!c) return true;
+      return (Date.now() - c.lastT * 1000) > ACARS_MAP_AGE_MS;
+    }
     function craftIsStale(id) {
       const c = acarsCraft[id];
       if (!c || c.lastT == null) return false;
@@ -1637,8 +1715,31 @@
       $("acarsFreqs").textContent = (freqs || []).join(" · ");
     }
     function setAcarsStatus(active) {
+      acarsActive = active;
       $("acarsStatus").textContent = active ? "מאזין · ACARS" : "ACARS כבוי";
-      $("acarsPill").className = "pill " + (active ? "live" : "err");
+      $("acarsPill").className = "pill " + (active ? "live" : "");
+      updateSdrPip();
+      renderAcarsSdrBar();
+      renderVoiceAcarsBanner();
+    }
+    function updateSdrPip() {
+      // נקודה ירוקה על הכרטיסייה שה-SDR באמת פעיל בה
+      const realMode = acarsActive ? "acars" : "voice";
+      document.querySelectorAll("#modeSeg button").forEach(b => {
+        b.classList.toggle("sdr-live", b.dataset.v === realMode);
+      });
+    }
+    function renderAcarsSdrBar() {
+      $("sdrInactive").classList.toggle("hidden", acarsActive);
+      $("sdrActiveCtrl").classList.toggle("hidden", !acarsActive);
+    }
+    function renderVoiceAcarsBanner() {
+      // מציג banner בכרטיסיית הקול כשה-SDR תפוס על-ידי ACARS
+      const banner = $("voiceAcarsBanner");
+      const show = acarsActive && appMode === "voice";
+      banner.classList.toggle("hidden", !show);
+      $("player").classList.toggle("hidden", show);
+      $("rfPanel").classList.toggle("hidden", show);
     }
     function fmtTime(epoch) {
       const d = epoch ? new Date(epoch * 1000) : new Date();
@@ -1753,32 +1854,49 @@
         else t.line = L.polyline(t.pts, { color: trackColor(id), weight: 2, opacity: .7 });  // בלי addTo
       }
     }
-    // הצגה לפי בחירה: מנקה את המפה ומצרף רק את ה-marker+שובל של המטוס הנבחר (acarsFocus).
-    // בלי בחירה => מפה נקייה + הערה. נטל ה-situational awareness עובר ל-roster.
+    // הצגת כל המטוסים עם מיקום (4 שעות אחרונות), ברירת מחדל מעומעמים. הנבחר מודגש + שובל + fitBounds.
     function renderMapSelection() {
       if (!acarsMap) return;
-      for (const id in acarsMarkers) acarsMap.removeLayer(acarsMarkers[id]);
-      for (const id in acarsTracks) if (acarsTracks[id].line) acarsMap.removeLayer(acarsTracks[id].line);
+      let hasAny = false;
+      // הצג את כל ה-markers מ-4 השעות האחרונות (מעומעמים); tracks רק לנבחר
+      for (const id in acarsMarkers) {
+        const mk = acarsMarkers[id];
+        if (craftTooOldForMap(id)) { acarsMap.removeLayer(mk); continue; }  // ישן מדי למפה
+        const isSelected = id === acarsFocus;
+        const isStale = craftIsStale(id);
+        mk.addTo(acarsMap).setOpacity(isSelected ? (isStale ? .45 : 1) : .4);
+        hasAny = true;
+      }
+      for (const id in acarsTracks) {
+        const tr = acarsTracks[id];
+        if (!tr.line) continue;
+        if (id === acarsFocus) tr.line.addTo(acarsMap);
+        else acarsMap.removeLayer(tr.line);
+      }
       const note = $("acarsMapNote");
-      if (!acarsFocus) { mapNote("בחר מטוס מהרשימה או הודעה — והמיקום שלו יוצג כאן."); return; }
+      if (!hasAny) { mapNote("אין מטוסים עם מיקום עדיין."); return; }
+      note.classList.add("hidden");
+      if (!acarsFocus) return;  // כל המטוסים מוצגים, אין fitBounds על הנבחר
       const mk = acarsMarkers[acarsFocus], tr = acarsTracks[acarsFocus];
       let bounds = null;
-      if (tr && tr.line) { tr.line.addTo(acarsMap); bounds = tr.line.getBounds(); }
-      if (mk) {
-        mk.addTo(acarsMap).setOpacity(craftIsStale(acarsFocus) ? .45 : 1);
-        bounds = bounds ? bounds.extend(mk.getLatLng()) : L.latLngBounds([mk.getLatLng()]);
-      }
+      if (tr && tr.line) bounds = tr.line.getBounds();
+      if (mk) bounds = bounds ? bounds.extend(mk.getLatLng()) : L.latLngBounds([mk.getLatLng()]);
       if (bounds && bounds.isValid()) {
-        note.classList.add("hidden");
         if (tr && tr.pts.length >= 2) acarsMap.fitBounds(bounds.pad(0.3));
         else acarsMap.setView(mk.getLatLng(), 9);
       } else {
         mapNote("למטוס " + acarsFocus + " אין עדיין מיקום מ-ACARS.");
       }
     }
-    function refreshStaleOpacity() {        // עדכון עמעום הנבחר בלי לזוז (לטיימר ה-stale)
-      if (acarsFocus && acarsMap && acarsMarkers[acarsFocus] && acarsMap.hasLayer(acarsMarkers[acarsFocus]))
-        acarsMarkers[acarsFocus].setOpacity(craftIsStale(acarsFocus) ? .45 : 1);
+    function refreshStaleOpacity() {        // עדכון עמעום כל ה-markers (לטיימר ה-stale)
+      if (!acarsMap) return;
+      for (const id in acarsMarkers) {
+        const mk = acarsMarkers[id];
+        if (craftTooOldForMap(id)) { acarsMap.removeLayer(mk); continue; }  // הסר אם חלף הזמן
+        if (!acarsMap.hasLayer(mk)) mk.addTo(acarsMap);
+        const isSelected = id === acarsFocus;
+        mk.setOpacity(isSelected ? (craftIsStale(id) ? .45 : 1) : .4);
+      }
     }
     // בחירת *הודעה* עם מיקום: בוחר את המטוס (מציג אותו במפה) וממרכז על הנקודה הספציפית.
     function focusOnMap(m) {
@@ -2148,9 +2266,14 @@
       retune();
     });
 
-    // מתג מצב קול/ACARS — מעבר מיידי (השרת מחליף את השירות שמחזיק את ה-SDR)
-    segInit("modeSeg", (v) => applyMode(v));
-    // "האזן למגדל" מתוך מצב ACARS: חוזר לקול ומכוונן ל-134.6 בבת אחת
+    // מתג מצב קול/ACARS — רק מחליף תצוגה; ה-SDR לא מוחלף כאן
+    segInit("modeSeg", (v) => showView(v));
+    // כפתורי בקרת SDR בסרגל ACARS (הם היחידים שקוראים applyMode)
+    $("acarsActivateBtn").onclick = () => applyMode("acars");
+    $("acarsStopBtn").onclick = () => applyMode("voice");
+    // banner בכרטיסיית קול כשה-SDR ב-ACARS: כפתור "חזור לקול"
+    $("voiceActivateBtn").onclick = () => applyMode("voice");
+    // "האזן למגדל": חוזר לקול ומכוונן ל-134.6 בבת אחת
     $("towerBtn").onclick = () => applyMode("voice", {
       freq: 134.6, mod: "am", agc: true,
       if_gain: sliderToIFGR(), rf_gain: sliderToRFGR(),
@@ -2234,9 +2357,11 @@
       if (st.acars_freqs) renderAcarsFreqs(st.acars_freqs);
       // app_mode מגיע מהמציאות (השירות הפעיל) => מציגים את התצוגה הנכונה בטעינה
       if (st.app_mode === "acars") {
+        setAcarsStatus(true);               // מאתחל pip + SDR bar + banner מיד בטעינה
         showView("acars");
         setStatus("מצב ACARS פעיל", "live");
       } else {
+        updateSdrPip();                     // pip על "קול" מיד בטעינה (לפני poll ראשון)
         showView("voice");
         setStatus("מוכן — לחץ ▶ או בחר תדר");
         player.src = streamURL();

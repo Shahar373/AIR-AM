@@ -309,8 +309,24 @@ def test_text_latlon_compact_no_decimal():
     # FPON prefix, 3-digit degree lon (F00A style — Turkish airspace)
     lat, lon = app._text_latlon("LTAA.AFN/FMHIGT1166,.4L-GIT,,062600/FPON39428E038506,1/FCOADS")
     assert abs(lat - 39.7133) < 0.001 and abs(lon - 38.8433) < 0.001
-    # SQ logon must NOT extract (ground-station address, not aircraft position)
-    assert app._text_latlon("02XSTLVLLBG03200N03452EV136975/") is None
+    # SQ logon: LLBG-anchored format now intentionally extracts aircraft position
+    lat, lon = app._text_latlon("02XSTLVLLBG03200N03452EV136975/")
+    assert abs(lat - 32.0) < 0.001 and abs(lon - 34.8667) < 0.001
+
+
+def test_text_latlon_llbg_format():
+    """פורמט LLBG SQ/Login: LLBG{status}{DDMM}{NS}{DDDMM}{EW}."""
+    # status=0: LLBG03200N03452E => 32°00'N 034°52'E
+    lat, lon = app._text_latlon("LLBG03200N03452E")
+    assert abs(lat - 32.0) < 0.001 and abs(lon - 34.8667) < 0.001
+    # status=1: LLBG13201N03452E => 32°01'N 034°52'E
+    lat, lon = app._text_latlon("02XATLVLLBG13201N03452EB136975/ARINC")
+    assert abs(lat - 32.0167) < 0.001 and abs(lon - 34.8667) < 0.001
+    # normalize_acars end-to-end: sets lat/lon and pos_src="text"
+    n = app._normalize_acars({"timestamp": 1.0, "text": "02XSTLVLLBG03200N03452EV136975/"})
+    assert n["lat"] is not None and abs(n["lat"] - 32.0) < 0.001
+    assert n["pos_src"] == "text"
+    assert n["group"] == "position"
 
 
 # --- ייצוא ------------------------------------------------------------------
