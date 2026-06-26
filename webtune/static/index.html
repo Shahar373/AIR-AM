@@ -522,6 +522,32 @@
       border-radius: 999px; padding: .1rem .5rem; }
     .acars-empty { color: #5c6878; font-size: .8rem; text-align: center; margin: .8rem 0 .2rem; }
 
+    /* לוח ATIS sticky (A9) */
+    .acars-atis { margin-top: .55rem; padding: .45rem .7rem; border-radius: 10px; font-size: .78rem;
+      color: var(--text); background: rgba(139,153,171,.12); border: 1px solid var(--border);
+      direction: ltr; text-align: left; }
+    .acars-atis b { color: var(--dim); font-size: .7rem; display: block; margin-bottom: .15rem; }
+
+    /* badge שגיאת קישור/CRC/פענוח */
+    .amsg-err { font-size: .65rem; font-weight: 700; direction: ltr; white-space: nowrap;
+      border-radius: 999px; padding: .04rem .42rem; border: 1px solid rgba(239,68,68,.4);
+      color: #fca5a5; background: rgba(239,68,68,.12); }
+
+    /* צביעת רמת אות לפי dBFS */
+    .level-good { color: #22c55e; }
+    .level-ok   { color: #eab308; }
+    .level-weak { color: #ef4444; }
+
+    /* badge ×N לקיבוץ multi-block */
+    .amsg-block-count { font-size: .65rem; font-weight: 700; color: var(--dim);
+      background: rgba(139,153,171,.15); border: 1px solid var(--border);
+      border-radius: 999px; padding: .04rem .42rem; direction: ltr; }
+    /* badge reTX (רטרנסמיט) */
+    .amsg-retx { font-size: .65rem; color: var(--dim); opacity: .7; direction: ltr; }
+
+    /* actype בשורת roster */
+    .rr-actype { color: var(--dim); font-size: .68rem; direction: ltr; }
+
     .hidden { display: none !important; }
   </style>
 </head>
@@ -758,6 +784,9 @@
       <div class="acars-stat"><b id="acStCraft">0</b><span>מטוסים</span></div>
       <div class="acars-stat"><b id="acStPos">0</b><span>עם מיקום</span></div>
     </div>
+
+    <!-- לוח ATIS sticky (מוסתר כברירת מחדל; מתמלא כשמגיעה הודעת A9) -->
+    <div class="acars-atis hidden" id="acarsAtis"></div>
 
     <!-- חיפוש + ייצוא -->
     <div class="acars-tools">
@@ -1572,12 +1601,13 @@
       const id = acAircraftId(m);
       if (!id) return;
       const c = acarsCraft[id] || (acarsCraft[id] = {
-        tail: null, flight: null, count: 0, firstT: null, lastT: null,
+        tail: null, flight: null, actype: null, count: 0, firstT: null, lastT: null,
         lastLabel: null, lastCat: null, lastGroup: null, lastDir: null,
         hasPos: false, lastLat: null, lastLon: null, lastPosSrc: null, up: 0, down: 0,
       });
       if (m.tail) c.tail = m.tail;
       if (m.flight) c.flight = m.flight;
+      if (m.actype && !c.actype) c.actype = m.actype;   // ראשון שזיהה מנצח
       c.count++;
       if (typeof m.t === "number") {
         if (c.firstT == null || m.t < c.firstT) c.firstT = m.t;
@@ -1803,12 +1833,27 @@
         row.onclick = () => setAcarsFocus(id === acarsFocus ? null : id);   // טוגל
         row.appendChild(mkSpan("rr-tail", c.tail || id));
         if (c.flight && c.flight !== c.tail) row.appendChild(mkSpan("rr-flight", c.flight));
+        if (c.actype) row.appendChild(mkSpan("rr-actype", c.actype));
         const db = dirBadge(c.lastDir, "rr-dir"); if (db) row.appendChild(db);
         if (c.hasPos) row.appendChild(mkSpan("rr-pos", "📍"));
         row.appendChild(mkSpan("rr-count", "×" + c.count));
         if (c.lastT != null) row.appendChild(mkSpan("rr-time", fmtTime(c.lastT)));
         box.appendChild(row);
       }
+    }
+
+    /* ----- לוח ATIS sticky (A9) ----- */
+    function updateAtisPanel(m) {
+      const box = $("acarsAtis");
+      box.textContent = "";
+      const label = document.createElement("b");
+      label.textContent = "✈ ATIS" + (m.freq != null ? " · " + Number(m.freq).toFixed(3) + " MHz" : "")
+        + " · " + fmtTime(m.t);
+      box.appendChild(label);
+      const info = document.createElement("span");
+      info.textContent = m.decoded || m.text || "";
+      box.appendChild(info);
+      box.classList.remove("hidden");
     }
 
     /* ----- פאנל פירוט למטוס הנבחר (מתחת למפה) ----- */
@@ -1854,7 +1899,7 @@
     const mkSpan = (cls, txt) => { const s = document.createElement("span"); s.className = cls; s.textContent = txt; return s; };
 
     /* ----- כרטיס הודעה אחיד (לכל הפורמטים) ----- */
-    function renderAcarsMsg(m) {
+    function renderAcarsMsg(m, blockCount) {
       const g = m.group || "text";
       const el = document.createElement("div");
       el.className = "amsg g-" + g;
@@ -1873,15 +1918,37 @@
         pos.onclick = () => focusOnMap(m);
         top.appendChild(pos);
       }
+      if (m.error && m.error > 0) {
+        const errLabels = ["", "CRC ⚠", "link ⚠", "decode ⚠"];
+        top.appendChild(mk("amsg-err", errLabels[m.error] || ("err " + m.error + " ⚠")));
+      }
       if (m.freq != null) top.appendChild(mk("amsg-freq", Number(m.freq).toFixed(3)));
       top.appendChild(mk("amsg-time", fmtTime(m.t)));
       el.appendChild(top);
-      const meta = [];
-      if (m.label) meta.push("label " + m.label);
-      if (m.mode)  meta.push("mode " + m.mode);
-      if (m.msgno) meta.push("#" + m.msgno);
-      if (m.level != null) meta.push(Number(m.level).toFixed(0) + " dBFS");
-      if (meta.length) el.appendChild(mk("amsg-meta", meta.join(" · ")));
+      // שורת meta (label · mode · msgno · level)
+      const metaEl = document.createElement("div");
+      metaEl.className = "amsg-meta";
+      const metaParts = [];
+      if (m.label) metaParts.push("label " + m.label);
+      if (m.mode)  metaParts.push("mode " + m.mode);
+      if (m.msgno) metaParts.push("#" + m.msgno);
+      if (blockCount && blockCount > 1) {          // badge multi-block
+        const bc = mk("amsg-block-count", "×" + blockCount);
+        bc.title = "קובץ מרובה-block (" + blockCount + " חלקים)";
+        metaEl.appendChild(document.createTextNode(metaParts.join(" · ")));
+        if (metaParts.length) metaEl.appendChild(document.createTextNode(" · "));
+        metaEl.appendChild(bc);
+      } else {
+        metaEl.textContent = metaParts.join(" · ");
+      }
+      if (m.level != null) {                       // level עם צבע לפי עוצמה
+        const lvl = Number(m.level);
+        const lvlCls = lvl > -30 ? "level-good" : lvl > -45 ? "level-ok" : "level-weak";
+        if (metaParts.length || (blockCount && blockCount > 1)) metaEl.appendChild(document.createTextNode(" · "));
+        const lvlSpan = mk(lvlCls, lvl.toFixed(0) + " dBFS");
+        metaEl.appendChild(lvlSpan);
+      }
+      if (metaEl.childNodes.length || metaEl.textContent) el.appendChild(metaEl);
       if (m.decoded) el.appendChild(mk("amsg-decoded", m.decoded));
       if (m.text) {
         if (m.decoded) {                  // יש פענוח => הגולמי מתקפל מתחתיו
@@ -1936,14 +2003,65 @@
         box.appendChild(c);
       }
     }
+    const RETRANS_WINDOW_S = 30;     // חלון זמן לספיגת רטרנסמיט (שניות)
+    const MULTIBLOCK_RE = /^[A-Z]\d\d[A-Z]$/;  // msgno בפורמט D57A/D57B => multi-block
+
     function renderAcarsFeed() {
       const feed = $("acarsFeed");
       const q = ($("acarsSearch").value || "").trim().toLowerCase();
       const stick = feed.scrollTop <= 8;                 // המשתמש בראש => נשארים בראש (הודעות חדשות)
       const distBottom = feed.scrollHeight - feed.scrollTop;
-      const list = acarsMsgs.filter((m) => acarsMatches(m, q)).slice(-200).reverse();  // חדש=>ישן
+      const filtered = acarsMsgs.filter((m) => acarsMatches(m, q)).slice(-200);
+
+      // שלב 1: ספיגת רטרנסמיט (VIEW-only — acarsMsgs לא משתנה)
+      // מפתח: tail+label+text[:50]; שומרים הודעה עם error נמוך ביותר בחלון הזמן
+      const retxMap = new Map();   // key => { m, hasRetx }
+      for (const m of filtered) {
+        const key = (m.tail || "") + "|" + (m.label || "") + "|" + (m.text || "").slice(0, 50);
+        if (retxMap.has(key)) {
+          const prev = retxMap.get(key);
+          if (typeof m.t === "number" && typeof prev.m.t === "number"
+              && Math.abs(m.t - prev.m.t) <= RETRANS_WINDOW_S) {
+            if ((m.error || 0) < (prev.m.error || 0)) retxMap.get(key).m = m;
+            retxMap.get(key).hasRetx = true;
+            continue;
+          }
+        }
+        retxMap.set(key, { m, hasRetx: false });
+      }
+      const deduped = Array.from(retxMap.values());
+
+      // שלב 2: קיבוץ multi-block (VIEW-only) — מפתח: tail+msgno[0:3]
+      // מציגים רק את ה-block האחרון עם badge ×N
+      const blockMap = new Map();  // bk => { m, count }
+      const ordered = [];          // שומר סדר הופעה (לפי insertion order)
+      for (const { m, hasRetx } of deduped) {
+        const isBlock = MULTIBLOCK_RE.test(m.msgno || "");
+        const bk = isBlock && m.tail
+          ? (m.tail + ":" + m.msgno.slice(0, 3))
+          : null;
+        if (bk) {
+          if (blockMap.has(bk)) {
+            const e = blockMap.get(bk);
+            if ((m.t || 0) >= (e.m.t || 0)) e.m = m;  // שמור חדש יותר
+            e.count++;
+          } else {
+            const entry = { m, count: 1, hasRetx };
+            blockMap.set(bk, entry);
+            ordered.push({ bk, isSingle: false });
+          }
+        } else {
+          ordered.push({ bk: null, isSingle: true, m, hasRetx });
+        }
+      }
+
+      const list = ordered.map((o) => o.isSingle
+        ? { m: o.m, count: 1, hasRetx: o.hasRetx }
+        : blockMap.get(o.bk)
+      ).reverse();  // חדש=>ישן
+
       feed.innerHTML = "";
-      for (const m of list) feed.appendChild(renderAcarsMsg(m));
+      for (const { m, count } of list) feed.appendChild(renderAcarsMsg(m, count));
       const empty = $("acarsEmpty");
       if (!acarsMsgs.length) { empty.textContent = "ממתין להודעות…"; empty.style.display = ""; }
       else if (!list.length) { empty.textContent = "אין תוצאות לסינון/חיפוש."; empty.style.display = ""; }
@@ -1973,6 +2091,7 @@
           }
           for (const id in acarsCraft) delete acarsCraft[id];   // איפוס צבירת המטוסים
           setAcarsFocus(null);                                  // הבחירה כבר לא תקפה
+          $("acarsAtis").classList.add("hidden");               // ATIS מהסשן הקודם לא רלוונטי
         }
         if (data.messages && data.messages.length) {
           for (const m of data.messages) {
@@ -1980,6 +2099,7 @@
             if (m.id > acarsLastId) acarsLastId = m.id;
             updateCraft(m);                     // צבירת מצב המטוס (roster/detail) לפני המפה
             upsertMarker(m);
+            if (m.label === "A9" && m.decoded) updateAtisPanel(m);  // עדכון לוח ATIS
           }
           while (acarsMsgs.length > ACARS_MAX) acarsMsgs.shift();
           renderAcarsStats();

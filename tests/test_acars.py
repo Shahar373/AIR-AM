@@ -267,11 +267,13 @@ def test_acars_direction_heuristic():
     assert app._acars_direction("QA", None) == "downlink"
     assert app._acars_direction("H1", "HELLO") == "downlink"
     assert app._acars_direction("BA", None) == "uplink"
+    assert app._acars_direction("A9", None) == "uplink"   # ATIS מהקרקע
+    assert app._acars_direction("Q0", "PING") == "downlink"  # link test ממטוס
+    assert app._acars_direction("80", None) == "downlink"    # OOOI report ממטוס
     # header ניתוב בתחילת הטקסט => uplink (גם בלי label מוכר)
     assert app._acars_direction("ZZ", ".ATSXCXA CLEARED TO...") == "uplink"
     assert app._acars_direction(None, "/TLVATYA WX REPORT") == "uplink"
     # עמום => None (לא מנחשים)
-    assert app._acars_direction("Q0", "PING") is None
     assert app._acars_direction(None, "JUST SOME TEXT") is None
 
 
@@ -280,7 +282,7 @@ def test_normalize_includes_direction():
     assert n["dir"] == "downlink"
     n2 = app._normalize_acars({"timestamp": 1.0, "label": "BA", "tail": "4X-A"})
     assert n2["dir"] == "uplink"
-    assert app._normalize_acars({"timestamp": 1.0, "label": "Q0"})["dir"] is None
+    assert app._normalize_acars({"timestamp": 1.0, "label": "Q0"})["dir"] == "downlink"
 
 
 def test_text_latlon_rejects_noise_and_parses_arinc():
@@ -336,3 +338,100 @@ def test_acars_export_json(client, paths):
         json.dumps({"t": 2.0, "tail": "B"}) + "\n" + json.dumps({"t": 1.0, "tail": "A"}) + "\n")
     data = json.loads(client.get("/api/acars/export?format=json").data)
     assert [d["tail"] for d in data] == ["A", "B"]     # ממוין לפי t
+
+
+# --- label 80 / A9 / C1 classifications ------------------------------------
+
+def test_label_80_group():
+    n = app._normalize_acars({"timestamp": 1.0, "label": "80", "tail": "4X-A",
+                               "text": "OFFRP LY316/14"})
+    assert n["group"] == "oooi"
+    assert n["dir"] == "downlink"
+
+
+def test_label_a9_group():
+    n = app._normalize_acars({"timestamp": 1.0, "label": "A9",
+                               "text": "LLBG INFO D RWY 12 WIND 080/15KT QNH 1018"})
+    assert n["group"] == "comm"
+    assert n["dir"] == "uplink"
+
+
+def test_label_c1_direction():
+    n = app._normalize_acars({"timestamp": 1.0, "label": "C1", "tail": "4X-A",
+                               "text": "COMPANY MSG"})
+    assert n["dir"] == "downlink"
+
+
+# --- _parse_atis -----------------------------------------------------------
+
+def test_parse_atis_basic():
+    text = "LLBG INFO D RWY 12 WIND 080/15KT QNH 1018 TEMP 28"
+    r = app._parse_atis(text)
+    assert r is not None
+    assert "12" in r        # runway
+    assert "080" in r       # wind
+    assert "1018" in r      # QNH
+
+
+def test_parse_atis_no_match():
+    assert app._parse_atis("HELLO WORLD") is None
+    assert app._parse_atis(None) is None
+
+
+def test_parse_atis_sets_decoded_in_normalize():
+    n = app._normalize_acars({"timestamp": 1.0, "label": "A9",
+                               "text": "INFO A RWY 03 WIND 020/08KT QNH 1013"})
+    assert n["decoded"] is not None
+    assert "03" in n["decoded"]
+
+
+# --- _parse_oooi_80 --------------------------------------------------------
+
+def test_parse_oooi_80_basic():
+    text = "OFFRP LY316/14 OUT1420 OFF1432 DEST LLBG ETA1510"
+    r = app._parse_oooi_80(text)
+    assert r is not None
+    assert "OUT" in r and "OFF" in r
+
+
+def test_parse_oooi_80_no_match():
+    assert app._parse_oooi_80("RANDOM TEXT") is None
+    assert app._parse_oooi_80(None) is None
+
+
+def test_parse_oooi_80_sets_decoded_in_normalize():
+    n = app._normalize_acars({"timestamp": 1.0, "label": "80", "tail": "4X-A",
+                               "text": "OFFRP LY12/05 OUT1400 OFF1415 DEST EGLL"})
+    assert n["decoded"] is not None
+    assert "OUT" in n["decoded"]
+
+
+# --- _extract_actype -------------------------------------------------------
+
+def test_extract_actype_h1():
+    assert app._extract_actype("H1", "B738 SYSTEMS OK") == "B738"
+    assert app._extract_actype("H1", "A320 FUEL REPORT") == "A320"
+    assert app._extract_actype("C1", "B777 CHECK") == "B777"
+
+
+def test_extract_actype_non_h1_ignored():
+    assert app._extract_actype("QA", "B738") is None    # label לא H1/C1
+    assert app._extract_actype("H1", None) is None
+
+
+def test_actype_in_normalize():
+    n = app._normalize_acars({"timestamp": 1.0, "label": "H1", "tail": "4X-EKF",
+                               "text": "10.17.24,DC,B738,01167,155.6"})
+    assert n["actype"] == "B738"
+    n2 = app._normalize_acars({"timestamp": 1.0, "label": "QA", "tail": "4X-A"})
+    assert n2["actype"] is None
+
+
+# --- ייצוא: עמודת actype --------------------------------------------------
+
+def test_acars_export_csv_has_actype(client, paths):
+    app.ACARS_LOG_PATH.write_text(
+        json.dumps({"t": 1.0, "tail": "4X-A", "actype": "B738"}) + "\n")
+    body = client.get("/api/acars/export?format=csv").data.decode("utf-8-sig")
+    header = body.splitlines()[0]
+    assert "actype" in header.split(",")
