@@ -403,6 +403,15 @@
     .acars-chip.on { color: var(--text); border-color: var(--accent);
       background: linear-gradient(180deg, rgba(77,163,255,.16), rgba(77,163,255,.06)); }
 
+    /* drill-down: צ'יפ המטוס הממוקד */
+    .acars-focus { display: flex; align-items: center; gap: .5rem; margin-top: .5rem;
+      font-size: .82rem; color: var(--text); direction: ltr;
+      background: linear-gradient(180deg, rgba(77,163,255,.16), rgba(77,163,255,.06));
+      border: 1px solid var(--accent); border-radius: 999px; padding: .25rem .35rem .25rem .8rem; }
+    .acars-focus-x { flex: none; padding: .1rem .5rem; font-size: .8rem; line-height: 1;
+      border-radius: 999px; color: var(--dim); }
+    .acars-pop-btn { margin-top: .4rem; padding: .25rem .6rem; font-size: .78rem; border-radius: 8px; }
+
     .acars-feed { margin-top: .6rem; display: flex; flex-direction: column; gap: .5rem;
       max-height: 62vh; overflow: auto; }
     .amsg { background: var(--panel-2); border: 1px solid var(--border);
@@ -410,6 +419,8 @@
     .amsg-top { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; font-size: .85rem; }
     .amsg-tail { font-weight: 700; color: var(--accent-2); direction: ltr; }
     .amsg-flight { color: var(--text); direction: ltr; }
+    .amsg-tail.clickable, .amsg-flight.clickable { cursor: pointer;
+      text-decoration: underline dotted rgba(124,196,255,.5); text-underline-offset: 2px; }
     .amsg-freq { color: var(--accent); direction: ltr; font-variant-numeric: tabular-nums; font-size: .78rem; }
     .amsg-time { margin-inline-start: auto; color: var(--dim); font-size: .72rem;
       direction: ltr; font-variant-numeric: tabular-nums; }
@@ -676,6 +687,8 @@
     </div>
     <!-- צ'יפים לסינון קטגוריה (נבנים דינמית לפי הקבוצות שהופיעו) -->
     <div class="acars-filters" id="acarsFilters"></div>
+    <!-- drill-down: צ'יפ המטוס הממוקד (לחיצה על זנב בכרטיס/popup); ✕ מנקה -->
+    <div class="acars-focus hidden" id="acarsFocusChip"></div>
 
     <div class="acars-feed" id="acarsFeed"></div>
     <p class="acars-empty" id="acarsEmpty">ממתין להודעות…</p>
@@ -1446,6 +1459,10 @@
     let acarsFilter = "all";              // קבוצת הסינון הפעילה (group) או "all"
     let acarsMap = null, acarsIcon = null, acarsLeafletLoading = false;
     const acarsMarkers = {};              // מזהה-מטוס -> Leaflet marker
+    const acarsTracks = {};               // מזהה-מטוס -> { pts:[[lat,lon]...], line } (שובל מסלול)
+    const TRACK_MAX = 60;                 // תקרת נקודות בשובל לכל מטוס
+    const TRACK_COLORS = ["#4da3ff", "#3fb950", "#d9a93d", "#e5534b", "#a371f7", "#2dd4bf"];
+    let acarsFocus = null;                // drill-down: מזהה-מטוס ממוקד (מסנן פיד+מפה) או null
     const CAT_GROUPS = {                  // group -> תווית צ'יפ
       position: "📍 מיקום", clearance: "ATC", oooi: "OOOI",
       tech: "טכני", comm: "תקשורת", text: "טקסט",
@@ -1504,17 +1521,57 @@
         for (const m of acarsMsgs) upsertMarker(m);
       } catch (e) { mapFail("שגיאה בטעינת המפה"); }
     }
+    function buildPopup(m) {                // DOM (לא HTML גולמי) => טקסט ACARS (קלט חיצוני) לא מוזרק כ-HTML
+      const d = document.createElement("div");
+      const h = document.createElement("div");
+      const strong = document.createElement("b");
+      strong.textContent = m.tail || m.flight || "ACARS";
+      h.appendChild(strong);
+      if (m.tail && m.flight) h.appendChild(document.createTextNode(" · " + m.flight));
+      h.appendChild(document.createElement("br"));
+      h.appendChild(document.createTextNode(fmtTime(m.t)));
+      if (m.text) {
+        h.appendChild(document.createElement("br"));
+        h.appendChild(document.createTextNode(m.text.slice(0, 80)));
+      }
+      d.appendChild(h);
+      const id = acAircraftId(m);
+      if (id) {
+        const b = document.createElement("button");
+        b.className = "acars-pop-btn"; b.textContent = "📋 הודעות";
+        b.onclick = () => setAcarsFocus(id);
+        d.appendChild(b);
+      }
+      return d;
+    }
     function upsertMarker(m) {
       if (!acarsMap || m.lat == null || m.lon == null) return;
       const id = acAircraftId(m) || (m.lat.toFixed(3) + "," + m.lon.toFixed(3));
       const label = m.tail || m.flight || "ACARS";
-      const pop = label + (m.flight && m.tail ? " · " + m.flight : "") +
-        "<br>" + fmtTime(m.t) + (m.text ? "<br>" + m.text.slice(0, 80) : "");
       const mk = acarsMarkers[id];
-      if (mk) { mk.setLatLng([m.lat, m.lon]); mk.setPopupContent(pop); }
+      if (mk) { mk.setLatLng([m.lat, m.lon]); mk.setPopupContent(buildPopup(m)); }
       else {
         acarsMarkers[id] = L.marker([m.lat, m.lon], acarsIcon ? { icon: acarsIcon } : undefined)
-          .addTo(acarsMap).bindPopup(pop).bindTooltip(label);
+          .addTo(acarsMap).bindPopup(buildPopup(m)).bindTooltip(label);
+      }
+      updateTrack(m);
+    }
+    function trackColor(id) {               // צבע יציב לכל מטוס (hash => פלטה) => הבחנה בין שובלים
+      let h = 0;
+      for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+      return TRACK_COLORS[Math.abs(h) % TRACK_COLORS.length];
+    }
+    function updateTrack(m) {               // שובל מסלול — נקודות עוקבות של אותו זנב, רק למטוס מזוהה
+      const id = acAircraftId(m);
+      if (!id || m.lat == null || m.lon == null) return;
+      const t = acarsTracks[id] || (acarsTracks[id] = { pts: [], line: null });
+      const last = t.pts[t.pts.length - 1];
+      if (last && Math.abs(last[0] - m.lat) < 1e-5 && Math.abs(last[1] - m.lon) < 1e-5) return;  // כפילות
+      t.pts.push([m.lat, m.lon]);
+      if (t.pts.length > TRACK_MAX) t.pts.shift();
+      if (t.pts.length >= 2) {
+        if (t.line) t.line.setLatLngs(t.pts);
+        else t.line = L.polyline(t.pts, { color: trackColor(id), weight: 2, opacity: .6 }).addTo(acarsMap);
       }
     }
     function focusOnMap(m) {
@@ -1525,6 +1582,32 @@
       if (acarsMarkers[id]) acarsMarkers[id].openPopup();
       $("acarsMap").scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
+    /* ----- drill-down: מיקוד הפיד והמפה למטוס יחיד ----- */
+    function setAcarsFocus(id) {
+      acarsFocus = id || null;
+      renderAcarsFocus();
+      renderAcarsFeed();
+      if (!acarsFocus) return;
+      ensureAcarsMap();
+      const t = acarsTracks[acarsFocus];
+      if (acarsMap && t && t.line) acarsMap.fitBounds(t.line.getBounds().pad(0.3));
+      else {                                // אין שובל (נקודה יחידה) => מרכוז למיקום האחרון
+        const last = [...acarsMsgs].reverse().find((x) => acAircraftId(x) === acarsFocus && x.lat != null);
+        if (acarsMap && last) acarsMap.setView([last.lat, last.lon], 9);
+      }
+    }
+    function renderAcarsFocus() {
+      const chip = $("acarsFocusChip");
+      if (!acarsFocus) { chip.classList.add("hidden"); chip.textContent = ""; return; }
+      chip.classList.remove("hidden");
+      chip.textContent = "";
+      const lbl = document.createElement("span");
+      lbl.textContent = "מטוס: " + acarsFocus;
+      const x = document.createElement("button");
+      x.className = "acars-focus-x"; x.textContent = "✕"; x.title = "נקה סינון";
+      x.onclick = () => setAcarsFocus(null);
+      chip.append(lbl, x);
+    }
 
     /* ----- כרטיס הודעה אחיד (לכל הפורמטים) ----- */
     function renderAcarsMsg(m) {
@@ -1534,8 +1617,10 @@
       const top = document.createElement("div");
       top.className = "amsg-top";
       const mk = (cls, txt) => { const s = document.createElement("span"); s.className = cls; s.textContent = txt; return s; };
-      if (m.tail)   top.appendChild(mk("amsg-tail", m.tail));
-      if (m.flight) top.appendChild(mk("amsg-flight", m.flight));
+      // לחיצה על זנב/טיסה => drill-down למטוס (acAircraftId מאחד את שניהם לאותו מטוס)
+      const idClick = (s) => { s.title = "סנן למטוס זה"; s.onclick = () => setAcarsFocus(acAircraftId(m)); return s; };
+      if (m.tail)   top.appendChild(idClick(mk("amsg-tail clickable", m.tail)));
+      if (m.flight) top.appendChild(idClick(mk("amsg-flight clickable", m.flight)));
       if (m.category) top.appendChild(mk("amsg-cat cat-" + g, m.category));
       if (m.lat != null) {
         const pos = mk("amsg-pos", "📍 " + Number(m.lat).toFixed(2) + "," + Number(m.lon).toFixed(2));
@@ -1568,6 +1653,7 @@
 
     /* ----- סינון / חיפוש / סטטיסטיקה ----- */
     function acarsMatches(m, q) {
+      if (acarsFocus && acAircraftId(m) !== acarsFocus) return false;   // drill-down: מטוס יחיד
       if (acarsFilter !== "all" && (m.group || "text") !== acarsFilter) return false;
       if (!q) return true;
       return [m.tail, m.flight, m.label, m.category, m.decoded, m.text, m.mode]
@@ -1635,6 +1721,10 @@
           for (const id in acarsMarkers) {
             if (acarsMap) acarsMap.removeLayer(acarsMarkers[id]);
             delete acarsMarkers[id];
+          }
+          for (const id in acarsTracks) {
+            if (acarsMap && acarsTracks[id].line) acarsMap.removeLayer(acarsTracks[id].line);
+            delete acarsTracks[id];
           }
         }
         if (data.messages && data.messages.length) {
