@@ -449,6 +449,10 @@ _TEXT_POS_RE = re.compile(
 # מנסים אחרי הפורמט עם נקודה (עדיפות נמוכה) כי הוא מדויק פחות.
 _TEXT_POS_COMPACT_RE = re.compile(
     r"([NS])(\d{2})([0-5]\d)(\d)([EW])(\d{3})([0-5]\d)(\d)")
+# פורמט LLBG SQ/Login: LLBG{status?}{DDMM}{NS}{DDDMM}{EW} — ה-LLBG הוא עוגן שמבטיח
+# שמדובר במיקום מטוס ולא בשם נקודת ניווט. status byte אחד אופציונלי לפני ה-lat.
+_TEXT_POS_LLBG_RE = re.compile(
+    r"LLBG\d?(\d{2})([0-5]\d)([NS])(\d{3})([0-5]\d)([EW])")
 
 
 def _text_latlon(text):
@@ -476,12 +480,30 @@ def _text_latlon(text):
             return None
         return round(lat, 5), round(lon, 5)
 
+    def _parse_llbg(groups):
+        la_d, la_m, ns, lo_d, lo_m, ew = groups
+        try:
+            lat = int(la_d) + int(la_m) / 60
+            lon = int(lo_d) + int(lo_m) / 60
+        except (ValueError, TypeError):
+            return None
+        if ns == "S":
+            lat = -lat
+        if ew == "W":
+            lon = -lon
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+            return None
+        return round(lat, 5), round(lon, 5)
+
     m = _TEXT_POS_RE.search(text)
     if m:
         return _parse(m.groups())
     m = _TEXT_POS_COMPACT_RE.search(text)
     if m:
         return _parse(m.groups(), compact=True)
+    m = _TEXT_POS_LLBG_RE.search(text)
+    if m:
+        return _parse_llbg(m.groups())
     return None
 
 
