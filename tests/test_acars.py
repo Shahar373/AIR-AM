@@ -262,6 +262,27 @@ def test_normalize_position_from_text():
     assert 31 < n["lat"] < 33 and 34 < n["lon"] < 35
 
 
+def test_acars_direction_heuristic():
+    # label מוכר: OOOI/position/login => downlink; BA (אישור מהקרקע) => uplink
+    assert app._acars_direction("QA", None) == "downlink"
+    assert app._acars_direction("H1", "HELLO") == "downlink"
+    assert app._acars_direction("BA", None) == "uplink"
+    # header ניתוב בתחילת הטקסט => uplink (גם בלי label מוכר)
+    assert app._acars_direction("ZZ", ".ATSXCXA CLEARED TO...") == "uplink"
+    assert app._acars_direction(None, "/TLVATYA WX REPORT") == "uplink"
+    # עמום => None (לא מנחשים)
+    assert app._acars_direction("Q0", "PING") is None
+    assert app._acars_direction(None, "JUST SOME TEXT") is None
+
+
+def test_normalize_includes_direction():
+    n = app._normalize_acars({"timestamp": 1.0, "label": "QA", "tail": "4X-A"})
+    assert n["dir"] == "downlink"
+    n2 = app._normalize_acars({"timestamp": 1.0, "label": "BA", "tail": "4X-A"})
+    assert n2["dir"] == "uplink"
+    assert app._normalize_acars({"timestamp": 1.0, "label": "Q0"})["dir"] is None
+
+
 def test_text_latlon_rejects_noise_and_parses_arinc():
     assert app._text_latlon("FUEL 5678 KG PART N1278E56789") is None   # דקות 78>59 => נדחה
     assert app._text_latlon("CODE N32E034") is None                    # בלי DDMM מלא => נדחה
@@ -274,7 +295,8 @@ def test_text_latlon_rejects_noise_and_parses_arinc():
 def test_acars_export_csv(client, paths):
     app.ACARS_LOG_PATH.write_text(
         json.dumps({"t": 2.0, "freq": 131.55, "tail": "4X-B", "category": "ADS-C",
-                    "group": "position", "lat": 32.1, "lon": 34.9, "text": "line1\nline2"}) + "\n"
+                    "group": "position", "dir": "downlink", "lat": 32.1, "lon": 34.9,
+                    "text": "line1\nline2"}) + "\n"
         + json.dumps({"t": 1.0, "freq": 131.72, "tail": "4X-A", "category": "Label H1"}) + "\n")
     r = client.get("/api/acars/export?format=csv")
     assert r.status_code == 200
@@ -282,6 +304,7 @@ def test_acars_export_csv(client, paths):
     body = r.data.decode("utf-8-sig")                  # מתעלם מ-BOM
     lines = body.splitlines()
     assert lines[0].startswith("time_iso,timestamp,freq")
+    assert "dir" in lines[0].split(",")                # עמודת כיוון בייצוא
     assert "4X-A" in lines[1] and "4X-B" in lines[2]   # ממוין לפי t עולה
     assert len(lines) == 3                             # newline בטקסט לא שובר שורה
     assert "line1 line2" in body

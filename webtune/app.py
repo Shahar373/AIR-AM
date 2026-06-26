@@ -95,6 +95,19 @@ ACARS_LABELS = {
     "BA": ("אישור ATC (clearance)", "clearance"),
 }
 
+# כיוון ההודעה (best-effort, חלקי בכוונה — כמו ACARS_LABELS): downlink = מטוס→קרקע
+# (דיווח/בקשה מהמטוס), uplink = קרקע→מטוס (אישור/הודעת חברה אל המטוס). רק labels שאנו
+# בטוחים בהם; השאר נופלים ל-heuristic של header או ל-None (לא מנחשים).
+_ACARS_DIR_BY_LABEL = {
+    "H1": "downlink", "SQ": "downlink", "5Z": "downlink",
+    "QA": "downlink", "QB": "downlink", "QC": "downlink", "QD": "downlink",
+    "B9": "downlink",   # בקשת אישור מהמטוס
+    "BA": "uplink",     # מתן אישור מהקרקע אל המטוס
+}
+# header ניתוב של תחנת קרקע בתחילת הטקסט (למשל ‎.ATSXCXA או ‎/TLVATYA) => uplink.
+# שמרני: דורש ‎. או ‎/ בתחילת השורה ואחריו מזהה תחנה אותיות-גדולות/ספרות.
+_UPLINK_HEADER_RE = re.compile(r"^[./][A-Z][A-Z0-9]{3,7}\b")
+
 # הקלטות: rtl_airband כותב קובץ MP3 לכל שידור (split_on_transmission) בשם
 # <REC_BASENAME>_YYYYMMDD_HHMMSS_<Hz>.mp3 (.tmp בזמן כתיבה, rename בסגירה
 # ~0.5ש' אחרי שהסקוולץ' נסגר). קובץ שהסתיים = אירוע ביומן השידורים.
@@ -476,6 +489,17 @@ def _libacars_decode(obj):
     return kind, text
 
 
+def _acars_direction(label, text):
+    """heuristic שמרני לכיוון ההודעה: 'uplink' (קרקע→מטוס) / 'downlink' (מטוס→קרקע) / None.
+    label מוכר קודם (אמין), אחרת header ניתוב בטקסט => uplink. None כשלא חד-משמעי (לא מנחשים)."""
+    d = _ACARS_DIR_BY_LABEL.get(label)
+    if d:
+        return d
+    if isinstance(text, str) and _UPLINK_HEADER_RE.match(text.lstrip()):
+        return "uplink"
+    return None
+
+
 def _normalize_acars(m):
     """מצמצם הודעת acarsdec JSON לשדות שה-UI מציג, בפורמט *אחיד* לכל סוגי ההודעות:
     קטגוריה קריאה (label => תיאור), קבוצה (לצבע), ומיקום (lat/lon) כשזמין. עמיד
@@ -525,6 +549,7 @@ def _normalize_acars(m):
         "flight": g("flight", "fid"),
         "mode": g("mode"),
         "msgno": g("msgno"),
+        "dir": _acars_direction(label, text),  # "uplink" | "downlink" | None (best-effort)
         "lat": lat,
         "lon": lon,
         "pos_src": pos_src,                   # "adsc" | "text" | None
@@ -1207,7 +1232,7 @@ def api_acars():
 
 
 ACARS_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "mode", "label",
-                     "category", "group", "tail", "flight", "msgno", "error",
+                     "category", "group", "dir", "tail", "flight", "msgno", "error",
                      "lat", "lon", "pos_src", "text"]
 
 
@@ -1248,7 +1273,7 @@ def api_acars_export():
             iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)) if t else ""
             txt = (r.get("text") or "").replace("\r", " ").replace("\n", " ")
             w.writerow([iso, t, r.get("freq"), r.get("level"), r.get("mode"),
-                        r.get("label"), r.get("category"), r.get("group"),
+                        r.get("label"), r.get("category"), r.get("group"), r.get("dir"),
                         r.get("tail"), r.get("flight"), r.get("msgno"), r.get("error"),
                         r.get("lat"), r.get("lon"), r.get("pos_src"), txt])
         # BOM => Excel מזהה UTF-8 ומציג עברית (category) נכון
