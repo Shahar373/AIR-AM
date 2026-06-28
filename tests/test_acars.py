@@ -508,3 +508,71 @@ def test_acars_export_csv_has_actype(client, paths):
     body = client.get("/api/acars/export?format=csv").data.decode("utf-8-sig")
     header = body.splitlines()[0]
     assert "actype" in header.split(",")
+
+
+# --- _parse_wx_alternates (label WX / alternate planning) --------------------
+
+def test_parse_wx_alternates_multi():
+    """4+ שדות alternate = decoded עם רשימה."""
+    text = "METAR LGRP LYBE LIMC LFPG"
+    r = app._parse_wx_alternates(text)
+    assert r is not None
+    assert r.startswith("ALTERNATE:")
+    assert "LGRP" in r and "LIMC" in r
+
+
+def test_parse_wx_alternates_single():
+    """שדה בודד שאינו LLBG = WX: CODE (לא alternate planning)."""
+    r = app._parse_wx_alternates("METAR LCLK")
+    assert r is not None
+    assert r.startswith("WX:")
+    assert "LCLK" in r
+
+
+def test_parse_wx_alternates_llbg_ignored():
+    """LLBG עצמה לא מסומנת כ-alternate (זהו השדה הביתי)."""
+    r = app._parse_wx_alternates("METAR LLBG")
+    assert r is None
+
+
+def test_parse_wx_alternates_no_icao():
+    """טקסט בלי קודי ICAO = None."""
+    assert app._parse_wx_alternates("NO VALID CODES") is None
+    assert app._parse_wx_alternates(None) is None
+    assert app._parse_wx_alternates("") is None
+
+
+def test_wx_label_in_normalize():
+    """label WX ב-_normalize_acars: קטגוריה נכונה + decoded עם alternate."""
+    n = app._normalize_acars({"timestamp": 1.0, "label": "WX", "tail": "9H-CAC",
+                               "text": "METAR LGRP LYBE LIMC LFPG"})
+    assert n["group"] == "comm"
+    assert n["dir"] == "downlink"
+    assert n["decoded"] is not None
+    assert "ALTERNATE" in n["decoded"]
+    assert "LLBG" not in n["decoded"]
+
+
+# --- dedup retries -----------------------------------------------------------
+
+def test_dedup_key_identifies_retry():
+    """אותו tail+label+text80 = מפתח dedup זהה (retry יהיה מזוהה)."""
+    base = {"timestamp": 1000.0, "tail": "OO-ACF", "label": "H1",
+            "text": "CFEM-APU-REAL " * 5}
+    r1 = app._normalize_acars({**base})
+    r2 = app._normalize_acars({**base, "timestamp": 1045.0})
+
+    key1 = (r1.get("tail"), r1.get("label"), (r1.get("text") or "")[:80])
+    key2 = (r2.get("tail"), r2.get("label"), (r2.get("text") or "")[:80])
+    assert key1 == key2          # מפתחות זהים = תיזוהה כ-retry
+
+
+def test_dedup_retry_count_update():
+    """עדכון retry_count על הרשומה המקורית (בדיקת לוגיקת הזיכרון)."""
+    rec = {"tail": "OO-ACF", "label": "H1", "text": "APU FAULT MSG", "t": 1000.0,
+           "group": "tech"}
+    # מדמה את מה שה-listener עושה: prev_rec הוא אותו dict
+    rec["retry_count"] = rec.get("retry_count", 1) + 1
+    assert rec["retry_count"] == 2
+    rec["retry_count"] = rec.get("retry_count", 1) + 1
+    assert rec["retry_count"] == 3

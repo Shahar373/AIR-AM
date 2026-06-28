@@ -89,6 +89,7 @@ ACARS_LABELS = {
     "C1": ("הודעת חברה (C1)", "text"),
     "3L": ("נתוני ULD/מטען (3L)", "tech"),
     "A4": ("הודעת לו\"ז (FSM)", "comm"),
+    "WX": ("בקשת מזג אוויר (WX)", "comm"),
     "RA": ("תקשורת אוויר/קרקע", "text"),
     "RB": ("תקשורת אוויר/קרקע", "text"),
     "QA": ("OOOI · יציאה (Out)", "oooi"),
@@ -111,6 +112,7 @@ _ACARS_DIR_BY_LABEL = {
     "Q0": "downlink",   # link test ממטוס
     "B9": "downlink",   # בקשת אישור מהמטוס
     "3L": "downlink",   # נתוני ULD/מטען מהמטוס
+    "WX": "downlink",   # בקשת METAR לשדות גיבוי מהמטוס
     "BA": "uplink",     # מתן אישור מהקרקע אל המטוס
     "A9": "uplink",     # ATIS משודר מהקרקע
     "A4": "uplink",     # FSM / הודעת לוח-זמנים מהקרקע
@@ -583,6 +585,15 @@ _ACTYPE_RE = re.compile(r"\b(B7[3-9]\d|A[23][0-9]\d|E[17][0-9]\d|CRJ\d|AT[57]\d)
 # עלול להיות צמוד (OUT1420). IN לא בתחילת מילה לפני ספרה אבל הפורמטים בשטח לא מופרדים.
 _OOOI_PAIR_RE = re.compile(r"\b(OUT|OFF|ON|IN)\s?(\d{2}[:.]\d{2}|\d{4})", re.IGNORECASE)
 
+# WX (בקשות מזג אוויר): מחלץ קודי ICAO מארבע אותיות. מסנן מילות-מפתח שאינן שדות תעופה.
+_WX_ICAO_RE = re.compile(r"\b([A-Z]{4})\b")
+_WX_NON_AIRPORT = frozenset({
+    "METAR", "SPECI", "SIGMET", "PIREP", "ATIS", "CAVOK", "NOSIG", "TEMPO",
+    "BECMG", "PROB", "FROM", "TILL", "WIND", "GUST", "SHRA", "TSRA", "ACFT",
+    "ACARS", "UPDT", "REQU", "RESP",
+})
+_HOME_AIRPORT = "LLBG"
+
 
 def _parse_atis(text):
     """Best-effort: מחלץ wind/runway/QNH מטקסט A9 (ATIS). מחזיר string קצר או None."""
@@ -622,6 +633,25 @@ def _extract_actype(label, text):
         return None
     m = _ACTYPE_RE.search(text)
     return m.group(1) if m else None
+
+
+def _parse_wx_alternates(text):
+    """מחלץ שדות alternate מהודעת WX (בקשת METAR לשדות גיבוי).
+    שני קודי ICAO+ שאינם LLBG = תכנון alternate פעיל. מחזיר decoded קצר או None."""
+    if not text:
+        return None
+    seen: set = set()
+    codes = []
+    for c in _WX_ICAO_RE.findall(text):
+        if c in seen or c in _WX_NON_AIRPORT or c == _HOME_AIRPORT:
+            continue
+        seen.add(c)
+        codes.append(c)
+    if len(codes) >= 2:
+        return "ALTERNATE: " + " · ".join(codes)
+    if codes:
+        return f"WX: {codes[0]}"
+    return None
 
 
 def _normalize_acars(m):
@@ -680,6 +710,8 @@ def _normalize_acars(m):
             decoded = _parse_oooi_80(text)
         elif label == "A9":
             decoded = _parse_atis(text)
+        elif label == "WX":
+            decoded = _parse_wx_alternates(text)
 
     return {
         "t": g("timestamp"),                  # epoch seconds (float) מ-acarsdec
@@ -760,6 +792,10 @@ def _acars_listener():
         log.warning("ACARS listener: port %d busy - /api/acars יחזיר ריק", ACARS_UDP_PORT)
         return
     seen = 0
+    # dedup: (tail, label, text[:80]) → (timestamp, rec_dict). מונע כפילות מ-ACARS retries
+    # (כש-ground station לא שולח ACK, המטוס שולח שוב — עד 7 פעמים ב-APU fault של OO-ACF).
+    # retry_count מצטבר על הכרטיס המקורי בזיכרון; ה-JSONL נשמר נקי מחזרות.
+    _dedup: dict = {}
     while True:
         try:
             data, _ = sock.recvfrom(65535)
@@ -770,6 +806,22 @@ def _acars_listener():
         except (ValueError, UnicodeError):
             continue                          # דאטהגרם לא-JSON => מתעלמים
         rec = _normalize_acars(msg)
+
+        # בדיקת dedup: רק להודעות עם tail+text (ACK ריקים אינם מוחזרים)
+        tail, label, text = rec.get("tail"), rec.get("label"), rec.get("text") or ""
+        ts = rec.get("t") or time.time()
+        if tail and text:
+            dedup_key = (tail, label, text[:80])
+            prev_ts, prev_rec = _dedup.get(dedup_key, (0, None))
+            if prev_rec is not None and ts - prev_ts < 90:
+                prev_rec["retry_count"] = prev_rec.get("retry_count", 1) + 1
+                continue                      # retry — לא מוסיפים כרטיס חדש
+            _dedup[dedup_key] = (ts, rec)
+            if len(_dedup) > 500:             # ניקוי ערכים ישנים (מניעת דליפת זיכרון)
+                cutoff = ts - 90
+                for k in [k for k, (t, _) in _dedup.items() if t < cutoff]:
+                    del _dedup[k]
+
         _append_acars_log(rec)                # התמדה לפני הקצאת id הזמני (הקובץ נקי מ-id)
         with _acars_lock:
             _acars_seq += 1

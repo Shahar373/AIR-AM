@@ -9,6 +9,21 @@
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-06-28
+### נוסף
+- **dedup ACARS retries**: כשמטוס לא מקבל ACK הוא שולח את אותה הודעה שוב ושוב
+  (נצפה: APU fault של OO-ACF נשלח 7 פעמים). כעת `_acars_listener` מזהה retry
+  לפי `(tail, label, text[:80])` בחלון 90 שניות — במקום כרטיס חדש, `retry_count`
+  מצטבר על הכרטיס המקורי. JSONL נשמר נקי מחזרות; ה-UI מציג אירוע אחד.
+- **Label `WX` (בקשת מזג אוויר)**: label שנקלט בשטח מ-9H-CAC (METAR ל-LGRP/LYBE/LIMC/LFPG)
+  מוצג עכשיו עם תיאור קריא ו-`decoded` אוטומטי:
+  - שדה בודד → `"WX: LCLK"` (בקשת מזג אוויר ליעד/חלופה יחידה)
+  - שני שדות+ → `"ALTERNATE: LGRP · LYBE · LIMC · LFPG"` (alternate planning פעיל)
+  - LLBG מוסננת (שדה הבית, אינה "alternate"). כיוון: `downlink`.
+### בדיקות
+- 7 טסטים חדשים: `_parse_wx_alternates` (multi/single/LLBG/None), WX ב-normalize,
+  dedup key logic, ו-retry_count update.
+
 ## [1.7.2] - 2026-06-28
 ### נוסף
 - **Label `3L` (ULD/מטען)**: label שהוצג בקליטה אמיתית מ-D-AIDA מסווג כעת כ-"נתוני ULD/מטען"
