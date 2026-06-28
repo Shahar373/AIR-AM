@@ -237,6 +237,25 @@ def test_normalize_category_from_labels():
     assert app._normalize_acars({"timestamp": 1.0})["category"] == "הודעה"   # בלי label
 
 
+def test_label_3l_uld_category():
+    """regression: label 3L (ULD/cargo) — מתוך קליטה אמיתית D-AIDA (596b4ef0...)."""
+    n = app._normalize_acars({"timestamp": 1.0, "label": "3L",
+                               "tail": "D-AIDA", "text": "531183D1934/12,935/12,936/12"})
+    assert "ULD" in n["category"] or "מטען" in n["category"]
+    assert n["group"] == "tech"
+    assert n["dir"] == "downlink"
+
+
+def test_label_5v_and_a4_known():
+    """regression: 5V (VHF link mgmt) ו-A4 (FSM) לא נופלים ל-'Label X'."""
+    n5v = app._normalize_acars({"timestamp": 1.0, "label": "5V", "tail": "YR-ADA"})
+    assert "Label 5V" not in n5v["category"]
+    na4 = app._normalize_acars({"timestamp": 1.0, "label": "A4", "tail": "4X-EMC",
+                                 "text": "/TLVCDYA.FS1/FSM 1452 AIZ1805 RCD RECEIVED"})
+    assert "Label A4" not in na4["category"]
+    assert na4["dir"] == "uplink"
+
+
 def test_normalize_position_from_libacars():
     m = {"timestamp": 1.0, "label": "B9",
          "libacars": {"arinc622": {"adsc": {"basic_report": {"lat": 32.1, "lon": 34.9}}}}}
@@ -334,6 +353,37 @@ def test_text_position_skipped_on_corrupted_frame():
                                     "text": "POSN32010E034540,RW21,103458"})
     assert corrupt["lat"] is None and corrupt["pos_src"] is None
     assert corrupt["group"] != "position"
+
+
+def test_parse_pos_report_basic():
+    """regression: /.POS/ (תגובת REQPOS) — קליטה אמיתית N375WB (596b4ef0...).
+    פורמט מבני => נ\"צ + WPT + ETA מחולצים."""
+    text = "/.POS/TS104451,260626N32006E034539,,104451,1,VELOX,110451,,P31,,147,F566"
+    result = app._parse_pos_report(text)
+    assert result is not None, "/.POS/ אמור להניב תוצאה"
+    lat, lon, decoded = result
+    assert abs(lat - 32.01) < 0.001,  f"lat שגוי: {lat}"
+    assert abs(lon - 34.8983) < 0.001, f"lon שגוי: {lon}"
+    assert "VELOX" in decoded
+    assert "11:04" in decoded       # ETA 110451 → 11:04z
+
+
+def test_pos_report_extracted_even_with_error():
+    """regression: /.POS/ נחלץ גם כאשר acarsdec מדווח error — כי הפורמט מבני,
+    לא heuristic. מתוך N375WB אמיתי שהיה error=3 (596b4ef0...)."""
+    text = "/.POS/TS104451,260626N32006E034539,,104451,1,VELOX,110451,,P31,,147,F566"
+    n = app._normalize_acars({"timestamp": 1.0, "error": 3, "tail": "N375WB", "text": text})
+    assert n["lat"] is not None,  "/.POS/ עם error אמור לתת מיקום"
+    assert n["pos_src"] == "pos-report"
+    assert n["group"] == "position"
+    assert n["decoded"] and "VELOX" in n["decoded"]
+
+
+def test_parse_pos_report_rejects_garbage():
+    """/.POS/ prefix בלי תוכן תקין => None."""
+    assert app._parse_pos_report("/.POS/GARBAGE") is None
+    assert app._parse_pos_report(None) is None
+    assert app._parse_pos_report("POSN32010E034540") is None  # לא /.POS/
 
 
 # --- ייצוא ------------------------------------------------------------------

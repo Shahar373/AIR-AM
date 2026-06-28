@@ -85,7 +85,10 @@ ACARS_LABELS = {
     "SQ": ("התחברות (login)", "comm"),
     "H1": ("הודעת מערכת/חברה (H1)", "text"),
     "5Z": ("שירות חברה (airline)", "text"),
+    "5V": ("זמינות VHF (link mgmt)", "comm"),
     "C1": ("הודעת חברה (C1)", "text"),
+    "3L": ("נתוני ULD/מטען (3L)", "tech"),
+    "A4": ("הודעת לו\"ז (FSM)", "comm"),
     "RA": ("תקשורת אוויר/קרקע", "text"),
     "RB": ("תקשורת אוויר/קרקע", "text"),
     "QA": ("OOOI · יציאה (Out)", "oooi"),
@@ -107,8 +110,10 @@ _ACARS_DIR_BY_LABEL = {
     "80": "downlink",   # דוח OOOI (OFFRP/INRP) מהמטוס
     "Q0": "downlink",   # link test ממטוס
     "B9": "downlink",   # בקשת אישור מהמטוס
+    "3L": "downlink",   # נתוני ULD/מטען מהמטוס
     "BA": "uplink",     # מתן אישור מהקרקע אל המטוס
     "A9": "uplink",     # ATIS משודר מהקרקע
+    "A4": "uplink",     # FSM / הודעת לוח-זמנים מהקרקע
 }
 # header ניתוב של תחנת קרקע בתחילת הטקסט (למשל ‎.ATSXCXA או ‎/TLVATYA) => uplink.
 # שמרני: דורש ‎. או ‎/ בתחילת השורה ואחריו מזהה תחנה אותיות-גדולות/ספרות.
@@ -453,6 +458,20 @@ _TEXT_POS_COMPACT_RE = re.compile(
 # ה-DDMM שם הוא נ"צ ה*שדה* (reference של נתב"ג שמשותף לכל מטוס שמתחבר), לא מיקום
 # המטוס. חילוצו הדביק 📍 מטעה על כל הודעת login. ראה CHANGELOG 1.7.1.
 
+# /.POS/ = תגובת מטוס ל-REQPOS (position request מהקרקע). פורמט מבני לחלוטין:
+# /.POS/TS{HHMMSS},{DDMMYY}{N}{DD}{MMf}{E}{DDD}{MMf},,{t},{?},{WPT},{ETA_WPT},,{fuel},,{spd},{alt}
+# lat/lon: DD+MMf = מעלות + דקות-עם-עשרון (3 ספרות: MM*10+f). דוגמה: 006 = 00.6'
+# הפורמט אמין גם עם error (פרוטוקול מבני, לא heuristic) ⇒ נחלץ לפני שמירת error guard.
+_POS_REPORT_RE = re.compile(
+    r"/\.POS/TS\d{6},\d{6}"        # TS timestamp + date (6 digits each)
+    r"([NS])(\d{2})(\d{3})"         # lat: NS, 2-digit deg, 3-digit MMf
+    r"([EW])(\d{3})(\d{3})"         # lon: EW, 3-digit deg, 3-digit MMf
+    r",,\d{6},\d+,"                 # gap fields (time2, unknown)
+    r"([A-Z][A-Z0-9]{1,7})"        # next waypoint (2–8 chars)
+    r",(\d{6})"                     # ETA to waypoint (HHMMSS)
+    r"(?:,,[^,]*,,[^,]*,([A-Z0-9]{2,6}))?"  # optional: fuel,,spd,{FL/alt code}
+)
+
 
 def _text_latlon(text):
     """heuristic שמרני לחילוץ מיקום מטקסט חופשי (פורמט ARINC קומפקטי). מחזיר (lat, lon)
@@ -486,6 +505,37 @@ def _text_latlon(text):
     if m:
         return _parse(m.groups(), compact=True)
     return None
+
+
+def _parse_pos_report(text):
+    """מחלץ נ\"צ + waypoint + ETA מהודעת /.POS/ (תגובה ל-REQPOS מהקרקע).
+    מחזיר (lat, lon, decoded_str) או None.
+    אמין גם עם acarsdec error כי הפורמט מבני — אין heuristic על טקסט חופשי."""
+    if not text or "/.POS/" not in text:
+        return None
+    m = _POS_REPORT_RE.search(text)
+    if not m:
+        return None
+    ns, la_d, la_mf, ew, lo_d, lo_mf, wpt, eta, alt = m.groups()
+    try:
+        la_mf_i, lo_mf_i = int(la_mf), int(lo_mf)
+        # MMf: 3 ספרות — המניות (2) + עשרון (1). 006 = 00.6', 539 = 53.9'
+        lat = int(la_d) + (la_mf_i // 10 + (la_mf_i % 10) / 10) / 60
+        lon = int(lo_d) + (lo_mf_i // 10 + (lo_mf_i % 10) / 10) / 60
+    except (ValueError, TypeError):
+        return None
+    if ns == "S":
+        lat = -lat
+    if ew == "W":
+        lon = -lon
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+        return None
+    parts = [f"WPT {wpt}"]
+    if eta and len(eta) == 6:
+        parts.append(f"ETA {eta[:2]}:{eta[2:4]}z")
+    if alt:
+        parts.append(alt)
+    return round(lat, 5), round(lon, 5), " · ".join(parts)
 
 
 def _libacars_decode(obj):
@@ -603,6 +653,15 @@ def _normalize_acars(m):
         pos = _scan_latlon(libacars)
         if pos:
             lat, lon, pos_src = pos[0], pos[1], "adsc"
+
+    # /.POS/ = תגובת REQPOS: פרוטוקול מבני (לא heuristic) => אמין גם עם error.
+    # נחלץ לפני בדיקת error כי ספרה שהתהפכה ב-prefix שגרם ל-error לא פוגמת את הקואורדינטה.
+    if lat is None and text:
+        pos = _parse_pos_report(text)
+        if pos:
+            lat, lon, pos_src = pos[0], pos[1], "pos-report"
+            if decoded is None and pos[2]:
+                decoded = pos[2]                  # WPT · ETA · alt code
 
     # נפילה: מיקום מקודד בטקסט חופשי — אבל *רק* מ-frame נקי. acarsdec error>0 = ביטים
     # שתוקנו/לא-תוקנו; ספרה אחת שהתהפכה בקואורדינטה => מטוס במקום שגוי על המפה. ADS-C
