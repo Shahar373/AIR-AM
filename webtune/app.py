@@ -64,10 +64,24 @@ ACARS_SERVICE = "airam-acars"
 ACARS_ENV_PATH = Path("/etc/airam/acars.env")
 ACARS_UDP_HOST = "127.0.0.1"
 ACARS_UDP_PORT = 5556                 # חייב להתאים ל-ACARS_UDP ב-acars.env
-ACARS_FREQS_DEFAULT = ["131.525", "131.550", "131.725", "131.825"]  # אירופה/ישראל
+# בנקי תדרי ACARS: כל בנק נכנס בחלון דגימה *אחד* של acarsdec (≤ ACARS_WINDOW_MHZ).
+# העיקרון: acarsdec מפענח עד 8 ערוצים, וכולם חייבים ליפול בתוך חלון ~2MHz (chooseFc
+# בוחר center שמכסה את כולם). צביר 131.x וצביר 136.x רחוקים ~5MHz => *לעולם* לא בחלון
+# אחד => בנקים נפרדים להחלפה (כמו מתג קול/ACARS). הצבא ומטוסי התדלוק האמריקאים
+# (KC-135/KC-46) אינם משתמשים בתדר ACARS צבאי נפרד — הם פלטפורמות אזרחיות מותאמות
+# על רשת ARINC/SITA, ובפועל מופיעים על 131.550 (הראשי העולמי) ועל צביר אירופה.
+ACARS_BANKS = [
+    {"id": "eu131", "name": "אירופה + עולמי (131)",
+     "freqs": ["130.450", "131.425", "131.525", "131.550", "131.725", "131.825", "131.850"]},
+    {"id": "band136", "name": "אזור 136",
+     "freqs": ["136.700", "136.750", "136.800", "136.850", "136.900", "136.925", "136.975"]},
+]
+ACARS_FREQS_DEFAULT = ACARS_BANKS[0]["freqs"]   # בנק ברירת המחדל (131.x מורחב, span 1.4MHz)
 ACARS_GAIN_DEFAULT = -10              # ‎-10 => AGC (מוסכמת acarsdec)
 ACARS_RATEMULT_DEFAULT = 160          # 160 => 2.0 MS/s (חלון ±1MHz)
-ACARS_BUF_MAX = 500                   # הודעות אחרונות בזיכרון (נטענות לקליינט בעלייה)
+ACARS_MAX_CHANNELS = 8               # מגבלת acarsdec — עד 8 ערוצים בו-זמנית
+ACARS_WINDOW_MHZ = 1.9               # span מרבי בחלון דגימה אחד (2.0MS/s, עם שוליים)
+ACARS_BUF_MAX = 500                   # הודעות אחרונות בזיכרון (נטענות לקליינט בעלייה, היום בלבד)
 _FREQ_RE = re.compile(r"^\d{2,3}\.\d{1,3}$")   # ולידציית תדר ACARS (MHz) לפני כתיבה ל-env
 
 # התמדה: כל הודעה מפוענחת נכתבת ל-acars.jsonl (כמו activity.jsonl) => שורדת restart.
@@ -245,7 +259,7 @@ def load_presets():
 DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  "if_gain": IF_GAIN_DEFAULT, "rf_gain": RF_GAIN_DEFAULT,
                  "squelch_mode": "open", "squelch_snr": SNR_DEFAULT,  # ברירת מחדל ATIS => תמיד פתוח
-                 "app_mode": "voice",                # "voice" (rtl_airband) | "acars" (acarsdec)
+                 "app_mode": "voice",  # "voice" (rtl_airband) | "acars" (acarsdec) | "off" (standby)
                  "acars_freqs": ACARS_FREQS_DEFAULT}
 
 
@@ -714,7 +728,7 @@ def _normalize_acars(m):
             decoded = _parse_wx_alternates(text)
 
     return {
-        "t": g("timestamp"),                  # epoch seconds (float) מ-acarsdec
+        "t": g("timestamp") or time.time(),   # epoch seconds (float) מ-acarsdec (חסר => עכשיו)
         "freq": g("freq"),                    # MHz
         "level": g("level"),                  # dBFS
         "label": label,
@@ -757,9 +771,18 @@ def _trim_acars_log():
         _atomic_write(ACARS_LOG_PATH, "\n".join(lines[-ACARS_LOG_KEEP:]) + "\n")
 
 
+def _today_start():
+    """epoch של חצות מקומי (שעון ה-Pi) של היום. רצפת-זמן ל"היום בלבד": מסננת את
+    טעינת ההיסטוריה ואת /api/acars => סשן חדש לא מוצף בתעבורת ימים קודמים.
+    ההיסטוריה המלאה בדיסק (acars.jsonl) נשמרת וזמינה בייצוא וב-?all=1."""
+    lt = time.localtime()
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+
+
 def _load_acars_history():
-    """טוען את זנב acars.jsonl ל-ring buffer בעלייה => הודעות שורדות restart, ממוינות
-    לפי זמן (t עולה) עם id רץ. נקרא *לפני* הפעלת thread ה-listener (אין מרוץ)."""
+    """טוען את זנב acars.jsonl ל-ring buffer בעלייה => הודעות *היום* שורדות restart,
+    ממוינות לפי זמן (t עולה) עם id רץ. נקרא *לפני* הפעלת thread ה-listener (אין מרוץ).
+    רק הודעות מהיום נטענות לזיכרון (ההיסטוריה המלאה נשמרת בדיסק)."""
     global _acars_seq
     try:
         lines = ACARS_LOG_PATH.read_text(encoding="utf-8").splitlines()
@@ -771,6 +794,8 @@ def _load_acars_history():
             recs.append(json.loads(ln))
         except ValueError:
             continue                          # שורה פגומה (כתיבה חלקית) => דילוג
+    floor = _today_start()
+    recs = [r for r in recs if (r.get("t") or 0) >= floor]   # היום בלבד (הדיסק נשמר)
     recs.sort(key=lambda r: r.get("t") or 0)
     with _acars_lock:
         for r in recs:
@@ -856,6 +881,27 @@ def _sanitize_freqs(freqs):
     return out or list(ACARS_FREQS_DEFAULT)
 
 
+def _acars_window_error(freqs):
+    """בודק שרשימת תדרי ACARS חוקית לחלון דגימה *אחד* של acarsdec: עד
+    ACARS_MAX_CHANNELS ערוצים, וכולם בתוך span של ACARS_WINDOW_MHZ (חלון ~2MHz).
+    מחזיר הודעת שגיאה (str) או None אם תקין. טהורה => נבדקת בלי חומרה."""
+    vals = []
+    for f in freqs or []:
+        try:
+            vals.append(float(f))
+        except (TypeError, ValueError):
+            continue
+    if not vals:
+        return "לא נבחרו תדרי ACARS תקינים"
+    if len(vals) > ACARS_MAX_CHANNELS:
+        return "acarsdec תומך עד %d ערוצים (נבחרו %d)" % (ACARS_MAX_CHANNELS, len(vals))
+    span = max(vals) - min(vals)
+    if span > ACARS_WINDOW_MHZ + 1e-9:
+        return ("התדרים מרוחקים מדי לחלון דגימה אחד (טווח %.3fMHz, מקסימום %sMHz) — "
+                "בחר בנק תדרים אחר" % (span, ACARS_WINDOW_MHZ))
+    return None
+
+
 def write_acars_env(freqs, gain=ACARS_GAIN_DEFAULT, ratemult=ACARS_RATEMULT_DEFAULT):
     """כותב /etc/airam/acars.env בפורמט EnvironmentFile של systemd. הערך של
     ACARS_FREQS *לא* מצוטט: systemd לוקח את שארית השורה (כולל רווחים) כערך,
@@ -892,6 +938,24 @@ def _enter_acars(freqs):
         if not _is_active(ACARS_SERVICE):
             return "acarsdec נכשל לעלות — בדוק journalctl -u airam-acars", _journal_tail(ACARS_SERVICE)
     return None, None
+
+
+def _enter_standby():
+    """מצב כיבוי (standby): עוצר את *שני* צרכני ה-SDR (rtl_airband + acarsdec) =>
+    משחרר את ה-RSP1B ליישום SDR אחר, בעוד airam-web/הדף נשארים פעילים. את
+    sdrplay.service משאירים חי בכוונה: ה-API daemon הוא המתווך שמאפשר לאפליקציית
+    SDRplay אחרת להתחבר מיד — וגם ה-sudoers ממילא אינו מתיר לעצור אותו.
+    מחזיר (error, detail). serialized תחת TUNE_LOCK ע"י הקורא."""
+    for svc in (ACARS_SERVICE, "rtl_airband"):
+        try:
+            _sysctl("stop", svc, timeout=30)
+        except Exception:
+            pass
+    for _ in range(7):
+        time.sleep(0.3)
+        if not _is_active(ACARS_SERVICE) and not _is_active("rtl_airband"):
+            return None, None
+    return "כיבוי המקלט נכשל — שירות עדיין פעיל", _journal_tail("rtl_airband")
 
 
 # --- נתיבים ----------------------------------------------------------------
@@ -965,8 +1029,18 @@ def api_state():
     st = load_state()
     # מקור-אמת למצב = המציאות (השירות), לא רק ה-state השמור: אחרי reboot רק
     # rtl_airband עולה (acars לא enabled), אז state ישן "acars" => מתוקן ל-voice.
-    st["app_mode"] = "acars" if _is_active(ACARS_SERVICE) else "voice"
-    st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT, version=VERSION)
+    # תלת-מצבי: acars פעיל => acars; rtl_airband פעיל => voice; שניהם כבויים *ו*-state
+    # מסומן off => standby מכוון (לא שורד reboot: rtl_airband enabled וחוזר לעלות).
+    if _is_active(ACARS_SERVICE):
+        st["app_mode"] = "acars"
+    elif _is_active("rtl_airband"):
+        st["app_mode"] = "voice"
+    elif st.get("app_mode") == "off":
+        st["app_mode"] = "off"
+    else:
+        st["app_mode"] = "voice"          # בזמן עליית שירותים / מצב לא ידוע => ברירת מחדל
+    st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT, version=VERSION,
+              acars_banks=ACARS_BANKS)
     return jsonify(st)
 
 
@@ -1003,7 +1077,13 @@ def api_health():
     # מצב ACARS (שבו rtl_airband מכוון מבחירה) היה נראה כתקלה.
     voice_ok = services["rtl_airband"] == "active" and services["icecast2"] == "active"
     acars_ok = services["airam-acars"] == "active"
-    return jsonify(ok=(voice_ok or acars_ok), app_mode=("acars" if acars_ok else "voice"),
+    # standby מכוון: שני הצרכנים כבויים ו-state מסומן off => תקין, *לא* תקלה (אחרת
+    # מצב הכיבוי שביקש המשתמש היה נראה כקריסה). sdrplay נשאר active במפה.
+    off_ok = (load_state().get("app_mode") == "off"
+              and services["rtl_airband"] != "active"
+              and services["airam-acars"] != "active")
+    mode = "acars" if acars_ok else "voice" if voice_ok else "off" if off_ok else "voice"
+    return jsonify(ok=(voice_ok or acars_ok or off_ok), app_mode=mode,
                    services=services, sdr_present=_sdr_present(), stats_age=stats_age)
 
 
@@ -1414,13 +1494,18 @@ def api_tune():
 
 @app.route("/api/acars")
 def api_acars():
-    """הודעות ACARS אחרונות. ?since=<id> => רק חדשות מאותו cursor (פולינג יעיל)."""
+    """הודעות ACARS אחרונות. ?since=<id> => רק חדשות מאותו cursor (פולינג יעיל).
+    כברירת מחדל מוחזרות רק הודעות *היום* (שעון ה-Pi) => סשן חדש לא מוצף בתעבורת
+    ימים קודמים. ?all=1 => כל מה שבזיכרון; ההיסטוריה המלאה תמיד זמינה בייצוא."""
     try:
         since = int(request.args.get("since", 0))
     except (TypeError, ValueError):
         since = 0
+    show_all = request.args.get("all") in ("1", "true", "yes")
+    floor = 0 if show_all else _today_start()
     with _acars_lock:
-        msgs = [m for m in _acars_msgs if m["id"] > since]
+        msgs = [m for m in _acars_msgs
+                if m["id"] > since and (m.get("t") or 0) >= floor]
         cursor = _acars_seq
     return jsonify(ok=True, active=_is_active(ACARS_SERVICE),
                    freqs=load_state().get("acars_freqs", ACARS_FREQS_DEFAULT),
@@ -1495,6 +1580,9 @@ def api_mode():
         try:
             st = load_state()
             freqs = _sanitize_freqs(data.get("freqs") or st.get("acars_freqs"))
+            werr = _acars_window_error(freqs)        # חייב להיכנס בחלון דגימה אחד
+            if werr:
+                return jsonify(ok=False, error=werr, state=load_state()), 400
             log.info("mode -> ACARS freqs=%s (from %s)", freqs, request.remote_addr)
             err, detail = _enter_acars(freqs)
             if err:
@@ -1511,6 +1599,24 @@ def api_mode():
             new_state = {**st, "app_mode": "acars", "acars_freqs": freqs}
             save_state(new_state)
             return jsonify(ok=True, app_mode="acars", acars_freqs=freqs)
+        finally:
+            TUNE_LOCK.release()
+
+    if mode == "off":
+        # כיבוי (standby): עוצר את שני צרכני ה-SDR ומשחרר את ה-RSP1B ליישום אחר.
+        # airam-web/הדף נשארים פעילים => אפשר להדליק שוב מה-UI בכל רגע.
+        if not TUNE_LOCK.acquire(blocking=False):
+            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב",
+                           state=load_state()), 409
+        try:
+            log.info("mode -> OFF (standby) (from %s)", request.remote_addr)
+            err, detail = _enter_standby()
+            if err:
+                log.warning("enter standby failed: %s", err)
+                return jsonify(ok=False, error=err, detail=detail, state=load_state()), 500
+            new_state = {**load_state(), "app_mode": "off"}
+            save_state(new_state)
+            return jsonify(ok=True, app_mode="off")
         finally:
             TUNE_LOCK.release()
 

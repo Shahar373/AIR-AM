@@ -403,9 +403,26 @@
       border-radius: 10px; padding: .6rem; max-height: 9rem; overflow: auto;
     }
     /* ---------- מתג מצב (קול / ACARS) ---------- */
-    .modebar { margin-bottom: .9rem; }
-    .modebar .seg { width: 100%; }
+    .modebar { margin-bottom: .9rem; display: flex; gap: .5rem; align-items: stretch; }
+    .modebar .seg { flex: 1; }
     .modebar .seg button { flex: 1; padding: .6rem; font-size: .95rem; }
+    /* כפתור כיבוי/הפעלת המקלט (standby): משחרר את ה-SDR ליישום אחר, הדף נשאר חי */
+    .power-btn { border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2);
+      color: var(--fg); font-size: .9rem; padding: .6rem .8rem; cursor: pointer; white-space: nowrap; }
+    .power-btn.on { background: linear-gradient(180deg, rgba(63,185,80,.22), rgba(63,185,80,.10));
+      border-color: rgba(63,185,80,.5); color: #6fe089; }
+    .power-btn:disabled { opacity: .5; cursor: default; }
+    /* באנר standby בתצוגת קול */
+    .standby-banner { margin: .6rem 0; padding: .75rem .9rem; border-radius: 12px;
+      background: rgba(63,185,80,.08); border: 1px solid rgba(63,185,80,.28);
+      display: flex; flex-direction: column; gap: .55rem; }
+    .standby-banner span { font-size: .9rem; color: #6fe089; }
+    /* בורר בנקי תדרי ACARS */
+    .acars-banks { display: flex; flex-wrap: wrap; gap: .4rem; margin: .15rem 0 .1rem; }
+    .acars-banks button { border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
+      background: var(--panel-2); color: var(--fg); font-size: .82rem; padding: .3rem .7rem; }
+    .acars-banks button.on { background: linear-gradient(180deg, rgba(77,163,255,.18), rgba(77,163,255,.08));
+      border-color: rgba(77,163,255,.5); color: var(--accent-2); }
     /* נקודה ירוקה על הכרטיסייה שה-SDR באמת פעיל בה (ייתכן שונה מהתצוגה) */
     .seg button .live-pip { display: none; width: 7px; height: 7px; border-radius: 50%;
       background: #3fb950; vertical-align: middle; margin-inline-end: 5px; }
@@ -599,6 +616,8 @@
       <button type="button" data-v="voice" class="on"><span class="live-pip"></span>📻 קול</button>
       <button type="button" data-v="acars"><span class="live-pip"></span>📡 ACARS</button>
     </div>
+    <!-- כיבוי/הפעלת המקלט (standby): עוצר את ה-SDR ומשחרר אותו ליישום אחר; הדף נשאר חי -->
+    <button type="button" id="powerBtn" class="power-btn" title="כיבוי/הפעלת המקלט — משחרר את ה-SDR ליישום אחר">⏻ כיבוי</button>
   </div>
 
   <!-- ===================== תצוגת קול ===================== -->
@@ -618,6 +637,12 @@
       <button id="voiceActivateBtn" class="primary" style="font-size:.85rem; padding:.55rem .9rem">
         🎧 חזור לקול
       </button>
+    </div>
+
+    <!-- מוצג כשהמקלט בכיבוי (standby) — ה-SDR פנוי ליישום אחר -->
+    <div id="standbyBanner" class="standby-banner hidden">
+      <span>⏻ המקלט בכיבוי (Standby) — ה-RSP1B פנוי ליישום SDR אחר. הדף נשאר פעיל.</span>
+      <button id="standbyOnBtn" class="primary" style="font-size:.9rem; padding:.55rem .9rem">▶ הפעל מקלט</button>
     </div>
 
     <!-- מדדי RF חיים (statsd מ-rtl_airband) -->
@@ -805,6 +830,8 @@
       <span id="acarsPill" class="pill"><span class="dot"></span><span id="acarsStatus">טוען…</span></span>
       <span class="acars-freqs" id="acarsFreqs"></span>
     </div>
+    <!-- בורר בנקי תדרים: כל בנק נכנס בחלון דגימה אחד; 131.x ו-136.x בבנקים נפרדים -->
+    <div class="acars-banks" id="acarsBanks"></div>
     <!-- סרגל בקרת SDR: מתעדכן לפי acarsActive (מצב ה-SDR האמיתי, לא הכרטיסייה) -->
     <div id="acarsSdrBar" class="acars-sdr-bar">
       <!-- כשה-SDR בקול ומעיינים בהיסטוריה -->
@@ -878,6 +905,9 @@
     let wantPlaying = false;      // iOS עוצר את הנגן ברקע => זוכרים את כוונת המשתמש
     let appMode = "voice";        // "voice" (rtl_airband) | "acars" (acarsdec) — תצוגה נוכחית
     let acarsActive = false;      // האם acarsdec פעיל בפועל ב-SDR (עשוי להיות שונה מ-appMode)
+    let sdrOff = false;           // האם המקלט בכיבוי (standby) — שני הצרכנים עצורים, ה-SDR פנוי
+    let acarsBanks = [];          // בנקי תדרי ACARS מהשרת (כל בנק נכנס בחלון אחד)
+    let selAcarsFreqs = null;     // התדרים הנבחרים להפעלת ACARS (בנק או מותאם)
     let applyModeInFlight = false; // מניעת לחיצות כפולות בזמן מעבר SDR (3-5 שניות)
     let acarsTimer = null;
     let acarsLastId = 0;          // cursor: ה-id האחרון שקיבלנו מ-/api/acars
@@ -1205,7 +1235,9 @@
       try {
         const h = await (await fetch("/api/health")).json();
         const el = document.querySelector("#rfPanel .nodata");
-        if (!h.sdr_present)
+        if (sdrOff || h.app_mode === "off")
+          el.textContent = "המקלט בכיבוי (Standby) — לחץ ▶ הפעלה";
+        else if (!h.sdr_present)
           el.textContent = "ה-SDR מנותק — בדוק את חיבור ה-USB";
         else if (h.services && h.services.rtl_airband !== "active")
           el.textContent = "המקלט (rtl_airband) לא פעיל — נסה לכוונן מחדש";
@@ -1605,28 +1637,42 @@
       if (applyModeInFlight) return false;    // מניעת לחיצות כפולות בזמן החלפת SDR
       applyModeInFlight = true;
       _setModeButtons(true);                  // נטרל כפתורי SDR בזמן המעבר
-      showView(mode);                         // עדכון אופטימי; אם השרת נכשל נסנכרן חזרה
-      if (mode === "acars") { wantPlaying = false; player.pause(); }  // ה-SDR עובר ל-ACARS
-      setStatus(mode === "acars" ? "מפעיל ACARS…" : "חוזר לקול…", "busy");
+      // mode "off" => מציגים את כרטיסיית הקול עם באנר standby (אין תצוגה ייעודית)
+      sdrOff = (mode === "off");
+      showView(mode === "off" ? "voice" : mode);   // עדכון אופטימי; אם השרת נכשל נסנכרן חזרה
+      if (mode !== "voice") { wantPlaying = false; player.pause(); }  // ה-SDR יוצא מקול
+      setStatus(mode === "acars" ? "מפעיל ACARS…" : mode === "off" ? "מכבה מקלט…" : "חוזר לקול…", "busy");
       try {
         const res = await apiSend("POST", "/api/mode", { mode, ...(extra || {}) });
         const data = await res.json();
         if (!data.ok) {
           setStatus("שגיאה: " + (data.error || "מעבר מצב נכשל"), "err");
           showError(data.detail || null);
-          showView((data.state && data.state.app_mode) || "voice");
+          const back = (data.state && data.state.app_mode) || "voice";
+          sdrOff = (back === "off");
+          showView(back === "off" ? "voice" : back);
+          renderPower();
           return false;
         }
         showError(null);
-        if (mode === "voice") {
+        if (mode === "off") {
+          sdrOff = true;
+          setAcarsStatus(false);              // ה-SDR כבוי => acarsdec לא פעיל
+          renderPower();
+          setStatus("מקלט בכיבוי (Standby)", "off");
+        } else if (mode === "voice") {
+          sdrOff = false;
           setAcarsStatus(false);              // SDR יצא ממצב ACARS
+          renderPower();
           if (data.freq != null) { current = Number(data.freq); updateDisplay(current); }
           setStatus("מתחבר לסטרים…", "busy");
           clearTimeout(connectTimer);
           connectTimer = setTimeout(() => reloadStream(), 1500);
         } else {
-          if (data.acars_freqs) renderAcarsFreqs(data.acars_freqs);
+          sdrOff = false;
+          if (data.acars_freqs) { renderAcarsFreqs(data.acars_freqs); selAcarsFreqs = data.acars_freqs; renderAcarsBanks(); }
           setAcarsStatus(true);
+          renderPower();
           pollAcars();                        // רענון מיידי אחרי ש-acarsdec עלה
         }
         return true;
@@ -1639,7 +1685,8 @@
       }
     }
     function _setModeButtons(disabled) {
-      ["acarsActivateBtn", "acarsStopBtn", "towerBtn", "voiceActivateBtn"].forEach(id => {
+      ["acarsActivateBtn", "acarsStopBtn", "towerBtn", "voiceActivateBtn",
+       "powerBtn", "standbyOnBtn"].forEach(id => {
         const el = $(id); if (el) el.disabled = disabled;
       });
       document.querySelectorAll("#modeSeg button").forEach(b => { b.disabled = disabled; });
@@ -1714,6 +1761,29 @@
     function renderAcarsFreqs(freqs) {
       $("acarsFreqs").textContent = (freqs || []).join(" · ");
     }
+    const _freqsKey = (a) => (a || []).map(String).slice().sort().join(",");
+    function renderAcarsBanks() {
+      const wrap = $("acarsBanks");
+      if (!wrap) return;
+      wrap.innerHTML = "";
+      const cur = _freqsKey(selAcarsFreqs);
+      for (const bank of acarsBanks) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = bank.name;
+        b.title = bank.freqs.join(" · ");
+        if (_freqsKey(bank.freqs) === cur) b.classList.add("on");
+        b.onclick = () => selectBank(bank);
+        wrap.appendChild(b);
+      }
+    }
+    function selectBank(bank) {
+      selAcarsFreqs = bank.freqs.slice();
+      renderAcarsFreqs(bank.freqs);
+      renderAcarsBanks();
+      // בנק נבחר בזמן קליטה חיה => מחליפים מיד את החלון; אחרת נשמר להפעלה הבאה
+      if (acarsActive) applyMode("acars", { freqs: bank.freqs });
+    }
     function setAcarsStatus(active) {
       acarsActive = active;
       $("acarsStatus").textContent = active ? "מאזין · ACARS" : "ACARS כבוי";
@@ -1734,12 +1804,21 @@
       $("sdrActiveCtrl").classList.toggle("hidden", !acarsActive);
     }
     function renderVoiceAcarsBanner() {
-      // מציג banner בכרטיסיית הקול כשה-SDR תפוס על-ידי ACARS
+      // standby (sdrOff) קודם לכול: אין שמע/מדדים, מציגים את באנר ה-standby בלבד.
+      $("standbyBanner").classList.toggle("hidden", !sdrOff);
+      // banner בכרטיסיית הקול כשה-SDR תפוס על-ידי ACARS
       const banner = $("voiceAcarsBanner");
-      const show = acarsActive && appMode === "voice";
+      const show = !sdrOff && acarsActive && appMode === "voice";
       banner.classList.toggle("hidden", !show);
-      $("player").classList.toggle("hidden", show);
-      $("rfPanel").classList.toggle("hidden", show);
+      $("player").classList.toggle("hidden", show || sdrOff);
+      $("rfPanel").classList.toggle("hidden", show || sdrOff);
+    }
+    function renderPower() {
+      // כפתור כיבוי/הפעלה משקף את מצב ה-SDR (standby או פעיל)
+      const btn = $("powerBtn");
+      btn.textContent = sdrOff ? "▶ הפעלה" : "⏻ כיבוי";
+      btn.classList.toggle("on", sdrOff);
+      renderVoiceAcarsBanner();
     }
     function fmtTime(epoch) {
       const d = epoch ? new Date(epoch * 1000) : new Date();
@@ -2269,8 +2348,11 @@
     // מתג מצב קול/ACARS — רק מחליף תצוגה; ה-SDR לא מוחלף כאן
     segInit("modeSeg", (v) => showView(v));
     // כפתורי בקרת SDR בסרגל ACARS (הם היחידים שקוראים applyMode)
-    $("acarsActivateBtn").onclick = () => applyMode("acars");
+    $("acarsActivateBtn").onclick = () => applyMode("acars", selAcarsFreqs ? { freqs: selAcarsFreqs } : undefined);
     $("acarsStopBtn").onclick = () => applyMode("voice");
+    // כיבוי/הפעלת המקלט (standby): כבוי => מדליק (חוזר לקול); פעיל => מכבה
+    $("powerBtn").onclick = () => applyMode(sdrOff ? "voice" : "off");
+    $("standbyOnBtn").onclick = () => applyMode("voice");
     // banner בכרטיסיית קול כשה-SDR ב-ACARS: כפתור "חזור לקול"
     $("voiceActivateBtn").onclick = () => applyMode("voice");
     // "האזן למגדל": חוזר לקול ומכוונן ל-134.6 בבת אחת
@@ -2354,12 +2436,20 @@
       current = Number(st.freq);
       updateDisplay(current);
       $("extBtn").href = appStreamHref();   // אנדרואיד => intent ל-VLC; אחרת /live.m3u
-      if (st.acars_freqs) renderAcarsFreqs(st.acars_freqs);
+      if (st.acars_freqs) { renderAcarsFreqs(st.acars_freqs); selAcarsFreqs = st.acars_freqs; }
+      acarsBanks = st.acars_banks || [];      // בנקי תדרים מהשרת => בורר בכותרת ACARS
+      renderAcarsBanks();
       // app_mode מגיע מהמציאות (השירות הפעיל) => מציגים את התצוגה הנכונה בטעינה
       if (st.app_mode === "acars") {
         setAcarsStatus(true);               // מאתחל pip + SDR bar + banner מיד בטעינה
         showView("acars");
         setStatus("מצב ACARS פעיל", "live");
+      } else if (st.app_mode === "off") {
+        sdrOff = true;                      // המקלט בכיבוי (standby) — אין שמע/ACARS
+        updateSdrPip();
+        showView("voice");
+        renderPower();
+        setStatus("מקלט בכיבוי (Standby)", "off");
       } else {
         updateSdrPip();                     // pip על "קול" מיד בטעינה (לפני poll ראשון)
         showView("voice");

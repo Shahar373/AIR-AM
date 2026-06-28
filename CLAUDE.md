@@ -130,7 +130,7 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 | `/etc/rtl_airband/airband.conf` | קונפיג קול חי (תדר נבחר) | app.py בכל `/api/tune` |
 | `/etc/airam/acars.env` | תדרי ACARS חיים | app.py בכל מעבר ל-ACARS |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/off) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
 | `/var/lib/airam/activity.jsonl` | יומן שידורים (retention 500) | _activity_watcher |
@@ -154,7 +154,9 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 - **ACARS:** `_acars_listener` (thread, מאזין UDP 5556), `_normalize_acars` (הלב —
   ממיר JSON גולמי לכרטיס אחיד: label→קטגוריה+כיוון, חילוץ נ"צ, ARINC-622, actype),
   `_text_latlon`/`_scan_latlon` (חילוץ מיקום), `_parse_atis`/`_parse_oooi_80`,
-  `_enter_acars` (כתיבת env + מעבר שירות).
+  `_enter_acars` (כתיבת env + מעבר שירות), `_enter_standby` (כיבוי שני הצרכנים, משאיר
+  sdrplay חי), `_acars_window_error` (ולידציית בנק: ≤8 ערוצים, span ≤ `ACARS_WINDOW_MHZ`),
+  `ACARS_BANKS` (בנקי תדרים, כל בנק בחלון אחד), `_today_start` (רצפת "היום בלבד").
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_transcribe_worker` (thread whisper אופציונלי), `_sweep_recordings` (retention).
 - **`__main__`:** מבטיח קונפיג עדכני, מרים threads (activity, acars, transcribe, adsb),
@@ -199,11 +201,11 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 | GET | `/<path>` | נכסים סטטיים |
 | GET | `/live.m3u` | playlist לנגן חיצוני |
 | GET | `/stream` | proxy same-origin ל-Icecast (נדרש כש-HTTPS, mixed-content) |
-| GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode) |
+| GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `acars_banks`) |
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
-| POST | `/api/mode` | **מעבר מצב** voice/acars. דרך `_guard`. |
-| GET | `/api/acars` | הודעות ACARS אחרונות |
+| POST | `/api/mode` | **מעבר מצב** voice/acars/**off** (standby). דרך `_guard`. |
+| GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM) |
 | GET | `/api/activity` | יומן שידורים |
 | GET | `/recordings/<name>` | קובץ הקלטה MP3 |
@@ -260,8 +262,14 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 ## 12. מוסכמות וגוצ'אות (קרא לפני שינוי)
 
 - **כיוונון אחד בכל רגע:** RSP1B יחיד = תדר/מצב אחד פעיל. אל תנסה ריבוי ערוצים בו-זמני.
+- **שלושה מצבי `app_mode`:** `voice` (rtl_airband) · `acars` (acarsdec) · `off` (standby —
+  שני הצרכנים עצורים, ה-SDR פנוי ליישום אחר). `off` **אינו שורד reboot** (rtl_airband
+  הוא enabled). `api_state`/`api_health` גוזרים את המצב מהמציאות + intent; standby ≠ תקלה.
+- **בנקי ACARS = חלון אחד כל אחד:** acarsdec מפענח עד **8 ערוצים** בתוך חלון **~2MHz**.
+  צביר 131.x ו-136.x רחוקים ~5MHz ⇒ לעולם לא יחד. בנק חדש חייב לעבור `_acars_window_error`.
+  הצבא/תדלוק אמריקאי = רשת ARINC/SITA אזרחית (בפועל 131.550), **אין** תדר צבאי נפרד.
 - **`config/airband.conf` ו-`config/acars.env` נדרסים** ע"י `app.py` בזמן ריצה.
-  לשנות ברירת מחדל קבועה — ערוך גם את הדיפולט בקוד (`ACARS_FREQS_DEFAULT` וכו').
+  לשנות ברירת מחדל קבועה — ערוך גם את הדיפולט בקוד (`ACARS_BANKS`/`ACARS_FREQS_DEFAULT` וכו').
 - **gain של SDRplay הפוך:** ערך **קטן יותר = רווח גדול יותר** (IFGR/RFGR הן *הפחתות*).
 - **בידוד מקורות חיצוניים:** כל קריאת רשת (ADS-B, METAR) חייבת לרוץ ב-thread ולהיכשל
   חיננית — **הרדיו לעולם לא תלוי באינטרנט.**
