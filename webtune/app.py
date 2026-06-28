@@ -449,10 +449,9 @@ _TEXT_POS_RE = re.compile(
 # מנסים אחרי הפורמט עם נקודה (עדיפות נמוכה) כי הוא מדויק פחות.
 _TEXT_POS_COMPACT_RE = re.compile(
     r"([NS])(\d{2})([0-5]\d)(\d)([EW])(\d{3})([0-5]\d)(\d)")
-# פורמט LLBG SQ/Login: LLBG{status?}{DDMM}{NS}{DDDMM}{EW} — ה-LLBG הוא עוגן שמבטיח
-# שמדובר במיקום מטוס ולא בשם נקודת ניווט. status byte אחד אופציונלי לפני ה-lat.
-_TEXT_POS_LLBG_RE = re.compile(
-    r"LLBG\d?(\d{2})([0-5]\d)([NS])(\d{3})([0-5]\d)([EW])")
+# הערה: פורמט ה-login של LLBG (`02XSTLVLLBG03200N03452E...`) *אינו* מחולץ —
+# ה-DDMM שם הוא נ"צ ה*שדה* (reference של נתב"ג שמשותף לכל מטוס שמתחבר), לא מיקום
+# המטוס. חילוצו הדביק 📍 מטעה על כל הודעת login. ראה CHANGELOG 1.7.1.
 
 
 def _text_latlon(text):
@@ -480,30 +479,12 @@ def _text_latlon(text):
             return None
         return round(lat, 5), round(lon, 5)
 
-    def _parse_llbg(groups):
-        la_d, la_m, ns, lo_d, lo_m, ew = groups
-        try:
-            lat = int(la_d) + int(la_m) / 60
-            lon = int(lo_d) + int(lo_m) / 60
-        except (ValueError, TypeError):
-            return None
-        if ns == "S":
-            lat = -lat
-        if ew == "W":
-            lon = -lon
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
-            return None
-        return round(lat, 5), round(lon, 5)
-
     m = _TEXT_POS_RE.search(text)
     if m:
         return _parse(m.groups())
     m = _TEXT_POS_COMPACT_RE.search(text)
     if m:
         return _parse(m.groups(), compact=True)
-    m = _TEXT_POS_LLBG_RE.search(text)
-    if m:
-        return _parse_llbg(m.groups())
     return None
 
 
@@ -623,7 +604,10 @@ def _normalize_acars(m):
         if pos:
             lat, lon, pos_src = pos[0], pos[1], "adsc"
 
-    if lat is None:                           # נפילה: מיקום מקודד בטקסט חופשי
+    # נפילה: מיקום מקודד בטקסט חופשי — אבל *רק* מ-frame נקי. acarsdec error>0 = ביטים
+    # שתוקנו/לא-תוקנו; ספרה אחת שהתהפכה בקואורדינטה => מטוס במקום שגוי על המפה. ADS-C
+    # (libacars) לעיל מוגן-CRC ולכן נשמר גם עם error; ה-heuristic הטקסטואלי לא — לכן מגודר.
+    if lat is None and not m.get("error"):
         pos = _text_latlon(text)
         if pos:
             lat, lon, pos_src = pos[0], pos[1], "text"

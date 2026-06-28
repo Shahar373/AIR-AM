@@ -309,24 +309,31 @@ def test_text_latlon_compact_no_decimal():
     # FPON prefix, 3-digit degree lon (F00A style — Turkish airspace)
     lat, lon = app._text_latlon("LTAA.AFN/FMHIGT1166,.4L-GIT,,062600/FPON39428E038506,1/FCOADS")
     assert abs(lat - 39.7133) < 0.001 and abs(lon - 38.8433) < 0.001
-    # SQ logon: LLBG-anchored format now intentionally extracts aircraft position
-    lat, lon = app._text_latlon("02XSTLVLLBG03200N03452EV136975/")
-    assert abs(lat - 32.0) < 0.001 and abs(lon - 34.8667) < 0.001
 
 
-def test_text_latlon_llbg_format():
-    """פורמט LLBG SQ/Login: LLBG{status}{DDMM}{NS}{DDDMM}{EW}."""
-    # status=0: LLBG03200N03452E => 32°00'N 034°52'E
-    lat, lon = app._text_latlon("LLBG03200N03452E")
-    assert abs(lat - 32.0) < 0.001 and abs(lon - 34.8667) < 0.001
-    # status=1: LLBG13201N03452E => 32°01'N 034°52'E
-    lat, lon = app._text_latlon("02XATLVLLBG13201N03452EB136975/ARINC")
-    assert abs(lat - 32.0167) < 0.001 and abs(lon - 34.8667) < 0.001
-    # normalize_acars end-to-end: sets lat/lon and pos_src="text"
-    n = app._normalize_acars({"timestamp": 1.0, "text": "02XSTLVLLBG03200N03452EV136975/"})
-    assert n["lat"] is not None and abs(n["lat"] - 32.0) < 0.001
-    assert n["pos_src"] == "text"
-    assert n["group"] == "position"
+def test_text_latlon_login_is_not_aircraft_position():
+    """regression: ה-DDMM ב-login של LLBG הוא נ"צ *השדה* (משותף לכל מטוס שמתחבר),
+    לא מיקום המטוס. אסור שיחולץ — אחרת כל הודעת login מקבלת 📍 מטעה על השדה.
+    טקסטים מתוך קליטה אמיתית (596b4ef0...json)."""
+    assert app._text_latlon("02XSTLVLLBG03200N03452EV136975/") is None
+    assert app._text_latlon("02XATLVLLBG13201N03452EB136975/ARINC") is None
+    # end-to-end: הודעת login (label SQ) לא מקבלת מיקום => נשארת בקבוצת comm
+    n = app._normalize_acars({"timestamp": 1.0, "label": "SQ",
+                              "text": "02XSTLVLLBG03200N03452EV136975/"})
+    assert n["lat"] is None and n["pos_src"] is None
+    assert n["group"] != "position"
+
+
+def test_text_position_skipped_on_corrupted_frame():
+    """regression: frame עם acarsdec error>0 לא מפיק מיקום טקסטואלי (ספרה שהתהפכה
+    בקואורדינטה => מטוס במקום שגוי). ADS-C מוגן-CRC נשמר; ה-heuristic לא."""
+    clean = app._normalize_acars({"timestamp": 1.0, "error": 0, "tail": "LY-LOC",
+                                  "text": "POSN32010E034540,RW21,103458"})
+    assert clean["lat"] is not None and clean["pos_src"] == "text"
+    corrupt = app._normalize_acars({"timestamp": 1.0, "error": 2, "tail": "LY-LOC",
+                                    "text": "POSN32010E034540,RW21,103458"})
+    assert corrupt["lat"] is None and corrupt["pos_src"] is None
+    assert corrupt["group"] != "position"
 
 
 # --- ייצוא ------------------------------------------------------------------
