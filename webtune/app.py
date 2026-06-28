@@ -85,7 +85,11 @@ ACARS_LABELS = {
     "SQ": ("התחברות (login)", "comm"),
     "H1": ("הודעת מערכת/חברה (H1)", "text"),
     "5Z": ("שירות חברה (airline)", "text"),
+    "5V": ("זמינות VHF (link mgmt)", "comm"),
     "C1": ("הודעת חברה (C1)", "text"),
+    "3L": ("נתוני ULD/מטען (3L)", "tech"),
+    "A4": ("הודעת לו\"ז (FSM)", "comm"),
+    "WX": ("בקשת מזג אוויר (WX)", "comm"),
     "RA": ("תקשורת אוויר/קרקע", "text"),
     "RB": ("תקשורת אוויר/קרקע", "text"),
     "QA": ("OOOI · יציאה (Out)", "oooi"),
@@ -107,8 +111,11 @@ _ACARS_DIR_BY_LABEL = {
     "80": "downlink",   # דוח OOOI (OFFRP/INRP) מהמטוס
     "Q0": "downlink",   # link test ממטוס
     "B9": "downlink",   # בקשת אישור מהמטוס
+    "3L": "downlink",   # נתוני ULD/מטען מהמטוס
+    "WX": "downlink",   # בקשת METAR לשדות גיבוי מהמטוס
     "BA": "uplink",     # מתן אישור מהקרקע אל המטוס
     "A9": "uplink",     # ATIS משודר מהקרקע
+    "A4": "uplink",     # FSM / הודעת לוח-זמנים מהקרקע
 }
 # header ניתוב של תחנת קרקע בתחילת הטקסט (למשל ‎.ATSXCXA או ‎/TLVATYA) => uplink.
 # שמרני: דורש ‎. או ‎/ בתחילת השורה ואחריו מזהה תחנה אותיות-גדולות/ספרות.
@@ -449,10 +456,23 @@ _TEXT_POS_RE = re.compile(
 # מנסים אחרי הפורמט עם נקודה (עדיפות נמוכה) כי הוא מדויק פחות.
 _TEXT_POS_COMPACT_RE = re.compile(
     r"([NS])(\d{2})([0-5]\d)(\d)([EW])(\d{3})([0-5]\d)(\d)")
-# פורמט LLBG SQ/Login: LLBG{status?}{DDMM}{NS}{DDDMM}{EW} — ה-LLBG הוא עוגן שמבטיח
-# שמדובר במיקום מטוס ולא בשם נקודת ניווט. status byte אחד אופציונלי לפני ה-lat.
-_TEXT_POS_LLBG_RE = re.compile(
-    r"LLBG\d?(\d{2})([0-5]\d)([NS])(\d{3})([0-5]\d)([EW])")
+# הערה: פורמט ה-login של LLBG (`02XSTLVLLBG03200N03452E...`) *אינו* מחולץ —
+# ה-DDMM שם הוא נ"צ ה*שדה* (reference של נתב"ג שמשותף לכל מטוס שמתחבר), לא מיקום
+# המטוס. חילוצו הדביק 📍 מטעה על כל הודעת login. ראה CHANGELOG 1.7.1.
+
+# /.POS/ = תגובת מטוס ל-REQPOS (position request מהקרקע). פורמט מבני לחלוטין:
+# /.POS/TS{HHMMSS},{DDMMYY}{N}{DD}{MMf}{E}{DDD}{MMf},,{t},{?},{WPT},{ETA_WPT},,{fuel},,{spd},{alt}
+# lat/lon: DD+MMf = מעלות + דקות-עם-עשרון (3 ספרות: MM*10+f). דוגמה: 006 = 00.6'
+# הפורמט אמין גם עם error (פרוטוקול מבני, לא heuristic) ⇒ נחלץ לפני שמירת error guard.
+_POS_REPORT_RE = re.compile(
+    r"/\.POS/TS\d{6},\d{6}"        # TS timestamp + date (6 digits each)
+    r"([NS])(\d{2})(\d{3})"         # lat: NS, 2-digit deg, 3-digit MMf
+    r"([EW])(\d{3})(\d{3})"         # lon: EW, 3-digit deg, 3-digit MMf
+    r",,\d{6},\d+,"                 # gap fields (time2, unknown)
+    r"([A-Z][A-Z0-9]{1,7})"        # next waypoint (2–8 chars)
+    r",(\d{6})"                     # ETA to waypoint (HHMMSS)
+    r"(?:,,[^,]*,,[^,]*,([A-Z0-9]{2,6}))?"  # optional: fuel,,spd,{FL/alt code}
+)
 
 
 def _text_latlon(text):
@@ -480,31 +500,44 @@ def _text_latlon(text):
             return None
         return round(lat, 5), round(lon, 5)
 
-    def _parse_llbg(groups):
-        la_d, la_m, ns, lo_d, lo_m, ew = groups
-        try:
-            lat = int(la_d) + int(la_m) / 60
-            lon = int(lo_d) + int(lo_m) / 60
-        except (ValueError, TypeError):
-            return None
-        if ns == "S":
-            lat = -lat
-        if ew == "W":
-            lon = -lon
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
-            return None
-        return round(lat, 5), round(lon, 5)
-
     m = _TEXT_POS_RE.search(text)
     if m:
         return _parse(m.groups())
     m = _TEXT_POS_COMPACT_RE.search(text)
     if m:
         return _parse(m.groups(), compact=True)
-    m = _TEXT_POS_LLBG_RE.search(text)
-    if m:
-        return _parse_llbg(m.groups())
     return None
+
+
+def _parse_pos_report(text):
+    """מחלץ נ\"צ + waypoint + ETA מהודעת /.POS/ (תגובה ל-REQPOS מהקרקע).
+    מחזיר (lat, lon, decoded_str) או None.
+    אמין גם עם acarsdec error כי הפורמט מבני — אין heuristic על טקסט חופשי."""
+    if not text or "/.POS/" not in text:
+        return None
+    m = _POS_REPORT_RE.search(text)
+    if not m:
+        return None
+    ns, la_d, la_mf, ew, lo_d, lo_mf, wpt, eta, alt = m.groups()
+    try:
+        la_mf_i, lo_mf_i = int(la_mf), int(lo_mf)
+        # MMf: 3 ספרות — המניות (2) + עשרון (1). 006 = 00.6', 539 = 53.9'
+        lat = int(la_d) + (la_mf_i // 10 + (la_mf_i % 10) / 10) / 60
+        lon = int(lo_d) + (lo_mf_i // 10 + (lo_mf_i % 10) / 10) / 60
+    except (ValueError, TypeError):
+        return None
+    if ns == "S":
+        lat = -lat
+    if ew == "W":
+        lon = -lon
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+        return None
+    parts = [f"WPT {wpt}"]
+    if eta and len(eta) == 6:
+        parts.append(f"ETA {eta[:2]}:{eta[2:4]}z")
+    if alt:
+        parts.append(alt)
+    return round(lat, 5), round(lon, 5), " · ".join(parts)
 
 
 def _libacars_decode(obj):
@@ -552,6 +585,15 @@ _ACTYPE_RE = re.compile(r"\b(B7[3-9]\d|A[23][0-9]\d|E[17][0-9]\d|CRJ\d|AT[57]\d)
 # עלול להיות צמוד (OUT1420). IN לא בתחילת מילה לפני ספרה אבל הפורמטים בשטח לא מופרדים.
 _OOOI_PAIR_RE = re.compile(r"\b(OUT|OFF|ON|IN)\s?(\d{2}[:.]\d{2}|\d{4})", re.IGNORECASE)
 
+# WX (בקשות מזג אוויר): מחלץ קודי ICAO מארבע אותיות. מסנן מילות-מפתח שאינן שדות תעופה.
+_WX_ICAO_RE = re.compile(r"\b([A-Z]{4})\b")
+_WX_NON_AIRPORT = frozenset({
+    "METAR", "SPECI", "SIGMET", "PIREP", "ATIS", "CAVOK", "NOSIG", "TEMPO",
+    "BECMG", "PROB", "FROM", "TILL", "WIND", "GUST", "SHRA", "TSRA", "ACFT",
+    "ACARS", "UPDT", "REQU", "RESP",
+})
+_HOME_AIRPORT = "LLBG"
+
 
 def _parse_atis(text):
     """Best-effort: מחלץ wind/runway/QNH מטקסט A9 (ATIS). מחזיר string קצר או None."""
@@ -593,6 +635,25 @@ def _extract_actype(label, text):
     return m.group(1) if m else None
 
 
+def _parse_wx_alternates(text):
+    """מחלץ שדות alternate מהודעת WX (בקשת METAR לשדות גיבוי).
+    שני קודי ICAO+ שאינם LLBG = תכנון alternate פעיל. מחזיר decoded קצר או None."""
+    if not text:
+        return None
+    seen: set = set()
+    codes = []
+    for c in _WX_ICAO_RE.findall(text):
+        if c in seen or c in _WX_NON_AIRPORT or c == _HOME_AIRPORT:
+            continue
+        seen.add(c)
+        codes.append(c)
+    if len(codes) >= 2:
+        return "ALTERNATE: " + " · ".join(codes)
+    if codes:
+        return f"WX: {codes[0]}"
+    return None
+
+
 def _normalize_acars(m):
     """מצמצם הודעת acarsdec JSON לשדות שה-UI מציג, בפורמט *אחיד* לכל סוגי ההודעות:
     קטגוריה קריאה (label => תיאור), קבוצה (לצבע), ומיקום (lat/lon) כשזמין. עמיד
@@ -623,7 +684,19 @@ def _normalize_acars(m):
         if pos:
             lat, lon, pos_src = pos[0], pos[1], "adsc"
 
-    if lat is None:                           # נפילה: מיקום מקודד בטקסט חופשי
+    # /.POS/ = תגובת REQPOS: פרוטוקול מבני (לא heuristic) => אמין גם עם error.
+    # נחלץ לפני בדיקת error כי ספרה שהתהפכה ב-prefix שגרם ל-error לא פוגמת את הקואורדינטה.
+    if lat is None and text:
+        pos = _parse_pos_report(text)
+        if pos:
+            lat, lon, pos_src = pos[0], pos[1], "pos-report"
+            if decoded is None and pos[2]:
+                decoded = pos[2]                  # WPT · ETA · alt code
+
+    # נפילה: מיקום מקודד בטקסט חופשי — אבל *רק* מ-frame נקי. acarsdec error>0 = ביטים
+    # שתוקנו/לא-תוקנו; ספרה אחת שהתהפכה בקואורדינטה => מטוס במקום שגוי על המפה. ADS-C
+    # (libacars) לעיל מוגן-CRC ולכן נשמר גם עם error; ה-heuristic הטקסטואלי לא — לכן מגודר.
+    if lat is None and not m.get("error"):
         pos = _text_latlon(text)
         if pos:
             lat, lon, pos_src = pos[0], pos[1], "text"
@@ -637,6 +710,8 @@ def _normalize_acars(m):
             decoded = _parse_oooi_80(text)
         elif label == "A9":
             decoded = _parse_atis(text)
+        elif label == "WX":
+            decoded = _parse_wx_alternates(text)
 
     return {
         "t": g("timestamp"),                  # epoch seconds (float) מ-acarsdec
@@ -717,6 +792,10 @@ def _acars_listener():
         log.warning("ACARS listener: port %d busy - /api/acars יחזיר ריק", ACARS_UDP_PORT)
         return
     seen = 0
+    # dedup: (tail, label, text[:80]) → (timestamp, rec_dict). מונע כפילות מ-ACARS retries
+    # (כש-ground station לא שולח ACK, המטוס שולח שוב — עד 7 פעמים ב-APU fault של OO-ACF).
+    # retry_count מצטבר על הכרטיס המקורי בזיכרון; ה-JSONL נשמר נקי מחזרות.
+    _dedup: dict = {}
     while True:
         try:
             data, _ = sock.recvfrom(65535)
@@ -727,6 +806,22 @@ def _acars_listener():
         except (ValueError, UnicodeError):
             continue                          # דאטהגרם לא-JSON => מתעלמים
         rec = _normalize_acars(msg)
+
+        # בדיקת dedup: רק להודעות עם tail+text (ACK ריקים אינם מוחזרים)
+        tail, label, text = rec.get("tail"), rec.get("label"), rec.get("text") or ""
+        ts = rec.get("t") or time.time()
+        if tail and text:
+            dedup_key = (tail, label, text[:80])
+            prev_ts, prev_rec = _dedup.get(dedup_key, (0, None))
+            if prev_rec is not None and ts - prev_ts < 90:
+                prev_rec["retry_count"] = prev_rec.get("retry_count", 1) + 1
+                continue                      # retry — לא מוסיפים כרטיס חדש
+            _dedup[dedup_key] = (ts, rec)
+            if len(_dedup) > 500:             # ניקוי ערכים ישנים (מניעת דליפת זיכרון)
+                cutoff = ts - 90
+                for k in [k for k, (t, _) in _dedup.items() if t < cutoff]:
+                    del _dedup[k]
+
         _append_acars_log(rec)                # התמדה לפני הקצאת id הזמני (הקובץ נקי מ-id)
         with _acars_lock:
             _acars_seq += 1

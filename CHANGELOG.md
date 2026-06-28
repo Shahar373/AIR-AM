@@ -9,6 +9,50 @@
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-06-28
+### נוסף
+- **dedup ACARS retries**: כשמטוס לא מקבל ACK הוא שולח את אותה הודעה שוב ושוב
+  (נצפה: APU fault של OO-ACF נשלח 7 פעמים). כעת `_acars_listener` מזהה retry
+  לפי `(tail, label, text[:80])` בחלון 90 שניות — במקום כרטיס חדש, `retry_count`
+  מצטבר על הכרטיס המקורי. JSONL נשמר נקי מחזרות; ה-UI מציג אירוע אחד.
+- **Label `WX` (בקשת מזג אוויר)**: label שנקלט בשטח מ-9H-CAC (METAR ל-LGRP/LYBE/LIMC/LFPG)
+  מוצג עכשיו עם תיאור קריא ו-`decoded` אוטומטי:
+  - שדה בודד → `"WX: LCLK"` (בקשת מזג אוויר ליעד/חלופה יחידה)
+  - שני שדות+ → `"ALTERNATE: LGRP · LYBE · LIMC · LFPG"` (alternate planning פעיל)
+  - LLBG מוסננת (שדה הבית, אינה "alternate"). כיוון: `downlink`.
+### בדיקות
+- 7 טסטים חדשים: `_parse_wx_alternates` (multi/single/LLBG/None), WX ב-normalize,
+  dedup key logic, ו-retry_count update.
+
+## [1.7.2] - 2026-06-28
+### נוסף
+- **Label `3L` (ULD/מטען)**: label שהוצג בקליטה אמיתית מ-D-AIDA מסווג כעת כ-"נתוני ULD/מטען"
+  בקבוצה `tech` (אפור), כיוון `downlink`. קודם הופיע כ-"Label 3L".
+- **Label `5V` (VHF link mgmt)** ו-**`A4` (FSM)**: שני labels נוספים שנקלטו בשטח זוהו
+  ומוצגים עם תיאור קריא ב-UI במקום "Label X".
+- **פרסר `/.POS/` (REQPOS response)**: הודעות תגובה לבקשת מיקום מהקרקע מחלצות עכשיו
+  נ"צ + waypoint הבא + ETA (שדה `decoded`). הפורמט הוא מבני לחלוטין ולכן **אמין גם עם
+  `error>0`** (בניגוד לחילוץ heuristic מטקסט חופשי). `pos_src` = `"pos-report"`.
+  דוגמה: `/.POS/TS104451,260626N32006E034539,,104451,1,VELOX,110451,,P31,,147,F566`
+  → lat=32.01, lon=34.90, decoded="WPT VELOX · ETA 11:04z · F566".
+### בדיקות
+- 5 טסטים חדשים: label 3L/5V/A4, `_parse_pos_report` (basic + error bypass + reject).
+
+## [1.7.1] - 2026-06-28
+### תוקן
+- **מיקומי login (LLBG) שגויים על המפה/בכרטיסים**: הודעות login/SQ נושאות את נ"צ
+  ה*שדה* (`...LLBG03200N03452E...` ≈ נתב"ג, reference משותף לכל מטוס שמתחבר) ולא את
+  מיקום המטוס. החילוץ הקודם הדביק 📍 מטעה על כל הודעת login (בקליטה לדוגמה: 73 כאלה).
+  ה-regex `_TEXT_POS_LLBG_RE` הוסר — נ"צ אמיתי מגיע מדיווחי position (compact/decimal)
+  ומ-ADS-C, לא מ-frame של login.
+- **חילוץ מיקום מ-frame משובש**: הודעות עם `error > 0` (acarsdec תיקן/החמיץ ביטים)
+  כבר לא מפיקות מיקום מ-heuristic הטקסט — ספרה שהתהפכה בקואורדינטה הייתה ממקמת מטוס
+  בנקודה שגויה. ADS-C (libacars, מוגן-CRC) ממשיך להיחלץ גם עם `error`.
+
+### נוסף
+- בדיקות regression מתוך קליטת ACARS אמיתית: login אינו מפיק מיקום, ו-frame עם
+  `error>0` מדלג על חילוץ מיקום טקסטואלי.
+
 ## [1.7.0] - 2026-06-26
 ### תוקן
 - **Bug #1 — הודעות multi-block מוצגות כ-N כרטיסים נפרדים**: הודעות שה-msgno שלהן הוא

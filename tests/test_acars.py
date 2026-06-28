@@ -237,6 +237,25 @@ def test_normalize_category_from_labels():
     assert app._normalize_acars({"timestamp": 1.0})["category"] == "הודעה"   # בלי label
 
 
+def test_label_3l_uld_category():
+    """regression: label 3L (ULD/cargo) — מתוך קליטה אמיתית D-AIDA (596b4ef0...)."""
+    n = app._normalize_acars({"timestamp": 1.0, "label": "3L",
+                               "tail": "D-AIDA", "text": "531183D1934/12,935/12,936/12"})
+    assert "ULD" in n["category"] or "מטען" in n["category"]
+    assert n["group"] == "tech"
+    assert n["dir"] == "downlink"
+
+
+def test_label_5v_and_a4_known():
+    """regression: 5V (VHF link mgmt) ו-A4 (FSM) לא נופלים ל-'Label X'."""
+    n5v = app._normalize_acars({"timestamp": 1.0, "label": "5V", "tail": "YR-ADA"})
+    assert "Label 5V" not in n5v["category"]
+    na4 = app._normalize_acars({"timestamp": 1.0, "label": "A4", "tail": "4X-EMC",
+                                 "text": "/TLVCDYA.FS1/FSM 1452 AIZ1805 RCD RECEIVED"})
+    assert "Label A4" not in na4["category"]
+    assert na4["dir"] == "uplink"
+
+
 def test_normalize_position_from_libacars():
     m = {"timestamp": 1.0, "label": "B9",
          "libacars": {"arinc622": {"adsc": {"basic_report": {"lat": 32.1, "lon": 34.9}}}}}
@@ -309,24 +328,62 @@ def test_text_latlon_compact_no_decimal():
     # FPON prefix, 3-digit degree lon (F00A style — Turkish airspace)
     lat, lon = app._text_latlon("LTAA.AFN/FMHIGT1166,.4L-GIT,,062600/FPON39428E038506,1/FCOADS")
     assert abs(lat - 39.7133) < 0.001 and abs(lon - 38.8433) < 0.001
-    # SQ logon: LLBG-anchored format now intentionally extracts aircraft position
-    lat, lon = app._text_latlon("02XSTLVLLBG03200N03452EV136975/")
-    assert abs(lat - 32.0) < 0.001 and abs(lon - 34.8667) < 0.001
 
 
-def test_text_latlon_llbg_format():
-    """פורמט LLBG SQ/Login: LLBG{status}{DDMM}{NS}{DDDMM}{EW}."""
-    # status=0: LLBG03200N03452E => 32°00'N 034°52'E
-    lat, lon = app._text_latlon("LLBG03200N03452E")
-    assert abs(lat - 32.0) < 0.001 and abs(lon - 34.8667) < 0.001
-    # status=1: LLBG13201N03452E => 32°01'N 034°52'E
-    lat, lon = app._text_latlon("02XATLVLLBG13201N03452EB136975/ARINC")
-    assert abs(lat - 32.0167) < 0.001 and abs(lon - 34.8667) < 0.001
-    # normalize_acars end-to-end: sets lat/lon and pos_src="text"
-    n = app._normalize_acars({"timestamp": 1.0, "text": "02XSTLVLLBG03200N03452EV136975/"})
-    assert n["lat"] is not None and abs(n["lat"] - 32.0) < 0.001
-    assert n["pos_src"] == "text"
+def test_text_latlon_login_is_not_aircraft_position():
+    """regression: ה-DDMM ב-login של LLBG הוא נ"צ *השדה* (משותף לכל מטוס שמתחבר),
+    לא מיקום המטוס. אסור שיחולץ — אחרת כל הודעת login מקבלת 📍 מטעה על השדה.
+    טקסטים מתוך קליטה אמיתית (596b4ef0...json)."""
+    assert app._text_latlon("02XSTLVLLBG03200N03452EV136975/") is None
+    assert app._text_latlon("02XATLVLLBG13201N03452EB136975/ARINC") is None
+    # end-to-end: הודעת login (label SQ) לא מקבלת מיקום => נשארת בקבוצת comm
+    n = app._normalize_acars({"timestamp": 1.0, "label": "SQ",
+                              "text": "02XSTLVLLBG03200N03452EV136975/"})
+    assert n["lat"] is None and n["pos_src"] is None
+    assert n["group"] != "position"
+
+
+def test_text_position_skipped_on_corrupted_frame():
+    """regression: frame עם acarsdec error>0 לא מפיק מיקום טקסטואלי (ספרה שהתהפכה
+    בקואורדינטה => מטוס במקום שגוי). ADS-C מוגן-CRC נשמר; ה-heuristic לא."""
+    clean = app._normalize_acars({"timestamp": 1.0, "error": 0, "tail": "LY-LOC",
+                                  "text": "POSN32010E034540,RW21,103458"})
+    assert clean["lat"] is not None and clean["pos_src"] == "text"
+    corrupt = app._normalize_acars({"timestamp": 1.0, "error": 2, "tail": "LY-LOC",
+                                    "text": "POSN32010E034540,RW21,103458"})
+    assert corrupt["lat"] is None and corrupt["pos_src"] is None
+    assert corrupt["group"] != "position"
+
+
+def test_parse_pos_report_basic():
+    """regression: /.POS/ (תגובת REQPOS) — קליטה אמיתית N375WB (596b4ef0...).
+    פורמט מבני => נ\"צ + WPT + ETA מחולצים."""
+    text = "/.POS/TS104451,260626N32006E034539,,104451,1,VELOX,110451,,P31,,147,F566"
+    result = app._parse_pos_report(text)
+    assert result is not None, "/.POS/ אמור להניב תוצאה"
+    lat, lon, decoded = result
+    assert abs(lat - 32.01) < 0.001,  f"lat שגוי: {lat}"
+    assert abs(lon - 34.8983) < 0.001, f"lon שגוי: {lon}"
+    assert "VELOX" in decoded
+    assert "11:04" in decoded       # ETA 110451 → 11:04z
+
+
+def test_pos_report_extracted_even_with_error():
+    """regression: /.POS/ נחלץ גם כאשר acarsdec מדווח error — כי הפורמט מבני,
+    לא heuristic. מתוך N375WB אמיתי שהיה error=3 (596b4ef0...)."""
+    text = "/.POS/TS104451,260626N32006E034539,,104451,1,VELOX,110451,,P31,,147,F566"
+    n = app._normalize_acars({"timestamp": 1.0, "error": 3, "tail": "N375WB", "text": text})
+    assert n["lat"] is not None,  "/.POS/ עם error אמור לתת מיקום"
+    assert n["pos_src"] == "pos-report"
     assert n["group"] == "position"
+    assert n["decoded"] and "VELOX" in n["decoded"]
+
+
+def test_parse_pos_report_rejects_garbage():
+    """/.POS/ prefix בלי תוכן תקין => None."""
+    assert app._parse_pos_report("/.POS/GARBAGE") is None
+    assert app._parse_pos_report(None) is None
+    assert app._parse_pos_report("POSN32010E034540") is None  # לא /.POS/
 
 
 # --- ייצוא ------------------------------------------------------------------
@@ -451,3 +508,71 @@ def test_acars_export_csv_has_actype(client, paths):
     body = client.get("/api/acars/export?format=csv").data.decode("utf-8-sig")
     header = body.splitlines()[0]
     assert "actype" in header.split(",")
+
+
+# --- _parse_wx_alternates (label WX / alternate planning) --------------------
+
+def test_parse_wx_alternates_multi():
+    """4+ שדות alternate = decoded עם רשימה."""
+    text = "METAR LGRP LYBE LIMC LFPG"
+    r = app._parse_wx_alternates(text)
+    assert r is not None
+    assert r.startswith("ALTERNATE:")
+    assert "LGRP" in r and "LIMC" in r
+
+
+def test_parse_wx_alternates_single():
+    """שדה בודד שאינו LLBG = WX: CODE (לא alternate planning)."""
+    r = app._parse_wx_alternates("METAR LCLK")
+    assert r is not None
+    assert r.startswith("WX:")
+    assert "LCLK" in r
+
+
+def test_parse_wx_alternates_llbg_ignored():
+    """LLBG עצמה לא מסומנת כ-alternate (זהו השדה הביתי)."""
+    r = app._parse_wx_alternates("METAR LLBG")
+    assert r is None
+
+
+def test_parse_wx_alternates_no_icao():
+    """טקסט בלי קודי ICAO = None."""
+    assert app._parse_wx_alternates("NO VALID CODES") is None
+    assert app._parse_wx_alternates(None) is None
+    assert app._parse_wx_alternates("") is None
+
+
+def test_wx_label_in_normalize():
+    """label WX ב-_normalize_acars: קטגוריה נכונה + decoded עם alternate."""
+    n = app._normalize_acars({"timestamp": 1.0, "label": "WX", "tail": "9H-CAC",
+                               "text": "METAR LGRP LYBE LIMC LFPG"})
+    assert n["group"] == "comm"
+    assert n["dir"] == "downlink"
+    assert n["decoded"] is not None
+    assert "ALTERNATE" in n["decoded"]
+    assert "LLBG" not in n["decoded"]
+
+
+# --- dedup retries -----------------------------------------------------------
+
+def test_dedup_key_identifies_retry():
+    """אותו tail+label+text80 = מפתח dedup זהה (retry יהיה מזוהה)."""
+    base = {"timestamp": 1000.0, "tail": "OO-ACF", "label": "H1",
+            "text": "CFEM-APU-REAL " * 5}
+    r1 = app._normalize_acars({**base})
+    r2 = app._normalize_acars({**base, "timestamp": 1045.0})
+
+    key1 = (r1.get("tail"), r1.get("label"), (r1.get("text") or "")[:80])
+    key2 = (r2.get("tail"), r2.get("label"), (r2.get("text") or "")[:80])
+    assert key1 == key2          # מפתחות זהים = תיזוהה כ-retry
+
+
+def test_dedup_retry_count_update():
+    """עדכון retry_count על הרשומה המקורית (בדיקת לוגיקת הזיכרון)."""
+    rec = {"tail": "OO-ACF", "label": "H1", "text": "APU FAULT MSG", "t": 1000.0,
+           "group": "tech"}
+    # מדמה את מה שה-listener עושה: prev_rec הוא אותו dict
+    rec["retry_count"] = rec.get("retry_count", 1) + 1
+    assert rec["retry_count"] == 2
+    rec["retry_count"] = rec.get("retry_count", 1) + 1
+    assert rec["retry_count"] == 3
