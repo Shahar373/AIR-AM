@@ -93,11 +93,12 @@ def test_acars_listener_and_api(client, monkeypatch):
     threading.Thread(target=app._acars_listener, daemon=True).start()
     time.sleep(0.2)
 
+    now = time.time()                              # היום (מסנן "היום בלבד" ב-/api/acars)
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.sendto(json.dumps({"timestamp": 1.0, "freq": 131.725, "tail": "4X-EKF",
+    s.sendto(json.dumps({"timestamp": now, "freq": 131.725, "tail": "4X-EKF",
                          "flight": "LY1", "label": "H1", "text": "hi"}).encode(),
              (app.ACARS_UDP_HOST, app.ACARS_UDP_PORT))
-    s.sendto(json.dumps({"timestamp": 2.0, "freq": 131.55, "error": 0}).encode(),
+    s.sendto(json.dumps({"timestamp": now + 1, "freq": 131.55, "error": 0}).encode(),
              (app.ACARS_UDP_HOST, app.ACARS_UDP_PORT))
     s.sendto(b"not-json-garbage", (app.ACARS_UDP_HOST, app.ACARS_UDP_PORT))  # יתעלם
 
@@ -135,8 +136,8 @@ def test_api_mode_enter_acars(client, paths, no_sleep, monkeypatch):
     assert app.load_state()["app_mode"] == "acars"
     # שחרר את rtl_airband והרים את acarsdec
     assert ("stop", "rtl_airband") in calls and ("restart", app.ACARS_SERVICE) in calls
-    # נכתב env תקין
-    assert "ACARS_FREQS=131.525 131.550 131.725 131.825" in app.ACARS_ENV_PATH.read_text()
+    # נכתב env תקין (בנק ברירת המחדל)
+    assert ("ACARS_FREQS=" + " ".join(app.ACARS_FREQS_DEFAULT)) in app.ACARS_ENV_PATH.read_text()
 
 
 def test_api_mode_enter_acars_failure_recovers_voice(client, paths, no_sleep, monkeypatch):
@@ -196,12 +197,13 @@ def _reset_buffer():
 
 def test_acars_log_append_and_load_history(paths):
     _reset_buffer()
-    for t in (3.0, 1.0, 2.0):                       # סדר כתיבה לא-ממוין בזמן
-        app._append_acars_log({"t": t, "freq": 131.55, "tail": "4X-A%d" % int(t)})
+    base = app._today_start() + 10                  # היום (אחרת מסנן "היום בלבד" יחסום)
+    for dt in (3.0, 1.0, 2.0):                      # סדר כתיבה לא-ממוין בזמן
+        app._append_acars_log({"t": base + dt, "freq": 131.55, "tail": "4X-A%d" % int(dt)})
     app._load_acars_history()
     with app._acars_lock:
         msgs = list(app._acars_msgs)
-    assert [m["t"] for m in msgs] == [1.0, 2.0, 3.0]   # ממוין עולה לפי t
+    assert [m["t"] for m in msgs] == [base + 1.0, base + 2.0, base + 3.0]   # ממוין עולה לפי t
     assert [m["id"] for m in msgs] == [1, 2, 3]        # id רץ הוקצה
     assert app._acars_seq == 3
 
@@ -219,11 +221,13 @@ def test_acars_log_trim(paths, monkeypatch):
 
 def test_load_history_tolerates_garbage(paths):
     _reset_buffer()
-    app.ACARS_LOG_PATH.write_text('{"t": 1.0, "freq": 131.5}\nnot-json\n{"t": 2.0}\n')
+    base = app._today_start() + 10                  # היום (מסנן "היום בלבד")
+    app.ACARS_LOG_PATH.write_text(
+        '{"t": %f, "freq": 131.5}\nnot-json\n{"t": %f}\n' % (base + 1, base + 2))
     app._load_acars_history()
     with app._acars_lock:
         msgs = list(app._acars_msgs)
-    assert [m["t"] for m in msgs] == [1.0, 2.0]        # השורה הפגומה דולגה
+    assert [m["t"] for m in msgs] == [base + 1, base + 2]   # השורה הפגומה דולגה
 
 
 # --- נרמול עשיר: קטגוריה + מיקום --------------------------------------------
@@ -576,3 +580,126 @@ def test_dedup_retry_count_update():
     assert rec["retry_count"] == 2
     rec["retry_count"] = rec.get("retry_count", 1) + 1
     assert rec["retry_count"] == 3
+
+
+# ============================================================================
+#  פיצ'רים חדשים: בנקי תדרים + ולידציית חלון, תצוגת "היום בלבד", standby
+# ============================================================================
+
+# --- בנקי תדרים + ולידציית חלון דגימה ---------------------------------------
+
+def test_acars_banks_default():
+    # ברירת המחדל היא הבנק הראשון (131.x מורחב), והוא נכנס בחלון אחד
+    assert app.ACARS_FREQS_DEFAULT == app.ACARS_BANKS[0]["freqs"]
+    for bank in app.ACARS_BANKS:
+        assert app._acars_window_error(bank["freqs"]) is None   # כל בנק חוקי
+        assert len(bank["freqs"]) <= app.ACARS_MAX_CHANNELS
+
+
+def test_acars_window_error_too_wide():
+    # 131.x + 136.x מרוחקים ~5MHz => חורגים מחלון יחיד
+    assert app._acars_window_error(["131.550", "136.900"]) is not None
+    # תקין בתוך החלון
+    assert app._acars_window_error(["131.525", "131.825"]) is None
+
+
+def test_acars_window_error_too_many_channels():
+    nine = ["131.5%02d" % i for i in range(9)]      # 9 ערוצים צמודים => חוקי-span אך >8
+    assert app._acars_window_error(nine) is not None
+
+
+def test_acars_window_error_empty():
+    assert app._acars_window_error([]) is not None
+
+
+def test_api_mode_acars_rejects_wide_window(client, paths, no_sleep, monkeypatch):
+    # בקשת מעבר ל-ACARS עם תדרים שלא נכנסים בחלון => 400 לפני נגיעה ב-SDR
+    called = []
+    monkeypatch.setattr(app, "_sysctl",
+                        lambda action, svc, timeout=45: called.append((action, svc)) or _ok())
+    r = client.post("/api/mode", json={"mode": "acars", "freqs": ["131.550", "136.900"]})
+    assert r.status_code == 400
+    assert called == []                              # לא נגענו בשירותים
+
+
+# --- תצוגת "היום בלבד" ------------------------------------------------------
+
+def test_load_acars_history_today_only(paths):
+    _reset_buffer()
+    base = app._today_start()
+    app._append_acars_log({"t": base - 90000, "tail": "OLD"})    # אתמול
+    app._append_acars_log({"t": base + 100, "tail": "NEW"})      # היום
+    app._load_acars_history()
+    with app._acars_lock:
+        tails = [m.get("tail") for m in app._acars_msgs]
+    assert tails == ["NEW"]                          # רק היום נטען לזיכרון
+
+
+def test_api_acars_today_filter_and_all(client, paths, monkeypatch):
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)
+    _reset_buffer()
+    base = app._today_start()
+    with app._acars_lock:
+        for t, tail in ((base - 90000, "OLD"), (base + 100, "NEW")):
+            app._acars_seq += 1
+            app._acars_msgs.append({"id": app._acars_seq, "t": t, "tail": tail})
+    # ברירת מחדל => היום בלבד
+    msgs = client.get("/api/acars?since=0").get_json()["messages"]
+    assert [m["tail"] for m in msgs] == ["NEW"]
+    # ?all=1 => כל מה שבזיכרון (כולל אתמול)
+    allmsgs = client.get("/api/acars?since=0&all=1").get_json()["messages"]
+    assert [m["tail"] for m in allmsgs] == ["OLD", "NEW"]
+
+
+def test_acars_export_keeps_all_history(client, paths):
+    # הייצוא לא מסונן לפי תאריך (ההיסטוריה המלאה נשמרת) — גם t ישן נכלל
+    app.ACARS_LOG_PATH.write_text(
+        json.dumps({"t": 1.0, "tail": "OLD"}) + "\n"
+        + json.dumps({"t": 2.0, "tail": "OLD2"}) + "\n")
+    data = json.loads(client.get("/api/acars/export?format=json").data)
+    assert [d["tail"] for d in data] == ["OLD", "OLD2"]
+
+
+# --- כיבוי/הפעלת מקלט (standby) ---------------------------------------------
+
+def test_api_mode_off_stops_both(client, paths, no_sleep, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app, "_sysctl",
+                        lambda action, svc, timeout=45: calls.append((action, svc)) or _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)   # שני הצרכנים כבויים אחרי stop
+    r = client.post("/api/mode", json={"mode": "off"})
+    j = r.get_json()
+    assert r.status_code == 200 and j["ok"] and j["app_mode"] == "off"
+    assert ("stop", "rtl_airband") in calls and ("stop", app.ACARS_SERVICE) in calls
+    assert all(svc != "sdrplay" for _, svc in calls)           # sdrplay לא נגעו בו
+    assert app.load_state()["app_mode"] == "off"
+
+
+def test_api_state_reports_off(client, paths, monkeypatch):
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "off"})
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)   # שני הצרכנים כבויים
+    assert client.get("/api/state").get_json()["app_mode"] == "off"
+
+
+def test_api_health_off_not_fault(client, paths, monkeypatch):
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "off"})
+
+    def fake_run(cmd, **kw):
+        svc = cmd[-1]
+        active = "active" if svc == "sdrplay" else "inactive"
+        return types.SimpleNamespace(returncode=0, stdout=active, stderr="")
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+    monkeypatch.setattr(app, "_sdr_present", lambda: True)
+    j = client.get("/api/health").get_json()
+    assert j["ok"] is True and j["app_mode"] == "off"           # standby = תקין, לא תקלה
+
+
+def test_api_mode_off_then_voice(client, paths, monkeypatch):
+    app.save_state({**app.DEFAULT_STATE, "freq": 118.1, "app_mode": "off"})
+    monkeypatch.setattr(app, "_restart_and_verify", lambda: (None, None, False))
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)   # יוצאים מ-standby
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    r = client.post("/api/mode", json={"mode": "voice"})
+    j = r.get_json()
+    assert r.status_code == 200 and j["ok"] and j["app_mode"] == "voice"
+    assert app.load_state()["app_mode"] == "voice"
