@@ -55,6 +55,8 @@ GPS_WINDOW_MIN = 15.0    # החלקה של יחס ה-NIC הפגום
 GPS_MIN_SAMPLE = 10      # פחות מדגימות מזה => "אין נתונים" ולא ירוק כוזב
 GPS_ALT_MIN = 5000.0     # מתחת לזה NIC נמוך נפוץ גם בלי שיבוש (multipath)
 
+AC_KEEP_SEC = 600.0      # snapshot פר-מטוס (היתוך ACARS↔ADS-B): גיזום אחרי 10 דק'
+
 # גילוי עמיד-שיבוש: באזור נתב"ג השיבוש מתמשך - מטוסים בגישה משדרים מיקום
 # מזויף או nic=0, אבל שדות ה-baro וה-track שורדים. nic=0 הוא בעצמו אות איתור:
 # השיבוש מקומי => המטוס פיזית קרוב לשדה (מטוסים על הקרקע כלל לא מושפעים).
@@ -103,6 +105,15 @@ def _final_geometry(lat, lon, rwy):
 def _num(v):
     """float או None. ‏alt_baro יכול להיות "ground" - לא מספר."""
     return float(v) if isinstance(v, (int, float)) else None
+
+
+def norm_reg(s):
+    """נרמול רישום מטוס להשוואת ACARS↔ADS-B: אותיות גדולות, בלי תווים שאינם
+    A-Z/0-9. ‏acarsdec מרפד בנקודות ('.4X-EHD'), ‏ADS-B עם מקף ('4X-EHD') —
+    שניהם => '4XEHD'. מחזיר None על ריק."""
+    if not s:
+        return None
+    return "".join(ch for ch in str(s).upper() if ch.isalnum()) or None
 
 
 # --- התאמת מסלול ------------------------------------------------------------
@@ -213,6 +224,7 @@ _S = {
     "src_idx": 0,
     "ac_count": 0,
     "spoofed_now": 0,         # מטוסים מזויפים (nic<SPOOF_NIC) בדגימה האחרונה
+    "aircraft": {},           # norm_reg(r) -> רשומת מטוס אחרונה (היתוך ACARS↔ADS-B)
 }
 
 
@@ -245,6 +257,33 @@ def process(ac_list, now=None):
                 total += 1
                 bad += integ < 7
 
+        # snapshot פר-מטוס (היתוך ACARS↔ADS-B): מיקום מפורסם רק כשהוא אמין —
+        # nic<SPOOF_NIC = מזויף (שיבוש GPS) => lat/lon מדוכאים, אבל גובה/מהירות/
+        # track (ששורדים שיבוש) נשמרים תמיד.
+        reg = norm_reg(ac.get("r"))
+        if reg:
+            spoofed = nic is not None and nic < SPOOF_NIC
+            lat, lon = _num(ac.get("lat")), _num(ac.get("lon"))
+            pos_ok = (lat is not None and lon is not None
+                      and (_num(ac.get("seen_pos")) or 0) <= 60 and not spoofed)
+            on_ground = ac.get("alt_baro") == "ground"
+            _S["aircraft"][reg] = {
+                "reg": str(ac.get("r")).strip(),
+                "hex": ac.get("hex"),
+                "flight": (ac.get("flight") or "").strip() or None,
+                "type": ac.get("t") or None,
+                "lat": lat if pos_ok else None,
+                "lon": lon if pos_ok else None,
+                "alt": None if on_ground else alt,
+                "ground": on_ground,
+                "gs": _num(ac.get("gs")),
+                "track": _num(ac.get("track")),
+                "nic": nic,
+                "spoofed": spoofed,
+                "pos_ok": pos_ok,
+                "t_mono": now,
+            }
+
         hit = classify(ac)
         if hit:
             kind, rwy, mode = hit
@@ -265,6 +304,9 @@ def process(ac_list, now=None):
         _S["gps_hist"].popleft()
     for key in [k for k, t in last_event.items() if now - t > DEDUP_MIN * 60]:
         del last_event[key]
+    aircraft = _S["aircraft"]
+    for reg in [r for r, rec in aircraft.items() if now - rec["t_mono"] > AC_KEEP_SEC]:
+        del aircraft[reg]                 # חסם זיכרון: מטוס שיצא מטווח נגזם
     return len(ac_list)
 
 
@@ -298,6 +340,26 @@ def _decide_runway(kind, now):
     last_age_min = (now - max(t for t, _r, _m in evs)) / 60.0
     pos_confirmed = any(m == "pos" for _t, rw, m in evs if rw == primary)
     return primary, secondary, len(evs), last_age_min, pos_confirmed
+
+
+def aircraft_snapshot(regs=None):
+    """רשומות פר-מטוס להעשרת ACARS (‏/api/acars). מפתח: רישום מנורמל (norm_reg).
+    ‏regs (set של רישומים מנורמלים) => מוחזרים רק המטוסים המבוקשים — כך התשובה
+    נושאת רק זנבות שמופיעים ב-ACARS, לא את כל ~300 המטוסים ברדיוס.
+    קריאה בלבד תחת הנעילה; מחזיר עותקים עם age (שניות מאז שנראה). לעולם לא זורק."""
+    out = {}
+    try:
+        with _LOCK:
+            now = time.monotonic()
+            for reg, rec in _S["aircraft"].items():
+                if regs is not None and reg not in regs:
+                    continue
+                r = dict(rec)
+                r["age"] = round(now - r.pop("t_mono"), 1)
+                out[reg] = r
+    except Exception:                     # אותו חוזה כמו snapshot: לא נוגעים ברדיו
+        pass
+    return out
 
 
 def snapshot():
@@ -468,6 +530,36 @@ def _selftest():
                     now + 120 + i)
     snap = snapshot()
     assert snap["runway"]["landing"] == "21", snap["runway"]
+
+    # --- snapshot פר-מטוס (היתוך ACARS↔ADS-B) --------------------------------
+    assert norm_reg(".4X-EHD") == "4XEHD" == norm_reg("4x-ehd")
+    assert norm_reg("") is None and norm_reg(None) is None
+    with _LOCK:
+        _S["aircraft"].clear()
+        now3 = time.monotonic()
+        process([
+            # מטוס תקין: מיקום אמין + סוג + callsign
+            {"hex": "738065", "r": "4X-EHD", "t": "B789", "flight": "ELY315 ",
+             "lat": 32.2, "lon": 34.7, "alt_baro": 12000, "gs": 320.0,
+             "track": 290.0, "nic": 8, "seen_pos": 3},
+            # משובש GPS: נ"צ מדוכא, גובה/track/מהירות נשמרים
+            {"hex": "5b1234", "r": "4X-EKS", "t": "B738", "lat": 33.8, "lon": 35.5,
+             "alt_baro": 3000, "gs": 150.0, "track": 209.0, "nic": 0, "seen_pos": 2},
+            # בלי רישום => לא נכנס ל-snapshot
+            {"hex": "abcdef", "lat": 32.1, "lon": 34.9, "alt_baro": 5000, "nic": 8},
+        ], now3)
+    ac_snap = aircraft_snapshot()
+    assert set(ac_snap) == {"4XEHD", "4XEKS"}, ac_snap
+    a = ac_snap["4XEHD"]
+    assert a["type"] == "B789" and a["flight"] == "ELY315" and a["pos_ok"]
+    assert a["lat"] == 32.2 and a["age"] >= 0
+    s = ac_snap["4XEKS"]
+    assert s["spoofed"] and s["lat"] is None and s["lon"] is None
+    assert s["alt"] == 3000 and s["track"] == 209.0     # שורדים שיבוש
+    assert set(aircraft_snapshot({"4XEHD"})) == {"4XEHD"}    # סינון לזנבות ACARS
+    with _LOCK:                                # גיזום: מטוס שלא נראה AC_KEEP_SEC נעלם
+        process([], now3 + AC_KEEP_SEC + 1)
+    assert aircraft_snapshot() == {}
     print("selftest: OK")
 
 

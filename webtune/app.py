@@ -1677,6 +1677,15 @@ def api_tune():
     return jsonify(payload), status
 
 
+def _acars_adsb():
+    """העשרת ADS-B לזנבות שבזיכרון ה-ACARS (היתוך לפי רישום מנורמל). קריאת
+    snapshot בזיכרון בלבד — אין רשת בנתיב הבקשה, אין אינטרנט => dict ריק."""
+    with _acars_lock:
+        regs = {adsb.norm_reg(m.get("tail")) for m in _acars_msgs if m.get("tail")}
+    regs.discard(None)
+    return adsb.aircraft_snapshot(regs) if regs else {}
+
+
 @app.route("/api/acars")
 def api_acars():
     """הודעות ACARS אחרונות. ?since=<id> => רק חדשות מאותו cursor (פולינג יעיל).
@@ -1696,7 +1705,7 @@ def api_acars():
         cursor = _acars_seq
     return jsonify(ok=True, active=_is_active(ACARS_SERVICE),
                    freqs=load_state().get("acars_freqs", ACARS_FREQS_DEFAULT),
-                   cursor=cursor, messages=msgs)
+                   cursor=cursor, messages=msgs, adsb=_acars_adsb())
 
 
 ACARS_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "mode", "label",

@@ -599,6 +599,12 @@
     /* actype בשורת roster */
     .rr-actype { color: var(--dim); font-size: .68rem; direction: ltr; }
 
+    /* העשרת ADS-B: badge "משדר כעת" ב-roster + התראת שיבוש בפאנל הפירוט */
+    .rr-adsb { font-size: .72rem; }
+    .ad-spoof { font-size: .68rem; font-weight: 700; color: #f0a8a3;
+      background: rgba(229,83,75,.14); border: 1px solid rgba(229,83,75,.4);
+      border-radius: 999px; padding: .04rem .42rem; white-space: nowrap; }
+
     .hidden { display: none !important; }
     .flex-col { display: flex; flex-direction: column; gap: .5rem; align-items: flex-start; }
   </style>
@@ -865,6 +871,7 @@
       <div class="acars-stat"><b id="acStRate">0</b><span>הודעות/דק׳</span></div>
       <div class="acars-stat"><b id="acStCraft">0</b><span>מטוסים</span></div>
       <div class="acars-stat"><b id="acStPos">0</b><span>עם מיקום</span></div>
+      <div class="acars-stat"><b id="acStAdsb">0</b><span>🛰 ב-ADS-B</span></div>
     </div>
 
     <!-- לוח ATIS sticky (מוסתר כברירת מחדל; מתמלא כשמגיעה הודעת A9) -->
@@ -1708,6 +1715,18 @@
     };
     const acAircraftId = (m) => m.tail || m.flight || null;
 
+    /* ----- העשרת ADS-B (היתוך לפי רישום מנורמל; שדה adsb ב-/api/acars) ----- */
+    let acarsAdsb = {};                   // norm_reg -> רשומת ADS-B (type/flight/lat/alt/gs/...)
+    let acarsAdsbKey = "";                // חתימה למניעת רינדור מיותר (ADS-B מתעדכן ~1/דק')
+    const ADSB_LIVE_S = 180;              // רשומה ישנה מזה => המטוס כבר לא "משדר כעת"
+    const adsbLive = {};                  // norm_reg -> { pts, line, head } שובל ADS-B במפה
+    const normReg = (s) => ((s || "").toUpperCase().replace(/[^A-Z0-9]/g, "")) || null;
+    function adsbFor(id) {                // רשומת ADS-B *חיה* למזהה-מטוס ACARS, או null
+      const c = acarsCraft[id];
+      const a = acarsAdsb[normReg((c && c.tail) || id) || ""];
+      return a && a.age <= ADSB_LIVE_S ? a : null;
+    }
+
     /* ----- צבירת מצב לכל מטוס (roster + detail), נגזר מ-acarsMsgs ----- */
     const acarsCraft = {};                // מזהה-מטוס -> { tail, flight, count, firstT, lastT, ... }
     const ACARS_STALE_MS = 10 * 60 * 1000;  // לא נשמע מעל 10 דק' => "יצא מטווח" (דהוי ב-roster/מפה)
@@ -1933,6 +1952,52 @@
         else t.line = L.polyline(t.pts, { color: trackColor(id), weight: 2, opacity: .7 });  // בלי addTo
       }
     }
+    /* ----- שכבת ADS-B במפה: שובל חי (מקווקו) + נקודת-ראש למטוס הנבחר ----- */
+    function updateAdsbLayer() {          // צבירת נקודות (גם בלי מפה) + רינדור
+      for (const reg in acarsAdsb) {
+        const a = acarsAdsb[reg];
+        if (!a.pos_ok || a.lat == null) continue;      // spoofed/בלי נ"צ => אין נקודה
+        const t = adsbLive[reg] || (adsbLive[reg] = { pts: [], line: null, head: null });
+        const last = t.pts[t.pts.length - 1];
+        if (!last || Math.abs(last[0] - a.lat) > 1e-5 || Math.abs(last[1] - a.lon) > 1e-5) {
+          t.pts.push([a.lat, a.lon]);
+          if (t.pts.length > TRACK_MAX) t.pts.shift();
+        }
+      }
+      // גיזום: מטוס שנעלם מה-snapshot של השרת (יצא מטווח/מה-ACARS) => ניקוי
+      for (const reg in adsbLive) {
+        if (reg in acarsAdsb) continue;
+        const t = adsbLive[reg];
+        if (acarsMap) { if (t.line) acarsMap.removeLayer(t.line); if (t.head) acarsMap.removeLayer(t.head); }
+        delete adsbLive[reg];
+      }
+      renderAdsbLayer();
+    }
+    function renderAdsbLayer() {          // מוצג רק למטוס הנבחר (עקבי עם renderMapSelection)
+      if (!acarsMap) return;
+      const focusReg = acarsFocus
+        ? normReg(((acarsCraft[acarsFocus] || {}).tail) || acarsFocus) : null;
+      for (const reg in adsbLive) {
+        const t = adsbLive[reg];
+        const show = reg === focusReg && t.pts.length > 0 && !!adsbFor(acarsFocus);
+        if (!show) {
+          if (t.line) acarsMap.removeLayer(t.line);
+          if (t.head) acarsMap.removeLayer(t.head);
+          continue;
+        }
+        const headPt = t.pts[t.pts.length - 1];
+        if (t.pts.length >= 2) {
+          if (t.line) { t.line.setLatLngs(t.pts); t.line.addTo(acarsMap); }
+          else t.line = L.polyline(t.pts, { color: "#9aa7b3", weight: 2, opacity: .8,
+                                            dashArray: "4 5" }).addTo(acarsMap);
+        }
+        if (t.head) { t.head.setLatLng(headPt); t.head.addTo(acarsMap); }
+        else t.head = L.circleMarker(headPt, { radius: 5, color: "#9aa7b3",
+            fillColor: "#e6edf3", fillOpacity: .9, weight: 2 })
+          .bindTooltip("ADS-B חי").addTo(acarsMap);
+      }
+    }
+
     // הצגת כל המטוסים עם מיקום (4 שעות אחרונות), ברירת מחדל מעומעמים. הנבחר מודגש + שובל + fitBounds.
     function renderMapSelection() {
       if (!acarsMap) return;
@@ -1997,6 +2062,7 @@
       renderAcarsFeed();                    // סינון הפיד למטוס
       ensureAcarsMap();
       renderMapSelection();                 // ציור המטוס הנבחר (או ניקוי המפה)
+      renderAdsbLayer();                    // שכבת ADS-B עוקבת אחרי הבחירה
     }
     function renderAcarsFocus() {
       const chip = $("acarsFocusChip");
@@ -2030,8 +2096,22 @@
         row.onclick = () => setAcarsFocus(id === acarsFocus ? null : id);   // טוגל
         row.appendChild(mkSpan("rr-tail", c.tail || id));
         if (c.flight && c.flight !== c.tail) row.appendChild(mkSpan("rr-flight", c.flight));
-        if (c.actype) row.appendChild(mkSpan("rr-actype", c.actype));
+        const a = adsbFor(id);
+        // סוג מ-ADS-B סמכותי וגובר על ה-heuristic מהודעות H1/C1
+        const actype = (a && a.type) || c.actype;
+        if (actype) {
+          const ty = mkSpan("rr-actype", actype);
+          if (a && a.type) ty.title = "סוג מטוס מ-ADS-B";
+          row.appendChild(ty);
+        }
         const db = dirBadge(c.lastDir, "rr-dir"); if (db) row.appendChild(db);
+        if (a) {
+          const sat = mkSpan("rr-adsb", "🛰");
+          sat.title = "משדר ADS-B כעת"
+            + (a.alt != null ? " · " + Math.round(a.alt).toLocaleString() + "ft" : "")
+            + (a.gs != null ? " · " + Math.round(a.gs) + "kt" : "");
+          row.appendChild(sat);
+        }
         if (c.hasPos) row.appendChild(mkSpan("rr-pos", "📍"));
         row.appendChild(mkSpan("rr-count", "×" + c.count));
         if (c.lastT != null) row.appendChild(mkSpan("rr-time", fmtTime(c.lastT)));
@@ -2060,11 +2140,17 @@
       if (!c) { box.classList.add("hidden"); box.textContent = ""; return; }
       box.classList.remove("hidden");
       box.textContent = "";
+      const adsb = adsbFor(acarsFocus);   // רשומת ADS-B חיה (או null — אין העשרה)
       const head = document.createElement("div");
       head.className = "ad-head";
       head.appendChild(mkSpan("ad-tail", c.tail || acarsFocus));
       if (c.flight && c.flight !== c.tail) head.appendChild(mkSpan("ad-flight", c.flight));
       if (craftIsStale(acarsFocus)) head.appendChild(mkSpan("amsg-dir dir-uplink", "יצא מטווח"));
+      if (adsb && adsb.spoofed) {
+        const sp = mkSpan("ad-spoof", "GPS משובש ⚠");
+        sp.title = "המטוס משדר מיקום מזויף (NIC נמוך) — הנ\"צ מ-ADS-B מדוכא; גובה/מהירות/כיוון אמינים";
+        head.appendChild(sp);
+      }
       box.appendChild(head);
 
       const grid = document.createElement("div");
@@ -2082,6 +2168,12 @@
         + (c.lastPosSrc ? " · " + c.lastPosSrc : ""));
       else cell("מיקום", "—");
       if (c.firstT != null) cell("נראה", fmtTime(c.firstT) + " → " + fmtTime(c.lastT));
+      if (adsb) {                          // העשרת ADS-B חיה (adsb.lol דרך adsb.py)
+        cell("ADS-B", [adsb.flight, adsb.type].filter(Boolean).join(" · ") || "משדר כעת");
+        if (adsb.alt != null) cell("גובה", Math.round(adsb.alt).toLocaleString() + " ft");
+        if (adsb.gs != null) cell("מהירות", Math.round(adsb.gs) + " kt");
+        if (adsb.track != null) cell("כיוון", Math.round(adsb.track) + "°");
+      }
       box.appendChild(grid);
 
       // מיני-היסטוריה: ההודעות האחרונות של המטוס (שימוש חוזר ב-renderAcarsMsg)
@@ -2172,6 +2264,7 @@
       $("acStTotal").textContent = acarsMsgs.length;
       $("acStCraft").textContent = new Set(acarsMsgs.map(acAircraftId).filter(Boolean)).size;
       $("acStPos").textContent = acarsMsgs.filter((m) => m.lat != null).length;
+      $("acStAdsb").textContent = Object.keys(acarsCraft).filter((id) => adsbFor(id)).length;
       const ts = acarsMsgs.map((m) => m.t).filter((t) => typeof t === "number");
       let rate = 0;
       if (ts.length >= 2) {
@@ -2290,6 +2383,13 @@
             delete acarsTracks[id];
           }
           for (const id in acarsCraft) delete acarsCraft[id];   // איפוס צבירת המטוסים
+          for (const reg in adsbLive) {                         // איפוס שכבת ה-ADS-B
+            if (acarsMap) {
+              if (adsbLive[reg].line) acarsMap.removeLayer(adsbLive[reg].line);
+              if (adsbLive[reg].head) acarsMap.removeLayer(adsbLive[reg].head);
+            }
+            delete adsbLive[reg];
+          }
           setAcarsFocus(null);                                  // הבחירה כבר לא תקפה
           $("acarsAtis").classList.add("hidden");               // ATIS מהסשן הקודם לא רלוונטי
         }
@@ -2307,6 +2407,21 @@
           renderAcarsRoster();
           renderAcarsDetail();
           renderAcarsFeed();
+        }
+        // העשרת ADS-B: מתעדכנת ~1/דק' גם בלי הודעות ACARS חדשות. חתימה יציבה
+        // (בלי age, שמשתנה בכל poll) => רינדור רק כשמשהו מהותי השתנה.
+        if (data.adsb) {
+          const key = Object.keys(data.adsb).sort().map((k) => {
+            const a = data.adsb[k];
+            return k + ":" + a.lat + "," + a.lon + "," + a.alt + "," + a.gs + ","
+              + (a.age <= ADSB_LIVE_S ? 1 : 0);
+          }).join("|");
+          acarsAdsb = data.adsb;          // age טרי תמיד (ל-adsbFor)
+          if (key !== acarsAdsbKey) {
+            acarsAdsbKey = key;
+            renderAcarsStats(); renderAcarsRoster(); renderAcarsDetail();
+            updateAdsbLayer();
+          }
         }
       } catch (e) { /* רשת זמנית => המחזור הבא ינסה שוב */ }
       finally { acarsInFlight = false; }
