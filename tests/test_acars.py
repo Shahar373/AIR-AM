@@ -721,6 +721,130 @@ def test_voice_go_ahead_label():
     assert n["dir"] == "uplink"
 
 
+# --- באג: תג-סוג פנימי של libacars ("adsc_msg") מוצג כאילו הוא תוכן ------------
+
+def test_libacars_decode_filters_internal_type_tag():
+    """regression: 'msg_type':'adsc_msg' (מתוך קליטה אמיתית) הוצג בעבר כ-decoded
+    כאילו זה תוכן ההודעה — זהו תג-סוג snake_case פנימי, לא טקסט. תוקן: מסונן."""
+    kind, text = app._libacars_decode({"adsc": {"msg_type": "adsc_msg",
+                                                 "basic_report": {"lat": 32.1, "lon": 34.9}}})
+    assert kind == "ADS-C" and text is None
+
+
+def test_libacars_decode_keeps_real_text():
+    """תוכן אמיתי (כולל מילה בודדת כמו CPDLC WILCO) לא נפגע מהסינון — רק תגי-סוג
+    snake_case (lowercase) מסוננים, לא טקסט אנושי (uppercase / עם רווחים)."""
+    kind, text = app._libacars_decode({"cpdlc": {"msg_type": "cpdlc_msg", "msg_text": "WILCO"}})
+    assert kind == "CPDLC" and text == "WILCO"
+    kind, text = app._libacars_decode({"cpdlc": {"msg_data": {"msg_text": "CLIMB TO FL350"}}})
+    assert text == "CLIMB TO FL350"
+
+
+# --- פרסרים נוספים שנבנו מקליטה אמיתית (C1 loadsheet, 16, 1L, A3 PDC) ----------
+# כל הווקטורים הבאים הם טקסטים מדויקים מתוך קליטה אמיתית ב-131.725/131.825 MHz
+# (LLBG, יוני 2026) — לא סינתטיים.
+
+def test_parse_loadsheet_real_capture():
+    text = (".UTCKM1P IZ/271346\nAGM\nFI IZ1843/AN 4X-EMF\n-  LOADSHEET\n"
+            "FINAL01 IZ1843/27   TLVETM 4XEMF 27JUN26\n"
+            "CREW    2/3  PAX  60             TTL  61\n"
+            "ZFW   33937  MAX    42600\nTOF    6650\nTOW   40587  MAX    52290\nTIF    1645")
+    d = app._parse_loadsheet(text)
+    assert "ZFW 33937kg" in d
+    assert "TOW 40587kg" in d
+    assert "TOF 6650kg" in d
+    assert "נוסעים 60" in d and "צוות 2/3" in d
+    assert 'סה"כ 61' in d
+
+
+def test_parse_loadsheet_ignores_mac_prefixed_fields():
+    """MACZFW/MACTOW/LIZFW לא אמורים להתבלבל עם ZFW/TOW (בדיקת \b)."""
+    text = "LOADSHEET\nMACZFW  23.7  MACTOW  19.6  LIZFW 60.1"
+    assert app._parse_loadsheet(text) is None    # אין ZFW/TOW אמיתיים, רק שדות MAC*/LI*
+
+
+def test_parse_loadsheet_requires_keyword():
+    assert app._parse_loadsheet("ZFW 33937 TOW 40587") is None   # בלי 'LOADSHEET' => לא מזוהה
+    assert app._parse_loadsheet(None) is None
+
+
+def test_loadsheet_in_normalize():
+    n = app._normalize_acars({"timestamp": 1.0, "label": "C1", "tail": "4X-EMF",
+                              "text": "LOADSHEET\nZFW   33937  MAX    42600"})
+    assert n["decoded"] == "ZFW 33937kg"
+    assert n["dir"] == "downlink"                 # C1 כבר ממופה downlink
+
+
+def test_parse_label16_real_capture():
+    """label 16: דיווח מיקום עשרוני שכלל לא זוהה קודם (lat=null בקליטה המקורית)."""
+    text = "BAL-14 ,N 35.676,E  34.264,35001,0501,2034,063\\TS180539,010726"
+    n = app._normalize_acars({"timestamp": 1.0, "label": "16", "error": 0, "text": text})
+    assert n["pos_src"] == "label16"
+    assert abs(n["lat"] - 35.676) < 0.001
+    assert abs(n["lon"] - 34.264) < 0.001
+    assert n["group"] == "position"
+    assert "BAL-14" in n["decoded"] and "35001ft" in n["decoded"]
+    assert n["dir"] == "downlink"
+
+
+def test_parse_label16_gated_by_error():
+    """label 16 פחות נוקשה-פורמט מ-DDMM המבני => מגודר כמו heuristic, לא נחלץ עם error."""
+    text = "BAL-14 ,N 35.676,E  34.264,35001,0501,2034,063\\TS180539,010726"
+    n = app._normalize_acars({"timestamp": 1.0, "label": "16", "error": 1, "text": text})
+    assert n["lat"] is None and n["pos_src"] is None
+
+
+def test_parse_label16_rejects_garbage():
+    assert app._parse_label16("not a position report") is None
+    assert app._parse_label16(None) is None
+
+
+def test_parse_nav_fuel_real_capture():
+    text = "00178220200 N 31.432/E 30.998/UTC 1842/FOB     4.9/ALT  15000/CAS 279.7/ETA 1902"
+    n = app._normalize_acars({"timestamp": 1.0, "label": "1L", "error": 0, "text": text})
+    assert n["pos_src"] == "nav-fuel"
+    assert abs(n["lat"] - 31.432) < 0.001
+    assert abs(n["lon"] - 30.998) < 0.001
+    assert "18:42" in n["decoded"] and "4.9t" in n["decoded"] and "19:02" in n["decoded"]
+
+
+def test_parse_nav_fuel_short_variant_not_matched():
+    """הווריאנט הקצר של 1L (בלי נ"צ) לא אמור להתפרש בטעות — נופל ל-None, לא ניחוש."""
+    assert app._parse_nav_fuel("00177214200HECA,1902") is None
+
+
+def test_parse_nav_fuel_extracted_even_with_error():
+    """עוגן ארוך וספציפי (7 שדות ברצף) => מבני מספיק לחילוץ גם עם error, כמו /.POS/."""
+    text = "N 31.432/E 30.998/UTC 1842/FOB 4.9/ALT 15000/CAS 279.7/ETA 1902"
+    n = app._normalize_acars({"timestamp": 1.0, "label": "1L", "error": 2, "text": text})
+    assert n["lat"] is not None and n["pos_src"] == "nav-fuel"
+
+
+def test_parse_pdc_real_capture():
+    """PDC (A3): אישור טרום-המראה אמיתי — היעד שהיה הכי קרוב למה שביקשנו מ-CPDLC."""
+    text = ("/TLVCDYA.DC1/CLD 1452 260627 LLBG PDC 678\n"
+            "AIZ1805 CLRD TO LLER OFF 26 VIA TOMAL4E\n"
+            "SQUAWK 4504 NEXT FREQ 121.750 ATIS W\n"
+            "CLIMB INIT ALT 4000  PLEASE ACK DC7482")
+    n = app._normalize_acars({"timestamp": 1.0, "label": "A3", "text": text})
+    d = n["decoded"]
+    assert "ל-LLER" in d and "המראה 26" in d and "SID TOMAL4E" in d
+    assert "Squawk 4504" in d and "תדר הבא 121.750" in d and "טפס ל-4000ft" in d
+    assert n["group"] == "clearance"
+    assert n["dir"] == "uplink"
+
+
+def test_parse_pdc_partial_fields():
+    d = app._parse_pdc("CLRD TO LLBG SQUAWK 1200")
+    assert "ל-LLBG" in d and "Squawk 1200" in d
+    assert "SID" not in d                          # לא נמצא => לא מוצג
+
+
+def test_parse_pdc_rejects_garbage():
+    assert app._parse_pdc("HELLO WORLD") is None
+    assert app._parse_pdc(None) is None
+
+
 # ============================================================================
 #  פיצ'רים חדשים: בנקי תדרים + ולידציית חלון, תצוגת "היום בלבד", standby
 # ============================================================================
