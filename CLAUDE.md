@@ -157,6 +157,9 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   `_parse_oooi_80` (80), `_parse_wx_alternates` (WX), `_parse_sa_media` (SA),
   `_parse_h1`+`_parse_fpn` (H1 sub-labels + תוכנית טיסה), `_parse_label15` (נ"צ, גם עם
   error — מבני), `_parse_sq` (squitter תחנה, בלי נ"צ), `_parse_autotune` (`:;`),
+  `_parse_loadsheet` (C1, ZFW/TOW/נוסעים), `_parse_pdc` (A3, אישור טרום-המראה),
+  `_parse_label16`/`_parse_nav_fuel` (16/1L, נ"צ עשרוני — לא-מתועדים ב-ARINC, זוהו
+  מקליטה אמיתית; **CPDLC נבדק ונמצא ללא תעבורה בפועל** בקליטה שנבדקה — לא מומש),
   `_acars_adsb` (העשרת ADS-B לזנבות שבזיכרון — ראה §6),
   `_enter_acars` (כתיבת env + מעבר שירות), `_enter_standby` (כיבוי שני הצרכנים, משאיר
   sdrplay חי), `_acars_window_error` (ולידציית בנק: ≤8 ערוצים, span ≤ `ACARS_WINDOW_MHZ`),

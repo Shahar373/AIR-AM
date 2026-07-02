@@ -117,6 +117,9 @@ ACARS_LABELS = {
     "A9": ("ATIS · מידע שדה (A9)", "comm"),
     "B9": ("בקשת אישור ATC", "clearance"),
     "BA": ("אישור ATC (clearance)", "clearance"),
+    "A3": ("אישור טרום-המראה (PDC)", "clearance"),
+    "16": ("דיווח מיקום (label 16)", "text"),
+    "1L": ("דוח ניווט/דלק (1L)", "text"),
 }
 
 # כיוון ההודעה (best-effort, חלקי בכוונה — כמו ACARS_LABELS): downlink = מטוס→קרקע
@@ -137,6 +140,9 @@ _ACARS_DIR_BY_LABEL = {
     "A4": "uplink",     # FSM / הודעת לוח-זמנים מהקרקע
     "SQ": "uplink",     # squitter של תחנת הקרקע (תוקן: בעבר downlink בטעות)
     "54": "uplink",     # voice go-ahead — הוראת קרקע לעבור לערוץ קול
+    "A3": "uplink",     # PDC — אישור טרום-המראה מהקרקע אל המטוס
+    "16": "downlink",   # דיווח מיקום מהמטוס
+    "1L": "downlink",   # דוח ניווט/דלק מהמטוס
     ":;": "uplink",     # autotune — הוראת קרקע למקלט לעבור תדר
 }
 # header ניתוב של תחנת קרקע בתחילת הטקסט (למשל ‎.ATSXCXA או ‎/TLVATYA) => uplink.
@@ -566,6 +572,12 @@ def _parse_pos_report(text):
     return round(lat, 5), round(lon, 5), " · ".join(parts)
 
 
+# מזהה-סוג פנימי של libacars (למשל "adsc_msg", "basic_report") — snake_case נקי,
+# לא טקסט אנושי. נצפה בקליטה אמיתית: "decoded" הציג "adsc_msg" כאילו זה תוכן
+# ההודעה, כי המפתח (msg_type) תואם ל-"msg" והערך הוא תג-סוג ולא תוכן.
+_LIBACARS_TAG_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
 def _libacars_decode(obj):
     """(kind, text) ממבנה libacars: kind ל-badge ('CPDLC'/'ADS-C'/'ARINC-622'),
     ו-text קצר קריא (CPDLC clearance וכו') אם נמצא. הגנתי לשינויי סכמה."""
@@ -579,7 +591,8 @@ def _libacars_decode(obj):
         if isinstance(o, dict):
             for k, v in o.items():
                 if (isinstance(v, str) and len(v.strip()) > 3
-                        and any(t in str(k).lower() for t in ("text", "msg", "message"))):
+                        and any(t in str(k).lower() for t in ("text", "msg", "message"))
+                        and not _LIBACARS_TAG_RE.match(v.strip())):
                     texts.append(v.strip())
                 else:
                     walk(v)
@@ -837,6 +850,135 @@ def _parse_autotune(text):
     return f"כוונון אוטומטי ל-{khz / 1000:.3f}MHz"
 
 
+# --- פרסרים נוספים שנבנו מקליטה אמיתית (labels C1/16/1L/A3, לא מתועדים ב-ARINC) --
+
+# Loadsheet אלקטרוני (label C1): מגיע בבלוקים נפרדים (multi-block, msgno D57A/B/C...) —
+# כל בלוק מחלץ מה שיש בו; \b לפני הקיצור מונע התאמה בתוך "MACZFW"/"LIZFW"/"MACTOW".
+_LOADSHEET_ZFW_RE = re.compile(r"\bZFW\s+(\d+)")
+_LOADSHEET_TOW_RE = re.compile(r"\bTOW\s+(\d+)")
+_LOADSHEET_TOF_RE = re.compile(r"\bTOF\s+(\d+)")
+_LOADSHEET_PAX_RE = re.compile(r"\bCREW\s+(\d+)/(\d+)\s+PAX\s+(\d+)")
+_LOADSHEET_TTL_RE = re.compile(r"\bTTL\s+(\d+)")
+
+
+def _parse_loadsheet(text):
+    """Loadsheet אלקטרוני (label C1, 'LOADSHEET FINAL'): משקל המראה (ZFW/TOW/TOF)
+    ונוסעים/צוות. best-effort — כל בלוק מציג רק את מה שהוא נושא."""
+    if not text or "LOADSHEET" not in text:
+        return None
+    parts = []
+    m = _LOADSHEET_ZFW_RE.search(text)
+    if m:
+        parts.append(f"ZFW {m.group(1)}kg")
+    m = _LOADSHEET_TOW_RE.search(text)
+    if m:
+        parts.append(f"TOW {m.group(1)}kg")
+    m = _LOADSHEET_TOF_RE.search(text)
+    if m:
+        parts.append(f"TOF {m.group(1)}kg")
+    m = _LOADSHEET_PAX_RE.search(text)
+    if m:
+        parts.append(f"נוסעים {m.group(3)} · צוות {m.group(1)}/{m.group(2)}")
+    m = _LOADSHEET_TTL_RE.search(text)
+    if m:
+        parts.append(f'סה"כ {m.group(1)}')
+    return " · ".join(parts) if parts else None
+
+
+# דיווח מיקום עשרוני (label 16, לא מתועד רשמית ב-ARINC 620): נצפה בקליטה אמיתית —
+# 'WPT ,N dd.ddd,E ddd.ddd,ALT,...\TS hhmmss,ddmmyy'. שדות באמצע (בין alt ל-\TS)
+# לא ברורים דיים כדי לתייג (לא מנחשים) — מחלצים רק waypoint+נ"צ+גובה.
+_L16_RE = re.compile(
+    r"^([A-Z0-9\-]{2,8})\s*,([NS])\s*([\d.]+),([EW])\s*([\d.]+),(\d{4,5})")
+
+
+def _parse_label16(text):
+    """label 16: נ"צ עשרוני + גובה. פחות נוקשה-פורמט מ-/.POS//label15 (שדות
+    באורך משתנה) => לא נחלץ עם error (בניגוד לפורמטים המבניים ה-DDMM)."""
+    if not text:
+        return None
+    m = _L16_RE.match(text.strip())
+    if not m:
+        return None
+    wpt, ns, la, ew, lo, alt = m.groups()
+    try:
+        lat, lon = float(la), float(lo)
+    except ValueError:
+        return None
+    if ns == "S":
+        lat = -lat
+    if ew == "W":
+        lon = -lon
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+        return None
+    return round(lat, 5), round(lon, 5), f"WPT {wpt.strip()} · {int(alt)}ft"
+
+
+# דוח ניווט/דלק (label 1L, לא מתועד רשמית): נ"צ עשרוני + UTC/דלק/גובה/מהירות/ETA.
+# עוגן ארוך וספציפי (7 שדות ברצף קבוע) => מבני מספיק לחילוץ גם עם error, כמו /.POS/.
+_NAV_FUEL_RE = re.compile(
+    r"\bN\s*([\d.]+)/E\s*([\d.]+)/UTC\s*(\d{4})/FOB\s+([\d.]+)/"
+    r"ALT\s+(\d+)/CAS\s+([\d.]+)/ETA\s+(\d{4})")
+
+
+def _parse_nav_fuel(text):
+    """label 1L: נ"צ עשרוני + UTC/דלק(טון)/גובה/מהירות/ETA. מדגם מצומצם בקליטה
+    שלנו — לא כל הודעות 1L תואמות (יש גם וריאנט קצר בלי נ"צ, שנופל ל-None כאן)."""
+    if not text:
+        return None
+    m = _NAV_FUEL_RE.search(text)
+    if not m:
+        return None
+    la, lo, utc, fob, alt, cas, eta = m.groups()
+    try:
+        lat, lon = float(la), float(lo)
+    except ValueError:
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+        return None
+    decoded = (f"UTC {utc[:2]}:{utc[2:]}z · דלק {fob}t · {alt}ft · "
+               f"CAS {cas}kt · ETA {eta[:2]}:{eta[2:]}z")
+    return round(lat, 5), round(lon, 5), decoded
+
+
+# PDC — Pre-Departure Clearance (label A3): אישור טרום-המראה מלא בטקסט חופשי.
+# מילות-המפתח (CLRD TO/OFF/VIA/SQUAWK/NEXT FREQ/CLIMB INIT ALT) הן סטנדרט תעשייתי
+# (FAA/EUROCONTROL DCL) ולא ספציפיות לחברה — אך מדגם יחיד בקליטה שלנו, best-effort.
+_PDC_DEST_RE = re.compile(r"\bCLRD TO ([A-Z]{4})\b")
+_PDC_RWY_RE = re.compile(r"\bOFF (\d{1,2}[LRC]?)\b")
+_PDC_SID_RE = re.compile(r"\bVIA ([A-Z0-9]{2,8})\b")
+_PDC_SQUAWK_RE = re.compile(r"\bSQUAWK (\d{4})\b")
+_PDC_FREQ_RE = re.compile(r"\bNEXT FREQ ([\d.]+)")
+_PDC_CLIMB_RE = re.compile(r"\bCLIMB INIT ALT (\d+)")
+
+
+def _parse_pdc(text):
+    """PDC (label A3): יעד/מסלול-המראה/SID/סקוואק/תדר הבא/גובה טיפוס ראשוני —
+    כל שדה אופציונלי, מוצגים רק אלה שנמצאו."""
+    if not text:
+        return None
+    parts = []
+    m = _PDC_DEST_RE.search(text)
+    if m:
+        parts.append(f"ל-{m.group(1)}")
+    m = _PDC_RWY_RE.search(text)
+    if m:
+        parts.append(f"המראה {m.group(1)}")
+    m = _PDC_SID_RE.search(text)
+    if m:
+        parts.append(f"SID {m.group(1)}")
+    m = _PDC_SQUAWK_RE.search(text)
+    if m:
+        parts.append(f"Squawk {m.group(1)}")
+    m = _PDC_FREQ_RE.search(text)
+    if m:
+        parts.append(f"תדר הבא {m.group(1)}")
+    m = _PDC_CLIMB_RE.search(text)
+    if m:
+        parts.append(f"טפס ל-{m.group(1)}ft")
+    return "אישור טרום-המראה: " + " · ".join(parts) if parts else None
+
+
 def _normalize_acars(m):
     """מצמצם הודעת acarsdec JSON לשדות שה-UI מציג, בפורמט *אחיד* לכל סוגי ההודעות:
     קטגוריה קריאה (label => תיאור), קבוצה (לצבע), ומיקום (lat/lon) כשזמין. עמיד
@@ -882,6 +1024,14 @@ def _normalize_acars(m):
         if pos:
             lat, lon, pos_src = pos[0], pos[1], "label15"
 
+    # label 1L (דוח ניווט/דלק): עוגן ארוך וספציפי (7 שדות ברצף) => מבני כמו /.POS/.
+    if lat is None and label == "1L" and text:
+        pos = _parse_nav_fuel(text)
+        if pos:
+            lat, lon, pos_src = pos[0], pos[1], "nav-fuel"
+            if decoded is None:
+                decoded = pos[2]
+
     # נפילה: מיקום מקודד בטקסט חופשי — אבל *רק* מ-frame נקי. acarsdec error>0 = ביטים
     # שתוקנו/לא-תוקנו; ספרה אחת שהתהפכה בקואורדינטה => מטוס במקום שגוי על המפה. ADS-C
     # (libacars) לעיל מוגן-CRC ולכן נשמר גם עם error; ה-heuristic הטקסטואלי לא — לכן מגודר.
@@ -889,6 +1039,14 @@ def _normalize_acars(m):
         pos = _text_latlon(text)
         if pos:
             lat, lon, pos_src = pos[0], pos[1], "text"
+
+    # label 16 (דיווח מיקום עשרוני): פורמט פחות נוקשה מ-DDMM המבני => מגודר כמו heuristic.
+    if lat is None and label == "16" and text and not m.get("error"):
+        pos = _parse_label16(text)
+        if pos:
+            lat, lon, pos_src = pos[0], pos[1], "label16"
+            if decoded is None:
+                decoded = pos[2]
 
     if lat is not None:
         group = "position"                    # יש מיקום => תמיד ירוק (קבוצת position)
@@ -909,6 +1067,10 @@ def _normalize_acars(m):
             decoded = _parse_sq(text)
         elif label == ":;":
             decoded = _parse_autotune(text)
+        elif label == "C1":
+            decoded = _parse_loadsheet(text)
+        elif label == "A3":
+            decoded = _parse_pdc(text)
 
     return {
         "t": g("timestamp") or time.time(),   # epoch seconds (float) מ-acarsdec (חסר => עכשיו)
@@ -924,7 +1086,8 @@ def _normalize_acars(m):
         "dir": _acars_direction(label, text),  # "uplink" | "downlink" | None (best-effort)
         "lat": lat,
         "lon": lon,
-        "pos_src": pos_src,                   # "adsc" | "text" | None
+        "pos_src": pos_src,                   # "adsc" | "pos-report" | "label15" | "nav-fuel"
+                                               # | "label16" | "text" | None
         "decoded": decoded,                   # טקסט מפוענח קצר (CPDLC/ATIS/OOOI וכו') או None
         "text": text,
         "error": m.get("error"),
