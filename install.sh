@@ -194,8 +194,13 @@ if pkg-config --atleast-version=2.1.0 libacars-2 2>/dev/null; then
 else
   log "בונה libacars..."
   cd "$BUILD_DIR"
-  rm -rf libacars                      # גרסה ישנה/עץ פגום => clone נקי
-  git clone https://github.com/szpajder/libacars.git
+  # checkout קיים => מעדכנים (לא הורסים): "rm -rf ואז clone" היה נכשל בלי רשת
+  # ומפיל את כל ההתקנה (set -euo pipefail) גם כשהיה כבר מקור זמין לבנייה.
+  if [[ -d libacars ]]; then
+    git -C libacars pull --ff-only || true
+  else
+    git clone https://github.com/szpajder/libacars.git
+  fi
   cd libacars && rm -rf build && mkdir build && cd build
   cmake .. && make -j"$(nproc)" && make install && ldconfig
 fi

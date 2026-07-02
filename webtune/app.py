@@ -475,6 +475,7 @@ _acars_seq = 0                 # מזהה רץ גלובלי (cursor ל-UI: "תן
 _vdl2_lock = threading.Lock()
 _vdl2_msgs = collections.deque(maxlen=VDL2_BUF_MAX)
 _vdl2_seq = 0                  # cursor נפרד ל-/api/vdl2
+_vdl2_drop_count = 0           # פריימים לא-מזוהים (סכמה לא תואמת) — נחשף בלוג תקופתי
 
 
 def _scan_latlon(obj):
@@ -1129,26 +1130,34 @@ def _normalize_acars(m):
     }
 
 
-def _append_acars_log(rec):
-    """מוסיף הודעה מנורמלת ל-acars.jsonl (append; thread ה-listener הוא הכותב היחיד).
-    נכשל בשקט (דיסק מלא וכו') => הפיד החי ממשיך לפעול."""
+def _append_jsonl_log(path, rec):
+    """מוסיף הודעה מנורמלת לקובץ JSONL (append; thread ה-listener הוא הכותב היחיד).
+    נכשל בשקט (דיסק מלא וכו') => הפיד החי ממשיך לפעול. משותף ל-ACARS ול-VDL2."""
     try:
-        ACARS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with ACARS_LOG_PATH.open("a", encoding="utf-8") as f:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError:
-        log.exception("acars log append")
+        log.exception("jsonl log append (%s)", path)
+
+
+def _trim_jsonl_log(path, keep):
+    """קיצוץ ל-keep שורות (rewrite אטומי). נקרא מדי פעם מ-thread ה-listener
+    (הכותב היחיד => אין מרוץ). קוראים (ייצוא) סובלים שורה אחרונה חלקית."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    if len(lines) > keep:
+        _atomic_write(path, "\n".join(lines[-keep:]) + "\n")
+
+
+def _append_acars_log(rec):
+    _append_jsonl_log(ACARS_LOG_PATH, rec)
 
 
 def _trim_acars_log():
-    """קיצוץ ל-ACARS_LOG_KEEP שורות (rewrite אטומי). נקרא מדי פעם מ-thread ה-listener
-    (הכותב היחיד => אין מרוץ). קוראים (ייצוא) סובלים שורה אחרונה חלקית."""
-    try:
-        lines = ACARS_LOG_PATH.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return
-    if len(lines) > ACARS_LOG_KEEP:
-        _atomic_write(ACARS_LOG_PATH, "\n".join(lines[-ACARS_LOG_KEEP:]) + "\n")
+    _trim_jsonl_log(ACARS_LOG_PATH, ACARS_LOG_KEEP)
 
 
 def _today_start():
@@ -1318,16 +1327,20 @@ def _normalize_vdl2(m):
         x25, xid = avlc.get("x25"), avlc.get("xid")
         if isinstance(x25, dict):
             blob = json.dumps(x25, ensure_ascii=False).lower()
+            is_adsc = "adsc" in blob or "ads-c" in blob
             if "cpdlc" in blob:
                 category, group = "CPDLC (VDL2)", "clearance"
-            elif "adsc" in blob or "ads-c" in blob:
+            elif is_adsc:
                 category, group = "ADS-C (VDL2)", "position"
             else:
                 category = "VDL2 · X.25"
             _, decoded = _libacars_decode(x25)   # תקציר טקסט קריא אם קיים במבנה
-            pos = _scan_latlon(x25)              # ADS-C => מיקום (מוגן-CRC בשכבת AVLC)
-            if pos:
-                lat, lon, pos_src, group = pos[0], pos[1], "adsc", "position"
+            # מיקום *רק* מ-ADS-C: CPDLC עלול לשאת נ"צ מוטבע (waypoint ב-clearance)
+            # שאינו מיקום המטוס עצמו — לא מייחסים אותו כמיקום כדי לא להטעות במפה.
+            if is_adsc:
+                pos = _scan_latlon(x25)          # מוגן-CRC בשכבת AVLC
+                if pos:
+                    lat, lon, pos_src, group = pos[0], pos[1], "adsc", "position"
         elif isinstance(xid, dict):
             category = "VDL2 · XID (ניהול קישור)"
             decoded = xid.get("type_descr") or xid.get("type")
@@ -1349,23 +1362,11 @@ def _normalize_vdl2(m):
 
 
 def _append_vdl2_log(rec):
-    """כמו _append_acars_log, על vdl2.jsonl (thread ה-listener הוא הכותב היחיד)."""
-    try:
-        VDL2_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with VDL2_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except OSError:
-        log.exception("vdl2 log append")
+    _append_jsonl_log(VDL2_LOG_PATH, rec)
 
 
 def _trim_vdl2_log():
-    """קיצוץ ל-VDL2_LOG_KEEP שורות (rewrite אטומי, כמו _trim_acars_log)."""
-    try:
-        lines = VDL2_LOG_PATH.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return
-    if len(lines) > VDL2_LOG_KEEP:
-        _atomic_write(VDL2_LOG_PATH, "\n".join(lines[-VDL2_LOG_KEEP:]) + "\n")
+    _trim_jsonl_log(VDL2_LOG_PATH, VDL2_LOG_KEEP)
 
 
 def _load_vdl2_history():
@@ -1398,7 +1399,7 @@ def _vdl2_listener():
     """thread רקע: מאזין ל-UDP מ-dumpvdl2, שומר ל-vdl2.jsonl ומכניס ל-ring buffer.
     רץ תמיד (גם כשהמצב אחר) — פשוט לא מגיעות דאטהגרמות כש-dumpvdl2 כבוי.
     dedup כמו ב-ACARS: זהות = tail או icao (לפריימים בלי רישום)."""
-    global _vdl2_seq
+    global _vdl2_seq, _vdl2_drop_count
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.bind((ACARS_UDP_HOST, VDL2_UDP_PORT))
@@ -1418,7 +1419,12 @@ def _vdl2_listener():
             continue                          # דאטהגרם לא-JSON => מתעלמים
         rec = _normalize_vdl2(msg)
         if rec is None:
-            continue                          # פריים לא בר-הצגה (בלי AVLC וכו')
+            # פריים לא בר-הצגה (בלי AVLC, סכמה לא תואמת וכו') — לוג תקופתי (לא רועש)
+            # כדי להבדיל "אין תעבורה" מ"dumpvdl2 שינה סכמה" בלי לקרוא קוד.
+            _vdl2_drop_count += 1
+            if _vdl2_drop_count % 200 == 1:
+                log.warning("VDL2: פריים לא זוהה (סכמה לא תואמת?) — %d עד כה", _vdl2_drop_count)
+            continue
 
         ident = rec.get("tail") or rec.get("icao")
         text = rec.get("text") or ""
@@ -1677,12 +1683,15 @@ def api_state():
     # rtl_airband עולה (acars/vdl2 לא enabled), אז state ישן "acars"/"vdl2" => מתוקן.
     # מרובע: vdl2/acars פעיל => הוא המצב; rtl_airband פעיל => voice; הכול כבוי *ו*-state
     # מסומן off => standby מכוון (לא שורד reboot: rtl_airband enabled וחוזר לעלות).
-    if _is_active(VDL2_SERVICE):
+    # בדיקת rtl_airband *ראשונה*: Conflicts ב-systemd מבטיח שאם הוא פעיל, שני
+    # האחרים בהכרח כבויים (בלעדיות הדדית) => בטוח לדלג עליהם. חוסך 2 מתוך 3
+    # קריאות subprocess ל-systemctl במצב הנפוץ ביותר (voice).
+    if _is_active("rtl_airband"):
+        st["app_mode"] = "voice"
+    elif _is_active(VDL2_SERVICE):
         st["app_mode"] = "vdl2"
     elif _is_active(ACARS_SERVICE):
         st["app_mode"] = "acars"
-    elif _is_active("rtl_airband"):
-        st["app_mode"] = "voice"
     elif st.get("app_mode") == "off":
         st["app_mode"] = "off"
     else:
@@ -2180,8 +2189,9 @@ ACARS_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "mode", "label",
                      "category", "group", "dir", "tail", "flight", "actype", "msgno", "error",
                      "lat", "lon", "pos_src", "text"]
 # ייצוא VDL2 = אותן עמודות + icao (זהות AVLC לפריימים בלי רישום) אחרי flight
-VDL2_EXPORT_COLS = (ACARS_EXPORT_COLS[:ACARS_EXPORT_COLS.index("flight") + 1]
-                    + ["icao"] + ACARS_EXPORT_COLS[ACARS_EXPORT_COLS.index("flight") + 1:])
+VDL2_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "mode", "label",
+                    "category", "group", "dir", "tail", "flight", "icao", "actype", "msgno",
+                    "error", "lat", "lon", "pos_src", "text"]
 
 
 def _read_jsonl_log(path):

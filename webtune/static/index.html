@@ -1888,7 +1888,7 @@
     }
     function updateSdrPip() {
       // נקודה ירוקה על הכרטיסייה שה-SDR באמת פעיל בה
-      const realMode = vdl2.active ? "vdl2" : acarsActive ? "acars" : "voice";
+      const realMode = (vdl2 && vdl2.active) ? "vdl2" : acarsActive ? "acars" : "voice";
       document.querySelectorAll("#modeSeg button").forEach(b => {
         b.classList.toggle("sdr-live", b.dataset.v === realMode);
       });
@@ -1902,13 +1902,13 @@
       $("standbyBanner").classList.toggle("hidden", !sdrOff);
       // banner בכרטיסיית הקול כשה-SDR תפוס על-ידי מצב דאטה (ACARS או VDL2)
       const banner = $("voiceAcarsBanner");
-      const dataActive = acarsActive || (typeof vdl2 !== "undefined" && vdl2.active);
+      const dataActive = acarsActive || (vdl2 && vdl2.active);
       const show = !sdrOff && dataActive && appMode === "voice";
       banner.classList.toggle("hidden", !show);
       if (show) {
         const txt = banner.querySelector("span");
-        if (txt) txt.textContent = vdl2.active ? "🛰️ המקלט כעת במצב VDL2 — אין שמע זמין"
-                                               : "📡 המקלט כעת במצב ACARS — אין שמע זמין";
+        if (txt) txt.textContent = (vdl2 && vdl2.active) ? "🛰️ המקלט כעת במצב VDL2 — אין שמע זמין"
+                                                          : "📡 המקלט כעת במצב ACARS — אין שמע זמין";
       }
       $("player").classList.toggle("hidden", show || sdrOff);
       $("rfPanel").classList.toggle("hidden", show || sdrOff);
@@ -2542,8 +2542,18 @@
       let focus = null, filter = "all", active = false;
       let lastId = 0, banks = [], selFreqs = null;
       let timer = null, staleTimer = null, inFlight = false, resizeT = null;
+      const icaoToId = {};                            // icao -> מזהה-מטוס ראשי (tail/flight)
 
-      const aircraftId = (m) => m.tail || m.flight || m.icao || null;
+      // אותו מטוס פיזי עשוי לשדר גם ACARS-over-VDL2 (עם tail) וגם CPDLC/XID (רק icao,
+      // בלי tail/flight) — בלי המיפוי הזה הם היו נכנסים לשני מפתחות נפרדים (roster/מפה
+      // כפולים). כשיש tail/flight, זוכרים את ה-icao שלו; פריים icao-בלבד משתמש במזהה
+      // הידוע במקום ליצור זהות חדשה.
+      function aircraftId(m) {
+        const id = m.tail || m.flight;
+        if (id) { if (m.icao) icaoToId[m.icao] = id; return id; }
+        if (m.icao) return icaoToId[m.icao] || m.icao;
+        return null;
+      }
       function adsbFor(id) {
         const c = craft[id];
         const a = adsb[normReg((c && c.tail) || id) || ""];
@@ -3003,6 +3013,7 @@
             for (const id in markers) { if (map) map.removeLayer(markers[id]); delete markers[id]; }
             for (const id in tracks) { if (map && tracks[id].line) map.removeLayer(tracks[id].line); delete tracks[id]; }
             for (const id in craft) delete craft[id];
+            for (const k in icaoToId) delete icaoToId[k];
             for (const reg in adsbTrk) {
               if (map) { if (adsbTrk[reg].line) map.removeLayer(adsbTrk[reg].line); if (adsbTrk[reg].head) map.removeLayer(adsbTrk[reg].head); }
               delete adsbTrk[reg];
@@ -3058,7 +3069,7 @@
         hide() { stopPolling(); },
       };
     }
-    const vdl2 = createDataView({ prefix: "vdl2", mode: "vdl2" });
+    var vdl2 = createDataView({ prefix: "vdl2", mode: "vdl2" });   // var: hoisted (לא TDZ) — מגן על הפניות מוקדמות ב-updateSdrPip/renderVoiceAcarsBanner
 
     /* ---------- אירועים ---------- */
     // רמז (לא חסימה) כשהתדר מחוץ ל-air band — טעות נפוצה: הקלדת תדר FM/קשר
