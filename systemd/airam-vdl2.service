@@ -1,0 +1,39 @@
+[Unit]
+Description=AIR-AM - VDL Mode 2 decoder (dumpvdl2, SDRplay RSP1B)
+Documentation=https://github.com/szpajder/dumpvdl2
+After=network-online.target sdrplay.service
+Wants=network-online.target
+# Requires => עצירת sdrplay עוצרת גם את dumpvdl2 (תלות קשיחה ב-API).
+# PartOf => restart של sdrplay מפעיל אותנו מחדש אם אנחנו הצרכן הפעיל כרגע
+# (try-restart) — בלי זה dependency-stop משאיר את התחנה שקטה. ראה rtl_airband.service.
+Requires=sdrplay.service
+PartOf=sdrplay.service
+# מצב משולב = SDR אחד בהחלפה: רק צרכן-SDR אחד פעיל בכל רגע. Conflicts דו-כיווני
+# מול *שני* הצרכנים האחרים => הפעלת dumpvdl2 עוצרת אוטומטית את rtl_airband ואת
+# acarsdec (וההפך). יחד עם ה-Conflicts שב-airam-acars.service כל הזוגות מכוסים.
+Conflicts=rtl_airband.service airam-acars.service
+# בלי הגבלת קצב-הפעלה => מתאושש לנצח (ניתוק/חיבור USB, מרוץ אתחול)
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# קובץ ההגדרות (אופציונלי, '-') - airam-web כותב אותו לפי בחירת הבנק בממשק.
+# systemd מנתח KEY=VALUE *בבטחה* (לא מריץ shell) => קובץ הניתן-לכתיבה ע"י airam
+# לא יכול להסליל הרצת קוד כ-root (בניגוד ל-source ב-bash).
+EnvironmentFile=-/etc/airam/vdl2.env
+# שער מוכנות: מחכה שה-SDRplay API באמת יענה לפני הרצת dumpvdl2 (כמו rtl_airband)
+ExecStartPre=/usr/local/bin/airam-wait-sdrplay
+# ‎$VDL2_FREQS ו-$VDL2_GAIN *ללא* סוגריים => systemd מפצל לארגומנטים; VDL2_GAIN
+# ריק (ברירת מחדל) פשוט נעלם => AGC של הדרייבר. ‎${VDL2_MSG_FILTER} *עם* סוגריים
+# => ארגומנט יחיד (token בלי רווחים). התדרים ב-*Hz* (ראה vdl2.env).
+# הפורט (5557) חייב להתאים ל-VDL2_UDP_PORT ב-webtune/app.py.
+# fallback שטח אם מסלול ה-SoapySDR מתנהג רע על החומרה: החלף את הקלט ב-
+#   --sdrplay3 0 --gr 40   (הדרייבר הנייטיבי; RSP1B נתמך מ-dumpvdl2 v2.6.0)
+ExecStart=/usr/local/bin/dumpvdl2 --soapysdr driver=sdrplay --sample-rate 2100000 $VDL2_GAIN --msg-filter ${VDL2_MSG_FILTER} --output decoded:json:udp:address=127.0.0.1,port=5557 $VDL2_FREQS
+# גישת חומרה (SDR) => כמו rtl_airband, רץ כ-root
+User=root
+Restart=always
+RestartSec=10
+
+# שים לב: השירות *לא* enabled (לא עולה באתחול). מצב ברירת המחדל הוא קול
+# (rtl_airband). airam-web מפעיל/עוצר אותו לפי בחירת המצב בממשק (דרך sudoers ממוקד).

@@ -925,15 +925,17 @@ def test_acars_export_keeps_all_history(client, paths):
 
 # --- כיבוי/הפעלת מקלט (standby) ---------------------------------------------
 
-def test_api_mode_off_stops_both(client, paths, no_sleep, monkeypatch):
+def test_api_mode_off_stops_all_consumers(client, paths, no_sleep, monkeypatch):
     calls = []
     monkeypatch.setattr(app, "_sysctl",
                         lambda action, svc, timeout=45: calls.append((action, svc)) or _ok())
-    monkeypatch.setattr(app, "_is_active", lambda svc: False)   # שני הצרכנים כבויים אחרי stop
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)   # כל הצרכנים כבויים אחרי stop
     r = client.post("/api/mode", json={"mode": "off"})
     j = r.get_json()
     assert r.status_code == 200 and j["ok"] and j["app_mode"] == "off"
+    # standby עוצר את *שלושת* צרכני ה-SDR (קול + ACARS + VDL2)
     assert ("stop", "rtl_airband") in calls and ("stop", app.ACARS_SERVICE) in calls
+    assert ("stop", app.VDL2_SERVICE) in calls
     assert all(svc != "sdrplay" for _, svc in calls)           # sdrplay לא נגעו בו
     assert app.load_state()["app_mode"] == "off"
 

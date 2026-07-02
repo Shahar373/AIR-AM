@@ -149,6 +149,34 @@ _ACARS_DIR_BY_LABEL = {
 # שמרני: דורש ‎. או ‎/ בתחילת השורה ואחריו מזהה תחנה אותיות-גדולות/ספרות.
 _UPLINK_HEADER_RE = re.compile(r"^[./][A-Z][A-Z0-9]{3,7}\b")
 
+# --- VDL2 (מצב שלישי: SDR אחד בהחלפה) --------------------------------------
+# VDL Mode 2 (D8PSK, 31.5kbps) הוא הדור הבא של דאטה-לינק: רוב התעבורה בו היא
+# ACARS-over-AVLC (אותן הודעות ACARS => כל הפרסרים הקיימים חלים), והשאר ATN/X.25
+# (CPDLC/ADS-C) ו-XID (ניהול קישור). dumpvdl2 שולח כל פריים מפוענח כ-JSON ב-UDP
+# ל-listener כאן (כמו acarsdec), וה-UI מושך מ-/api/vdl2. CHANGELOG ‏1.10.0 קבע
+# ש-CPDLC לא קיים על ACARS VHF באזורנו — הוא רץ על VDL2; המצב הזה סוגר את הפער.
+VDL2_SERVICE = "airam-vdl2"
+VDL2_ENV_PATH = Path("/etc/airam/vdl2.env")
+VDL2_UDP_PORT = 5557                  # חייב להתאים ל-port ב-airam-vdl2.service (host: ACARS_UDP_HOST)
+# בנקי תדרי VDL2: כל התדרים בצביר 136.7–137.0 (span ‏250kHz) => תמיד חלון דגימה אחד.
+# 136.975 הוא ה-CSC (Common Signalling Channel) העולמי — כמעט כל התעבורה באזורנו שם;
+# 4 הערוצים המשניים (אירופה) מפוענחים בו-זמנית בחינם. בנק CSC-בלבד = fallback ל-CPU.
+VDL2_BANKS = [
+    {"id": "eu_csc", "name": "עולמי + אירופה (CSC+4)",
+     "freqs": ["136.725", "136.775", "136.825", "136.875", "136.975"]},
+    {"id": "csc", "name": "CSC בלבד (136.975)", "freqs": ["136.975"]},
+]
+VDL2_FREQS_DEFAULT = VDL2_BANKS[0]["freqs"]
+VDL2_MAX_CHANNELS = 8                 # תקרה שפויה (dumpvdl2 מוגבל CPU, לא ערוצים)
+VDL2_WINDOW_MHZ = 1.9                 # SoapySDR של dumpvdl2 דוגם 2.1MS/s => ~2MHz עם שוליים
+VDL2_BUF_MAX = 500                    # הודעות אחרונות בזיכרון (כמו ACARS)
+VDL2_LOG_PATH = Path("/var/lib/airam/vdl2.jsonl")
+VDL2_LOG_KEEP = 5000                  # retention על הדיסק (זנב נשמר; ייצוא לניתוח)
+# סינון רעש בצד המפענח: בלי supervisory (RR וכו'), ‏ACK ריקים, ‏GSIF squitters (כל
+# כמה שניות מכל תחנת קרקע — היו מציפים את הפיד), ‏x25 control ו-keepalives של הרשת.
+# נשארים: acars (התוכן העיקרי), x25 data (CPDLC/ADS-C), xid (אירועי logon, קצב נמוך).
+VDL2_MSG_FILTER = "all,-avlc_s,-acars_nodata,-gsif,-x25_control,-idrp_keepalive,-esis"
+
 # הקלטות: rtl_airband כותב קובץ MP3 לכל שידור (split_on_transmission) בשם
 # <REC_BASENAME>_YYYYMMDD_HHMMSS_<Hz>.mp3 (.tmp בזמן כתיבה, rename בסגירה
 # ~0.5ש' אחרי שהסקוולץ' נסגר). קובץ שהסתיים = אירוע ביומן השידורים.
@@ -273,8 +301,9 @@ def load_presets():
 DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  "if_gain": IF_GAIN_DEFAULT, "rf_gain": RF_GAIN_DEFAULT,
                  "squelch_mode": "open", "squelch_snr": SNR_DEFAULT,  # ברירת מחדל ATIS => תמיד פתוח
-                 "app_mode": "voice",  # "voice" (rtl_airband) | "acars" (acarsdec) | "off" (standby)
-                 "acars_freqs": ACARS_FREQS_DEFAULT}
+                 "app_mode": "voice",  # "voice" (rtl_airband) | "acars" (acarsdec) | "vdl2" (dumpvdl2) | "off" (standby)
+                 "acars_freqs": ACARS_FREQS_DEFAULT,
+                 "vdl2_freqs": VDL2_FREQS_DEFAULT}
 
 
 # --- שורת ה-squelch: מקור אמת יחיד -----------------------------------------
@@ -441,6 +470,12 @@ def _rollback(prev):
 _acars_lock = threading.Lock()
 _acars_msgs = collections.deque(maxlen=ACARS_BUF_MAX)
 _acars_seq = 0                 # מזהה רץ גלובלי (cursor ל-UI: "תן לי הודעות חדשות מ-id")
+
+# --- VDL2: ring-buffer נפרד (אותה תבנית) -----------------------------------
+_vdl2_lock = threading.Lock()
+_vdl2_msgs = collections.deque(maxlen=VDL2_BUF_MAX)
+_vdl2_seq = 0                  # cursor נפרד ל-/api/vdl2
+_vdl2_drop_count = 0           # פריימים לא-מזוהים (סכמה לא תואמת) — נחשף בלוג תקופתי
 
 
 def _scan_latlon(obj):
@@ -1095,26 +1130,34 @@ def _normalize_acars(m):
     }
 
 
-def _append_acars_log(rec):
-    """מוסיף הודעה מנורמלת ל-acars.jsonl (append; thread ה-listener הוא הכותב היחיד).
-    נכשל בשקט (דיסק מלא וכו') => הפיד החי ממשיך לפעול."""
+def _append_jsonl_log(path, rec):
+    """מוסיף הודעה מנורמלת לקובץ JSONL (append; thread ה-listener הוא הכותב היחיד).
+    נכשל בשקט (דיסק מלא וכו') => הפיד החי ממשיך לפעול. משותף ל-ACARS ול-VDL2."""
     try:
-        ACARS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with ACARS_LOG_PATH.open("a", encoding="utf-8") as f:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError:
-        log.exception("acars log append")
+        log.exception("jsonl log append (%s)", path)
+
+
+def _trim_jsonl_log(path, keep):
+    """קיצוץ ל-keep שורות (rewrite אטומי). נקרא מדי פעם מ-thread ה-listener
+    (הכותב היחיד => אין מרוץ). קוראים (ייצוא) סובלים שורה אחרונה חלקית."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    if len(lines) > keep:
+        _atomic_write(path, "\n".join(lines[-keep:]) + "\n")
+
+
+def _append_acars_log(rec):
+    _append_jsonl_log(ACARS_LOG_PATH, rec)
 
 
 def _trim_acars_log():
-    """קיצוץ ל-ACARS_LOG_KEEP שורות (rewrite אטומי). נקרא מדי פעם מ-thread ה-listener
-    (הכותב היחיד => אין מרוץ). קוראים (ייצוא) סובלים שורה אחרונה חלקית."""
-    try:
-        lines = ACARS_LOG_PATH.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return
-    if len(lines) > ACARS_LOG_KEEP:
-        _atomic_write(ACARS_LOG_PATH, "\n".join(lines[-ACARS_LOG_KEEP:]) + "\n")
+    _trim_jsonl_log(ACARS_LOG_PATH, ACARS_LOG_KEEP)
 
 
 def _today_start():
@@ -1205,6 +1248,210 @@ def _acars_listener():
             _trim_acars_log()
 
 
+# --- VDL2: נרמול, התמדה ו-listener ------------------------------------------
+# סכמת dumpvdl2 v2.6.0 (אומתה מהמקור): ‏{"vdl2": {"t": {"sec","usec"}, "freq" (Hz),
+# "sig_level", "avlc": {"src"/"dst": {"addr","type","status"}, "frame_type",
+# "acars": {err,crc_ok,reg,mode,label,blk_id,ack,flight,msg_num,msg_num_seq,msg_text,
+#           + יישומים מפוענחים *מקוננים בפנים* (arinc622/adsc/cpdlc/miam...)},
+# או "xid": {type,type_descr,...} או "x25": {pkt_type_name, + clnp/cotp מקוננים}}}
+_VDL2_ACARS_FIELDS = frozenset({
+    "err", "crc_ok", "more", "reg", "mode", "label", "blk_id", "ack",
+    "flight", "msg_num", "msg_num_seq", "sublabel", "mfi", "msg_text",
+})
+
+
+def _normalize_vdl2(m):
+    """ממיר פריים dumpvdl2 JSON לאותה סכמת כרטיס אחידה של _normalize_acars, בתוספת
+    שדה icao (כתובת ICAO 24-bit של צד-המטוס — זהות לפריימים בלי tail). מחזיר None
+    לפריים שאינו בר-הצגה (בלי שכבת AVLC). שני מסלולים:
+      A. ‏avlc.acars קיים => מסנתזים dict בסגנון acarsdec ומזרימים דרך _normalize_acars
+         — כל הפרסרים (ATIS/OOOI/PDC/15/16/1L/H1...) והקטגוריות חלים כמות שהם.
+      B. אחרת => כרטיס גנרי בסיסי: CPDLC/ADS-C (תקציר libacars) / XID / X.25."""
+    v = m.get("vdl2")
+    if not isinstance(v, dict):
+        return None
+    avlc = v.get("avlc")
+    if not isinstance(avlc, dict):
+        return None                           # פריים בלי AVLC (שגיאת פענוח) => מדלגים
+
+    t_obj = v.get("t") or {}
+    try:
+        t = float(t_obj.get("sec") or 0) + float(t_obj.get("usec") or 0) / 1e6
+    except (TypeError, ValueError):
+        t = 0
+    t = t or time.time()
+    try:
+        freq_mhz = round(float(v.get("freq")) / 1e6, 3) if v.get("freq") else None
+    except (TypeError, ValueError):
+        freq_mhz = None
+    level = v.get("sig_level")
+
+    # זהות + כיוון מבניים משכבת ה-AVLC: src=Aircraft => downlink (עובדה פיזית,
+    # אמינה יותר מכל heuristic של label/טקסט => דורסת את _acars_direction בסוף).
+    src, dst = avlc.get("src") or {}, avlc.get("dst") or {}
+    icao = direction = None
+    if str(src.get("type") or "").lower() == "aircraft":
+        icao, direction = src.get("addr"), "downlink"
+    elif str(dst.get("type") or "").lower() == "aircraft":
+        icao = dst.get("addr")
+        if str(src.get("type") or "").lower().startswith("ground"):
+            direction = "uplink"
+    icao = str(icao).upper() if icao else None
+
+    acars = avlc.get("acars")
+    if isinstance(acars, dict):
+        # מסלול A: יישומים מפוענחים (arinc622 וכו') מקוננים בתוך אובייקט ה-acars
+        # (libacars סוגר את ההורה אחרי הצאצא) => כל מפתח מבני לא-מוכר הוא יישום.
+        apps = {k: val for k, val in acars.items()
+                if k not in _VDL2_ACARS_FIELDS and isinstance(val, (dict, list))}
+        raw = {
+            "timestamp": t,
+            "freq": freq_mhz,
+            "level": level,
+            "mode": acars.get("mode"),
+            "label": acars.get("label"),
+            "tail": acars.get("reg"),         # יתכן '.' מוביל — כמו acarsdec (norm_reg מטפל)
+            "flight": acars.get("flight"),
+            "msgno": ((acars.get("msg_num") or "") + (acars.get("msg_num_seq") or "")) or None,
+            "text": acars.get("msg_text"),
+            # err=פריים פגום / crc_ok=False => כמו acarsdec error>0 (מגדר heuristics של טקסט)
+            "error": 0 if (not acars.get("err") and acars.get("crc_ok", True)) else 1,
+        }
+        if apps:
+            raw["libacars"] = apps
+        card = _normalize_acars(raw)
+    else:
+        # מסלול B: כרטיס גנרי (החלטת עיצוב: בלי פרסרים ייעודיים ל-ATN בשלב זה)
+        category, group, decoded = "VDL2", "comm", None
+        lat = lon = pos_src = None
+        x25, xid = avlc.get("x25"), avlc.get("xid")
+        if isinstance(x25, dict):
+            blob = json.dumps(x25, ensure_ascii=False).lower()
+            is_adsc = "adsc" in blob or "ads-c" in blob
+            if "cpdlc" in blob:
+                category, group = "CPDLC (VDL2)", "clearance"
+            elif is_adsc:
+                category, group = "ADS-C (VDL2)", "position"
+            else:
+                category = "VDL2 · X.25"
+            _, decoded = _libacars_decode(x25)   # תקציר טקסט קריא אם קיים במבנה
+            # מיקום *רק* מ-ADS-C: CPDLC עלול לשאת נ"צ מוטבע (waypoint ב-clearance)
+            # שאינו מיקום המטוס עצמו — לא מייחסים אותו כמיקום כדי לא להטעות במפה.
+            if is_adsc:
+                pos = _scan_latlon(x25)          # מוגן-CRC בשכבת AVLC
+                if pos:
+                    lat, lon, pos_src, group = pos[0], pos[1], "adsc", "position"
+        elif isinstance(xid, dict):
+            category = "VDL2 · XID (ניהול קישור)"
+            decoded = xid.get("type_descr") or xid.get("type")
+        else:
+            ft = avlc.get("frame_type")
+            category = f"VDL2 · {ft}" if ft else "VDL2"
+        card = {
+            "t": t, "freq": freq_mhz, "level": level,
+            "label": None, "category": category, "group": group,
+            "tail": None, "flight": None, "mode": None, "msgno": None,
+            "dir": None, "lat": lat, "lon": lon, "pos_src": pos_src,
+            "decoded": decoded, "text": None, "error": 0, "actype": None,
+        }
+
+    card["icao"] = icao
+    if direction:
+        card["dir"] = direction
+    return card
+
+
+def _append_vdl2_log(rec):
+    _append_jsonl_log(VDL2_LOG_PATH, rec)
+
+
+def _trim_vdl2_log():
+    _trim_jsonl_log(VDL2_LOG_PATH, VDL2_LOG_KEEP)
+
+
+def _load_vdl2_history():
+    """טוען את זנב vdl2.jsonl ל-ring buffer בעלייה (היום בלבד, כמו ACARS).
+    נקרא *לפני* הפעלת thread ה-listener (אין מרוץ)."""
+    global _vdl2_seq
+    try:
+        lines = VDL2_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    recs = []
+    for ln in lines[-VDL2_BUF_MAX:]:
+        try:
+            recs.append(json.loads(ln))
+        except ValueError:
+            continue                          # שורה פגומה (כתיבה חלקית) => דילוג
+    floor = _today_start()
+    recs = [r for r in recs if (r.get("t") or 0) >= floor]
+    recs.sort(key=lambda r: r.get("t") or 0)
+    with _vdl2_lock:
+        for r in recs:
+            _vdl2_seq += 1
+            r["id"] = _vdl2_seq
+            _vdl2_msgs.append(r)
+    if recs:
+        log.info("VDL2: נטענו %d הודעות מההיסטוריה", len(recs))
+
+
+def _vdl2_listener():
+    """thread רקע: מאזין ל-UDP מ-dumpvdl2, שומר ל-vdl2.jsonl ומכניס ל-ring buffer.
+    רץ תמיד (גם כשהמצב אחר) — פשוט לא מגיעות דאטהגרמות כש-dumpvdl2 כבוי.
+    dedup כמו ב-ACARS: זהות = tail או icao (לפריימים בלי רישום)."""
+    global _vdl2_seq, _vdl2_drop_count
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind((ACARS_UDP_HOST, VDL2_UDP_PORT))
+    except OSError:
+        log.warning("VDL2 listener: port %d busy - /api/vdl2 יחזיר ריק", VDL2_UDP_PORT)
+        return
+    seen = 0
+    _dedup: dict = {}
+    while True:
+        try:
+            data, _ = sock.recvfrom(65535)
+        except OSError:
+            continue
+        try:
+            msg = json.loads(data.decode("utf-8", "replace"))
+        except (ValueError, UnicodeError):
+            continue                          # דאטהגרם לא-JSON => מתעלמים
+        rec = _normalize_vdl2(msg)
+        if rec is None:
+            # פריים לא בר-הצגה (בלי AVLC, סכמה לא תואמת וכו') — לוג תקופתי (לא רועש)
+            # כדי להבדיל "אין תעבורה" מ"dumpvdl2 שינה סכמה" בלי לקרוא קוד.
+            _vdl2_drop_count += 1
+            if _vdl2_drop_count % 200 == 1:
+                log.warning("VDL2: פריים לא זוהה (סכמה לא תואמת?) — %d עד כה", _vdl2_drop_count)
+            continue
+
+        ident = rec.get("tail") or rec.get("icao")
+        text = rec.get("text") or ""
+        ts = rec.get("t") or time.time()
+        if ident and text:
+            dedup_key = (ident, rec.get("label"), text[:80])
+            prev_ts, prev_rec = _dedup.get(dedup_key, (0, None))
+            if prev_rec is not None and ts - prev_ts < 90:
+                with _vdl2_lock:              # prev_rec חי גם ב-_vdl2_msgs => מוטציה תחת נעילה
+                    prev_rec["retry_count"] = prev_rec.get("retry_count", 1) + 1
+                continue
+            _dedup[dedup_key] = (ts, rec)
+            if len(_dedup) > 500:
+                cutoff = ts - 90
+                for k in [k for k, (t0, _) in _dedup.items() if t0 < cutoff]:
+                    del _dedup[k]
+
+        _append_vdl2_log(rec)                 # התמדה לפני הקצאת id (הקובץ נקי מ-id)
+        with _vdl2_lock:
+            _vdl2_seq += 1
+            rec["id"] = _vdl2_seq
+            _vdl2_msgs.append(rec)
+        seen += 1
+        if seen % 200 == 0:
+            _trim_vdl2_log()
+
+
 def _is_active(service):
     """is-active הוא קריאת-קריאה => לא דורש sudo (עובד לכל משתמש)."""
     try:
@@ -1217,22 +1464,23 @@ def _is_active(service):
 
 def _sysctl(action, service, timeout=45):
     """systemctl פעולה משנת-מצב => דרך SUDO (sudoers ממוקד מתיר בדיוק את
-    הפעולות האלה ל-airam: restart/stop rtl_airband, restart/stop airam-acars)."""
+    הפעולות האלה ל-airam: restart/stop של rtl_airband / airam-acars / airam-vdl2)."""
     return subprocess.run([*SUDO, "systemctl", action, service],
                           capture_output=True, text=True, timeout=timeout)
 
 
-def _sanitize_freqs(freqs):
-    """מסנן רשימת תדרי ACARS לערכים תקינים (MHz). נכתבים ל-env => חובה לוודא
-    שאין הזרקה: רק ספרות ונקודה (אף ש-systemd מנתח בבטחה, שמירה על קלט נקי)."""
+def _sanitize_freqs(freqs, default=None):
+    """מסנן רשימת תדרים לערכים תקינים (MHz). נכתבים ל-env => חובה לוודא
+    שאין הזרקה: רק ספרות ונקודה (אף ש-systemd מנתח בבטחה, שמירה על קלט נקי).
+    ‏default => רשימת הנפילה כשלא נשאר כלום (ברירת מחדל: תדרי ה-ACARS)."""
     out = [str(f).strip() for f in (freqs or []) if _FREQ_RE.match(str(f).strip())]
-    return out or list(ACARS_FREQS_DEFAULT)
+    return out or list(default if default is not None else ACARS_FREQS_DEFAULT)
 
 
-def _acars_window_error(freqs):
-    """בודק שרשימת תדרי ACARS חוקית לחלון דגימה *אחד* של acarsdec: עד
-    ACARS_MAX_CHANNELS ערוצים, וכולם בתוך span של ACARS_WINDOW_MHZ (חלון ~2MHz).
-    מחזיר הודעת שגיאה (str) או None אם תקין. טהורה => נבדקת בלי חומרה."""
+def _window_error(freqs, max_channels, window_mhz, decoder):
+    """בודק שרשימת תדרים חוקית לחלון דגימה *אחד* של המפענח: עד max_channels
+    ערוצים, וכולם בתוך span של window_mhz. מחזיר הודעת שגיאה (str) או None אם
+    תקין. טהורה => נבדקת בלי חומרה. משותפת ל-ACARS (acarsdec) ול-VDL2 (dumpvdl2)."""
     vals = []
     for f in freqs or []:
         try:
@@ -1240,14 +1488,22 @@ def _acars_window_error(freqs):
         except (TypeError, ValueError):
             continue
     if not vals:
-        return "לא נבחרו תדרי ACARS תקינים"
-    if len(vals) > ACARS_MAX_CHANNELS:
-        return "acarsdec תומך עד %d ערוצים (נבחרו %d)" % (ACARS_MAX_CHANNELS, len(vals))
+        return "לא נבחרו תדרים תקינים"
+    if len(vals) > max_channels:
+        return "%s תומך עד %d ערוצים (נבחרו %d)" % (decoder, max_channels, len(vals))
     span = max(vals) - min(vals)
-    if span > ACARS_WINDOW_MHZ + 1e-9:
+    if span > window_mhz + 1e-9:
         return ("התדרים מרוחקים מדי לחלון דגימה אחד (טווח %.3fMHz, מקסימום %sMHz) — "
-                "בחר בנק תדרים אחר" % (span, ACARS_WINDOW_MHZ))
+                "בחר בנק תדרים אחר" % (span, window_mhz))
     return None
+
+
+def _acars_window_error(freqs):
+    return _window_error(freqs, ACARS_MAX_CHANNELS, ACARS_WINDOW_MHZ, "acarsdec")
+
+
+def _vdl2_window_error(freqs):
+    return _window_error(freqs, VDL2_MAX_CHANNELS, VDL2_WINDOW_MHZ, "dumpvdl2")
 
 
 def write_acars_env(freqs, gain=ACARS_GAIN_DEFAULT, ratemult=ACARS_RATEMULT_DEFAULT):
@@ -1265,14 +1521,61 @@ def write_acars_env(freqs, gain=ACARS_GAIN_DEFAULT, ratemult=ACARS_RATEMULT_DEFA
     _atomic_write(ACARS_ENV_PATH, text)
 
 
-def _enter_acars(freqs):
-    """עוצר את rtl_airband ומריץ acarsdec. מחזיר (error, detail).
-    Conflicts ב-unit עוצר ממילא את rtl_airband, אבל עוצרים מפורשות תחילה כדי
-    לשחרר את ה-SDR לפני ש-acarsdec פותח אותו (מונע מרוץ על המכשיר)."""
+def write_vdl2_env(freqs, ifgr=None, rfgr=None):
+    """כותב /etc/airam/vdl2.env בפורמט EnvironmentFile של systemd. שים לב:
+    ‏dumpvdl2 מקבל תדרים ב-*Hz* — ההמרה מ-MHz (הפורמט של state/UI) נעשית רק כאן.
+    ‏VDL2_GAIN מכיל את הדגל *כולו* (או ריק): ‏$VDL2_GAIN לא-מצוטט ב-ExecStart נעלם
+    לגמרי כשהערך ריק => ברירת המחדל היא AGC של הדרייבר (כמו rtl_airband בלי שורת gain).
+    האפליקציה כותבת רק מחרוזת ריקה או ints מפורמטים => אין משטח הזרקה."""
+    mhz = _sanitize_freqs(freqs, VDL2_FREQS_DEFAULT)
+    hz = " ".join(str(int(round(float(f) * 1e6))) for f in mhz)
+    gain = ""
+    if ifgr is not None and rfgr is not None:
+        gain = "--soapy-gain IFGR=%d,RFGR=%d" % (int(ifgr), int(rfgr))
+    text = "\n".join([
+        "# נכתב אוטומטית ע\"י AIR-AM web tuner (מצב VDL2). שינויים ידניים נדרסים.",
+        "# התדרים ב-Hz (dumpvdl2), בעוד ה-state/UI עובדים ב-MHz.",
+        f"VDL2_FREQS={hz}",
+        f"VDL2_GAIN={gain}",
+        f"VDL2_MSG_FILTER={VDL2_MSG_FILTER}",
+        "",
+    ])
+    _atomic_write(VDL2_ENV_PATH, text)
+
+
+def _enter_vdl2(freqs):
+    """עוצר את שני צרכני ה-SDR האחרים ומריץ dumpvdl2. מחזיר (error, detail).
+    Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות תחילה כדי לשחרר את
+    ה-SDR לפני ש-dumpvdl2 פותח אותו (מונע מרוץ על המכשיר)."""
+    for svc in ("rtl_airband", ACARS_SERVICE):
+        try:
+            _sysctl("stop", svc, timeout=30)
+        except Exception:
+            pass
+    write_vdl2_env(freqs)
     try:
-        _sysctl("stop", "rtl_airband", timeout=30)
-    except Exception:
-        pass
+        r = _sysctl("restart", VDL2_SERVICE, timeout=45)
+    except subprocess.TimeoutExpired:
+        return "הפעלת VDL2 נתקעה — בדוק שה-SDR מחובר", None
+    if r.returncode != 0:
+        return (r.stderr or "dumpvdl2 failed").strip(), _journal_tail(VDL2_SERVICE)
+    # כמו ב-acarsdec: השירות יכול לעלות ואז לקרוס => פולינג ולא בדיקה בודדת
+    for _ in range(7):
+        time.sleep(0.5)
+        if not _is_active(VDL2_SERVICE):
+            return "dumpvdl2 נכשל לעלות — בדוק journalctl -u airam-vdl2", _journal_tail(VDL2_SERVICE)
+    return None, None
+
+
+def _enter_acars(freqs):
+    """עוצר את שאר צרכני ה-SDR ומריץ acarsdec. מחזיר (error, detail).
+    Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות תחילה כדי לשחרר את
+    ה-SDR לפני ש-acarsdec פותח אותו (מונע מרוץ על המכשיר)."""
+    for svc in ("rtl_airband", VDL2_SERVICE):
+        try:
+            _sysctl("stop", svc, timeout=30)
+        except Exception:
+            pass
     write_acars_env(freqs)
     try:
         r = _sysctl("restart", ACARS_SERVICE, timeout=45)
@@ -1289,19 +1592,20 @@ def _enter_acars(freqs):
 
 
 def _enter_standby():
-    """מצב כיבוי (standby): עוצר את *שני* צרכני ה-SDR (rtl_airband + acarsdec) =>
-    משחרר את ה-RSP1B ליישום SDR אחר, בעוד airam-web/הדף נשארים פעילים. את
-    sdrplay.service משאירים חי בכוונה: ה-API daemon הוא המתווך שמאפשר לאפליקציית
+    """מצב כיבוי (standby): עוצר את *שלושת* צרכני ה-SDR (rtl_airband + acarsdec +
+    dumpvdl2) => משחרר את ה-RSP1B ליישום SDR אחר, בעוד airam-web/הדף נשארים פעילים.
+    את sdrplay.service משאירים חי בכוונה: ה-API daemon הוא המתווך שמאפשר לאפליקציית
     SDRplay אחרת להתחבר מיד — וגם ה-sudoers ממילא אינו מתיר לעצור אותו.
     מחזיר (error, detail). serialized תחת TUNE_LOCK ע"י הקורא."""
-    for svc in (ACARS_SERVICE, "rtl_airband"):
+    consumers = (ACARS_SERVICE, VDL2_SERVICE, "rtl_airband")
+    for svc in consumers:
         try:
             _sysctl("stop", svc, timeout=30)
         except Exception:
             pass
     for _ in range(7):
         time.sleep(0.3)
-        if not _is_active(ACARS_SERVICE) and not _is_active("rtl_airband"):
+        if not any(_is_active(svc) for svc in consumers):
             return None, None
     return "כיבוי המקלט נכשל — שירות עדיין פעיל", _journal_tail("rtl_airband")
 
@@ -1376,19 +1680,24 @@ def root_asset(fname):
 def api_state():
     st = load_state()
     # מקור-אמת למצב = המציאות (השירות), לא רק ה-state השמור: אחרי reboot רק
-    # rtl_airband עולה (acars לא enabled), אז state ישן "acars" => מתוקן ל-voice.
-    # תלת-מצבי: acars פעיל => acars; rtl_airband פעיל => voice; שניהם כבויים *ו*-state
+    # rtl_airband עולה (acars/vdl2 לא enabled), אז state ישן "acars"/"vdl2" => מתוקן.
+    # מרובע: vdl2/acars פעיל => הוא המצב; rtl_airband פעיל => voice; הכול כבוי *ו*-state
     # מסומן off => standby מכוון (לא שורד reboot: rtl_airband enabled וחוזר לעלות).
-    if _is_active(ACARS_SERVICE):
-        st["app_mode"] = "acars"
-    elif _is_active("rtl_airband"):
+    # בדיקת rtl_airband *ראשונה*: Conflicts ב-systemd מבטיח שאם הוא פעיל, שני
+    # האחרים בהכרח כבויים (בלעדיות הדדית) => בטוח לדלג עליהם. חוסך 2 מתוך 3
+    # קריאות subprocess ל-systemctl במצב הנפוץ ביותר (voice).
+    if _is_active("rtl_airband"):
         st["app_mode"] = "voice"
+    elif _is_active(VDL2_SERVICE):
+        st["app_mode"] = "vdl2"
+    elif _is_active(ACARS_SERVICE):
+        st["app_mode"] = "acars"
     elif st.get("app_mode") == "off":
         st["app_mode"] = "off"
     else:
         st["app_mode"] = "voice"          # בזמן עליית שירותים / מצב לא ידוע => ברירת מחדל
     st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT, version=VERSION,
-              acars_banks=ACARS_BANKS)
+              acars_banks=ACARS_BANKS, vdl2_banks=VDL2_BANKS)
     return jsonify(st)
 
 
@@ -1410,7 +1719,7 @@ def api_presets():
 def api_health():
     """סטטוס המערכת — מאפשר ל-UI להבדיל בין "אין שידור" ל"משהו נפל"."""
     services = {}
-    for svc in ("rtl_airband", "icecast2", "sdrplay", "airam-acars"):
+    for svc in ("rtl_airband", "icecast2", "sdrplay", "airam-acars", "airam-vdl2"):
         try:
             r = subprocess.run(["systemctl", "is-active", svc],
                                capture_output=True, text=True, timeout=5)
@@ -1421,17 +1730,20 @@ def api_health():
         stats_age = round(time.time() - STATS_PATH.stat().st_mtime, 1)
     except OSError:
         stats_age = None     # עוד לא נכתב (rtl_airband לא עלה / זה עתה הופעל)
-    # תקין בשני המצבים: קול (rtl_airband+icecast) או ACARS (airam-acars) — אחרת
-    # מצב ACARS (שבו rtl_airband מכוון מבחירה) היה נראה כתקלה.
+    # תקין בכל המצבים: קול (rtl_airband+icecast) / ACARS (airam-acars) / VDL2
+    # (airam-vdl2) — אחרת מצב דאטה (שבו rtl_airband מכובה מבחירה) היה נראה כתקלה.
     voice_ok = services["rtl_airband"] == "active" and services["icecast2"] == "active"
     acars_ok = services["airam-acars"] == "active"
-    # standby מכוון: שני הצרכנים כבויים ו-state מסומן off => תקין, *לא* תקלה (אחרת
+    vdl2_ok = services["airam-vdl2"] == "active"
+    # standby מכוון: כל הצרכנים כבויים ו-state מסומן off => תקין, *לא* תקלה (אחרת
     # מצב הכיבוי שביקש המשתמש היה נראה כקריסה). sdrplay נשאר active במפה.
     off_ok = (load_state().get("app_mode") == "off"
               and services["rtl_airband"] != "active"
-              and services["airam-acars"] != "active")
-    mode = "acars" if acars_ok else "voice" if voice_ok else "off" if off_ok else "voice"
-    return jsonify(ok=(voice_ok or acars_ok or off_ok), app_mode=mode,
+              and services["airam-acars"] != "active"
+              and services["airam-vdl2"] != "active")
+    mode = ("vdl2" if vdl2_ok else "acars" if acars_ok
+            else "voice" if voice_ok else "off" if off_ok else "voice")
+    return jsonify(ok=(voice_ok or acars_ok or vdl2_ok or off_ok), app_mode=mode,
                    services=services, sdr_present=_sdr_present(), stats_age=stats_age)
 
 
@@ -1792,15 +2104,17 @@ def _voice_tune(params):
                 "state": load_state()}, 409
     try:
         prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
-        # מצב משולב: אם acarsdec רץ הוא מחזיק את ה-SDR => עוצרים מפורשות לפני
-        # שמרימים את rtl_airband (Conflicts גיבוי, אבל זה משחרר את המכשיר מיד).
-        if _is_active(ACARS_SERVICE):
-            try:
-                _sysctl("stop", ACARS_SERVICE, timeout=30)
-            except Exception:
-                pass
+        # מצב משולב: אם acarsdec/dumpvdl2 רץ הוא מחזיק את ה-SDR => עוצרים מפורשות
+        # לפני שמרימים את rtl_airband (Conflicts גיבוי, אבל זה משחרר את המכשיר מיד).
+        for svc in (ACARS_SERVICE, VDL2_SERVICE):
+            if _is_active(svc):
+                try:
+                    _sysctl("stop", svc, timeout=30)
+                except Exception:
+                    pass
         new_state = {**params, "app_mode": "voice",
-                     "acars_freqs": prev.get("acars_freqs", ACARS_FREQS_DEFAULT)}
+                     "acars_freqs": prev.get("acars_freqs", ACARS_FREQS_DEFAULT),
+                     "vdl2_freqs": prev.get("vdl2_freqs", VDL2_FREQS_DEFAULT)}
         log.info("tune %.3f MHz mod=%s agc=%s if_gain=%d rf_gain=%d squelch=%s snr=%.1f (from %s)",
                  params["freq"], params["mod"], params["agc"], params["if_gain"],
                  params["rf_gain"], params["squelch_mode"], params["squelch_snr"], request.remote_addr)
@@ -1874,13 +2188,17 @@ def api_acars():
 ACARS_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "mode", "label",
                      "category", "group", "dir", "tail", "flight", "actype", "msgno", "error",
                      "lat", "lon", "pos_src", "text"]
+# ייצוא VDL2 = אותן עמודות + icao (זהות AVLC לפריימים בלי רישום) אחרי flight
+VDL2_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "mode", "label",
+                    "category", "group", "dir", "tail", "flight", "icao", "actype", "msgno",
+                    "error", "lat", "lon", "pos_src", "text"]
 
 
-def _read_acars_log():
-    """כל ההודעות מ-acars.jsonl, ממוינות לפי זמן (t עולה). סובל שורות פגומות
-    (כתיבה חלקית של ההודעה האחרונה בזמן הקריאה)."""
+def _read_jsonl_log(path):
+    """כל ההודעות מקובץ JSONL, ממוינות לפי זמן (t עולה). סובל שורות פגומות
+    (כתיבה חלקית של ההודעה האחרונה בזמן הקריאה). משותף ל-ACARS ול-VDL2."""
     try:
-        lines = ACARS_LOG_PATH.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
     out = []
@@ -1893,44 +2211,128 @@ def _read_acars_log():
     return out
 
 
-@app.route("/api/acars/export")
-def api_acars_export():
-    """ייצוא כל הודעות ה-ACARS השמורות לקובץ מסודר (לניתוח offline).
-    ?format=csv (ברירת מחדל) | json. GET => בלי PIN (כמו שאר ה-GET)."""
+def _read_acars_log():
+    return _read_jsonl_log(ACARS_LOG_PATH)
+
+
+def _read_vdl2_log():
+    return _read_jsonl_log(VDL2_LOG_PATH)
+
+
+def _export_response(recs, cols, basename):
+    """בונה תגובת ייצוא (CSV עם BOM ל-Excel / JSON) מרשומות מנורמלות. משותף
+    ל-/api/acars/export ול-/api/vdl2/export — אותה סכמת כרטיס, עמודות לפי cols."""
     fmt = (request.args.get("format") or "csv").lower()
-    recs = _read_acars_log()
     stamp = time.strftime("%Y%m%d-%H%M%S")
     if fmt == "json":
         resp = app.response_class(json.dumps(recs, ensure_ascii=False, indent=1),
                                   mimetype="application/json")
-        fname = f"airam-acars-{stamp}.json"
+        fname = f"{basename}-{stamp}.json"
     else:
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(ACARS_EXPORT_COLS)
+        w.writerow(cols)
         for r in recs:
             t = r.get("t")
-            iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)) if t else ""
-            txt = (r.get("text") or "").replace("\r", " ").replace("\n", " ")
-            w.writerow([iso, t, r.get("freq"), r.get("level"), r.get("mode"),
-                        r.get("label"), r.get("category"), r.get("group"), r.get("dir"),
-                        r.get("tail"), r.get("flight"), r.get("actype"), r.get("msgno"), r.get("error"),
-                        r.get("lat"), r.get("lon"), r.get("pos_src"), txt])
+            row = []
+            for c in cols:
+                if c == "time_iso":
+                    row.append(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)) if t else "")
+                elif c == "timestamp":
+                    row.append(t)
+                elif c == "text":
+                    row.append((r.get("text") or "").replace("\r", " ").replace("\n", " "))
+                else:
+                    row.append(r.get(c))
+            w.writerow(row)
         # BOM => Excel מזהה UTF-8 ומציג עברית (category) נכון
         resp = app.response_class("﻿" + buf.getvalue(),
                                   mimetype="text/csv; charset=utf-8")
-        fname = f"airam-acars-{stamp}.csv"
+        fname = f"{basename}-{stamp}.csv"
     resp.headers["Content-Disposition"] = f'attachment; filename="{fname}"'
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
 
+@app.route("/api/acars/export")
+def api_acars_export():
+    """ייצוא כל הודעות ה-ACARS השמורות לקובץ מסודר (לניתוח offline).
+    ?format=csv (ברירת מחדל) | json. GET => בלי PIN (כמו שאר ה-GET)."""
+    return _export_response(_read_acars_log(), ACARS_EXPORT_COLS, "airam-acars")
+
+
+def _vdl2_adsb():
+    """העשרת ADS-B לזנבות שבזיכרון ה-VDL2 (היתוך לפי רישום מנורמל, כמו _acars_adsb).
+    פריימים עם icao בלבד (בלי reg) אינם מועשרים — adsb.py ממופתח לפי רישום."""
+    with _vdl2_lock:
+        regs = {adsb.norm_reg(m.get("tail")) for m in _vdl2_msgs if m.get("tail")}
+    regs.discard(None)
+    return adsb.aircraft_snapshot(regs) if regs else {}
+
+
+@app.route("/api/vdl2")
+def api_vdl2():
+    """הודעות VDL2 אחרונות. ?since=<id> => רק חדשות מאותו cursor (פולינג יעיל).
+    כברירת מחדל רק הודעות *היום*; ?all=1 => כל מה שבזיכרון (כמו /api/acars)."""
+    try:
+        since = int(request.args.get("since", 0))
+    except (TypeError, ValueError):
+        since = 0
+    show_all = request.args.get("all") in ("1", "true", "yes")
+    floor = 0 if show_all else _today_start()
+    with _vdl2_lock:
+        # עותקים (לא references): retry_count עלול להתעדכן ע"י ה-listener תוך כדי סדרול
+        msgs = [dict(m) for m in _vdl2_msgs
+                if m["id"] > since and (m.get("t") or 0) >= floor]
+        cursor = _vdl2_seq
+    return jsonify(ok=True, active=_is_active(VDL2_SERVICE),
+                   freqs=load_state().get("vdl2_freqs", VDL2_FREQS_DEFAULT),
+                   cursor=cursor, messages=msgs, adsb=_vdl2_adsb())
+
+
+@app.route("/api/vdl2/export")
+def api_vdl2_export():
+    """ייצוא כל הודעות ה-VDL2 השמורות (vdl2.jsonl). ?format=csv | json."""
+    return _export_response(_read_vdl2_log(), VDL2_EXPORT_COLS, "airam-vdl2")
+
+
 @app.route("/api/mode", methods=["POST"])
 def api_mode():
-    """מעבר בין מצב קול (rtl_airband) למצב ACARS (acarsdec). SDR אחד בהחלפה.
+    """מעבר בין המצבים: קול (rtl_airband) / ACARS (acarsdec) / VDL2 (dumpvdl2) /
+    off (standby). SDR אחד בהחלפה — צרכן אחד בכל רגע.
     POST => עובר דרך _guard (Origin + PIN אופציונלי), כמו /api/tune."""
     data = request.get_json(silent=True) or {}
     mode = str(data.get("mode", "")).lower()
+
+    if mode == "vdl2":
+        if not TUNE_LOCK.acquire(blocking=False):
+            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב",
+                           state=load_state()), 409
+        try:
+            st = load_state()
+            freqs = _sanitize_freqs(data.get("freqs") or st.get("vdl2_freqs"),
+                                    VDL2_FREQS_DEFAULT)
+            werr = _vdl2_window_error(freqs)         # חייב להיכנס בחלון דגימה אחד
+            if werr:
+                return jsonify(ok=False, error=werr, state=load_state()), 400
+            log.info("mode -> VDL2 freqs=%s (from %s)", freqs, request.remote_addr)
+            err, detail = _enter_vdl2(freqs)
+            if err:
+                log.warning("enter VDL2 failed: %s", err)
+                # נכשל => מנסים לחזור לקול האחרון כדי לא להשאיר SDR בלי צרכן
+                try:
+                    write_config(st["freq"], st["mod"], st["agc"], st["if_gain"],
+                                 st["rf_gain"], st["squelch_mode"], st["squelch_snr"])
+                    _sysctl("restart", "rtl_airband", timeout=45)
+                except Exception:
+                    pass
+                return jsonify(ok=False, error=err, detail=detail,
+                               state={**st, "app_mode": "voice"}), 500
+            new_state = {**st, "app_mode": "vdl2", "vdl2_freqs": freqs}
+            save_state(new_state)
+            return jsonify(ok=True, app_mode="vdl2", vdl2_freqs=freqs)
+        finally:
+            TUNE_LOCK.release()
 
     if mode == "acars":
         if not TUNE_LOCK.acquire(blocking=False):
@@ -1988,7 +2390,7 @@ def api_mode():
         payload, status = _voice_tune(params)
         return jsonify(payload), status
 
-    return jsonify(ok=False, error="mode לא תקין (voice/acars)"), 400
+    return jsonify(ok=False, error="mode לא תקין (voice/acars/vdl2/off)"), 400
 
 
 if __name__ == "__main__":
@@ -2013,6 +2415,8 @@ if __name__ == "__main__":
     threading.Thread(target=_activity_watcher, daemon=True).start()
     _load_acars_history()                                           # היסטוריית ACARS שורדת restart (לפני ה-listener)
     threading.Thread(target=_acars_listener, daemon=True).start()   # פיד UDP מ-acarsdec (שקט במצב קול)
+    _load_vdl2_history()                                            # היסטוריית VDL2 (לפני ה-listener, אין מרוץ)
+    threading.Thread(target=_vdl2_listener, daemon=True).start()    # פיד UDP מ-dumpvdl2 (שקט בשאר המצבים)
     if TRANSCRIBE:   # תמלול ATC אופציונלי - דמון נפרד (לא חוסם את היומן/retention)
         threading.Thread(target=_transcribe_worker, daemon=True).start()
     adsb.start()   # רק כשרצים כשרת (לא בזמן import) - דמון, לא מעכב עלייה
