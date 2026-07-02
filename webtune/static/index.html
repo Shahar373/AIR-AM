@@ -616,11 +616,12 @@
     <span class="tag" id="verTag">SDRplay RSP1B</span>
   </header>
 
-  <!-- מתג מצב: קול (rtl_airband) / ACARS (acarsdec) — SDR אחד בהחלפה -->
+  <!-- מתג מצב: קול (rtl_airband) / ACARS (acarsdec) / VDL2 (dumpvdl2) — SDR אחד בהחלפה -->
   <div class="modebar">
     <div class="seg" id="modeSeg">
       <button type="button" data-v="voice" class="on"><span class="live-pip"></span>📻 קול</button>
       <button type="button" data-v="acars"><span class="live-pip"></span>📡 ACARS</button>
+      <button type="button" data-v="vdl2"><span class="live-pip"></span>🛰️ VDL2</button>
     </div>
     <!-- כיבוי/הפעלת המקלט (standby): עוצר את ה-SDR ומשחרר אותו ליישום אחר; הדף נשאר חי -->
     <button type="button" id="powerBtn" class="power-btn" title="כיבוי/הפעלת המקלט — משחרר את ה-SDR ליישום אחר">⏻ כיבוי</button>
@@ -898,6 +899,68 @@
 
     <div class="acars-feed" id="acarsFeed"></div>
     <p class="acars-empty" id="acarsEmpty">ממתין להודעות…</p>
+    </div><!-- /acars-col-feed -->
+    </div><!-- /acars-body -->
+  </section>
+
+  <!-- ===================== תצוגת VDL2 ===================== -->
+  <!-- שימוש חוזר במחלקות ה-.acars-* (אפס CSS חדש); ה-JS מנוהל בנפרד עם prefix vdl2 -->
+  <section class="card hidden" id="vdl2View">
+    <div class="acars-head">
+      <span id="vdl2Pill" class="pill"><span class="dot"></span><span id="vdl2Status">טוען…</span></span>
+      <span class="acars-freqs" id="vdl2Freqs"></span>
+    </div>
+    <!-- בורר בנקי תדרים: כל הצביר 136.7–137.0 נכנס בחלון דגימה אחד -->
+    <div class="acars-banks" id="vdl2Banks"></div>
+    <!-- סרגל בקרת SDR: מתעדכן לפי vdl2Active (מצב ה-SDR האמיתי, לא הכרטיסייה) -->
+    <div id="vdl2SdrBar" class="acars-sdr-bar">
+      <div id="vdl2Inactive">
+        <button id="vdl2ActivateBtn" class="primary" style="width:100%">▶ הפעל קליטת VDL2 חיה</button>
+        <p class="sdr-hint">מציג היסטוריה · השמע ממשיך לרוץ. לחץ כדי להעביר את ה-SDR ל-VDL2 (השמע ייפסק).</p>
+      </div>
+      <div id="vdl2ActiveCtrl" class="hidden">
+        <div class="sdr-btns">
+          <button id="vdl2StopBtn">⏹ עצור / חזור לקול</button>
+          <button id="vdl2TowerBtn">🎧 האזן למגדל (134.600)</button>
+        </div>
+        <p class="sdr-hint">VDL2 פעיל — ה-SDR מפענח נתונים. השמע אינו זמין.</p>
+      </div>
+    </div>
+
+    <div class="acars-body">
+    <div class="acars-col-map">
+    <!-- מפה (Leaflet) — מטוסים עם מיקום מ-VDL2 (ADS-C); מתמלאת לאט -->
+    <div id="vdl2Map" class="acars-map"></div>
+    <p class="acars-map-note hidden" id="vdl2MapNote"></p>
+    <div class="acars-detail hidden" id="vdl2Detail"></div>
+    </div><!-- /acars-col-map -->
+
+    <div class="acars-col-feed">
+    <div class="acars-stats">
+      <div class="acars-stat"><b id="vdl2StTotal">0</b><span>הודעות</span></div>
+      <div class="acars-stat"><b id="vdl2StRate">0</b><span>הודעות/דק׳</span></div>
+      <div class="acars-stat"><b id="vdl2StCraft">0</b><span>מטוסים</span></div>
+      <div class="acars-stat"><b id="vdl2StPos">0</b><span>עם מיקום</span></div>
+      <div class="acars-stat"><b id="vdl2StAdsb">0</b><span>🛰 ב-ADS-B</span></div>
+    </div>
+
+    <div class="acars-tools">
+      <input id="vdl2Search" class="acars-search" type="search"
+             placeholder="חיפוש: זנב / טיסה / ICAO / label / טקסט…" autocomplete="off" />
+      <span class="acars-export">
+        <a class="ghost" id="vdl2Csv" href="/api/vdl2/export?format=csv" download>⬇ CSV</a>
+        <a class="ghost" id="vdl2Json" href="/api/vdl2/export?format=json" download>JSON</a>
+      </span>
+    </div>
+    <div class="acars-filters" id="vdl2Filters"></div>
+    <details class="acars-roster-wrap" id="vdl2RosterWrap" open>
+      <summary>✈️ מטוסים (<span id="vdl2RosterCount">0</span>)</summary>
+      <div class="acars-roster" id="vdl2Roster"></div>
+    </details>
+    <div class="acars-focus hidden" id="vdl2FocusChip"></div>
+
+    <div class="acars-feed" id="vdl2Feed"></div>
+    <p class="acars-empty" id="vdl2Empty">ממתין להודעות… רוב התעבורה באזורנו על 136.975.</p>
     </div><!-- /acars-col-feed -->
     </div><!-- /acars-body -->
   </section>
@@ -1622,13 +1685,14 @@
     pollMetar();
 
     /* ---------- מצב: קול / ACARS ---------- */
-    // SDR אחד => החלפה: מצב ACARS עוצר את rtl_airband ומריץ acarsdec (ולהפך).
+    // SDR אחד => החלפה: כל מצב-דאטה עוצר את rtl_airband ומריץ את המפענח שלו (ולהפך).
     function showView(mode) {
       appMode = mode;
       $("voiceView").classList.toggle("hidden", mode !== "voice");
       $("acarsView").classList.toggle("hidden", mode !== "acars");
+      $("vdl2View").classList.toggle("hidden", mode !== "vdl2");
       segSet("modeSeg", mode);
-      renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acarsActive — עדכן בכל מעבר
+      renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acarsActive/vdl2Active — עדכן בכל מעבר
       if (mode === "acars") {
         // האזנה נמשכת — ה-SDR ייעצר רק אם המשתמש ילחץ "הפעל ACARS" במפורש
         ensureAcarsMap();                     // אתחול עצלן של המפה (פעם אחת)
@@ -1638,6 +1702,7 @@
       } else {
         stopAcarsPolling();
       }
+      if (mode === "vdl2") vdl2.show(); else vdl2.hide();   // תצוגת VDL2 מנוהלת בפקטורי נפרד
     }
 
     async function applyMode(mode, extra) {
@@ -1648,7 +1713,8 @@
       sdrOff = (mode === "off");
       showView(mode === "off" ? "voice" : mode);   // עדכון אופטימי; אם השרת נכשל נסנכרן חזרה
       if (mode !== "voice") { wantPlaying = false; player.pause(); }  // ה-SDR יוצא מקול
-      setStatus(mode === "acars" ? "מפעיל ACARS…" : mode === "off" ? "מכבה מקלט…" : "חוזר לקול…", "busy");
+      setStatus(mode === "acars" ? "מפעיל ACARS…" : mode === "vdl2" ? "מפעיל VDL2…"
+                : mode === "off" ? "מכבה מקלט…" : "חוזר לקול…", "busy");
       try {
         const res = await apiSend("POST", "/api/mode", { mode, ...(extra || {}) });
         const data = await res.json();
@@ -1664,19 +1730,27 @@
         showError(null);
         if (mode === "off") {
           sdrOff = true;
-          setAcarsStatus(false);              // ה-SDR כבוי => acarsdec לא פעיל
+          setAcarsStatus(false); vdl2.setActive(false);   // ה-SDR כבוי => שני המפענחים לא פעילים
           renderPower();
           setStatus("מקלט בכיבוי (Standby)", "off");
         } else if (mode === "voice") {
           sdrOff = false;
-          setAcarsStatus(false);              // SDR יצא ממצב ACARS
+          setAcarsStatus(false); vdl2.setActive(false);   // SDR יצא ממצב דאטה
           renderPower();
           if (data.freq != null) { current = Number(data.freq); updateDisplay(current); }
           setStatus("מתחבר לסטרים…", "busy");
           clearTimeout(connectTimer);
           connectTimer = setTimeout(() => reloadStream(), 1500);
-        } else {
+        } else if (mode === "vdl2") {
           sdrOff = false;
+          setAcarsStatus(false);              // ה-SDR עבר ל-VDL2 => acarsdec לא פעיל
+          if (data.vdl2_freqs) { vdl2.setSelFreqs(data.vdl2_freqs); vdl2.renderFreqs(data.vdl2_freqs); vdl2.renderBanks(); }
+          vdl2.setActive(true);
+          renderPower();
+          vdl2.poll();                        // רענון מיידי אחרי ש-dumpvdl2 עלה
+        } else {   // acars
+          sdrOff = false;
+          vdl2.setActive(false);              // ה-SDR עבר ל-ACARS => dumpvdl2 לא פעיל
           if (data.acars_freqs) { renderAcarsFreqs(data.acars_freqs); selAcarsFreqs = data.acars_freqs; renderAcarsBanks(); }
           setAcarsStatus(true);
           renderPower();
@@ -1693,7 +1767,8 @@
     }
     function _setModeButtons(disabled) {
       ["acarsActivateBtn", "acarsStopBtn", "towerBtn", "voiceActivateBtn",
-       "powerBtn", "standbyOnBtn"].forEach(id => {
+       "powerBtn", "standbyOnBtn",
+       "vdl2ActivateBtn", "vdl2StopBtn", "vdl2TowerBtn"].forEach(id => {
         const el = $(id); if (el) el.disabled = disabled;
       });
       document.querySelectorAll("#modeSeg button").forEach(b => { b.disabled = disabled; });
@@ -1813,7 +1888,7 @@
     }
     function updateSdrPip() {
       // נקודה ירוקה על הכרטיסייה שה-SDR באמת פעיל בה
-      const realMode = acarsActive ? "acars" : "voice";
+      const realMode = vdl2.active ? "vdl2" : acarsActive ? "acars" : "voice";
       document.querySelectorAll("#modeSeg button").forEach(b => {
         b.classList.toggle("sdr-live", b.dataset.v === realMode);
       });
@@ -1825,10 +1900,16 @@
     function renderVoiceAcarsBanner() {
       // standby (sdrOff) קודם לכול: אין שמע/מדדים, מציגים את באנר ה-standby בלבד.
       $("standbyBanner").classList.toggle("hidden", !sdrOff);
-      // banner בכרטיסיית הקול כשה-SDR תפוס על-ידי ACARS
+      // banner בכרטיסיית הקול כשה-SDR תפוס על-ידי מצב דאטה (ACARS או VDL2)
       const banner = $("voiceAcarsBanner");
-      const show = !sdrOff && acarsActive && appMode === "voice";
+      const dataActive = acarsActive || (typeof vdl2 !== "undefined" && vdl2.active);
+      const show = !sdrOff && dataActive && appMode === "voice";
       banner.classList.toggle("hidden", !show);
+      if (show) {
+        const txt = banner.querySelector("span");
+        if (txt) txt.textContent = vdl2.active ? "🛰️ המקלט כעת במצב VDL2 — אין שמע זמין"
+                                               : "📡 המקלט כעת במצב ACARS — אין שמע זמין";
+      }
       $("player").classList.toggle("hidden", show || sdrOff);
       $("rfPanel").classList.toggle("hidden", show || sdrOff);
     }
@@ -2443,6 +2524,542 @@
       if (acarsStaleTimer) { clearInterval(acarsStaleTimer); acarsStaleTimer = null; }
     }
 
+    /* ---------- VDL2: תצוגה עצמאית (פקטורי) ----------
+       תצוגת ה-VDL2 עוטפת את אותה מכונת נתונים/מפה/roster כמו ACARS, אבל עם state
+       וכרטיסייה משלה. מיושמת כפקטורי סגור (closures) => מופע נפרד ב-100% מ-ACARS:
+       Leaflet, buffers, cursor, filters — כלום לא משותף בזיכרון. עושה שימוש חוזר
+       בעוזרים ה*טהורים* הגלובליים ($/fmtTime/mkSpan/dirBadge/normReg/trackColor/
+       CAT_GROUPS/DIR_INFO/MULTIBLOCK_RE/segSet), כך ש-ACARS לא נגע כלל (אפס רגרסיה). */
+    function createDataView(opts) {
+      const E = (suf) => $(opts.prefix + suf);       // element id: vdl2Pill, vdl2Feed ...
+      const MAX = 500, TRACK_N = TRACK_MAX, RETX_S = RETRANS_WINDOW_S;
+      const STALE_MS = ACARS_STALE_MS, MAP_AGE_MS = ACARS_MAP_AGE_MS, LIVE_S = ADSB_LIVE_S;
+      const msgs = [];                                // כל ההודעות (חיפוש/סינון/מפה/סטטיסטיקה)
+      const craft = {};                               // מזהה-מטוס -> צבירת מצב
+      const markers = {}, tracks = {}, adsbTrk = {};  // שכבות מפה
+      let adsb = {}, adsbKey = "";                    // העשרת ADS-B (norm_reg -> רשומה)
+      let map = null, icon = null, leafLoading = false;
+      let focus = null, filter = "all", active = false;
+      let lastId = 0, banks = [], selFreqs = null;
+      let timer = null, staleTimer = null, inFlight = false, resizeT = null;
+
+      const aircraftId = (m) => m.tail || m.flight || m.icao || null;
+      function adsbFor(id) {
+        const c = craft[id];
+        const a = adsb[normReg((c && c.tail) || id) || ""];
+        return a && a.age <= LIVE_S ? a : null;
+      }
+      function updateCraft(m) {
+        const id = aircraftId(m);
+        if (!id) return;
+        const c = craft[id] || (craft[id] = {
+          tail: null, flight: null, icao: null, actype: null, count: 0,
+          firstT: null, lastT: null, lastLabel: null, lastCat: null, lastGroup: null,
+          lastDir: null, hasPos: false, lastLat: null, lastLon: null, lastPosSrc: null, up: 0, down: 0,
+        });
+        if (m.tail) c.tail = m.tail;
+        if (m.flight) c.flight = m.flight;
+        if (m.icao) c.icao = m.icao;
+        if (m.actype && !c.actype) c.actype = m.actype;
+        c.count++;
+        if (typeof m.t === "number") {
+          if (c.firstT == null || m.t < c.firstT) c.firstT = m.t;
+          if (c.lastT == null || m.t > c.lastT) c.lastT = m.t;
+        }
+        if (m.label) c.lastLabel = m.label;
+        if (m.category) c.lastCat = m.category;
+        if (m.group) c.lastGroup = m.group;
+        if (m.dir) { c.lastDir = m.dir; if (m.dir === "uplink") c.up++; else if (m.dir === "downlink") c.down++; }
+        if (m.lat != null) { c.hasPos = true; c.lastLat = m.lat; c.lastLon = m.lon; c.lastPosSrc = m.pos_src || null; }
+      }
+      const tooOldForMap = (id) => { const c = craft[id]; return !c || (Date.now() - c.lastT * 1000) > MAP_AGE_MS; };
+      const isStale = (id) => { const c = craft[id]; return !!c && c.lastT != null && (Date.now() - c.lastT * 1000) > STALE_MS; };
+
+      /* ----- מפה (Leaflet, טעינה עצלנית + נפילה חיננית) ----- */
+      function mapNote(msg) { const n = E("MapNote"); n.textContent = msg; n.classList.remove("hidden"); }
+      function mapFail(msg) { E("Map").classList.add("hidden"); mapNote(msg + " — המיקומים מופיעים כ-📍 בכרטיסים."); }
+      function ensureMap() {
+        if (map) { setTimeout(() => map.invalidateSize(), 50); return; }
+        if (leafLoading) return;
+        if (window.L) { initMap(); return; }
+        leafLoading = true;
+        const s = document.createElement("script");
+        s.src = "/static/vendor/leaflet/leaflet.js";
+        s.onload = () => { leafLoading = false; initMap(); };
+        s.onerror = () => { leafLoading = false; mapFail("המפה לא נטענה (אין חיבור?)"); };
+        document.head.appendChild(s);
+      }
+      function initMap() {
+        try {
+          map = L.map(opts.prefix + "Map", { zoomControl: true }).setView([32.0114, 34.8867], 7);
+          const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            { maxZoom: 12, attribution: "© OpenStreetMap" });
+          let tileErr = 0;
+          tiles.on("tileerror", () => { if (++tileErr === 6) mapNote("רקע המפה לא נטען (אין אינטרנט?) — הסמנים עדיין מוצגים."); });
+          tiles.addTo(map);
+          icon = L.icon({
+            iconUrl: "/static/vendor/leaflet/images/marker-icon.png",
+            iconRetinaUrl: "/static/vendor/leaflet/images/marker-icon-2x.png",
+            shadowUrl: "/static/vendor/leaflet/images/marker-shadow.png",
+            iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41],
+          });
+          setTimeout(() => map.invalidateSize(), 60);
+          for (const m of msgs) upsertMarker(m);
+          renderMapSelection();
+        } catch (e) { mapFail("שגיאה בטעינת המפה"); }
+      }
+      function relayoutMap() {
+        if (!map || appMode !== opts.mode) return;
+        clearTimeout(resizeT);
+        resizeT = setTimeout(() => map.invalidateSize(), 200);
+      }
+      function buildPopup(m) {
+        const d = document.createElement("div"), h = document.createElement("div"), b = document.createElement("b");
+        b.textContent = m.tail || m.flight || m.icao || "VDL2";
+        h.appendChild(b);
+        if (m.tail && m.flight) h.appendChild(document.createTextNode(" · " + m.flight));
+        h.appendChild(document.createElement("br"));
+        h.appendChild(document.createTextNode(fmtTime(m.t)));
+        if (m.text) { h.appendChild(document.createElement("br")); h.appendChild(document.createTextNode(m.text.slice(0, 80))); }
+        d.appendChild(h);
+        const id = aircraftId(m);
+        if (id) {
+          const btn = document.createElement("button");
+          btn.className = "acars-pop-btn"; btn.textContent = "📋 הודעות";
+          btn.onclick = () => setFocus(id);
+          d.appendChild(btn);
+        }
+        return d;
+      }
+      function upsertMarker(m) {
+        const id = aircraftId(m);
+        if (!map || !id || m.lat == null || m.lon == null) return;
+        const label = m.tail || m.flight || m.icao || "VDL2";
+        const mk = markers[id];
+        if (mk) { mk.setLatLng([m.lat, m.lon]); mk.setPopupContent(buildPopup(m)); }
+        else markers[id] = L.marker([m.lat, m.lon], icon ? { icon } : undefined).bindPopup(buildPopup(m)).bindTooltip(label);
+        updateTrack(m);
+        if (id === focus) renderMapSelection();
+      }
+      function updateTrack(m) {
+        const id = aircraftId(m);
+        if (!id || m.lat == null || m.lon == null) return;
+        const t = tracks[id] || (tracks[id] = { pts: [], line: null });
+        const last = t.pts[t.pts.length - 1];
+        if (last && Math.abs(last[0] - m.lat) < 1e-5 && Math.abs(last[1] - m.lon) < 1e-5) return;
+        t.pts.push([m.lat, m.lon]);
+        if (t.pts.length > TRACK_N) t.pts.shift();
+        if (t.pts.length >= 2) {
+          if (t.line) t.line.setLatLngs(t.pts);
+          else t.line = L.polyline(t.pts, { color: trackColor(id), weight: 2, opacity: .7 });
+        }
+      }
+      function updateAdsbLayer() {
+        for (const reg in adsb) {
+          const a = adsb[reg];
+          if (!a.pos_ok || a.lat == null) continue;
+          const t = adsbTrk[reg] || (adsbTrk[reg] = { pts: [], line: null, head: null });
+          const last = t.pts[t.pts.length - 1];
+          if (!last || Math.abs(last[0] - a.lat) > 1e-5 || Math.abs(last[1] - a.lon) > 1e-5) {
+            t.pts.push([a.lat, a.lon]);
+            if (t.pts.length > TRACK_N) t.pts.shift();
+          }
+        }
+        for (const reg in adsbTrk) {
+          if (reg in adsb) continue;
+          const t = adsbTrk[reg];
+          if (map) { if (t.line) map.removeLayer(t.line); if (t.head) map.removeLayer(t.head); }
+          delete adsbTrk[reg];
+        }
+        renderAdsbLayer();
+      }
+      function renderAdsbLayer() {
+        if (!map) return;
+        const focusReg = focus ? normReg(((craft[focus] || {}).tail) || focus) : null;
+        for (const reg in adsbTrk) {
+          const t = adsbTrk[reg];
+          const show = reg === focusReg && t.pts.length > 0 && !!adsbFor(focus);
+          if (!show) { if (t.line) map.removeLayer(t.line); if (t.head) map.removeLayer(t.head); continue; }
+          const headPt = t.pts[t.pts.length - 1];
+          if (t.pts.length >= 2) {
+            if (t.line) { t.line.setLatLngs(t.pts); t.line.addTo(map); }
+            else t.line = L.polyline(t.pts, { color: "#9aa7b3", weight: 2, opacity: .8, dashArray: "4 5" }).addTo(map);
+          }
+          if (t.head) { t.head.setLatLng(headPt); t.head.addTo(map); }
+          else t.head = L.circleMarker(headPt, { radius: 5, color: "#9aa7b3", fillColor: "#e6edf3", fillOpacity: .9, weight: 2 })
+            .bindTooltip("ADS-B חי").addTo(map);
+        }
+      }
+      function renderMapSelection() {
+        if (!map) return;
+        let hasAny = false;
+        for (const id in markers) {
+          const mk = markers[id];
+          if (tooOldForMap(id)) { map.removeLayer(mk); continue; }
+          mk.addTo(map).setOpacity(id === focus ? (isStale(id) ? .45 : 1) : .4);
+          hasAny = true;
+        }
+        for (const id in tracks) {
+          const tr = tracks[id];
+          if (!tr.line) continue;
+          if (id === focus) tr.line.addTo(map); else map.removeLayer(tr.line);
+        }
+        const note = E("MapNote");
+        if (!hasAny) { mapNote("אין מטוסים עם מיקום עדיין."); return; }
+        note.classList.add("hidden");
+        if (!focus) return;
+        const mk = markers[focus], tr = tracks[focus];
+        let bounds = null;
+        if (tr && tr.line) bounds = tr.line.getBounds();
+        if (mk) bounds = bounds ? bounds.extend(mk.getLatLng()) : L.latLngBounds([mk.getLatLng()]);
+        if (bounds && bounds.isValid()) {
+          if (tr && tr.pts.length >= 2) map.fitBounds(bounds.pad(0.3));
+          else map.setView(mk.getLatLng(), 9);
+        } else mapNote("למטוס " + focus + " אין עדיין מיקום מ-VDL2.");
+      }
+      function refreshStaleOpacity() {
+        if (!map) return;
+        for (const id in markers) {
+          const mk = markers[id];
+          if (tooOldForMap(id)) { map.removeLayer(mk); continue; }
+          if (!map.hasLayer(mk)) mk.addTo(map);
+          mk.setOpacity(id === focus ? (isStale(id) ? .45 : 1) : .4);
+        }
+      }
+      function focusOnMap(m) {
+        const id = aircraftId(m);
+        if (id) setFocus(id);
+        ensureMap();
+        if (!map || m.lat == null) return;
+        map.setView([m.lat, m.lon], 9);
+        E("MapNote").classList.add("hidden");
+        if (id && markers[id]) markers[id].openPopup();
+        E("Map").scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+
+      /* ----- בחירה (drill-down) ----- */
+      function setFocus(id) {
+        focus = id || null;
+        renderFocus(); renderRoster(); renderDetail(); renderFeed();
+        ensureMap(); renderMapSelection(); renderAdsbLayer();
+      }
+      function renderFocus() {
+        const chip = E("FocusChip");
+        if (!focus) { chip.classList.add("hidden"); chip.textContent = ""; return; }
+        chip.classList.remove("hidden"); chip.textContent = "";
+        const lbl = document.createElement("span"); lbl.textContent = "מטוס: " + focus;
+        const x = document.createElement("button");
+        x.className = "acars-focus-x"; x.textContent = "✕"; x.title = "נקה סינון";
+        x.onclick = () => setFocus(null);
+        chip.append(lbl, x);
+      }
+
+      /* ----- roster ----- */
+      function renderRoster() {
+        const box = E("Roster");
+        const ids = Object.keys(craft).sort((a, b) => (craft[b].lastT || 0) - (craft[a].lastT || 0));
+        E("RosterCount").textContent = ids.length;
+        box.textContent = "";
+        if (!ids.length) { box.appendChild(mkSpan("acars-roster-empty", "אין עדיין מטוסים — ממתין להודעות…")); return; }
+        for (const id of ids) {
+          const c = craft[id];
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = "acars-rrow" + (id === focus ? " on" : "") + (isStale(id) ? " stale" : "");
+          row.onclick = () => setFocus(id === focus ? null : id);
+          row.appendChild(mkSpan("rr-tail", c.tail || c.icao || id));
+          if (c.flight && c.flight !== c.tail) row.appendChild(mkSpan("rr-flight", c.flight));
+          const a = adsbFor(id);
+          const actype = (a && a.type) || c.actype;
+          if (actype) { const ty = mkSpan("rr-actype", actype); if (a && a.type) ty.title = "סוג מטוס מ-ADS-B"; row.appendChild(ty); }
+          const db = dirBadge(c.lastDir, "rr-dir"); if (db) row.appendChild(db);
+          if (a) {
+            const sat = mkSpan("rr-adsb", "🛰");
+            sat.title = "משדר ADS-B כעת" + (a.alt != null ? " · " + Math.round(a.alt).toLocaleString() + "ft" : "")
+              + (a.gs != null ? " · " + Math.round(a.gs) + "kt" : "");
+            row.appendChild(sat);
+          }
+          if (c.hasPos) row.appendChild(mkSpan("rr-pos", "📍"));
+          row.appendChild(mkSpan("rr-count", "×" + c.count));
+          if (c.lastT != null) row.appendChild(mkSpan("rr-time", fmtTime(c.lastT)));
+          box.appendChild(row);
+        }
+      }
+
+      /* ----- פאנל פירוט ----- */
+      function renderDetail() {
+        const box = E("Detail");
+        const c = focus && craft[focus];
+        if (!c) { box.classList.add("hidden"); box.textContent = ""; return; }
+        box.classList.remove("hidden"); box.textContent = "";
+        const a = adsbFor(focus);
+        const head = document.createElement("div"); head.className = "ad-head";
+        head.appendChild(mkSpan("ad-tail", c.tail || c.icao || focus));
+        if (c.flight && c.flight !== c.tail) head.appendChild(mkSpan("ad-flight", c.flight));
+        if (isStale(focus)) head.appendChild(mkSpan("amsg-dir dir-uplink", "יצא מטווח"));
+        if (a && a.spoofed) {
+          const sp = mkSpan("ad-spoof", "GPS משובש ⚠");
+          sp.title = "המטוס משדר מיקום מזויף (NIC נמוך) — הנ\"צ מ-ADS-B מדוכא; גובה/מהירות/כיוון אמינים";
+          head.appendChild(sp);
+        }
+        box.appendChild(head);
+        const grid = document.createElement("div"); grid.className = "ad-grid";
+        const cell = (label, val) => {
+          const d = document.createElement("div"); d.className = "ad-cell";
+          const b = document.createElement("b"); b.textContent = label + " ";
+          d.appendChild(b); d.appendChild(document.createTextNode(val)); grid.appendChild(d);
+        };
+        cell("הודעות", String(c.count));
+        cell("כיוון", "↑" + c.up + " / ↓" + c.down);
+        if (c.icao) cell("ICAO", c.icao);
+        if (c.lastCat) cell("אחרון", c.lastCat + (c.lastLabel ? " (" + c.lastLabel + ")" : ""));
+        if (c.lastLat != null) cell("מיקום", Number(c.lastLat).toFixed(3) + "," + Number(c.lastLon).toFixed(3)
+          + (c.lastPosSrc ? " · " + c.lastPosSrc : ""));
+        else cell("מיקום", "—");
+        if (c.firstT != null) cell("נראה", fmtTime(c.firstT) + " → " + fmtTime(c.lastT));
+        if (a) {
+          cell("ADS-B", [a.flight, a.type].filter(Boolean).join(" · ") || "משדר כעת");
+          if (a.alt != null) cell("גובה", Math.round(a.alt).toLocaleString() + " ft");
+          if (a.gs != null) cell("מהירות", Math.round(a.gs) + " kt");
+          if (a.track != null) cell("כיוון", Math.round(a.track) + "°");
+        }
+        box.appendChild(grid);
+        const hist = msgs.filter((m) => aircraftId(m) === focus).slice(-6).reverse();
+        if (hist.length) {
+          box.appendChild(mkSpan("ad-hist-h", "הודעות אחרונות"));
+          const wrap = document.createElement("div"); wrap.className = "ad-hist";
+          for (const m of hist) wrap.appendChild(renderMsg(m));
+          box.appendChild(wrap);
+        }
+      }
+
+      /* ----- כרטיס הודעה אחיד ----- */
+      function renderMsg(m, blockCount) {
+        const g = m.group || "text";
+        const el = document.createElement("div"); el.className = "amsg g-" + g;
+        const top = document.createElement("div"); top.className = "amsg-top";
+        const mk = (cls, txt) => { const s = document.createElement("span"); s.className = cls; s.textContent = txt; return s; };
+        const idClick = (s) => { s.title = "סנן למטוס זה"; s.onclick = () => setFocus(aircraftId(m)); return s; };
+        if (m.tail) top.appendChild(idClick(mk("amsg-tail clickable", m.tail)));
+        if (m.flight) top.appendChild(idClick(mk("amsg-flight clickable", m.flight)));
+        // פריים בלי רישום (CPDLC/XID) => מזהה ה-ICAO הוא הזהות הלחיצה
+        if (!m.tail && !m.flight && m.icao) top.appendChild(idClick(mk("amsg-tail clickable", m.icao)));
+        const db = dirBadge(m.dir); if (db) top.appendChild(db);
+        if (m.category) top.appendChild(mk("amsg-cat cat-" + g, m.category));
+        if (m.lat != null) {
+          const pos = mk("amsg-pos", "📍 " + Number(m.lat).toFixed(2) + "," + Number(m.lon).toFixed(2));
+          pos.title = "מקד במפה"; pos.onclick = () => focusOnMap(m); top.appendChild(pos);
+        }
+        if (m.error && m.error > 0) {
+          const errLabels = ["", "CRC ⚠", "link ⚠", "decode ⚠"];
+          top.appendChild(mk("amsg-err", errLabels[m.error] || ("err " + m.error + " ⚠")));
+        }
+        if (m.freq != null) top.appendChild(mk("amsg-freq", Number(m.freq).toFixed(3)));
+        top.appendChild(mk("amsg-time", fmtTime(m.t)));
+        el.appendChild(top);
+        const metaEl = document.createElement("div"); metaEl.className = "amsg-meta";
+        const metaParts = [];
+        if (m.label) metaParts.push("label " + m.label);
+        if (m.mode) metaParts.push("mode " + m.mode);
+        if (m.msgno) metaParts.push("#" + m.msgno);
+        if (blockCount && blockCount > 1) {
+          const bc = mk("amsg-block-count", "×" + blockCount); bc.title = "קובץ מרובה-block (" + blockCount + " חלקים)";
+          metaEl.appendChild(document.createTextNode(metaParts.join(" · ")));
+          if (metaParts.length) metaEl.appendChild(document.createTextNode(" · "));
+          metaEl.appendChild(bc);
+        } else metaEl.textContent = metaParts.join(" · ");
+        if (m.level != null) {
+          const lvl = Number(m.level);
+          const lvlCls = lvl > -30 ? "level-good" : lvl > -45 ? "level-ok" : "level-weak";
+          if (metaParts.length || (blockCount && blockCount > 1)) metaEl.appendChild(document.createTextNode(" · "));
+          metaEl.appendChild(mk(lvlCls, lvl.toFixed(0) + " dBFS"));
+        }
+        if (metaEl.childNodes.length || metaEl.textContent) el.appendChild(metaEl);
+        if (m.decoded) el.appendChild(mk("amsg-decoded", m.decoded));
+        if (m.text) {
+          if (m.decoded) {
+            const det = document.createElement("details");
+            const sum = document.createElement("summary"); sum.textContent = "טקסט גולמי";
+            det.append(sum, mk("amsg-text", m.text)); el.appendChild(det);
+          } else el.appendChild(mk("amsg-text", m.text));
+        }
+        return el;
+      }
+
+      /* ----- סינון / חיפוש / סטטיסטיקה ----- */
+      function matches(m, q) {
+        if (focus && aircraftId(m) !== focus) return false;
+        if (filter !== "all" && (m.group || "text") !== filter) return false;
+        if (!q) return true;
+        return [m.tail, m.flight, m.icao, m.label, m.category, m.decoded, m.text, m.mode]
+          .filter(Boolean).join(" ").toLowerCase().includes(q);
+      }
+      function renderStats() {
+        E("StTotal").textContent = msgs.length;
+        E("StCraft").textContent = new Set(msgs.map(aircraftId).filter(Boolean)).size;
+        E("StPos").textContent = msgs.filter((m) => m.lat != null).length;
+        E("StAdsb").textContent = Object.keys(craft).filter((id) => adsbFor(id)).length;
+        const ts = msgs.map((m) => m.t).filter((t) => typeof t === "number");
+        let rate = 0;
+        if (ts.length >= 2) { const span = (Math.max(...ts) - Math.min(...ts)) / 60; rate = span > 0.1 ? ts.length / span : 0; }
+        E("StRate").textContent = rate ? rate.toFixed(1) : "0";
+      }
+      function renderFilters() {
+        const box = E("Filters");
+        const groups = new Set(msgs.map((m) => m.group || "text"));
+        const order = ["all", "position", "clearance", "oooi", "tech", "comm", "text"];
+        const want = order.filter((g) => g === "all" || groups.has(g));
+        if (box.dataset.sig === want.join(",")) {
+          for (const c of box.children) c.classList.toggle("on", c.dataset.g === filter);
+          return;
+        }
+        box.dataset.sig = want.join(","); box.innerHTML = "";
+        for (const g of want) {
+          const c = document.createElement("span");
+          c.className = "acars-chip" + (g === filter ? " on" : ""); c.dataset.g = g;
+          c.textContent = g === "all" ? "הכל" : (CAT_GROUPS[g] || g);
+          c.onclick = () => { filter = g; renderFilters(); renderFeed(); };
+          box.appendChild(c);
+        }
+      }
+      function renderFeed() {
+        const feed = E("Feed");
+        const q = (E("Search").value || "").trim().toLowerCase();
+        const stick = feed.scrollTop <= 8;
+        const distBottom = feed.scrollHeight - feed.scrollTop;
+        const filtered = msgs.filter((m) => matches(m, q)).slice(-200);
+        const retxMap = new Map();
+        for (const m of filtered) {
+          const key = (m.tail || m.icao || "") + "|" + (m.label || "") + "|" + (m.text || "").slice(0, 50);
+          if (retxMap.has(key)) {
+            const prev = retxMap.get(key);
+            if (typeof m.t === "number" && typeof prev.m.t === "number" && Math.abs(m.t - prev.m.t) <= RETX_S) {
+              if ((m.error || 0) < (prev.m.error || 0)) retxMap.get(key).m = m;
+              retxMap.get(key).hasRetx = true; continue;
+            }
+          }
+          retxMap.set(key, { m, hasRetx: false });
+        }
+        const deduped = Array.from(retxMap.values());
+        const blockMap = new Map(), ordered = [];
+        for (const { m, hasRetx } of deduped) {
+          const isBlock = MULTIBLOCK_RE.test(m.msgno || "");
+          const bk = isBlock && m.tail ? (m.tail + ":" + m.msgno.slice(0, 3)) : null;
+          if (bk) {
+            if (blockMap.has(bk)) { const e = blockMap.get(bk); if ((m.t || 0) >= (e.m.t || 0)) e.m = m; e.count++; }
+            else { blockMap.set(bk, { m, count: 1, hasRetx }); ordered.push({ bk, isSingle: false }); }
+          } else ordered.push({ bk: null, isSingle: true, m, hasRetx });
+        }
+        const list = ordered.map((o) => o.isSingle ? { m: o.m, count: 1 } : blockMap.get(o.bk)).reverse();
+        feed.innerHTML = "";
+        for (const { m, count } of list) feed.appendChild(renderMsg(m, count));
+        const empty = E("Empty");
+        if (!msgs.length) { empty.textContent = "ממתין להודעות… רוב התעבורה באזורנו על 136.975."; empty.style.display = ""; }
+        else if (!list.length) { empty.textContent = "אין תוצאות לסינון/חיפוש."; empty.style.display = ""; }
+        else empty.style.display = "none";
+        feed.scrollTop = stick ? 0 : Math.max(0, feed.scrollHeight - distBottom);
+      }
+
+      /* ----- בנקים + תדרים + סטטוס ----- */
+      const freqsKey = (a) => (a || []).map(String).slice().sort().join(",");
+      function renderFreqs(freqs) { E("Freqs").textContent = (freqs || []).join(" · "); }
+      function renderBanks() {
+        const wrap = E("Banks"); if (!wrap) return;
+        wrap.innerHTML = ""; const cur = freqsKey(selFreqs);
+        for (const bank of banks) {
+          const b = document.createElement("button"); b.type = "button";
+          b.textContent = bank.name; b.title = bank.freqs.join(" · ");
+          if (freqsKey(bank.freqs) === cur) b.classList.add("on");
+          b.onclick = () => selectBank(bank);
+          wrap.appendChild(b);
+        }
+      }
+      function selectBank(bank) {
+        selFreqs = bank.freqs.slice();
+        renderFreqs(bank.freqs); renderBanks();
+        if (active) applyMode("vdl2", { freqs: bank.freqs });   // חי => החלף חלון מיד
+      }
+      function setActive(on) {
+        active = on;
+        E("Status").textContent = on ? "מאזין · VDL2" : "VDL2 כבוי";
+        E("Pill").className = "pill " + (on ? "live" : "");
+        updateSdrPip();
+        E("Inactive").classList.toggle("hidden", on);
+        E("ActiveCtrl").classList.toggle("hidden", !on);
+        renderVoiceAcarsBanner();
+      }
+
+      /* ----- polling ----- */
+      async function poll() {
+        if (inFlight) return;
+        inFlight = true;
+        try {
+          const data = await (await fetch("/api/vdl2?since=" + lastId)).json();
+          if (!data.ok) return;
+          setActive(data.active);
+          if (data.freqs) renderFreqs(data.freqs);
+          if (typeof data.cursor === "number" && data.cursor < lastId) {   // השרת אותחל => איפוס
+            lastId = 0; msgs.length = 0;
+            for (const id in markers) { if (map) map.removeLayer(markers[id]); delete markers[id]; }
+            for (const id in tracks) { if (map && tracks[id].line) map.removeLayer(tracks[id].line); delete tracks[id]; }
+            for (const id in craft) delete craft[id];
+            for (const reg in adsbTrk) {
+              if (map) { if (adsbTrk[reg].line) map.removeLayer(adsbTrk[reg].line); if (adsbTrk[reg].head) map.removeLayer(adsbTrk[reg].head); }
+              delete adsbTrk[reg];
+            }
+            setFocus(null);
+          }
+          if (data.messages && data.messages.length) {
+            for (const m of data.messages) {
+              msgs.push(m);
+              if (m.id > lastId) lastId = m.id;
+              updateCraft(m); upsertMarker(m);
+            }
+            while (msgs.length > MAX) msgs.shift();
+            renderStats(); renderFilters(); renderRoster(); renderDetail(); renderFeed();
+          }
+          if (data.adsb) {
+            const key = Object.keys(data.adsb).sort().map((k) => {
+              const a = data.adsb[k];
+              return k + ":" + a.lat + "," + a.lon + "," + a.alt + "," + a.gs + "," + (a.age <= LIVE_S ? 1 : 0);
+            }).join("|");
+            adsb = data.adsb;
+            if (key !== adsbKey) { adsbKey = key; renderStats(); renderRoster(); renderDetail(); updateAdsbLayer(); }
+          }
+        } catch (e) { /* רשת זמנית => המחזור הבא ינסה שוב */ }
+        finally { inFlight = false; }
+      }
+      function startPolling() {
+        stopPolling();
+        poll();
+        timer = setInterval(() => { if (!document.hidden) poll(); }, 3000);
+        staleTimer = setInterval(() => { if (document.hidden) return; renderRoster(); renderDetail(); refreshStaleOpacity(); }, 30000);
+      }
+      function stopPolling() {
+        if (timer) { clearInterval(timer); timer = null; }
+        if (staleTimer) { clearInterval(staleTimer); staleTimer = null; }
+      }
+
+      E("Search").addEventListener("input", renderFeed);
+      window.addEventListener("resize", relayoutMap);
+      window.addEventListener("orientationchange", relayoutMap);
+
+      return {
+        get active() { return active; },
+        get selFreqs() { return selFreqs; },
+        setActive, poll, renderFreqs, renderBanks, relayoutMap,
+        setSelFreqs(f) { selFreqs = f; },
+        setBanks(b) { banks = b || []; renderBanks(); },
+        show() {
+          ensureMap();
+          renderStats(); renderFilters(); renderRoster(); renderDetail(); renderFeed();
+          startPolling();
+        },
+        hide() { stopPolling(); },
+      };
+    }
+    const vdl2 = createDataView({ prefix: "vdl2", mode: "vdl2" });
+
     /* ---------- אירועים ---------- */
     // רמז (לא חסימה) כשהתדר מחוץ ל-air band — טעות נפוצה: הקלדת תדר FM/קשר
     const inAirBand = (f) => f >= 118 && f <= 137;
@@ -2475,11 +3092,16 @@
     // banner בכרטיסיית קול כשה-SDR ב-ACARS: כפתור "חזור לקול"
     $("voiceActivateBtn").onclick = () => applyMode("voice");
     // "האזן למגדל": חוזר לקול ומכוונן ל-134.6 בבת אחת
-    $("towerBtn").onclick = () => applyMode("voice", {
+    const towerTune = () => applyMode("voice", {
       freq: 134.6, mod: "am", agc: true,
       if_gain: sliderToIFGR(), rf_gain: sliderToRFGR(),
       squelch_mode: "auto", squelch_snr: getSnr(),
     });
+    $("towerBtn").onclick = towerTune;
+    // כפתורי בקרת SDR בסרגל VDL2 (קוראים applyMode עם mode="vdl2")
+    $("vdl2ActivateBtn").onclick = () => applyMode("vdl2", vdl2.selFreqs ? { freqs: vdl2.selFreqs } : undefined);
+    $("vdl2StopBtn").onclick = () => applyMode("voice");
+    $("vdl2TowerBtn").onclick = towerTune;
 
     $("agc").onchange = () => { renderGainUI(); retune(); };
     $("ifGain").oninput = renderGainUI;
@@ -2558,13 +3180,19 @@
       if (st.acars_freqs) { renderAcarsFreqs(st.acars_freqs); selAcarsFreqs = st.acars_freqs; }
       acarsBanks = st.acars_banks || [];      // בנקי תדרים מהשרת => בורר בכותרת ACARS
       renderAcarsBanks();
+      if (st.vdl2_freqs) { vdl2.setSelFreqs(st.vdl2_freqs); vdl2.renderFreqs(st.vdl2_freqs); }
+      vdl2.setBanks(st.vdl2_banks || []);     // בנקי VDL2 => בורר בכותרת VDL2
       // app_mode מגיע מהמציאות (השירות הפעיל) => מציגים את התצוגה הנכונה בטעינה
       if (st.app_mode === "acars") {
         setAcarsStatus(true);               // מאתחל pip + SDR bar + banner מיד בטעינה
         showView("acars");
         setStatus("מצב ACARS פעיל", "live");
+      } else if (st.app_mode === "vdl2") {
+        vdl2.setActive(true);               // מאתחל pip + SDR bar + banner מיד בטעינה
+        showView("vdl2");
+        setStatus("מצב VDL2 פעיל", "live");
       } else if (st.app_mode === "off") {
-        sdrOff = true;                      // המקלט בכיבוי (standby) — אין שמע/ACARS
+        sdrOff = true;                      // המקלט בכיבוי (standby) — אין שמע/דאטה
         updateSdrPip();
         showView("voice");
         renderPower();

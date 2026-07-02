@@ -42,29 +42,30 @@
 ## 2. ארכיטקטורה — זרימת הנתונים
 
 ```
-                      ┌─────────────────────────────────────────────┐
-   אנטנה ─► RSP1B ─USB─►              Raspberry Pi 5                 │
-                      │   SDRplay API service (sdrplay.service)      │
-                      │                    │                         │
-                      │      ┌─────────────┴──────────────┐          │
-   מצב קול 📻         │  rtl_airband              acarsdec  │ מצב ACARS 📡
-   (Conflicts) ◄──────┤  (AM/NFM → MP3)        (ACARS → JSON)│
-                      │      │                        │ UDP 5556    │
-                      │  Icecast2 :8000          airam-web :8080    │
-                      │      │                        │             │
-                      └──────┼────────────────────────┼─────────────┘
-                             ▼                         ▼
-                      נגן הדפדפן (סטרים)       דף הבקרה (REST/JSON)
-                             ▲                         │
-                             └──── /stream proxy ──────┘ (כש-HTTPS: same-origin)
+                   ┌────────────────────────────────────────────────────┐
+   אנטנה ─►RSP1B─USB─►                Raspberry Pi 5                      │
+                   │      SDRplay API service (sdrplay.service)          │
+                   │                       │                             │
+                   │      ┌────────────────┼────────────────┐            │
+   קול 📻          │ rtl_airband       acarsdec         dumpvdl2 │ VDL2 🛰️
+   / ACARS 📡      │ (AM/NFM→MP3)    (ACARS→JSON)     (VDL2→JSON) │  (Conflicts
+   (Conflicts) ◄───┤      │           │ UDP 5556       │ UDP 5557 │   3-כיווני)
+                   │ Icecast2 :8000   └──── airam-web :8080 ──────┘            │
+                   │      │                       │                            │
+                   └──────┼───────────────────────┼────────────────────────────┘
+                          ▼                        ▼
+                   נגן הדפדפן (סטרים)      דף הבקרה (REST/JSON)
+                          ▲                        │
+                          └──── /stream proxy ─────┘ (כש-HTTPS: same-origin)
 
    thread ברקע ב-airam-web:  adsb.py ─HTTP─► adsb.lol / adsb.fi  (מסלול פעיל + GPS)
 ```
 
 **העיקרון המכריע — SDR אחד, בהחלפה:** ל-RSP1B יכול לגשת **תהליך אחד בלבד** בכל רגע.
-`rtl_airband` (קול) ו-`acarsdec` (ACARS) הם תהליכים נפרדים שמתחרים על אותו מקלט.
-לכן יחידות ה-systemd מוגדרות `Conflicts` — הפעלת אחת עוצרת אוטומטית את השנייה.
-**אי אפשר קול ו-ACARS בו-זמנית עם SDR אחד.** מעבר מצב = ~3 שניות.
+`rtl_airband` (קול), `acarsdec` (ACARS) ו-`dumpvdl2` (VDL2) הם שלושה תהליכים נפרדים
+שמתחרים על אותו מקלט. לכן יחידות ה-systemd מוגדרות `Conflicts` (`airam-vdl2` מצהיר
+Conflicts מול *שני* האחרים => כל הזוגות מכוסים, דו-כיווני) — הפעלת אחת עוצרת אוטומטית
+את השאר. **אי אפשר שניים מהם בו-זמנית עם SDR אחד.** מעבר מצב = ~3 שניות.
 
 ---
 
@@ -78,25 +79,29 @@ README.md                   # תיעוד למשתמש הקצה (התקנה + ש�
 CLAUDE.md                   # ← המסמך הזה: ארכיטקטורה + פיתוח.
 
 webtune/
-  app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, REST API, יומן,
-                            #   הקלטות, תמלול, METAR, מדדי RF, מעבר מצבים. ~1460 שורות.
+  app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, REST API, יומן,
+                            #   הקלטות, תמלול, METAR, מדדי RF, מעבר מצבים. ~2200 שורות.
   adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS. thread נפרד.
                             #   ניתן להרצה ידנית: `python3 adsb.py [--selftest]`.
   static/
-    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~2400 שורות). PWA.
+    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~3200 שורות). PWA. תצוגת VDL2
+                            #   בפקטורי createDataView (מופע נפרד מ-ACARS — אפס רגרסיה).
     manifest.webmanifest    # PWA manifest (התקנה כאפליקציה).
     sw.js                   # Service Worker (נדרש HTTPS).
     icon-*.png, apple-touch-icon.png
-    vendor/leaflet/         # Leaflet vendored (מפת ACARS, בלי CDN).
+    vendor/leaflet/         # Leaflet vendored (מפת ACARS/VDL2, בלי CDN).
 
 config/
   airband.conf             # קונפיג ברירת-מחדל ל-rtl_airband (ATIS 132.5). ⚠ נדרס ע"י app.py בכל tune.
   acars.env               # ברירת-מחדל ל-acarsdec (EnvironmentFile). ⚠ נדרס ע"י app.py בכל מעבר ACARS.
+  vdl2.env                # ברירת-מחדל ל-dumpvdl2 (EnvironmentFile). ⚠ נדרס ע"י app.py בכל מעבר VDL2.
+                          #   ⚠ התדרים ב-Hz (dumpvdl2), בעוד state/UI ב-MHz.
 
 systemd/
   sdrplay.service          # שירות SDRplay API.
   rtl_airband.service      # קול. Requires=sdrplay, Conflicts=airam-acars. root. Restart=always.
-  airam-acars.service      # ACARS. *לא* enabled (מופעל לפי המצב ב-UI). root.
+  airam-acars.service      # ACARS. Conflicts=rtl_airband. *לא* enabled (מופעל לפי המצב ב-UI). root.
+  airam-vdl2.service       # VDL2 (dumpvdl2). Conflicts=rtl_airband+airam-acars. *לא* enabled. root.
   airam-web.service        # שרת הווב. User=airam (לא-root). Restart=always.
 
 scripts/
@@ -110,6 +115,7 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   conftest.py              # מוסיף webtune/ ל-sys.path.
   test_app.py              # render_config, parse, presets, מדדים, יומן (389 שורות).
   test_acars.py            # נרמול ACARS, latlon, labels, ATIS, OOOI, actype (453 שורות).
+  test_vdl2.py             # נרמול VDL2 (מסלול A/B), env, מעברי מצב, ייצוא (35 טסטים).
   test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
 
 .github/workflows/ci.yml   # pytest + `bash -n` על install.sh ו-airam-wait-sdrplay.
@@ -129,10 +135,12 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 | `/opt/airam/webtune/` | הקוד הפרוס (app.py, adsb.py, static) | install.sh |
 | `/etc/rtl_airband/airband.conf` | קונפיג קול חי (תדר נבחר) | app.py בכל `/api/tune` |
 | `/etc/airam/acars.env` | תדרי ACARS חיים | app.py בכל מעבר ל-ACARS |
+| `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/off) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/off, acars_freqs, vdl2_freqs) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
+| `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
 | `/var/lib/airam/activity.jsonl` | יומן שידורים (retention 500) | _activity_watcher |
 | `/var/lib/airam/recordings/` | הקלטות MP3 (200 קבצים / 100MB) | rtl_airband, נמחק ע"י app.py |
 | `/run/rtl_airband_stats.txt` | מדדי RF (tmpfs, ~1Hz) | rtl_airband |
@@ -161,13 +169,21 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   `_parse_label16`/`_parse_nav_fuel` (16/1L, נ"צ עשרוני — לא-מתועדים ב-ARINC, זוהו
   מקליטה אמיתית; **CPDLC נבדק ונמצא ללא תעבורה בפועל** בקליטה שנבדקה — לא מומש),
   `_acars_adsb` (העשרת ADS-B לזנבות שבזיכרון — ראה §6),
-  `_enter_acars` (כתיבת env + מעבר שירות), `_enter_standby` (כיבוי שני הצרכנים, משאיר
-  sdrplay חי), `_acars_window_error` (ולידציית בנק: ≤8 ערוצים, span ≤ `ACARS_WINDOW_MHZ`),
-  `ACARS_BANKS` (בנקי תדרים, כל בנק בחלון אחד), `_today_start` (רצפת "היום בלבד").
+  `_enter_acars` (כתיבת env + מעבר שירות), `_enter_standby` (כיבוי **שלושת** הצרכנים, משאיר
+  sdrplay חי), `_acars_window_error` (wrapper דק מעל `_window_error` הגנרי — ≤8 ערוצים,
+  span ≤ `ACARS_WINDOW_MHZ`), `ACARS_BANKS` (בנקי תדרים, כל בנק בחלון אחד), `_today_start`.
+- **VDL2:** `_vdl2_listener` (thread, מאזין UDP 5557), `_normalize_vdl2` (הלב — סכמת
+  dumpvdl2 v2.6.0: **מסלול A** — `avlc.acars` קיים ⇒ מסנתז dict בסגנון acarsdec ומזרים
+  דרך `_normalize_acars` ⇒ *כל* הפרסרים הקיימים חלים בחינם; **מסלול B** — CPDLC/ADS-C
+  (`avlc.x25`, תקציר `_libacars_decode`) / XID / פריים גנרי. שדה `icao` חדש = כתובת
+  ה-AVLC של צד-המטוס; `dir` מבני מסוג הכתובת דורס heuristics), `write_vdl2_env` (**ממיר
+  MHz→Hz**, `VDL2_GAIN` מכיל את הדגל כולו או ריק), `_enter_vdl2` (עוצר rtl_airband+acars,
+  מרים dumpvdl2, verify), `_vdl2_window_error`, `_vdl2_adsb`, `VDL2_BANKS`. התמדה:
+  `_append_vdl2_log`/`_trim_vdl2_log`/`_load_vdl2_history` (clones של צמד ה-ACARS).
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_transcribe_worker` (thread whisper אופציונלי), `_sweep_recordings` (retention).
-- **`__main__`:** מבטיח קונפיג עדכני, מרים threads (activity, acars, transcribe, adsb),
-  `app.run(threaded=True)` — threaded **חובה** כי `/stream` הוא חיבור ארוך-טווח.
+- **`__main__`:** מבטיח קונפיג עדכני, מרים threads (activity, acars, **vdl2**, transcribe,
+  adsb), `app.run(threaded=True)` — threaded **חובה** כי `/stream` הוא חיבור ארוך-טווח.
 
 ---
 
@@ -197,11 +213,19 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 ## 7. ה-UI (`static/index.html`)
 
 HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע ברקע).
-מתג מצב 📻/📡 בראש. הדף מושך מצב מ-`/api/*` ב-polling. עיצוב responsive (multi-column
+מתג מצב 📻/📡/🛰️ בראש. הדף מושך מצב מ-`/api/*` ב-polling. עיצוב responsive (multi-column
 בטאבלט/דסקטופ). **אין build step** — עורכים את הקובץ ישירות. Leaflet vendored תחת
 `static/vendor/` (בלי CDN, עובד גם בלי אינטרנט — אריחי OSM יורדים חיננית בלי רשת).
 
+**תצוגת ACARS מול VDL2:** ACARS ממומש ישירות (globals `acars*` + `renderAcarsMsg`
+וכו'). תצוגת VDL2 ממומשת ב-**פקטורי `createDataView({prefix:"vdl2", ...})`** — מופע סגור
+(closures) עם state/מפה/buffers משלו, לגמרי נפרד מ-ACARS (⇒ אפס רגרסיה ל-ACARS; ה-DOM
+של `#vdl2View` משתמש חוזר במחלקות ה-CSS `.acars-*`, אפס CSS חדש). הפקטורי עושה שימוש
+חוזר בעוזרים ה*טהורים* הגלובליים בלבד (`fmtTime`/`mkSpan`/`dirBadge`/`normReg`/`trackColor`/
+`CAT_GROUPS`/`MULTIBLOCK_RE`/`segSet`). `showView`/`applyMode` מרובעים (voice/acars/vdl2/off).
+
 > בעריכת ה-UI: שמור על polling קל, על נפילה חיננית בלי רשת, ועל RTL/עברית נכונה.
+> שינוי שנוגע בשתי התצוגות — עדכן גם את קוד ה-ACARS וגם את הפקטורי (הם אינם משתפים קוד stateful).
 
 ---
 
@@ -213,12 +237,14 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 | GET | `/<path>` | נכסים סטטיים |
 | GET | `/live.m3u` | playlist לנגן חיצוני |
 | GET | `/stream` | proxy same-origin ל-Icecast (נדרש כש-HTTPS, mixed-content) |
-| GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `acars_banks`) |
+| GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `acars_banks`, `vdl2_banks`, `vdl2_freqs`) |
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
-| POST | `/api/mode` | **מעבר מצב** voice/acars/**off** (standby). דרך `_guard`. |
+| POST | `/api/mode` | **מעבר מצב** voice/acars/**vdl2**/**off** (standby). דרך `_guard`. |
 | GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM) |
+| GET | `/api/vdl2` | הודעות VDL2 אחרונות (**היום בלבד**; `?all=1`) + שדה `adsb`. אותה סכמת כרטיס כמו ACARS + `icao` |
+| GET | `/api/vdl2/export?format=csv\|json` | ייצוא VDL2 (CSV עם BOM, עמודת `icao`) |
 | GET | `/api/activity` | יומן שידורים |
 | GET | `/recordings/<name>` | קובץ הקלטה MP3 |
 | GET | `/api/metrics` | מדדי RF (SNR/signal/noise מ-stats_filepath) |
@@ -235,8 +261,8 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 
 - **`airam-web` רץ כמשתמש לא-root (`airam`).** גישתו ל-root מוגבלת ל-sudoers ממוקד:
   *רק* פקודות `systemctl` ספציפיות (restart rtl_airband, start/stop של המצבים).
-- **`acars.env` מנותח ע"י systemd (`EnvironmentFile`), לא ע"י shell** → קובץ שכותב
-  `airam` לא יכול להסליל הרצת קוד כ-root. **אל תעביר את הקובץ הזה דרך bash source.**
+- **`acars.env`/`vdl2.env` מנותחים ע"י systemd (`EnvironmentFile`), לא ע"י shell** → קובץ
+  שכותב `airam` לא יכול להסליל הרצת קוד כ-root. **אל תעביר את הקבצים האלה דרך bash source.**
 - **מאזינים בלי סיסמה;** סיסמת ה-source ל-Icecast פנימית קבועה (`airam`).
 - **PIN אופציונלי** דרך `AIRAM_PIN` ב-`/etc/airam/airam.env` (כבוי כברירת מחדל).
 - **הגנת CSRF/DNS-rebind:** `_guard` דוחה בקשות משנות-מצב כש-`Origin != Host`.
@@ -246,14 +272,18 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 
 ## 10. `install.sh` — 8 שלבים (אידמפוטנטי)
 
-1. תלויות מערכת (Python/Flask וכו'). 2. **SDRplay API** (הורדת `.run`, חילוץ והתקנה
-ללא אישור רישיון ידני — `SDRPLAY_VER` בראש הקובץ). 3. בניית `SoapySDRPlay3`.
-4. בניית `rtl_airband` (4b: `libacars`+`acarsdec` ל-ACARS). 5. `Icecast2` (מאזין בלי
-סיסמה). 6. קונפיג התחלתי + state (6b: יצירת משתמש `airam` + sudoers ממוקד).
-7. שרת הווב (7b: תמלול whisper אופציונלי, `INSTALL_WHISPER=1`). 8. שירותי systemd.
+1. תלויות מערכת (Python/Flask, `libglib2.0-dev` ל-dumpvdl2 וכו'). 2. **SDRplay API**
+(הורדת `.run`, חילוץ והתקנה ללא אישור רישיון ידני — `SDRPLAY_VER` בראש הקובץ).
+3. בניית `SoapySDRPlay3`. 4. בניית `rtl_airband` (4b: `libacars` ≥2.1.0 + `acarsdec`
+ל-ACARS; **4c: `dumpvdl2` ל-VDL2, נעוץ ל-`DUMPVDL2_VER=v2.6.0`, חתימת בנייה**).
+5. `Icecast2` (מאזין בלי סיסמה). 6. קונפיג התחלתי + state (6b: יצירת משתמש `airam` +
+sudoers ממוקד — **6 פקודות systemctl**: restart/stop × rtl_airband/airam-acars/airam-vdl2;
+seeding של `acars.env`+`vdl2.env`). 7. שרת הווב (7b: תמלול whisper אופציונלי,
+`INSTALL_WHISPER=1`). 8. שירותי systemd (`airam-acars` ו-`airam-vdl2` מותקנים אך **לא**
+enabled — מופעלים לפי המצב ב-UI).
 
-הסקריפט **בונה מחדש רק כשצריך** ובסוף **מפעיל מחדש את כל השירותים** → אין reboot.
-דגלים: `INSTALL_WHISPER=1` (תמלול), עדכון `SDRPLAY_VER` כשיוצא API חדש.
+הסקריפט **בונה מחדש רק כשצריך** (חתימת בנייה פר-רכיב) ובסוף **מפעיל מחדש את כל השירותים**
+→ אין reboot. דגלים: `INSTALL_WHISPER=1` (תמלול), עדכון `SDRPLAY_VER`/`DUMPVDL2_VER` בגרסה חדשה.
 
 ---
 
@@ -274,14 +304,25 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 ## 12. מוסכמות וגוצ'אות (קרא לפני שינוי)
 
 - **כיוונון אחד בכל רגע:** RSP1B יחיד = תדר/מצב אחד פעיל. אל תנסה ריבוי ערוצים בו-זמני.
-- **שלושה מצבי `app_mode`:** `voice` (rtl_airband) · `acars` (acarsdec) · `off` (standby —
-  שני הצרכנים עצורים, ה-SDR פנוי ליישום אחר). `off` **אינו שורד reboot** (rtl_airband
-  הוא enabled). `api_state`/`api_health` גוזרים את המצב מהמציאות + intent; standby ≠ תקלה.
-- **בנקי ACARS = חלון אחד כל אחד:** acarsdec מפענח עד **8 ערוצים** בתוך חלון **~2MHz**.
-  צביר 131.x ו-136.x רחוקים ~5MHz ⇒ לעולם לא יחד. בנק חדש חייב לעבור `_acars_window_error`.
+- **ארבעה מצבי `app_mode`:** `voice` (rtl_airband) · `acars` (acarsdec) · `vdl2` (dumpvdl2) ·
+  `off` (standby — **שלושת** הצרכנים עצורים, ה-SDR פנוי ליישום אחר). `off` **אינו שורד
+  reboot** (רק rtl_airband enabled). `api_state`/`api_health` גוזרים את המצב מהמציאות
+  (מציאות-תחילה, מרובע) + intent; standby ≠ תקלה. `_enter_standby`/`_voice_tune` עוצרים
+  את *שני* הצרכנים האחרים.
+- **בנקי ACARS/VDL2 = חלון אחד כל אחד:** acarsdec/dumpvdl2 מפענחים ערוצים מרובים בתוך
+  חלון דגימה אחד (~2MHz). צביר 131.x ו-136.x רחוקים ~5MHz ⇒ לעולם לא יחד. בנק חדש חייב
+  לעבור `_acars_window_error`/`_vdl2_window_error` (שניהם wrappers מעל `_window_error`).
   הצבא/תדלוק אמריקאי = רשת ARINC/SITA אזרחית (בפועל 131.550), **אין** תדר צבאי נפרד.
-- **`config/airband.conf` ו-`config/acars.env` נדרסים** ע"י `app.py` בזמן ריצה.
-  לשנות ברירת מחדל קבועה — ערוך גם את הדיפולט בקוד (`ACARS_BANKS`/`ACARS_FREQS_DEFAULT` וכו').
+  תדרי VDL2 כולם ב-136.7–137.0 (span 250kHz) ⇒ תמיד חלון אחד; 136.975 הוא ה-CSC העולמי.
+- **⚠ VDL2 env ב-Hz, state/UI ב-MHz:** dumpvdl2 מקבל תדרים ב-Hz. `write_vdl2_env` הוא
+  **המקום היחיד** שממיר MHz→Hz; בכל שאר המקומות (state, `VDL2_BANKS`, UI, `_sanitize_freqs`)
+  התדרים הם מחרוזות MHz — כמו ACARS. אל תערבב.
+- **`config/airband.conf` · `config/acars.env` · `config/vdl2.env` נדרסים** ע"י `app.py`
+  בזמן ריצה. לשנות ברירת מחדל קבועה — ערוך גם את הדיפולט בקוד (`ACARS_BANKS`/`VDL2_BANKS`/
+  `ACARS_FREQS_DEFAULT`/`VDL2_FREQS_DEFAULT` וכו').
+- **msg-filter של VDL2** (`VDL2_MSG_FILTER`): מסנן בצד המפענח רעש שהיה מציף את הפיד
+  (supervisory, ACK ריקים, **GSIF squitters** שמשודרים כל כמה שניות), ושומר acars +
+  x25-data (CPDLC/ADS-C) + xid. `_normalize_vdl2` עדיין סובל כל סוג פריים (הסינון קונפיג, לא הבטחה).
 - **gain של SDRplay הפוך:** ערך **קטן יותר = רווח גדול יותר** (IFGR/RFGR הן *הפחתות*).
 - **בידוד מקורות חיצוניים:** כל קריאת רשת (ADS-B, METAR) חייבת לרוץ ב-thread ולהיכשל
   חיננית — **הרדיו לעולם לא תלוי באינטרנט.**
