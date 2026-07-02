@@ -2267,7 +2267,10 @@
       feed.scrollTop = stick ? 0 : Math.max(0, feed.scrollHeight - distBottom);
     }
 
+    let acarsInFlight = false;              // מונע בקשות חופפות (interval + רענון מיידי + רשת איטית)
     async function pollAcars() {
+      if (acarsInFlight) return;            // בקשה חופפת עם אותו since הייתה מכפילה הודעות
+      acarsInFlight = true;
       try {
         const data = await (await fetch("/api/acars?since=" + acarsLastId)).json();
         if (!data.ok) return;
@@ -2306,6 +2309,7 @@
           renderAcarsFeed();
         }
       } catch (e) { /* רשת זמנית => המחזור הבא ינסה שוב */ }
+      finally { acarsInFlight = false; }
     }
     $("acarsSearch").addEventListener("input", renderAcarsFeed);
 

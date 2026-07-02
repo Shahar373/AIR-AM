@@ -839,7 +839,9 @@ def _acars_listener():
             dedup_key = (tail, label, text[:80])
             prev_ts, prev_rec = _dedup.get(dedup_key, (0, None))
             if prev_rec is not None and ts - prev_ts < 90:
-                prev_rec["retry_count"] = prev_rec.get("retry_count", 1) + 1
+                # prev_rec חי גם ב-_acars_msgs שקוראים ממנו routes => מוטציה רק תחת הנעילה
+                with _acars_lock:
+                    prev_rec["retry_count"] = prev_rec.get("retry_count", 1) + 1
                 continue                      # retry — לא מוסיפים כרטיס חדש
             _dedup[dedup_key] = (ts, rec)
             if len(_dedup) > 500:             # ניקוי ערכים ישנים (מניעת דליפת זיכרון)
@@ -1504,7 +1506,9 @@ def api_acars():
     show_all = request.args.get("all") in ("1", "true", "yes")
     floor = 0 if show_all else _today_start()
     with _acars_lock:
-        msgs = [m for m in _acars_msgs
+        # עותקים (לא references): jsonify מסדרל אחרי שחרור הנעילה, ו-retry_count
+        # עלול להתעדכן ע"י ה-listener באמצע האיטרציה של ה-encoder
+        msgs = [dict(m) for m in _acars_msgs
                 if m["id"] > since and (m.get("t") or 0) >= floor]
         cursor = _acars_seq
     return jsonify(ok=True, active=_is_active(ACARS_SERVICE),

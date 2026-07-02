@@ -3,8 +3,11 @@ Description=AIR-AM - ACARS decoder (acarsdec, SDRplay RSP1B)
 Documentation=https://github.com/TLeconte/acarsdec
 After=network-online.target sdrplay.service
 Wants=network-online.target
-# Requires (לא Wants) => הפעלה מחדש של ה-API גוררת את acarsdec
+# Requires => עצירת sdrplay עוצרת גם את acarsdec (תלות קשיחה ב-API).
+# PartOf => restart של sdrplay מפעיל אותנו מחדש אם אנחנו הצרכן הפעיל כרגע
+# (try-restart) — בלי זה dependency-stop משאיר את התחנה שקטה. ראה rtl_airband.service.
 Requires=sdrplay.service
+PartOf=sdrplay.service
 # מצב משולב = SDR אחד בהחלפה: רק צרכן-SDR אחד פעיל בכל רגע. Conflicts => הפעלת
 # acarsdec עוצרת אוטומטית את rtl_airband (וההפך), כך שלעולם אין שני תהליכים
 # שמתחרים על ה-RSP1B. ההצהרה כאן בלבד מספיקה (Conflicts דו-כיווני).

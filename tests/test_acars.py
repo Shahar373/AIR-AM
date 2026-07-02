@@ -582,6 +582,28 @@ def test_dedup_retry_count_update():
     assert rec["retry_count"] == 3
 
 
+def test_api_acars_serializes_copies(client, monkeypatch):
+    """/api/acars מסדרל *עותקים* של ההודעות — לא references ל-ring buffer.
+    אחרת עדכון retry_count של ה-listener באמצע איטרציית ה-JSON encoder (שרץ
+    אחרי שחרור _acars_lock) היה מפיל את הבקשה ב-RuntimeError."""
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    with app._acars_lock:
+        app._acars_msgs.clear()
+        app._acars_seq = 1
+        rec = {"id": 1, "t": time.time(), "tail": "OO-ACF", "label": "H1", "text": "hi"}
+        app._acars_msgs.append(rec)
+
+    captured = {}
+    real_jsonify = app.jsonify
+    monkeypatch.setattr(app, "jsonify",
+                        lambda **kw: (captured.update(kw), real_jsonify(**kw))[1])
+    data = client.get("/api/acars?since=0").get_json()
+    assert data["messages"][0]["tail"] == "OO-ACF"
+    sent = captured["messages"][0]
+    assert sent is not rec                 # עותק, לא אותו אובייקט
+    assert sent == rec                     # אבל תוכן זהה
+
+
 # ============================================================================
 #  פיצ'רים חדשים: בנקי תדרים + ולידציית חלון, תצוגת "היום בלבד", standby
 # ============================================================================
