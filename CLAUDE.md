@@ -153,7 +153,11 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   `_rollback` מחזיר לקונפיג קודם אם נכשל. כיוונון אחד בכל רגע (`TUNE_LOCK`).
 - **ACARS:** `_acars_listener` (thread, מאזין UDP 5556), `_normalize_acars` (הלב —
   ממיר JSON גולמי לכרטיס אחיד: label→קטגוריה+כיוון, חילוץ נ"צ, ARINC-622, actype),
-  `_text_latlon`/`_scan_latlon` (חילוץ מיקום), `_parse_atis`/`_parse_oooi_80`,
+  `_text_latlon`/`_scan_latlon` (חילוץ מיקום), פרסרים לפי label: `_parse_atis` (A9),
+  `_parse_oooi_80` (80), `_parse_wx_alternates` (WX), `_parse_sa_media` (SA),
+  `_parse_h1`+`_parse_fpn` (H1 sub-labels + תוכנית טיסה), `_parse_label15` (נ"צ, גם עם
+  error — מבני), `_parse_sq` (squitter תחנה, בלי נ"צ), `_parse_autotune` (`:;`),
+  `_acars_adsb` (העשרת ADS-B לזנבות שבזיכרון — ראה §6),
   `_enter_acars` (כתיבת env + מעבר שירות), `_enter_standby` (כיבוי שני הצרכנים, משאיר
   sdrplay חי), `_acars_window_error` (ולידציית בנק: ≤8 ערוצים, span ≤ `ACARS_WINDOW_MHZ`),
   `ACARS_BANKS` (בנקי תדרים, כל בנק בחלון אחד), `_today_start` (רצפת "היום בלבד").
@@ -177,6 +181,11 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   (שיטת gpsjam.org, בזמן אמת).
 - **בידוד:** רץ ב-thread; `/api/airspace` מגיש מ-snapshot בזיכרון בלבד → **תקלת רשת
   לא נוגעת בנתיב הרדיו**. כל הפונקציות הגאומטריות טהורות ונבדקות ב-`--selftest` (בלי רשת).
+- **snapshot פר-מטוס (היתוך ACARS↔ADS-B):** `process()` שומר רשומה לכל מטוס עם רישום
+  (`_S["aircraft"]`, מפתח `norm_reg` — מנרמל `.4X-EHD`↔`4X-EHD`; גיזום אחרי
+  `AC_KEEP_SEC`=10 דק'). `aircraft_snapshot(regs)` מגיש עותקים (עם `age`) ל-`/api/acars`
+  להעשרת ה-roster/מפה. עמידות שיבוש: `nic<SPOOF_NIC` ⇒ נ"צ מדוכא (`spoofed=True`),
+  גובה/track/מהירות נשמרים.
 
 החלפת מיקום השדה: ערוך `ARP_LAT/ARP_LON/RUNWAYS` בראש הקובץ.
 
@@ -205,7 +214,7 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
 | POST | `/api/mode` | **מעבר מצב** voice/acars/**off** (standby). דרך `_guard`. |
-| GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון) |
+| GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM) |
 | GET | `/api/activity` | יומן שידורים |
 | GET | `/recordings/<name>` | קובץ הקלטה MP3 |

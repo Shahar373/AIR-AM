@@ -3,8 +3,12 @@ Description=AIR-AM - RTLSDR-Airband aviation receiver (SDRplay RSP1B)
 Documentation=https://github.com/rtl-airband/RTLSDR-Airband/wiki
 After=network-online.target icecast2.service sdrplay.service
 Wants=network-online.target
-# Requires (לא Wants) => הפעלה מחדש של ה-API גוררת את rtl_airband
+# Requires => עצירת sdrplay עוצרת גם את rtl_airband (תלות קשיחה ב-API).
+# אבל dependency-stop הוא עצירה "נקייה" ש-Restart=always לא מתאושש ממנה —
+# לכן PartOf: מפיץ גם restart של sdrplay אלינו (try-restart: רק אם אנחנו
+# פעילים כרגע => לא מפעיל את שני צרכני ה-SDR ולא שובר את ה-Conflicts).
 Requires=sdrplay.service
+PartOf=sdrplay.service
 # בלי הגבלת קצב-הפעלה => מתאושש לנצח (ניתוק/חיבור USB, מרוץ אתחול)
 StartLimitIntervalSec=0
 
