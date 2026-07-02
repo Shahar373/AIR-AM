@@ -96,7 +96,10 @@ ACARS_LABELS = {
     "Q0": ("בדיקת קישור (link test)", "comm"),
     "_d": ("אישור קישור (link ack)", "comm"),
     "SA": ("ניהול מדיה (media advisory)", "comm"),
-    "SQ": ("התחברות (login)", "comm"),
+    "SQ": ("Squitter תחנת קרקע (SQ)", "comm"),
+    "15": ("דיווח מיקום (label 15)", "position"),
+    "54": ("מעבר לערוץ קול (voice go-ahead)", "comm"),
+    ":;": ("כוונון תדר אוטומטי (autotune)", "comm"),
     "H1": ("הודעת מערכת/חברה (H1)", "text"),
     "5Z": ("שירות חברה (airline)", "text"),
     "5V": ("זמינות VHF (link mgmt)", "comm"),
@@ -120,16 +123,21 @@ ACARS_LABELS = {
 # (דיווח/בקשה מהמטוס), uplink = קרקע→מטוס (אישור/הודעת חברה אל המטוס). רק labels שאנו
 # בטוחים בהם; השאר נופלים ל-heuristic של header או ל-None (לא מנחשים).
 _ACARS_DIR_BY_LABEL = {
-    "H1": "downlink", "SQ": "downlink", "5Z": "downlink", "C1": "downlink",
+    "H1": "downlink", "5Z": "downlink", "C1": "downlink",
     "QA": "downlink", "QB": "downlink", "QC": "downlink", "QD": "downlink",
     "80": "downlink",   # דוח OOOI (OFFRP/INRP) מהמטוס
     "Q0": "downlink",   # link test ממטוס
     "B9": "downlink",   # בקשת אישור מהמטוס
     "3L": "downlink",   # נתוני ULD/מטען מהמטוס
     "WX": "downlink",   # בקשת METAR לשדות גיבוי מהמטוס
+    "SA": "downlink",   # media advisory — המטוס מדווח על מצב הקישורים שלו
+    "15": "downlink",   # דיווח מיקום מהמטוס
     "BA": "uplink",     # מתן אישור מהקרקע אל המטוס
     "A9": "uplink",     # ATIS משודר מהקרקע
     "A4": "uplink",     # FSM / הודעת לוח-זמנים מהקרקע
+    "SQ": "uplink",     # squitter של תחנת הקרקע (תוקן: בעבר downlink בטעות)
+    "54": "uplink",     # voice go-ahead — הוראת קרקע לעבור לערוץ קול
+    ":;": "uplink",     # autotune — הוראת קרקע למקלט לעבור תדר
 }
 # header ניתוב של תחנת קרקע בתחילת הטקסט (למשל ‎.ATSXCXA או ‎/TLVATYA) => uplink.
 # שמרני: דורש ‎. או ‎/ בתחילת השורה ואחריו מזהה תחנה אותיות-גדולות/ספרות.
@@ -523,6 +531,13 @@ def _text_latlon(text):
     return None
 
 
+def _ddmmf(deg, mmf):
+    """מעלות + דקות-עם-עשרון-מחובר (MMf: 3 ספרות — דקות (2) + עשרון (1),
+    006 = 00.6', 539 = 53.9') => מעלות עשרוניות. משותף ל-/.POS/ ול-label 15."""
+    m = int(mmf)
+    return int(deg) + (m // 10 + (m % 10) / 10) / 60
+
+
 def _parse_pos_report(text):
     """מחלץ נ\"צ + waypoint + ETA מהודעת /.POS/ (תגובה ל-REQPOS מהקרקע).
     מחזיר (lat, lon, decoded_str) או None.
@@ -534,10 +549,7 @@ def _parse_pos_report(text):
         return None
     ns, la_d, la_mf, ew, lo_d, lo_mf, wpt, eta, alt = m.groups()
     try:
-        la_mf_i, lo_mf_i = int(la_mf), int(lo_mf)
-        # MMf: 3 ספרות — המניות (2) + עשרון (1). 006 = 00.6', 539 = 53.9'
-        lat = int(la_d) + (la_mf_i // 10 + (la_mf_i % 10) / 10) / 60
-        lon = int(lo_d) + (lo_mf_i // 10 + (lo_mf_i % 10) / 10) / 60
+        lat, lon = _ddmmf(la_d, la_mf), _ddmmf(lo_d, lo_mf)
     except (ValueError, TypeError):
         return None
     if ns == "S":
@@ -668,6 +680,163 @@ def _parse_wx_alternates(text):
     return None
 
 
+# --- חבילת פענוח עמוק: SA / H1 / FPN / label 15 / SQ / autotune -------------
+# כל ה-parsers מופעלים *רק* לפי label (dispatch ב-_normalize_acars) => אין סיכון
+# false-positive בין labels; בתוך ה-label — regex מעוגן-תחילה ושמרני.
+
+# media advisory (label SA): '0' + E/L (established/lost) + אות מדיה + HHMMSS +
+# רשימת מדיות זמינות. דוגמה: 0EV093425VS = קישור VHF נוצר ב-09:34:25, זמין VHF+SATCOM.
+_SA_MEDIA = {"V": "VHF", "S": "SATCOM", "H": "HF", "G": "GlobalStar", "C": "Iridium",
+             "2": "VDL-M2", "X": "Inmarsat", "I": "Iridium", "T": "טלפוני"}
+_SA_RE = re.compile(r"^0([EL])([VSHGCX2IT])([0-2]\d)([0-5]\d)([0-5]\d)([VSHGCX2IT]*)")
+
+# H1 sub-label: '#' + מזהה מקור בן 2 תווים בתחילת הטקסט (#DF = מקליט, #M1 = FMC...).
+_H1_SUB_RE = re.compile(r"^#([A-Z][A-Z0-9])")
+_H1_SUBLABELS = {
+    "DF": "מקליט נתונים (DFDAU)", "M1": "מחשב ניהול טיסה (FMC)",
+    "M2": "FMC 2", "M3": "FMC 3", "CF": "מערכת תחזוקה (CFDS)",
+    "EC": "בקר מנוע (EEC)", "EI": "דיווח מנוע", "WO": "תצפית מז\"א",
+    "PS": "דיווח מיקום", "S1": "בקשת קרקע (S1)",
+}
+_H1_POS_RE = re.compile(r".{0,2}POS")     # POS מיד אחרי ההדר (עם block char אופציונלי)
+
+# ‎/FPN/ = תוכנית טיסה בתוך H1: ‏:DA: יציאה, ‏:AA: יעד, ‏:F: נקודות מופרדות '..'
+# (לכל נקודה עשוי להיצמד נ"צ אחרי פסיק — נחתך).
+_FPN_DA_RE = re.compile(r":DA:([A-Z]{4})")
+_FPN_AA_RE = re.compile(r":AA:([A-Z]{4})")
+_FPN_F_RE = re.compile(r":F:([A-Z0-9.,]+)")
+_FPN_MAX_WPTS = 8
+
+# דיווח מיקום קלאסי (label 15): '(2' + NS+DD+MMf + EW+DDD+MMf. אותו קידוד דקות
+# של /.POS/ (_ddmmf). דקות נאכפות [0-5]\d => כמעט בלי false positives.
+_L15_RE = re.compile(r"^\(2([NS])(\d{2})([0-5]\d\d)([EW])(\d{3})([0-5]\d\d)")
+
+# squitter תחנת קרקע (label SQ): '0' + version + 2 אותיות + IATA(3) + ICAO(4) +
+# נ"צ התחנה + אות מדיה + תדר kHz + '/'. דוגמה: 02XSTLVLLBG03200N03452EV136975/
+_SQ_RE = re.compile(r"^0\d[A-Z]{2}([A-Z]{3})([A-Z]{4})")
+_SQ_FREQ_RE = re.compile(r"[A-Z](\d{6})/")
+
+# autotune (label ':;'): הוראת קרקע למקלט לעבור תדר — 6 ספרות kHz בתחום ה-air band.
+_AUTOTUNE_RE = re.compile(r"\b(1[23]\d{4})\b")
+
+
+def _parse_sa_media(text):
+    """media advisory (SA): איזה קישור נוצר/אבד, מתי, ואילו מדיות זמינות.
+    פורמט שדות-תו-בודד מעוגן. מחזיר string קצר או None."""
+    if not text:
+        return None
+    m = _SA_RE.match(text.strip())
+    if not m:
+        return None
+    ev, media, hh, mm, ss, avail = m.groups()
+    parts = [f"קישור {_SA_MEDIA.get(media, media)} " + ("נוצר" if ev == "E" else "אבד"),
+             f"{hh}:{mm}:{ss}z"]
+    if avail:
+        names = [_SA_MEDIA.get(c, c) for c in dict.fromkeys(avail)]   # dedup בשמירת סדר
+        parts.append("זמין: " + "·".join(names))
+    return " · ".join(parts)
+
+
+def _parse_fpn(text):
+    """‎/FPN/ (תוכנית טיסה ב-H1): יציאה→יעד + רשימת waypoints. מחזיר string או None."""
+    idx = text.find("/FPN/")
+    if idx < 0:
+        return None
+    seg = text[idx:]
+    parts = []
+    da, aa = _FPN_DA_RE.search(seg), _FPN_AA_RE.search(seg)
+    if da and aa:
+        parts.append(f"{da.group(1)}→{aa.group(1)}")
+    elif aa:
+        parts.append(f"יעד {aa.group(1)}")
+    m = _FPN_F_RE.search(seg)
+    if m:
+        wpts = []
+        for tok in m.group(1).split(".."):
+            name = tok.split(",")[0].strip()          # חיתוך נ"צ צמוד (PURLA,N32016...)
+            if 2 <= len(name) <= 8 and name[0].isalpha():
+                wpts.append(name)
+        if wpts:
+            shown = " ".join(wpts[:_FPN_MAX_WPTS])
+            if len(wpts) > _FPN_MAX_WPTS:
+                shown += f" (+{len(wpts) - _FPN_MAX_WPTS})"
+            parts.append(shown)
+    return "תוכנית טיסה " + " · ".join(parts) if parts else None
+
+
+def _parse_h1(text):
+    """H1: זיהוי מקור ההודעה לפי sub-label (#DF/#M1/...) + פענוח /FPN/ אם קיים.
+    מחזיר string קצר או None (H1 בלי הדר '#' => אין מה להסיק, לא מנחשים)."""
+    if not text:
+        return None
+    text = text.lstrip()
+    parts = []
+    m = _H1_SUB_RE.match(text)
+    if m:
+        sub = m.group(1)
+        desc = _H1_SUBLABELS.get(sub)
+        if desc is None and sub[0] == "T" and sub[1].isdigit():
+            desc = "מסוף תא (cabin terminal)"
+        if desc:
+            parts.append(desc)
+        if _H1_POS_RE.match(text[m.end():]):
+            parts.append("דיווח מיקום")
+    fpn = _parse_fpn(text)
+    if fpn:
+        parts.append(fpn)
+    return " · ".join(parts) if parts else None
+
+
+def _parse_label15(text):
+    """נ\"צ מדיווח מיקום קלאסי (label 15). פורמט מעוגן-מבני (כמו /.POS/) =>
+    אמין גם עם error>0. מחזיר (lat, lon) או None."""
+    if not text:
+        return None
+    m = _L15_RE.match(text.lstrip())
+    if not m:
+        return None
+    ns, la_d, la_mf, ew, lo_d, lo_mf = m.groups()
+    lat, lon = _ddmmf(la_d, la_mf), _ddmmf(lo_d, lo_mf)
+    if ns == "S":
+        lat = -lat
+    if ew == "W":
+        lon = -lon
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+        return None
+    return round(lat, 5), round(lon, 5)
+
+
+def _parse_sq(text):
+    """squitter תחנת קרקע (SQ): מזהה תחנה (IATA+ICAO) ותדר. *בלי* חילוץ נ"צ —
+    ה-DDMM בהודעה הוא מיקום התחנה, לא המטוס (לקח 1.7.1)."""
+    if not text:
+        return None
+    m = _SQ_RE.match(text.strip())
+    if not m:
+        return None
+    iata, icao = m.groups()
+    parts = [f"תחנת קרקע {iata} ({icao})"]
+    fm = _SQ_FREQ_RE.search(text)
+    if fm:
+        khz = int(fm.group(1))
+        if 118000 <= khz <= 137000:
+            parts.append(f"{khz / 1000:.3f}MHz")
+    return " · ".join(parts)
+
+
+def _parse_autotune(text):
+    """label ':;' — הוראת קרקע למקלט ה-ACARS לעבור תדר (kHz בטקסט)."""
+    if not text:
+        return None
+    m = _AUTOTUNE_RE.search(text)
+    if not m:
+        return None
+    khz = int(m.group(1))
+    if not (118000 <= khz <= 137000):
+        return None
+    return f"כוונון אוטומטי ל-{khz / 1000:.3f}MHz"
+
+
 def _normalize_acars(m):
     """מצמצם הודעת acarsdec JSON לשדות שה-UI מציג, בפורמט *אחיד* לכל סוגי ההודעות:
     קטגוריה קריאה (label => תיאור), קבוצה (לצבע), ומיקום (lat/lon) כשזמין. עמיד
@@ -707,6 +876,12 @@ def _normalize_acars(m):
             if decoded is None and pos[2]:
                 decoded = pos[2]                  # WPT · ETA · alt code
 
+    # label 15 (דיווח מיקום קלאסי): פורמט מעוגן-מבני כמו /.POS/ => לפני שומר ה-error.
+    if lat is None and label == "15" and text:
+        pos = _parse_label15(text)
+        if pos:
+            lat, lon, pos_src = pos[0], pos[1], "label15"
+
     # נפילה: מיקום מקודד בטקסט חופשי — אבל *רק* מ-frame נקי. acarsdec error>0 = ביטים
     # שתוקנו/לא-תוקנו; ספרה אחת שהתהפכה בקואורדינטה => מטוס במקום שגוי על המפה. ADS-C
     # (libacars) לעיל מוגן-CRC ולכן נשמר גם עם error; ה-heuristic הטקסטואלי לא — לכן מגודר.
@@ -726,6 +901,14 @@ def _normalize_acars(m):
             decoded = _parse_atis(text)
         elif label == "WX":
             decoded = _parse_wx_alternates(text)
+        elif label == "SA":
+            decoded = _parse_sa_media(text)
+        elif label == "H1":
+            decoded = _parse_h1(text)
+        elif label == "SQ":
+            decoded = _parse_sq(text)
+        elif label == ":;":
+            decoded = _parse_autotune(text)
 
     return {
         "t": g("timestamp") or time.time(),   # epoch seconds (float) מ-acarsdec (חסר => עכשיו)

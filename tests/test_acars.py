@@ -604,6 +604,123 @@ def test_api_acars_serializes_copies(client, monkeypatch):
     assert sent == rec                     # אבל תוכן זהה
 
 
+# --- חבילת פענוח עמוק: SA / H1 / FPN / label 15 / SQ / autotune --------------
+
+def test_parse_sa_media_established():
+    d = app._parse_sa_media("0EV093425VS")
+    assert "VHF" in d and "נוצר" in d
+    assert "09:34:25" in d
+    assert "זמין" in d and "SATCOM" in d
+
+
+def test_parse_sa_media_lost():
+    d = app._parse_sa_media("0LS121200V")
+    assert "SATCOM" in d and "אבד" in d
+    assert "12:12:00" in d
+
+
+def test_parse_sa_media_rejects_garbage():
+    assert app._parse_sa_media("0Z093425") is None      # אות אירוע לא מוכרת
+    assert app._parse_sa_media("0EV936425") is None     # שעה לא חוקית (93)
+    assert app._parse_sa_media("") is None
+    assert app._parse_sa_media(None) is None
+
+
+def test_sa_in_normalize():
+    n = app._normalize_acars({"timestamp": 1.0, "label": "SA", "tail": "4X-EKF",
+                              "text": "0EV093425VS"})
+    assert n["dir"] == "downlink"
+    assert n["decoded"] and "VHF" in n["decoded"]
+
+
+def test_parse_h1_sublabel():
+    assert "מקליט נתונים" in app._parse_h1("#DFB737-800 REPORT DATA")
+    assert "FMC" in app._parse_h1("#M1BREQPD")
+    assert "מסוף תא" in app._parse_h1("#T2BFREE TEXT FROM CABIN")
+    assert app._parse_h1("PLAIN TEXT WITHOUT HEADER") is None
+    assert app._parse_h1(None) is None
+
+
+def test_parse_h1_pos_report():
+    """#M1B + POS מיד אחרי ההדר => 'דיווח מיקום'; הנ"צ הקומפקטי נחלץ (frame נקי)."""
+    text = "#M1BPOSN32016E034538,VELOX,110451"
+    d = app._parse_h1(text)
+    assert "FMC" in d and "דיווח מיקום" in d
+    n = app._normalize_acars({"timestamp": 1.0, "label": "H1", "tail": "4X-EKF",
+                              "error": 0, "text": text})
+    assert n["lat"] is not None and abs(n["lat"] - 32.02667) < 0.001
+    assert n["decoded"] and "FMC" in n["decoded"]
+
+
+def test_parse_fpn_route():
+    d = app._parse_h1("#M1B/FPN/RI:DA:LLBG:AA:LGAV:F:PURLA..SOLIN..NIKAS")
+    assert "LLBG→LGAV" in d
+    assert "PURLA" in d and "SOLIN" in d and "NIKAS" in d
+
+
+def test_parse_fpn_waypoint_coord_trimmed():
+    """נ"צ צמוד ל-waypoint אחרי פסיק נחתך; מעל 8 נקודות => (+N)."""
+    wpts = "..".join(f"WPT{i:02d},N32016E034538" for i in range(10))
+    d = app._parse_fpn(f"/FPN/RI:AA:LGAV:F:{wpts}")
+    assert "WPT00" in d and "N32016" not in d
+    assert "(+2)" in d
+
+
+def test_label15_position_in_normalize():
+    n = app._normalize_acars({"timestamp": 1.0, "label": "15", "tail": "4X-EKF",
+                              "error": 0, "text": "(2N32016E034538ELY315"})
+    assert n["pos_src"] == "label15"
+    assert abs(n["lat"] - 32.02667) < 0.001
+    assert abs(n["lon"] - 34.89667) < 0.001
+    assert n["group"] == "position"
+    assert n["dir"] == "downlink"
+
+
+def test_label15_extracted_even_with_error():
+    """label 15 הוא פורמט מעוגן-מבני (כמו /.POS/) => נחלץ גם עם error>0."""
+    n = app._normalize_acars({"timestamp": 1.0, "label": "15", "tail": "4X-EKF",
+                              "error": 2, "text": "(2N32016E034538ELY315"})
+    assert n["lat"] is not None and n["pos_src"] == "label15"
+
+
+def test_label15_rejects_bad_minutes():
+    assert app._parse_label15("(2N32916E034538") is None   # דקות 91 לא חוקיות
+    assert app._parse_label15("N32016E034538") is None     # בלי הדר (2
+    assert app._parse_label15(None) is None
+
+
+def test_parse_sq_ground_station():
+    """SQ squitter אמיתי מהקליטה (596b4ef0...): תחנה + תדר, *בלי* נ"צ (נ"צ התחנה)."""
+    text = "02XSTLVLLBG03200N03452EV136975/"
+    d = app._parse_sq(text)
+    assert "TLV" in d and "LLBG" in d
+    assert "136.975" in d
+    n = app._normalize_acars({"timestamp": 1.0, "label": "SQ", "text": text})
+    assert n["lat"] is None and n["pos_src"] is None       # לקח 1.7.1 נשמר
+    assert n["dir"] == "uplink"                            # squitter משודר מהקרקע
+    assert n["decoded"] and "LLBG" in n["decoded"]
+
+
+def test_parse_sq_rejects_garbage():
+    assert app._parse_sq("HELLO WORLD") is None
+    assert app._parse_sq("0") is None
+    assert app._parse_sq(None) is None
+
+
+def test_autotune_label():
+    n = app._normalize_acars({"timestamp": 1.0, "label": ":;", "text": "131550"})
+    assert n["decoded"] == "כוונון אוטומטי ל-131.550MHz"
+    assert n["dir"] == "uplink"
+    assert app._parse_autotune("999999") is None           # מחוץ ל-air band
+    assert app._parse_autotune("") is None
+
+
+def test_voice_go_ahead_label():
+    n = app._normalize_acars({"timestamp": 1.0, "label": "54", "text": ""})
+    assert "קול" in n["category"]
+    assert n["dir"] == "uplink"
+
+
 # ============================================================================
 #  פיצ'רים חדשים: בנקי תדרים + ולידציית חלון, תצוגת "היום בלבד", standby
 # ============================================================================
