@@ -266,15 +266,18 @@
     .player-row { display: flex; gap: .5rem; margin-top: .6rem; }
     .player-row button, .player-row a { flex: 1; }
 
-    /* ---------- כפתורים ---------- */
+    /* ---------- כפתורים ----------
+       סקאלה מהודקת: הכפתורים ירשו 1rem מהגוף וזה היה גדול מדי לפקדי-ממשק —
+       גופן .9rem, משקל 600, padding קומפקטי. פקדים משניים (chips/SDR) קטנים עוד. */
     button, a.ghost {
-      font: inherit; font-weight: 600; cursor: pointer;
+      font-family: inherit; font-size: .9rem; font-weight: 600; cursor: pointer;
+      line-height: 1.25;
       color: var(--text);
       background: rgba(255,255,255,.045);
       border: 1px solid var(--border);
       border-radius: var(--r-ctrl);
-      padding: .72rem 1rem;
-      min-height: 42px;
+      padding: .55rem .9rem;
+      min-height: 38px;
       transition: transform .07s ease, background .15s ease, border-color .15s ease, box-shadow .15s ease;
     }
     button:hover, a.ghost:hover { background: var(--hover); border-color: var(--border-strong); }
@@ -286,7 +289,7 @@
     }
     button.primary:hover { background: linear-gradient(180deg, #4a96fb, #2373ef); }
     button.ghost, a.ghost {
-      color: var(--dim); font-weight: 500; font-size: .85rem; padding: .55rem .9rem;
+      color: var(--dim); font-weight: 500; font-size: .82rem; padding: .48rem .85rem; min-height: 34px;
       text-decoration: none; text-align: center; display: inline-flex;
       align-items: center; justify-content: center;
     }
@@ -472,10 +475,10 @@
       display: flex; gap: .5rem; align-items: stretch;
     }
     .modebar .seg { flex: 1; }
-    .modebar .seg button { flex: 1; padding: .62rem .35rem; font-size: .92rem; white-space: nowrap; }
+    .modebar .seg button { flex: 1; padding: .58rem .35rem; font-size: .88rem; white-space: nowrap; }
     /* כפתור כיבוי/הפעלת המקלט (standby): משחרר את ה-SDR ליישום אחר, הדף נשאר חי */
-    .power-btn { border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2);
-      color: var(--text); font-size: .9rem; padding: .6rem .8rem; cursor: pointer; white-space: nowrap; }
+    .power-btn { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel-2);
+      color: var(--text); font-size: .82rem; padding: .55rem .75rem; cursor: pointer; white-space: nowrap; }
     .power-btn.on { background: linear-gradient(180deg, rgba(63,185,80,.22), rgba(63,185,80,.10));
       border-color: rgba(63,185,80,.5); color: #6fe089; }
     .power-btn:disabled { opacity: .5; cursor: default; }
@@ -487,8 +490,8 @@
     /* בורר בנקי תדרי ACARS */
     .acars-banks { display: flex; flex-wrap: wrap; gap: .4rem; margin: .15rem 0 .1rem; }
     .acars-banks button { border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
-      background: var(--panel-2); color: var(--text); font-size: .82rem; padding: .42rem .8rem;
-      min-height: 36px; }
+      background: var(--panel-2); color: var(--text); font-size: .78rem; font-weight: 500;
+      padding: .38rem .78rem; min-height: 34px; }
     .acars-banks button.on { background: linear-gradient(180deg, rgba(77,163,255,.18), rgba(77,163,255,.08));
       border-color: rgba(77,163,255,.5); color: var(--accent-2); }
     /* נקודה ירוקה על הכרטיסייה שה-SDR באמת פעיל בה (ייתכן שונה מהתצוגה) */
@@ -499,8 +502,10 @@
     .acars-sdr-bar { padding: .5rem 0 .6rem; border-bottom: 1px solid var(--border);
       margin-bottom: .5rem; }
     .acars-sdr-bar .sdr-btns { display: flex; gap: .5rem; flex-wrap: wrap; }
-    .acars-sdr-bar .sdr-btns button { flex: 1; min-width: 120px; }
-    .acars-sdr-bar .sdr-hint { margin: .4rem 0 0; font-size: .8rem; color: var(--dim); }
+    /* פקדי בקרה משניים — קומפקטיים: גופן קטן ו-padding מהודק כדי שלא ינפחו את הסרגל */
+    .acars-sdr-bar .sdr-btns button { flex: 1; min-width: 110px; font-size: .82rem; font-weight: 500;
+      padding: .48rem .7rem; min-height: 36px; line-height: 1.2; }
+    .acars-sdr-bar .sdr-hint { margin: .45rem 0 0; font-size: .78rem; color: var(--dim); }
 
     /* ---------- ACARS ---------- */
     .acars-head { display: flex; align-items: center; justify-content: space-between;
@@ -551,9 +556,9 @@
 
     /* צ'יפים לסינון קטגוריה */
     .acars-filters { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .55rem; }
-    .acars-chip { font-size: .76rem; color: var(--dim); cursor: pointer;
+    .acars-chip { font-size: .74rem; color: var(--dim); cursor: pointer;
       background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px;
-      padding: .42rem .85rem; min-height: 36px; user-select: none;
+      padding: .38rem .8rem; min-height: 34px; user-select: none;
       display: inline-flex; align-items: center; }
     .acars-chip.on { color: var(--text); border-color: var(--accent);
       background: linear-gradient(180deg, rgba(77,163,255,.16), rgba(77,163,255,.06)); }
@@ -988,7 +993,7 @@
       <div id="sdrActiveCtrl" class="hidden">
         <div class="sdr-btns">
           <button id="acarsStopBtn">⏹ עצור / חזור לקול</button>
-          <button id="towerBtn">🎧 האזן למגדל (134.600)</button>
+          <button id="towerBtn">🎧 מגדל · 134.600</button>
         </div>
         <p class="sdr-hint">ACARS פעיל — ה-SDR מפענח נתונים. השמע אינו זמין.</p>
       </div>
@@ -1063,7 +1068,7 @@
       <div id="vdl2ActiveCtrl" class="hidden">
         <div class="sdr-btns">
           <button id="vdl2StopBtn">⏹ עצור / חזור לקול</button>
-          <button id="vdl2TowerBtn">🎧 האזן למגדל (134.600)</button>
+          <button id="vdl2TowerBtn">🎧 מגדל · 134.600</button>
         </div>
         <p class="sdr-hint">VDL2 פעיל — ה-SDR מפענח נתונים. השמע אינו זמין.</p>
       </div>
