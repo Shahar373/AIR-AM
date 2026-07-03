@@ -262,10 +262,12 @@ def process(ac_list, now=None):
         # track (ששורדים שיבוש) נשמרים תמיד.
         reg = norm_reg(ac.get("r"))
         if reg:
-            spoofed = nic is not None and nic < SPOOF_NIC
+            # שם נפרד מהמונה spoofed שלמעלה — שימוש חוזר באותו שם דרס את הספירה
+            # (bool במקום מונה) וכל spoofed_count ב-/api/airspace יצא שגוי.
+            ac_spoofed = nic is not None and nic < SPOOF_NIC
             lat, lon = _num(ac.get("lat")), _num(ac.get("lon"))
             pos_ok = (lat is not None and lon is not None
-                      and (_num(ac.get("seen_pos")) or 0) <= 60 and not spoofed)
+                      and (_num(ac.get("seen_pos")) or 0) <= 60 and not ac_spoofed)
             on_ground = ac.get("alt_baro") == "ground"
             _S["aircraft"][reg] = {
                 "reg": str(ac.get("r")).strip(),
@@ -279,7 +281,7 @@ def process(ac_list, now=None):
                 "gs": _num(ac.get("gs")),
                 "track": _num(ac.get("track")),
                 "nic": nic,
-                "spoofed": spoofed,
+                "spoofed": ac_spoofed,
                 "pos_ok": pos_ok,
                 "t_mono": now,
             }
@@ -560,6 +562,18 @@ def _selftest():
     with _LOCK:                                # גיזום: מטוס שלא נראה AC_KEEP_SEC נעלם
         process([], now3 + AC_KEEP_SEC + 1)
     assert aircraft_snapshot() == {}
+
+    # רגרסיה: מונה המזויפים שורד מטוס עם רישום (בעבר ההשמה בבלוק ה-snapshot
+    # דרסה את המונה => spoofed_count יצא bool/אפס אחרי כל מטוס רשום)
+    with _LOCK:
+        process([
+            {"hex": "s1", "alt_baro": 3000, "nic": 0},
+            {"hex": "s2", "alt_baro": 4000, "nic": 0},
+            {"hex": "c1", "r": "4X-CLN", "alt_baro": 12000, "nic": 8,
+             "lat": 32.2, "lon": 34.7, "seen_pos": 1},
+        ], now3 + AC_KEEP_SEC + 60)
+        _S["last_ok"] = now3 + AC_KEEP_SEC + 60
+    assert snapshot()["gps"]["spoofed_count"] == 2, snapshot()["gps"]
     print("selftest: OK")
 
 

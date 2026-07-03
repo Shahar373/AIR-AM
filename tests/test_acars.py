@@ -390,6 +390,17 @@ def test_parse_pos_report_rejects_garbage():
     assert app._parse_pos_report("POSN32010E034540") is None  # לא /.POS/
 
 
+def test_parse_pos_report_rejects_invalid_minutes():
+    """regression: דקות מחוץ ל-00–59 נדחות (כמו _L15_RE). קריטי כי /.POS/ נחלץ
+    גם עם error — ספרת דקות שהתהפכה (80.0') הזיזה בעבר את המטוס ~1.3° בשקט."""
+    bad_lat = "/.POS/TS104451,260626N32800E034539,,104451,1,VELOX,110451"
+    assert app._parse_pos_report(bad_lat) is None
+    bad_lon = "/.POS/TS104451,260626N32006E034939,,104451,1,VELOX,110451"
+    assert app._parse_pos_report(bad_lon) is None
+    good = "/.POS/TS104451,260626N32006E034539,,104451,1,VELOX,110451"
+    assert app._parse_pos_report(good) is not None
+
+
 # --- ייצוא ------------------------------------------------------------------
 
 def test_acars_export_csv(client, paths):
@@ -622,6 +633,8 @@ def test_parse_sa_media_lost():
 def test_parse_sa_media_rejects_garbage():
     assert app._parse_sa_media("0Z093425") is None      # אות אירוע לא מוכרת
     assert app._parse_sa_media("0EV936425") is None     # שעה לא חוקית (93)
+    assert app._parse_sa_media("0EV293425VS") is None   # שעה 29 (בעבר עברה — [0-2]\d)
+    assert app._parse_sa_media("0EV233425VS") is not None   # 23 חוקית
     assert app._parse_sa_media("") is None
     assert app._parse_sa_media(None) is None
 
