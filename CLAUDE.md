@@ -217,6 +217,11 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 בטאבלט/דסקטופ). **אין build step** — עורכים את הקובץ ישירות. Leaflet vendored תחת
 `static/vendor/` (בלי CDN, עובד גם בלי אינטרנט — אריחי OSM יורדים חיננית בלי רשת).
 
+**טוקני עיצוב ב-`:root`:** גיאומטריה (`--r-card`/`--r-ctrl`/`--r-sm`), מרווח (`--sp-1..5`,
+בסיס 4px), הצללה (`--sh-card`/`--sh-1`/`--sh-blue`), משטחים (`--panel`/`--panel-2`/`--hover`)
+וקווים (`--border`/`--border-strong`). **השתמש בטוקנים בקוד חדש** במקום ערכים קשיחים —
+כך הקצב והגיאומטריה נשמרים עקביים, ושינוי במקום אחד מתפשט לכל הרכיבים.
+
 **תצוגת ACARS מול VDL2:** ACARS ממומש ישירות (globals `acars*` + `renderAcarsMsg`
 וכו'). תצוגת VDL2 ממומשת ב-**פקטורי `createDataView({prefix:"vdl2", ...})`** — מופע סגור
 (closures) עם state/מפה/buffers משלו, לגמרי נפרד מ-ACARS (⇒ אפס רגרסיה ל-ACARS; ה-DOM
