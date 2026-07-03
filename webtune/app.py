@@ -529,8 +529,10 @@ _TEXT_POS_COMPACT_RE = re.compile(
 # הפורמט אמין גם עם error (פרוטוקול מבני, לא heuristic) ⇒ נחלץ לפני שמירת error guard.
 _POS_REPORT_RE = re.compile(
     r"/\.POS/TS\d{6},\d{6}"        # TS timestamp + date (6 digits each)
-    r"([NS])(\d{2})(\d{3})"         # lat: NS, 2-digit deg, 3-digit MMf
-    r"([EW])(\d{3})(\d{3})"         # lon: EW, 3-digit deg, 3-digit MMf
+    r"([NS])(\d{2})([0-5]\d\d)"     # lat: NS, 2-digit deg, MMf עם דקות 00–59
+    r"([EW])(\d{3})([0-5]\d\d)"     # lon: EW, 3-digit deg, MMf עם דקות 00–59
+                                    # (כמו _L15_RE: הפורמט נחלץ גם עם error ⇒ ספרת
+                                    # דקות שהתהפכה חייבת להידחות, לא להזיז את המטוס)
     r",,\d{6},\d+,"                 # gap fields (time2, unknown)
     r"([A-Z][A-Z0-9]{1,7})"        # next waypoint (2–8 chars)
     r",(\d{6})"                     # ETA to waypoint (HHMMSS)
@@ -736,7 +738,7 @@ def _parse_wx_alternates(text):
 # רשימת מדיות זמינות. דוגמה: 0EV093425VS = קישור VHF נוצר ב-09:34:25, זמין VHF+SATCOM.
 _SA_MEDIA = {"V": "VHF", "S": "SATCOM", "H": "HF", "G": "GlobalStar", "C": "Iridium",
              "2": "VDL-M2", "X": "Inmarsat", "I": "Iridium", "T": "טלפוני"}
-_SA_RE = re.compile(r"^0([EL])([VSHGCX2IT])([0-2]\d)([0-5]\d)([0-5]\d)([VSHGCX2IT]*)")
+_SA_RE = re.compile(r"^0([EL])([VSHGCX2IT])([01]\d|2[0-3])([0-5]\d)([0-5]\d)([VSHGCX2IT]*)")
 
 # H1 sub-label: '#' + מזהה מקור בן 2 תווים בתחילת הטקסט (#DF = מקליט, #M1 = FMC...).
 _H1_SUB_RE = re.compile(r"^#([A-Z][A-Z0-9])")
