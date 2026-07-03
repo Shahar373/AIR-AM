@@ -493,6 +493,12 @@
       font-variant-numeric: tabular-nums; direction: ltr; }
     .acars-stat span { font-size: .68rem; color: var(--dim); }
 
+    /* קצב הודעות: sparkline (כמו .rf canvas בתצוגת הקול) — מגמה קצרת-טווח מתחת לסטטיסטיקה */
+    .rate-spark { display: flex; align-items: center; gap: .5rem; margin-top: .5rem;
+      padding: .4rem .65rem; background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 10px; font-size: .78rem; color: var(--dim); }
+    .rate-spark canvas { flex: 1; min-width: 0; height: 22px; }
+
     /* סרגל כלים: חיפוש + ייצוא */
     .acars-tools { display: flex; gap: .5rem; margin-top: .65rem; align-items: center; }
     /* direction נקבע ע"י dir="auto" במרקאפ — מקלידים בעיקר זנבות/labels לטיניים */
@@ -644,22 +650,42 @@
     @keyframes amsg-in { from { opacity: 0; transform: translateY(-8px); } }
     .amsg-new { animation: amsg-in .4s ease both; }
 
+    /* ---------- שלד טעינה ראשונית (skeleton) ---------- */
+    /* עד ש-/api/state חוזר: פריסטים מוצגים כשלד קבוע-מראש (renderPresets() מוחק
+       ומחליף אוטומטית ברגע שהנתונים מגיעים — בלי לוגיקת הצג/הסתר נפרדת),
+       ותצוגת התדר/סטטוס דוהה בעדינות במקום "—"/"טוען…" יבשים. */
+    @keyframes skel-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+    .skel-bar {
+      background: linear-gradient(90deg, var(--panel-2) 25%, var(--hover) 50%, var(--panel-2) 75%);
+      background-size: 200% 100%; animation: skel-shimmer 1.5s ease-in-out infinite;
+      border-radius: 6px; display: block;
+    }
+    .presets button.skel { pointer-events: none; cursor: default; border-style: dashed; }
+    .presets button.skel .row1 { height: .95rem; width: 70%; }
+    .presets button.skel .pf { height: .8rem; width: 3.4em; }
+    body.loading #curFreq, body.loading #freqName, body.loading #status { opacity: .35; }
+    body.loading .pill .dot { animation: skel-pulse 1.3s ease-in-out infinite; }
+    @keyframes skel-pulse { 0%, 100% { opacity: .3; } 50% { opacity: .8; } }
+
     /* נגישות: טבעת פוקוס לניווט מקלדת (לא מופיעה בלחיצת עכבר/מגע) */
     :where(button, a.ghost, input, summary, .acars-chip):focus-visible {
       outline: 2px solid var(--accent); outline-offset: 2px;
     }
 
-    /* העדפת מערכת לצמצום תנועה => בלי אנימציות דופקות/כניסה */
+    /* העדפת מערכת לצמצום תנועה => בלי אנימציות דופקות/כניסה/שלד */
     @media (prefers-reduced-motion: reduce) {
       .pill.live .dot, .pill.busy .dot, .pwr.bad .pdot,
-      .overload, .play-main.playing, .amsg-new { animation: none; }
+      .overload, .play-main.playing, .amsg-new,
+      .skel-bar, body.loading .pill .dot { animation: none; }
     }
 
     .hidden { display: none !important; }
     .flex-col { display: flex; flex-direction: column; gap: .5rem; align-items: flex-start; }
   </style>
 </head>
-<body>
+<!-- body.loading: הוסר ב-JS ברגע ש-/api/state חוזר (הצלחה או כישלון) — עד אז
+     התדר/סטטוס דוהים בעדינות במקום להישאר "—"/"טוען…" יבשים (ראה .skel-* ב-CSS) -->
+<body class="loading">
   <header>
     <span class="logo">✈️</span>
     <h1>AIR-AM</h1>
@@ -762,7 +788,17 @@
       <button type="button" id="editPresetsBtn" class="ghost"
               style="margin-inline-start:auto;padding:.25rem .65rem">✎ עריכה</button>
     </p>
-    <div class="presets" id="presets"></div>
+    <div class="presets" id="presets">
+      <!-- שלד טעינה: renderPresets() מרוקן ומחליף אוטומטית ברגע ש-/api/state חוזר -->
+      <button type="button" class="skel" disabled aria-hidden="true" tabindex="-1">
+        <div class="row1 skel-bar"></div><span class="pf skel-bar"></span></button>
+      <button type="button" class="skel" disabled aria-hidden="true" tabindex="-1">
+        <div class="row1 skel-bar"></div><span class="pf skel-bar"></span></button>
+      <button type="button" class="skel" disabled aria-hidden="true" tabindex="-1">
+        <div class="row1 skel-bar"></div><span class="pf skel-bar"></span></button>
+      <button type="button" class="skel" disabled aria-hidden="true" tabindex="-1">
+        <div class="row1 skel-bar"></div><span class="pf skel-bar"></span></button>
+    </div>
     <!-- טופס הוספה (מוצג רק במצב עריכה); עריכת שם = מחיקה והוספה מחדש -->
     <div id="presetForm" class="hidden" style="margin-top:.7rem">
       <div class="tune-row">
@@ -933,6 +969,10 @@
       <div class="acars-stat"><b id="acStPos">0</b><span>עם מיקום</span></div>
       <div class="acars-stat"><b id="acStAdsb">0</b><span>🛰 ב-ADS-B</span></div>
     </div>
+    <!-- מגמת קצב ההודעות (2 הדקות האחרונות) — כמו .rf canvas בתצוגת הקול -->
+    <div class="rate-spark" title="קצב הודעות · 2 הדקות האחרונות">
+      <span>📈</span><canvas id="acRateSpark"></canvas>
+    </div>
 
     <!-- לוח ATIS sticky (מוסתר כברירת מחדל; מתמלא כשמגיעה הודעת A9) -->
     <div class="acars-atis hidden" id="acarsAtis"></div>
@@ -1002,6 +1042,9 @@
       <div class="acars-stat"><b id="vdl2StPos">0</b><span>עם מיקום</span></div>
       <div class="acars-stat"><b id="vdl2StAdsb">0</b><span>🛰 ב-ADS-B</span></div>
     </div>
+    <div class="rate-spark" title="קצב הודעות · 2 הדקות האחרונות">
+      <span>📈</span><canvas id="vdl2RateSpark"></canvas>
+    </div>
 
     <div class="acars-tools">
       <input id="vdl2Search" dir="auto" class="acars-search" type="search"
@@ -1041,6 +1084,8 @@
     let acarsTimer = null;
     let acarsLastId = 0;          // cursor: ה-id האחרון שקיבלנו מ-/api/acars
     let acarsFeedMax = 0;         // ה-id הגבוה שרונדר בפיד — לסימון "חדש" (אנימציה)
+    const RATE_HIST_N = 40;       // 40 דגימות × ~3s פולינג = כ-2 דקות אחורה
+    const acarsRateHist = [];     // מגמת קצב ההודעות (rate-spark)
 
     /* ---------- API + PIN אופציונלי ---------- */
     // PIN פעיל רק אם השרת הוגדר עם AIRAM_PIN. אחרת לעולם לא נתבקש => חוויה זהה.
@@ -1353,6 +1398,31 @@
         i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
       });
       ctx.strokeStyle = "#4da3ff"; ctx.lineWidth = 1.6; ctx.lineJoin = "round";
+      ctx.stroke();
+    }
+
+    // sparkline גנרי (משותף ל-ACARS/VDL2 rate-spark): סקאלה אוטומטית לפי המקסימום
+    // בהיסטוריה (בניגוד ל-drawSpark של ה-SNR שסקאלתו קבועה 0..30dB), כי קצב הודעות
+    // אין לו טווח טבעי ידוע מראש. x לפי histN הקבוע (לא hist.length) => הקו גדל
+    // משמאל החוצה בתחילת הטעינה במקום להימתח על פני כל הרוחב מדגימה אחת.
+    function drawMiniSpark(cv, hist, histN, color) {
+      if (!cv) return;
+      const dpr = window.devicePixelRatio || 1;
+      const w = cv.clientWidth, h = cv.clientHeight;
+      if (!w) return;
+      if (cv.width !== w * dpr) { cv.width = w * dpr; cv.height = h * dpr; }
+      const ctx = cv.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      if (hist.length < 2) return;
+      const max = Math.max(1, ...hist);   // לפחות 1 => לא מתחלקים ב-0 כשהכול שקט
+      ctx.beginPath();
+      hist.forEach((v, i) => {
+        const x = (i / (histN - 1)) * w;
+        const y = h - (v / max) * (h - 3) - 1.5;
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      });
+      ctx.strokeStyle = color || "#4da3ff"; ctx.lineWidth = 1.4; ctx.lineJoin = "round";
       ctx.stroke();
     }
 
@@ -2454,6 +2524,38 @@
     const RETRANS_WINDOW_S = 30;     // חלון זמן לספיגת רטרנסמיט (שניות)
     const MULTIBLOCK_RE = /^[A-Z]\d\d[A-Z]$/;  // msgno בפורמט D57A/D57B => multi-block
 
+    // ----- רינדור אינקרמנטלי של הפיד (משותף ל-ACARS ול-VDL2) -----
+    // הבעיה עם רינדור-מחדש מלא: כל poll (3s) בנה מחדש עד 200 DOM nodes מורכבים,
+    // גם כשרוב ההודעות לא השתנו כלל. reconcileFeed משווה "חתימה" תוכן פר-הודעה
+    // מול מטמון פר-מפתח: זהה => משתמש חוזר ב-DOM node הקיים (רק מתעדכן הזמן
+    // היחסי); שונה/חדש => בונה מחדש. הסדר הסופי מתקבל ע"י הזזת ה-nodes (לא הרס)
+    // לתוך fragment, ולכן גם רשימות שמסודרות-מחדש (למשל block שקיבל חלק חדש)
+    // לא הורסות nodes שלא השתנו.
+    function msgSig(m, count, hasRetx) {
+      return JSON.stringify([m.id, m.tail, m.flight, m.icao, m.dir, m.category, m.group,
+        m.lat, m.lon, m.error, m.freq, m.level, m.label, m.mode, m.msgno, m.decoded,
+        m.text, count, hasRetx]);
+    }
+    function patchMsgTime(el, m) {
+      const t = el.querySelector(".amsg-time");
+      if (t && m.t) { t.textContent = fmtRel(m.t); t.title = new Date(m.t * 1000).toLocaleString("he-IL"); }
+    }
+    function reconcileFeed(feedEl, cache, entries) {
+      const frag = document.createDocumentFragment();
+      const seen = new Set();
+      for (const e of entries) {
+        seen.add(e.key);
+        const cached = cache.get(e.key);
+        let el;
+        if (cached && cached.sig === e.sig) { el = cached.el; e.patchTime(el); }
+        else { el = e.build(); cache.set(e.key, { sig: e.sig, el }); }
+        frag.appendChild(el);          // מזיז node קיים (לא הורס) אם היה כבר ב-feedEl
+      }
+      for (const k of Array.from(cache.keys())) { if (!seen.has(k)) cache.delete(k); }
+      feedEl.replaceChildren(frag);
+    }
+    const acarsFeedCache = new Map();  // key => { sig, el }
+
     function renderAcarsFeed() {
       const feed = $("acarsFeed");
       const q = ($("acarsSearch").value || "").trim().toLowerCase();
@@ -2463,27 +2565,28 @@
 
       // שלב 1: ספיגת רטרנסמיט (VIEW-only — acarsMsgs לא משתנה)
       // מפתח: tail+label+text[:50]; שומרים הודעה עם error נמוך ביותר בחלון הזמן
-      const retxMap = new Map();   // key => { m, hasRetx }
+      const retxMap = new Map();   // dedupKey => { m, hasRetx, dedupKey }
       for (const m of filtered) {
-        const key = (m.tail || "") + "|" + (m.label || "") + "|" + (m.text || "").slice(0, 50);
-        if (retxMap.has(key)) {
-          const prev = retxMap.get(key);
+        const dedupKey = (m.tail || "") + "|" + (m.label || "") + "|" + (m.text || "").slice(0, 50);
+        if (retxMap.has(dedupKey)) {
+          const prev = retxMap.get(dedupKey);
           if (typeof m.t === "number" && typeof prev.m.t === "number"
               && Math.abs(m.t - prev.m.t) <= RETRANS_WINDOW_S) {
-            if ((m.error || 0) < (prev.m.error || 0)) retxMap.get(key).m = m;
-            retxMap.get(key).hasRetx = true;
+            if ((m.error || 0) < (prev.m.error || 0)) retxMap.get(dedupKey).m = m;
+            retxMap.get(dedupKey).hasRetx = true;
             continue;
           }
         }
-        retxMap.set(key, { m, hasRetx: false });
+        retxMap.set(dedupKey, { m, hasRetx: false, dedupKey });
       }
       const deduped = Array.from(retxMap.values());
 
       // שלב 2: קיבוץ multi-block (VIEW-only) — מפתח: tail+msgno[0:3]
-      // מציגים רק את ה-block האחרון עם badge ×N
-      const blockMap = new Map();  // bk => { m, count }
+      // מציגים רק את ה-block האחרון עם badge ×N. key = מזהה יציב ל-reconcileFeed
+      // (dedup key להודעה בודדת, "blk:"+bk לקבוצת block — עמיד גם כש-m עצמו מתחלף).
+      const blockMap = new Map();  // bk => { m, count, hasRetx, key }
       const ordered = [];          // שומר סדר הופעה (לפי insertion order)
-      for (const { m, hasRetx } of deduped) {
+      for (const { m, hasRetx, dedupKey } of deduped) {
         const isBlock = MULTIBLOCK_RE.test(m.msgno || "");
         const bk = isBlock && m.tail
           ? (m.tail + ":" + m.msgno.slice(0, 3))
@@ -2494,31 +2597,36 @@
             if ((m.t || 0) >= (e.m.t || 0)) e.m = m;  // שמור חדש יותר
             e.count++;
           } else {
-            const entry = { m, count: 1, hasRetx };
+            const entry = { m, count: 1, hasRetx, key: "blk:" + bk };
             blockMap.set(bk, entry);
             ordered.push({ bk, isSingle: false });
           }
         } else {
-          ordered.push({ bk: null, isSingle: true, m, hasRetx });
+          ordered.push({ bk: null, isSingle: true, m, hasRetx, key: "dedup:" + dedupKey });
         }
       }
 
       const list = ordered.map((o) => o.isSingle
-        ? { m: o.m, count: 1, hasRetx: o.hasRetx }
+        ? { m: o.m, count: 1, hasRetx: o.hasRetx, key: o.key }
         : blockMap.get(o.bk)
       ).reverse();  // חדש=>ישן
 
-      feed.innerHTML = "";
-      // אנימציית כניסה רק להודעות שטרם רונדרו (id חדש) — רינדור-מחדש מסינון/חיפוש לא מהבהב
+      // אנימציית כניסה רק להודעות שטרם נבנו אי-פעם (id חדש) — cache-hit לא בונה
+      // מחדש כלל => סינון/חיפוש/רענון-זמן לא נוגעים בכרטיסים קיימים ולא מהבהבים.
       const prevMax = acarsFeedMax;
-      for (const { m, count, hasRetx } of list) {
-        const el = renderAcarsMsg(m, count, hasRetx);
-        if (typeof m.id === "number" && m.id > prevMax) {
-          el.classList.add("amsg-new");
-          if (m.id > acarsFeedMax) acarsFeedMax = m.id;
-        }
-        feed.appendChild(el);
-      }
+      const entries = list.map(({ m, count, hasRetx, key }) => ({
+        key, sig: msgSig(m, count, hasRetx),
+        build: () => {
+          const el = renderAcarsMsg(m, count, hasRetx);
+          if (typeof m.id === "number" && m.id > prevMax) {
+            el.classList.add("amsg-new");
+            if (m.id > acarsFeedMax) acarsFeedMax = m.id;
+          }
+          return el;
+        },
+        patchTime: (el) => patchMsgTime(el, m),
+      }));
+      reconcileFeed(feed, acarsFeedCache, entries);
       const empty = $("acarsEmpty");
       if (!acarsMsgs.length) { empty.textContent = "ממתין להודעות…"; empty.style.display = ""; }
       else if (!list.length) { empty.textContent = "אין תוצאות לסינון/חיפוש."; empty.style.display = ""; }
@@ -2541,6 +2649,8 @@
         if (typeof data.cursor === "number" && data.cursor < acarsLastId) {
           acarsLastId = 0;
           acarsFeedMax = 0;
+          acarsRateHist.length = 0;
+          acarsFeedCache.clear();
           acarsMsgs.length = 0;
           for (const id in acarsMarkers) {
             if (acarsMap) acarsMap.removeLayer(acarsMarkers[id]);
@@ -2591,6 +2701,11 @@
             updateAdsbLayer();
           }
         }
+        // דגימת קצב לכל poll מוצלח (גם בלי הודעות חדשות — "שקט" הוא נתון בעצמו)
+        const now = Date.now() / 1000;
+        acarsRateHist.push(acarsMsgs.filter((m) => typeof m.t === "number" && now - m.t <= 60).length);
+        if (acarsRateHist.length > RATE_HIST_N) acarsRateHist.shift();
+        drawMiniSpark($("acRateSpark"), acarsRateHist, RATE_HIST_N);
       } catch (e) { /* רשת זמנית => המחזור הבא ינסה שוב */ }
       finally { acarsInFlight = false; }
     }
@@ -2630,6 +2745,8 @@
       let focus = null, filter = "all", active = false;
       let lastId = 0, banks = [], selFreqs = null;
       let feedMax = 0;                                // ה-id הגבוה שרונדר — לסימון "חדש"
+      const rateHist = [];                            // מגמת קצב ההודעות (rate-spark, כמו ACARS)
+      const feedCache = new Map();                    // key => { sig, el } — reconcileFeed (רינדור אינקרמנטלי, כמו ACARS)
       let timer = null, staleTimer = null, inFlight = false, resizeT = null;
       const icaoToId = {};                            // icao -> מזהה-מטוס ראשי (tail/flight)
 
@@ -3035,42 +3152,47 @@
         const stick = feed.scrollTop <= 8;
         const distBottom = feed.scrollHeight - feed.scrollTop;
         const filtered = msgs.filter((m) => matches(m, q)).slice(-200);
-        const retxMap = new Map();
+        const retxMap = new Map();   // dedupKey => { m, hasRetx, dedupKey }
         for (const m of filtered) {
-          const key = (m.tail || m.icao || "") + "|" + (m.label || "") + "|" + (m.text || "").slice(0, 50);
-          if (retxMap.has(key)) {
-            const prev = retxMap.get(key);
+          const dedupKey = (m.tail || m.icao || "") + "|" + (m.label || "") + "|" + (m.text || "").slice(0, 50);
+          if (retxMap.has(dedupKey)) {
+            const prev = retxMap.get(dedupKey);
             if (typeof m.t === "number" && typeof prev.m.t === "number" && Math.abs(m.t - prev.m.t) <= RETX_S) {
-              if ((m.error || 0) < (prev.m.error || 0)) retxMap.get(key).m = m;
-              retxMap.get(key).hasRetx = true; continue;
+              if ((m.error || 0) < (prev.m.error || 0)) retxMap.get(dedupKey).m = m;
+              retxMap.get(dedupKey).hasRetx = true; continue;
             }
           }
-          retxMap.set(key, { m, hasRetx: false });
+          retxMap.set(dedupKey, { m, hasRetx: false, dedupKey });
         }
         const deduped = Array.from(retxMap.values());
-        const blockMap = new Map(), ordered = [];
-        for (const { m, hasRetx } of deduped) {
+        const blockMap = new Map(), ordered = [];   // bk => { m, count, hasRetx, key }
+        for (const { m, hasRetx, dedupKey } of deduped) {
           const isBlock = MULTIBLOCK_RE.test(m.msgno || "");
           const bk = isBlock && m.tail ? (m.tail + ":" + m.msgno.slice(0, 3)) : null;
           if (bk) {
             if (blockMap.has(bk)) { const e = blockMap.get(bk); if ((m.t || 0) >= (e.m.t || 0)) e.m = m; e.count++; }
-            else { blockMap.set(bk, { m, count: 1, hasRetx }); ordered.push({ bk, isSingle: false }); }
-          } else ordered.push({ bk: null, isSingle: true, m, hasRetx });
+            else { blockMap.set(bk, { m, count: 1, hasRetx, key: "blk:" + bk }); ordered.push({ bk, isSingle: false }); }
+          } else ordered.push({ bk: null, isSingle: true, m, hasRetx, key: "dedup:" + dedupKey });
         }
         const list = ordered.map((o) => o.isSingle
-          ? { m: o.m, count: 1, hasRetx: o.hasRetx }
+          ? { m: o.m, count: 1, hasRetx: o.hasRetx, key: o.key }
           : blockMap.get(o.bk)).reverse();
-        feed.innerHTML = "";
-        // אנימציית כניסה רק להודעות שטרם רונדרו (id חדש) — כמו בפיד ה-ACARS
+        // אנימציית כניסה רק להודעות שטרם נבנו אי-פעם (id חדש) — כמו בפיד ה-ACARS
+        // (reconcileFeed משותף — ראה ההערה המלאה ליד ההגדרה שלו)
         const prevMax = feedMax;
-        for (const { m, count, hasRetx } of list) {
-          const el = renderMsg(m, count, hasRetx);
-          if (typeof m.id === "number" && m.id > prevMax) {
-            el.classList.add("amsg-new");
-            if (m.id > feedMax) feedMax = m.id;
-          }
-          feed.appendChild(el);
-        }
+        const entries = list.map(({ m, count, hasRetx, key }) => ({
+          key, sig: msgSig(m, count, hasRetx),
+          build: () => {
+            const el = renderMsg(m, count, hasRetx);
+            if (typeof m.id === "number" && m.id > prevMax) {
+              el.classList.add("amsg-new");
+              if (m.id > feedMax) feedMax = m.id;
+            }
+            return el;
+          },
+          patchTime: (el) => patchMsgTime(el, m),
+        }));
+        reconcileFeed(feed, feedCache, entries);
         const empty = E("Empty");
         if (!msgs.length) { empty.textContent = "ממתין להודעות… רוב התעבורה באזורנו על 136.975."; empty.style.display = ""; }
         else if (!list.length) { empty.textContent = "אין תוצאות לסינון/חיפוש."; empty.style.display = ""; }
@@ -3117,7 +3239,7 @@
           setActive(data.active);
           if (data.freqs) renderFreqs(data.freqs);
           if (typeof data.cursor === "number" && data.cursor < lastId) {   // השרת אותחל => איפוס
-            lastId = 0; feedMax = 0; msgs.length = 0;
+            lastId = 0; feedMax = 0; rateHist.length = 0; feedCache.clear(); msgs.length = 0;
             for (const id in markers) { if (map) map.removeLayer(markers[id]); delete markers[id]; }
             for (const id in tracks) { if (map && tracks[id].line) map.removeLayer(tracks[id].line); delete tracks[id]; }
             for (const id in craft) delete craft[id];
@@ -3145,6 +3267,10 @@
             adsb = data.adsb;
             if (key !== adsbKey) { adsbKey = key; renderStats(); renderRoster(); renderDetail(); updateAdsbLayer(); }
           }
+          const now2 = Date.now() / 1000;
+          rateHist.push(msgs.filter((m) => typeof m.t === "number" && now2 - m.t <= 60).length);
+          if (rateHist.length > RATE_HIST_N) rateHist.shift();
+          drawMiniSpark(E("RateSpark"), rateHist, RATE_HIST_N);
         } catch (e) { /* רשת זמנית => המחזור הבא ינסה שוב */ }
         finally { inFlight = false; }
       }
@@ -3296,6 +3422,7 @@
 
     /* ---------- אתחול ---------- */
     fetch("/api/state").then((r) => r.json()).then((st) => {
+      document.body.classList.remove("loading");   // הצלחה => מבטלים את שלד הטעינה
       cfg = st;
       if (st.version) $("verTag").textContent = "v" + st.version + " · SDRplay RSP1B";
       segSet("modSeg", st.mod === "nfm" ? "nfm" : "am");
@@ -3340,7 +3467,7 @@
         player.src = streamURL();
         pollActivity();   // עכשיו כש-cfg.presets נטען, שמות הפריסטים יופיעו ביומן
       }
-    }).catch(() => setStatus("אין חיבור לשרת", "err"));
+    }).catch(() => { document.body.classList.remove("loading"); setStatus("אין חיבור לשרת", "err"); });
 
     // רישום ה-service worker => מאפשר "הוסף למסך הבית" כאפליקציה. לא מטמיין כלום.
     if ("serviceWorker" in navigator) {
