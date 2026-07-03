@@ -18,34 +18,53 @@
   <style>
     :root {
       color-scheme: dark;
-      --bg: #0a0e14;
-      --panel: #11161f;
-      --panel-2: #0d1219;
-      --border: #1f2733;
+      /* --- משטחים (סקאלת רום עדינה: הכרטיס "מתרומם" מהרקע דרך ניגודיות משטח, לא רק צל) --- */
+      --bg: #090b10;
+      --panel: #131923;
+      --panel-2: #0e131b;
+      --hover: #1c2634;
+      /* --- קווים (hairline עדין + גרסה מודגשת למצב פעיל/פוקוס) --- */
+      --border: #212a37;
+      --border-strong: #303c4d;
+      /* --- מותג / הדגשה --- */
       --accent: #4da3ff;
-      --accent-2: #7cc4ff;
+      --accent-2: #82c2ff;
       --green: #3fb950;
       --amber: #d9a93d;
       --red: #e5534b;
-      --text: #e8eef6;
-      --dim: #8b99ab;
+      --text: #e9eef7;
+      --dim: #93a1b3;
       /* טוקנים עזר */
       --green-fg: #9fe3b1;
       --amber-fg: #ecd49a;
       --red-fg: #f1a49e;
       --text-faint: #5c6878;
-      --hover: #1d2636;
+      /* --- גיאומטריה אחידה (רדיוסים) --- */
+      --r-card: 16px;
+      --r-ctrl: 12px;
+      --r-sm: 10px;
+      /* --- סקאלת מרווח (בסיס 4px) — קצב אנכי עקבי --- */
+      --sp-1: .25rem; --sp-2: .5rem; --sp-3: .75rem; --sp-4: 1rem; --sp-5: 1.5rem;
+      /* --- הצללה מרובדת ורכה (במקום צל שחור אחיד וכבד) --- */
+      --sh-1: 0 1px 2px rgba(0,0,0,.35);
+      --sh-card: 0 1px 1px rgba(0,0,0,.22), 0 12px 30px -16px rgba(0,0,0,.75);
+      --sh-blue: 0 6px 20px rgba(31,111,235,.32);
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html { height: 100%; }
     body {
       font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Heebo", sans-serif;
+      -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+      text-rendering: optimizeLegibility;
       background:
-        radial-gradient(1200px 500px at 50% -10%, #14202f 0%, transparent 60%),
+        radial-gradient(1100px 460px at 50% -8%, rgba(77,163,255,.11) 0%, transparent 60%),
         var(--bg);
+      background-attachment: fixed;
       color: var(--text);
+      line-height: 1.5;
+      letter-spacing: .003em;
       margin: 0;
-      padding: max(1rem, env(safe-area-inset-top)) 1rem calc(1.5rem + env(safe-area-inset-bottom));
+      padding: max(1rem, env(safe-area-inset-top)) 1rem calc(2rem + env(safe-area-inset-bottom));
       max-width: 560px;
       margin-inline: auto;
       min-height: 100%;
@@ -82,22 +101,33 @@
     }
 
     /* ---------- כותרת ---------- */
-    header { display: flex; align-items: baseline; gap: .55rem; margin: .2rem 0 1rem; }
-    header h1 { font-size: 1.25rem; margin: 0; letter-spacing: .02em; }
-    header .logo { font-size: 1.3rem; }
-    header .tag { color: var(--dim); font-size: .8rem; margin-inline-start: auto; }
+    header { display: flex; align-items: center; gap: .6rem; margin: .1rem 0 1.1rem; }
+    header .logo {
+      font-size: 1.12rem; line-height: 1; flex: none;
+      width: 2.15rem; height: 2.15rem;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 11px;
+      background: linear-gradient(155deg, rgba(77,163,255,.24), rgba(77,163,255,.05));
+      border: 1px solid rgba(77,163,255,.32);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.07);
+    }
+    header h1 { font-size: 1.3rem; margin: 0; font-weight: 800; letter-spacing: .07em; line-height: 1; }
+    header .tag {
+      color: var(--dim); font-size: .72rem; margin-inline-start: auto; text-align: end;
+      font-variant-numeric: tabular-nums; letter-spacing: .01em; line-height: 1.35;
+    }
 
     .card {
       background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
       border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 1rem;
-      margin-bottom: .9rem;
-      box-shadow: 0 8px 24px rgba(0,0,0,.35);
+      border-radius: var(--r-card);
+      padding: 1.1rem;
+      margin-bottom: .85rem;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.035), var(--sh-card);
     }
 
     /* ---------- תצוגת הרדיו ---------- */
-    .radio { text-align: center; padding-top: 1.1rem; }
+    .radio { text-align: center; padding-top: .5rem; }
     .pill {
       display: inline-flex; align-items: center; gap: .45rem;
       font-size: .8rem; color: var(--dim);
@@ -122,29 +152,31 @@
       direction: ltr;
       font-variant-numeric: tabular-nums;
       font-weight: 800;
-      font-size: clamp(2.9rem, 14vw, 3.8rem);
-      line-height: 1.05;
-      margin: .5rem 0 .1rem;
+      font-size: clamp(3rem, 14vw, 3.9rem);
+      line-height: 1;
+      letter-spacing: -.015em;
+      margin: .5rem 0 .15rem;
       color: var(--accent-2);                 /* fallback למקרה שclip לא נתמך */
-      background: linear-gradient(180deg, var(--accent-2), var(--accent));
+      background: linear-gradient(180deg, #aad5ff 0%, var(--accent) 90%);
       -webkit-background-clip: text; background-clip: text;
       -webkit-text-fill-color: transparent;
     }
-    .freq-display small { font-size: 1.05rem; font-weight: 500; -webkit-text-fill-color: var(--dim); color: var(--dim); }
-    .freq-name { color: var(--dim); font-size: .9rem; min-height: 1.3em; margin-bottom: .3rem; }
+    .freq-display small { font-size: 1rem; font-weight: 600; letter-spacing: 0;
+      margin-inline-start: .1rem; -webkit-text-fill-color: var(--dim); color: var(--dim); }
+    .freq-name { color: var(--dim); font-size: .88rem; min-height: 1.3em; margin-bottom: .2rem; }
 
     /* ---------- נגן מותאם (ה-<audio> בלי controls; הפקדים שלנו) ---------- */
     .player-box { display: flex; flex-direction: column; align-items: center;
       gap: .55rem; margin-top: .75rem; }
     .play-main {
-      width: 74px; height: 74px; border-radius: 50%;
+      width: 76px; height: 76px; border-radius: 50%;
       display: flex; align-items: center; justify-content: center;
       font-size: 1.7rem; line-height: 1; padding: 0;
-      color: #fff; background: linear-gradient(180deg, #2f81f7, #1f6feb);
+      color: #fff; background: linear-gradient(180deg, #3a8bf9, #1f6feb);
       border-color: transparent;
-      box-shadow: 0 6px 20px rgba(31,111,235,.35);
+      box-shadow: 0 8px 24px rgba(31,111,235,.4), inset 0 1px 0 rgba(255,255,255,.22);
     }
-    .play-main:hover { background: linear-gradient(180deg, #3d8ef7, #1a5ede); }
+    .play-main:hover { background: linear-gradient(180deg, #4a96fb, #1a5ede); }
     .play-main.playing { animation: pulse-blue 1.8s ease-out infinite; }
     @keyframes pulse-blue {
       0% { box-shadow: 0 6px 20px rgba(31,111,235,.35), 0 0 0 0 rgba(77,163,255,.45); }
@@ -211,7 +243,9 @@
     .aw.stale .nodata { display: block; }
 
     /* מפת המסלולים: SVG בקנה מידה, נבנה ב-JS מאותן קואורדינטות של adsb.py */
-    .aw-map { display: block; width: 100%; height: 190px; margin-top: .55rem; direction: ltr; }
+    .aw-map { display: block; width: 100%; height: 200px; margin-top: .65rem; direction: ltr;
+      background: radial-gradient(130% 100% at 50% 0%, rgba(77,163,255,.055), transparent 70%), var(--panel-2);
+      border: 1px solid var(--border); border-radius: var(--r-ctrl); }
     .aw.stale .aw-map { opacity: .45; }
     .aw-map .rwy { stroke: #3a4453; stroke-width: 7; stroke-linecap: round; }
     .aw-map .rwy.land { stroke: var(--green); filter: drop-shadow(0 0 4px rgba(63,185,80,.55)); }
@@ -232,26 +266,30 @@
     .player-row { display: flex; gap: .5rem; margin-top: .6rem; }
     .player-row button, .player-row a { flex: 1; }
 
-    /* ---------- כפתורים ---------- */
+    /* ---------- כפתורים ----------
+       סקאלה מהודקת: הכפתורים ירשו 1rem מהגוף וזה היה גדול מדי לפקדי-ממשק —
+       גופן .9rem, משקל 600, padding קומפקטי. פקדים משניים (chips/SDR) קטנים עוד. */
     button, a.ghost {
-      font: inherit; font-weight: 600; cursor: pointer;
+      font-family: inherit; font-size: .9rem; font-weight: 600; cursor: pointer;
+      line-height: 1.25;
       color: var(--text);
-      background: rgba(255,255,255,.05);
+      background: rgba(255,255,255,.045);
       border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: .72rem 1rem;
-      min-height: 40px;
-      transition: transform .06s ease, background .15s ease, border-color .15s ease;
+      border-radius: var(--r-ctrl);
+      padding: .55rem .9rem;
+      min-height: 38px;
+      transition: transform .07s ease, background .15s ease, border-color .15s ease, box-shadow .15s ease;
     }
-    button:hover, a.ghost:hover { background: var(--hover); border-color: #2d3a4a; }
-    button.primary:hover { background: linear-gradient(180deg, #3d8ef7, #1a5ede); }
-    button:active, a.ghost:active { transform: scale(.97); }
+    button:hover, a.ghost:hover { background: var(--hover); border-color: var(--border-strong); }
+    button:active, a.ghost:active { transform: translateY(1px) scale(.99); }
     button.primary {
-      background: linear-gradient(180deg, #2f81f7, #1f6feb);
-      border-color: transparent;
+      background: linear-gradient(180deg, #3a8bf9, #1f6feb);
+      border-color: transparent; color: #fff;
+      box-shadow: var(--sh-blue), inset 0 1px 0 rgba(255,255,255,.18);
     }
+    button.primary:hover { background: linear-gradient(180deg, #4a96fb, #2373ef); }
     button.ghost, a.ghost {
-      color: var(--dim); font-weight: 500; font-size: .85rem; padding: .55rem .9rem;
+      color: var(--dim); font-weight: 500; font-size: .82rem; padding: .48rem .85rem; min-height: 34px;
       text-decoration: none; text-align: center; display: inline-flex;
       align-items: center; justify-content: center;
     }
@@ -264,25 +302,27 @@
       font: inherit; font-size: 1.15rem; font-variant-numeric: tabular-nums;
       color: var(--text);
       background: var(--panel-2);
-      border: 1px solid var(--border); border-radius: 12px;
+      border: 1px solid var(--border); border-radius: var(--r-ctrl);
       padding: .7rem .6rem;
+      transition: border-color .15s ease, box-shadow .15s ease;
     }
-    .tune-row input:focus { outline: none; border-color: var(--accent); }
+    .tune-row input:focus { outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(77,163,255,.16); }
     .tune-row input::placeholder { direction: rtl; font-size: .9rem; color: #5c6878; }
 
     /* ---------- פריסטים ---------- */
-    .section-title { font-size: .8rem; color: var(--dim); margin: 0 0 .5rem; letter-spacing: .04em; }
-    .presets { display: grid; grid-template-columns: repeat(2, 1fr); gap: .55rem; }
+    .section-title { font-size: .74rem; font-weight: 600; color: var(--dim); margin: 0 0 .65rem; letter-spacing: .02em; }
+    .presets { display: grid; grid-template-columns: repeat(2, 1fr); gap: .5rem; }
     .presets button {
-      display: flex; flex-direction: column; gap: .2rem;
+      display: flex; flex-direction: column; gap: .28rem;
       align-items: flex-start; text-align: start;
-      padding: .65rem .75rem; font-weight: 500; font-size: .92rem;
+      padding: .72rem .82rem; font-weight: 600; font-size: .92rem;
       background: var(--panel-2);
     }
     .presets button .pf {
       direction: ltr;
-      color: var(--accent); font-variant-numeric: tabular-nums;
-      font-size: .82rem; font-weight: 600;
+      color: var(--accent-2); font-variant-numeric: tabular-nums;
+      font-size: .85rem; font-weight: 700; letter-spacing: .01em;
     }
     .presets button .badge {
       font-size: .65rem; color: var(--amber);
@@ -308,20 +348,23 @@
     .setting:last-of-type { border-bottom: 0; }
 
     .seg { display: inline-flex; background: var(--panel-2); border: 1px solid var(--border);
-      border-radius: 10px; padding: .18rem; gap: .18rem; }
-    .seg button { border: 0; border-radius: 8px; background: transparent;
-      color: var(--dim); font-size: .85rem; font-weight: 500; padding: .42rem .8rem; }
-    .seg button.on { background: linear-gradient(180deg, rgba(77,163,255,.18), rgba(77,163,255,.08));
-      color: var(--text); font-weight: 600; border: 1px solid rgba(77,163,255,.25); }
+      border-radius: var(--r-sm); padding: .2rem; gap: .2rem; }
+    /* border שקוף בכל הכפתורים => המצב הפעיל לא "קופץ" ב-2px כשמופיע גבול */
+    .seg button { border: 1px solid transparent; border-radius: 8px; background: transparent;
+      color: var(--dim); font-size: .85rem; font-weight: 500; padding: .44rem .8rem;
+      transition: background .15s ease, color .15s ease, border-color .15s ease; }
+    .seg button.on { background: linear-gradient(180deg, rgba(77,163,255,.20), rgba(77,163,255,.08));
+      color: var(--text); font-weight: 600; border-color: rgba(77,163,255,.30);
+      box-shadow: var(--sh-1); }
 
     .switch { position: relative; width: 46px; height: 27px; flex: none; }
     .switch input { opacity: 0; width: 100%; height: 100%; margin: 0; position: absolute; inset: 0; cursor: pointer; }
     .switch .track { position: absolute; inset: 0; border-radius: 999px;
       background: #2a3442; transition: background .15s ease; pointer-events: none; }
-    .switch input:checked + .track { background: #2f81f7; }
+    .switch input:checked + .track { background: linear-gradient(180deg, #3a8bf9, #1f6feb); }
     .switch .track::after { content: ""; position: absolute; top: 3px; inset-inline-start: 3px;
       width: 21px; height: 21px; border-radius: 50%; background: #fff;
-      transition: transform .15s ease; }
+      box-shadow: 0 1px 2px rgba(0,0,0,.4); transition: transform .18s cubic-bezier(.3,.7,.4,1); }
     .switch input:checked + .track::after { transform: translateX(-19px); }
 
     .sub-setting { display: none; align-items: center; gap: .7rem; padding: .15rem 0 .6rem;
@@ -425,17 +468,17 @@
     /* דביק לראש המסך: בתצוגות הדאטה הדף ארוך, וכך מחליפים מצב בלי לגלול חזרה */
     .modebar {
       position: sticky; top: env(safe-area-inset-top, 0px); z-index: 1100;
-      margin: 0 -1rem .9rem; padding: .5rem 1rem;
-      background: rgba(10,14,20,.82);
-      -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+      margin: 0 -1rem 1rem; padding: .5rem 1rem;
+      background: rgba(9,11,16,.72);
+      -webkit-backdrop-filter: saturate(1.6) blur(14px); backdrop-filter: saturate(1.6) blur(14px);
       border-bottom: 1px solid var(--border);
       display: flex; gap: .5rem; align-items: stretch;
     }
     .modebar .seg { flex: 1; }
-    .modebar .seg button { flex: 1; padding: .6rem .35rem; font-size: .92rem; white-space: nowrap; }
+    .modebar .seg button { flex: 1; padding: .58rem .35rem; font-size: .88rem; white-space: nowrap; }
     /* כפתור כיבוי/הפעלת המקלט (standby): משחרר את ה-SDR ליישום אחר, הדף נשאר חי */
-    .power-btn { border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2);
-      color: var(--text); font-size: .9rem; padding: .6rem .8rem; cursor: pointer; white-space: nowrap; }
+    .power-btn { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel-2);
+      color: var(--text); font-size: .82rem; padding: .55rem .75rem; cursor: pointer; white-space: nowrap; }
     .power-btn.on { background: linear-gradient(180deg, rgba(63,185,80,.22), rgba(63,185,80,.10));
       border-color: rgba(63,185,80,.5); color: #6fe089; }
     .power-btn:disabled { opacity: .5; cursor: default; }
@@ -447,8 +490,8 @@
     /* בורר בנקי תדרי ACARS */
     .acars-banks { display: flex; flex-wrap: wrap; gap: .4rem; margin: .15rem 0 .1rem; }
     .acars-banks button { border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
-      background: var(--panel-2); color: var(--text); font-size: .82rem; padding: .42rem .8rem;
-      min-height: 36px; }
+      background: var(--panel-2); color: var(--text); font-size: .78rem; font-weight: 500;
+      padding: .38rem .78rem; min-height: 34px; }
     .acars-banks button.on { background: linear-gradient(180deg, rgba(77,163,255,.18), rgba(77,163,255,.08));
       border-color: rgba(77,163,255,.5); color: var(--accent-2); }
     /* נקודה ירוקה על הכרטיסייה שה-SDR באמת פעיל בה (ייתכן שונה מהתצוגה) */
@@ -459,8 +502,10 @@
     .acars-sdr-bar { padding: .5rem 0 .6rem; border-bottom: 1px solid var(--border);
       margin-bottom: .5rem; }
     .acars-sdr-bar .sdr-btns { display: flex; gap: .5rem; flex-wrap: wrap; }
-    .acars-sdr-bar .sdr-btns button { flex: 1; min-width: 120px; }
-    .acars-sdr-bar .sdr-hint { margin: .4rem 0 0; font-size: .8rem; color: var(--dim); }
+    /* פקדי בקרה משניים — קומפקטיים: גופן קטן ו-padding מהודק כדי שלא ינפחו את הסרגל */
+    .acars-sdr-bar .sdr-btns button { flex: 1; min-width: 110px; font-size: .82rem; font-weight: 500;
+      padding: .48rem .7rem; min-height: 36px; line-height: 1.2; }
+    .acars-sdr-bar .sdr-hint { margin: .45rem 0 0; font-size: .78rem; color: var(--dim); }
 
     /* ---------- ACARS ---------- */
     .acars-head { display: flex; align-items: center; justify-content: space-between;
@@ -485,13 +530,13 @@
     .leaflet-bar a.leaflet-disabled { background: var(--panel-2); color: var(--text-faint); }
     .acars-map-note { font-size: .74rem; color: var(--dim); margin: .45rem 0 0; text-align: center; }
 
-    /* שורת סטטיסטיקה */
-    .acars-stats { display: flex; gap: .45rem; flex-wrap: wrap; margin-top: .65rem; }
-    .acars-stat { flex: 1; min-width: 4.1em; text-align: center; padding: .45rem .3rem;
-      background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; }
-    .acars-stat b { display: block; font-size: 1.15rem; font-weight: 800; color: var(--accent-2);
-      font-variant-numeric: tabular-nums; direction: ltr; }
-    .acars-stat span { font-size: .68rem; color: var(--dim); }
+    /* שורת סטטיסטיקה — grid של 5 עמודות שוות => הפריט החמישי לא "מתייתם" לשורה נפרדת */
+    .acars-stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: .4rem; margin-top: .65rem; }
+    .acars-stat { text-align: center; padding: .5rem .25rem;
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-sm); }
+    .acars-stat b { display: block; font-size: 1.2rem; font-weight: 800; color: var(--accent-2);
+      font-variant-numeric: tabular-nums; direction: ltr; line-height: 1.1; margin-bottom: .1rem; }
+    .acars-stat span { display: block; font-size: .62rem; color: var(--dim); line-height: 1.15; }
 
     /* קצב הודעות: sparkline (כמו .rf canvas בתצוגת הקול) — מגמה קצרת-טווח מתחת לסטטיסטיקה */
     .rate-spark { display: flex; align-items: center; gap: .5rem; margin-top: .5rem;
@@ -511,9 +556,9 @@
 
     /* צ'יפים לסינון קטגוריה */
     .acars-filters { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .55rem; }
-    .acars-chip { font-size: .76rem; color: var(--dim); cursor: pointer;
+    .acars-chip { font-size: .74rem; color: var(--dim); cursor: pointer;
       background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px;
-      padding: .42rem .85rem; min-height: 36px; user-select: none;
+      padding: .38rem .8rem; min-height: 34px; user-select: none;
       display: inline-flex; align-items: center; }
     .acars-chip.on { color: var(--text); border-color: var(--accent);
       background: linear-gradient(180deg, rgba(77,163,255,.16), rgba(77,163,255,.06)); }
@@ -540,12 +585,15 @@
     .acars-rrow.on { border-color: var(--accent);
       background: linear-gradient(180deg, rgba(77,163,255,.16), rgba(77,163,255,.06)); }
     .acars-rrow.stale { opacity: .5; }
-    .rr-tail { font-weight: 700; color: var(--accent-2); direction: ltr; }
-    .rr-flight { color: var(--dim); direction: ltr; font-size: .8rem; }
-    .rr-pos { color: #9fe3b1; font-size: .72rem; }
-    .rr-count { margin-inline-start: auto; color: var(--dim); font-size: .72rem;
+    /* מזהים קבועים (זנב/זמן/מונה) לא נשברים לעולם; רק שם-הטיסה מתכווץ עם ellipsis */
+    .rr-tail { font-weight: 700; color: var(--accent-2); direction: ltr; white-space: nowrap; flex: none; }
+    .rr-flight { color: var(--dim); direction: ltr; font-size: .8rem;
+      min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rr-pos { color: #9fe3b1; font-size: .72rem; flex: none; }
+    .rr-count { margin-inline-start: auto; color: var(--dim); font-size: .72rem; flex: none; white-space: nowrap;
       direction: ltr; font-variant-numeric: tabular-nums; }
-    .rr-time { color: var(--dim); font-size: .68rem; direction: ltr; font-variant-numeric: tabular-nums; }
+    .rr-time { color: var(--dim); font-size: .68rem; direction: ltr; font-variant-numeric: tabular-nums;
+      white-space: nowrap; flex: none; }
     .acars-roster-empty { color: #5c6878; font-size: .78rem; text-align: center; padding: .5rem; }
 
     /* פאנל פירוט למטוס הנבחר */
@@ -571,10 +619,10 @@
     .acars-feed { margin-top: .6rem; display: flex; flex-direction: column; gap: .5rem;
       max-height: 62vh; overflow: auto; }
     .amsg { background: var(--panel-2); border: 1px solid var(--border);
-      border-radius: 12px; padding: .55rem .65rem; border-inline-start: 3px solid var(--border); }
+      border-radius: var(--r-ctrl); padding: .6rem .7rem; border-inline-start: 3px solid var(--border); }
     .amsg-top { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; font-size: .85rem; }
-    .amsg-tail { font-weight: 700; color: var(--accent-2); direction: ltr; }
-    .amsg-flight { color: var(--text); direction: ltr; }
+    .amsg-tail { font-weight: 700; color: var(--accent-2); direction: ltr; white-space: nowrap; }
+    .amsg-flight { color: var(--text); direction: ltr; white-space: nowrap; }
     .amsg-tail.clickable, .amsg-flight.clickable { cursor: pointer;
       text-decoration: underline dotted rgba(124,196,255,.5); text-underline-offset: 2px; }
     .amsg-freq { color: var(--accent); direction: ltr; font-variant-numeric: tabular-nums; font-size: .78rem; }
@@ -638,7 +686,7 @@
     .amsg-retx { font-size: .65rem; color: var(--dim); opacity: .7; direction: ltr; }
 
     /* actype בשורת roster */
-    .rr-actype { color: var(--dim); font-size: .68rem; direction: ltr; }
+    .rr-actype { color: var(--dim); font-size: .68rem; direction: ltr; white-space: nowrap; flex: none; }
 
     /* העשרת ADS-B: badge "משדר כעת" ב-roster + התראת שיבוש בפאנל הפירוט */
     .rr-adsb { font-size: .72rem; }
@@ -945,7 +993,7 @@
       <div id="sdrActiveCtrl" class="hidden">
         <div class="sdr-btns">
           <button id="acarsStopBtn">⏹ עצור / חזור לקול</button>
-          <button id="towerBtn">🎧 האזן למגדל (134.600)</button>
+          <button id="towerBtn">🎧 מגדל · 134.600</button>
         </div>
         <p class="sdr-hint">ACARS פעיל — ה-SDR מפענח נתונים. השמע אינו זמין.</p>
       </div>
@@ -967,7 +1015,7 @@
       <div class="acars-stat"><b id="acStRate">0</b><span>הודעות/דק׳</span></div>
       <div class="acars-stat"><b id="acStCraft">0</b><span>מטוסים</span></div>
       <div class="acars-stat"><b id="acStPos">0</b><span>עם מיקום</span></div>
-      <div class="acars-stat"><b id="acStAdsb">0</b><span>🛰 ב-ADS-B</span></div>
+      <div class="acars-stat"><b id="acStAdsb">0</b><span>🛰 ADS‑B</span></div>
     </div>
     <!-- מגמת קצב ההודעות (2 הדקות האחרונות) — כמו .rf canvas בתצוגת הקול -->
     <div class="rate-spark" title="קצב הודעות · 2 הדקות האחרונות">
@@ -1020,7 +1068,7 @@
       <div id="vdl2ActiveCtrl" class="hidden">
         <div class="sdr-btns">
           <button id="vdl2StopBtn">⏹ עצור / חזור לקול</button>
-          <button id="vdl2TowerBtn">🎧 האזן למגדל (134.600)</button>
+          <button id="vdl2TowerBtn">🎧 מגדל · 134.600</button>
         </div>
         <p class="sdr-hint">VDL2 פעיל — ה-SDR מפענח נתונים. השמע אינו זמין.</p>
       </div>
@@ -1040,7 +1088,7 @@
       <div class="acars-stat"><b id="vdl2StRate">0</b><span>הודעות/דק׳</span></div>
       <div class="acars-stat"><b id="vdl2StCraft">0</b><span>מטוסים</span></div>
       <div class="acars-stat"><b id="vdl2StPos">0</b><span>עם מיקום</span></div>
-      <div class="acars-stat"><b id="vdl2StAdsb">0</b><span>🛰 ב-ADS-B</span></div>
+      <div class="acars-stat"><b id="vdl2StAdsb">0</b><span>🛰 ADS‑B</span></div>
     </div>
     <div class="rate-spark" title="קצב הודעות · 2 הדקות האחרונות">
       <span>📈</span><canvas id="vdl2RateSpark"></canvas>
@@ -1391,12 +1439,20 @@
       ctx.clearRect(0, 0, w, h);
       if (snrHist.length < 2) return;
       const max = 30;                                  // סקאלה 0..30dB
+      const pts = snrHist.map((v, i) => [
+        (i / (SNR_HIST_N - 1)) * w,
+        h - Math.max(0, Math.min(max, v)) / max * (h - 3) - 1.5,
+      ]);
+      // מילוי-שטח מדורג מתחת לקו => ה-sparkline נקרא כמגמה מכוונת גם כשהוא כמעט-שטוח
+      const grad = ctx.createLinearGradient(0, 0, 0, h);
+      grad.addColorStop(0, "rgba(77,163,255,.26)");
+      grad.addColorStop(1, "rgba(77,163,255,0)");
       ctx.beginPath();
-      snrHist.forEach((v, i) => {
-        const x = (i / (SNR_HIST_N - 1)) * w;
-        const y = h - Math.max(0, Math.min(max, v)) / max * (h - 3) - 1.5;
-        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-      });
+      pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.lineTo(pts[pts.length - 1][0], h); ctx.lineTo(pts[0][0], h); ctx.closePath();
+      ctx.fillStyle = grad; ctx.fill();
+      ctx.beginPath();
+      pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
       ctx.strokeStyle = "#4da3ff"; ctx.lineWidth = 1.6; ctx.lineJoin = "round";
       ctx.stroke();
     }
@@ -1416,13 +1472,19 @@
       ctx.clearRect(0, 0, w, h);
       if (hist.length < 2) return;
       const max = Math.max(1, ...hist);   // לפחות 1 => לא מתחלקים ב-0 כשהכול שקט
+      const col = color || "#4da3ff";
+      const pts = hist.map((v, i) => [(i / (histN - 1)) * w, h - (v / max) * (h - 3) - 1.5]);
+      // אותו מילוי-שטח עדין כמו ב-drawSpark (עקביות ויזואלית בין הגרפים)
+      const grad = ctx.createLinearGradient(0, 0, 0, h);
+      grad.addColorStop(0, col + "3d");   // ‎~24% שקיפות (hex 8 ספרות)
+      grad.addColorStop(1, col + "00");
       ctx.beginPath();
-      hist.forEach((v, i) => {
-        const x = (i / (histN - 1)) * w;
-        const y = h - (v / max) * (h - 3) - 1.5;
-        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-      });
-      ctx.strokeStyle = color || "#4da3ff"; ctx.lineWidth = 1.4; ctx.lineJoin = "round";
+      pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.lineTo(pts[pts.length - 1][0], h); ctx.lineTo(pts[0][0], h); ctx.closePath();
+      ctx.fillStyle = grad; ctx.fill();
+      ctx.beginPath();
+      pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.strokeStyle = col; ctx.lineWidth = 1.4; ctx.lineJoin = "round";
       ctx.stroke();
     }
 
