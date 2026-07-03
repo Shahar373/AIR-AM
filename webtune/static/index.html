@@ -133,7 +133,26 @@
     .freq-display small { font-size: 1.05rem; font-weight: 500; -webkit-text-fill-color: var(--dim); color: var(--dim); }
     .freq-name { color: var(--dim); font-size: .9rem; min-height: 1.3em; margin-bottom: .3rem; }
 
-    audio { width: 100%; margin-top: .65rem; border-radius: 12px; }
+    /* ---------- נגן מותאם (ה-<audio> בלי controls; הפקדים שלנו) ---------- */
+    .player-box { display: flex; flex-direction: column; align-items: center;
+      gap: .55rem; margin-top: .75rem; }
+    .play-main {
+      width: 74px; height: 74px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.7rem; line-height: 1; padding: 0;
+      color: #fff; background: linear-gradient(180deg, #2f81f7, #1f6feb);
+      border-color: transparent;
+      box-shadow: 0 6px 20px rgba(31,111,235,.35);
+    }
+    .play-main:hover { background: linear-gradient(180deg, #3d8ef7, #1a5ede); }
+    .play-main.playing { animation: pulse-blue 1.8s ease-out infinite; }
+    @keyframes pulse-blue {
+      0% { box-shadow: 0 6px 20px rgba(31,111,235,.35), 0 0 0 0 rgba(77,163,255,.45); }
+      100% { box-shadow: 0 6px 20px rgba(31,111,235,.35), 0 0 0 .8rem rgba(77,163,255,0); }
+    }
+    .vol-row { display: flex; align-items: center; gap: .5rem; width: min(240px, 80%);
+      color: var(--dim); font-size: .8rem; }
+    .vol-row input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
 
     /* ---------- מדדי RF ---------- */
     .rf {
@@ -386,7 +405,7 @@
       word-break: break-word; }
     .act-search {
       width: 100%; margin: 0 0 .3rem;
-      direction: rtl; font: inherit; font-size: .85rem; color: var(--text);
+      font: inherit; font-size: .85rem; color: var(--text);
       background: var(--panel-2); border: 1px solid var(--border);
       border-radius: 10px; padding: .5rem .7rem;
     }
@@ -402,13 +421,21 @@
       background: var(--panel-2); border: 1px solid var(--border);
       border-radius: 10px; padding: .6rem; max-height: 9rem; overflow: auto;
     }
-    /* ---------- מתג מצב (קול / ACARS) ---------- */
-    .modebar { margin-bottom: .9rem; display: flex; gap: .5rem; align-items: stretch; }
+    /* ---------- מתג מצב (קול / ACARS / VDL2) ---------- */
+    /* דביק לראש המסך: בתצוגות הדאטה הדף ארוך, וכך מחליפים מצב בלי לגלול חזרה */
+    .modebar {
+      position: sticky; top: env(safe-area-inset-top, 0px); z-index: 1100;
+      margin: 0 -1rem .9rem; padding: .5rem 1rem;
+      background: rgba(10,14,20,.82);
+      -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      display: flex; gap: .5rem; align-items: stretch;
+    }
     .modebar .seg { flex: 1; }
-    .modebar .seg button { flex: 1; padding: .6rem; font-size: .95rem; }
+    .modebar .seg button { flex: 1; padding: .6rem .35rem; font-size: .92rem; white-space: nowrap; }
     /* כפתור כיבוי/הפעלת המקלט (standby): משחרר את ה-SDR ליישום אחר, הדף נשאר חי */
     .power-btn { border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2);
-      color: var(--fg); font-size: .9rem; padding: .6rem .8rem; cursor: pointer; white-space: nowrap; }
+      color: var(--text); font-size: .9rem; padding: .6rem .8rem; cursor: pointer; white-space: nowrap; }
     .power-btn.on { background: linear-gradient(180deg, rgba(63,185,80,.22), rgba(63,185,80,.10));
       border-color: rgba(63,185,80,.5); color: #6fe089; }
     .power-btn:disabled { opacity: .5; cursor: default; }
@@ -420,7 +447,8 @@
     /* בורר בנקי תדרי ACARS */
     .acars-banks { display: flex; flex-wrap: wrap; gap: .4rem; margin: .15rem 0 .1rem; }
     .acars-banks button { border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
-      background: var(--panel-2); color: var(--fg); font-size: .82rem; padding: .3rem .7rem; }
+      background: var(--panel-2); color: var(--text); font-size: .82rem; padding: .42rem .8rem;
+      min-height: 36px; }
     .acars-banks button.on { background: linear-gradient(180deg, rgba(77,163,255,.18), rgba(77,163,255,.08));
       border-color: rgba(77,163,255,.5); color: var(--accent-2); }
     /* נקודה ירוקה על הכרטיסייה שה-SDR באמת פעיל בה (ייתכן שונה מהתצוגה) */
@@ -440,8 +468,9 @@
     .acars-freqs { direction: ltr; font-variant-numeric: tabular-nums;
       font-size: .78rem; color: var(--dim); }
 
-    /* מפה (Leaflet) */
-    .acars-map { width: 100%; height: 240px; border-radius: 12px; margin-top: .6rem;
+    /* מפה (Leaflet). במובייל נמוכה יותר — שהפיד (התוכן העיקרי) ייכנס מעל קו המסך;
+       בדסקטופ ה-media query למעלה מגדיל אותה לצד הפיד. */
+    .acars-map { width: 100%; height: 190px; border-radius: 12px; margin-top: .6rem;
       border: 1px solid var(--border); background: var(--panel-2); }
     .leaflet-container { background: var(--panel-2); font: inherit; }
     /* אריחי OSM כהים (filter: invert + hue) */
@@ -458,7 +487,7 @@
 
     /* שורת סטטיסטיקה */
     .acars-stats { display: flex; gap: .45rem; flex-wrap: wrap; margin-top: .65rem; }
-    .acars-stat { flex: 1; min-width: 5.2em; text-align: center; padding: .45rem .4rem;
+    .acars-stat { flex: 1; min-width: 4.1em; text-align: center; padding: .45rem .3rem;
       background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; }
     .acars-stat b { display: block; font-size: 1.15rem; font-weight: 800; color: var(--accent-2);
       font-variant-numeric: tabular-nums; direction: ltr; }
@@ -466,7 +495,8 @@
 
     /* סרגל כלים: חיפוש + ייצוא */
     .acars-tools { display: flex; gap: .5rem; margin-top: .65rem; align-items: center; }
-    .acars-search { flex: 1; min-width: 0; direction: rtl; font: inherit; font-size: .85rem;
+    /* direction נקבע ע"י dir="auto" במרקאפ — מקלידים בעיקר זנבות/labels לטיניים */
+    .acars-search { flex: 1; min-width: 0; font: inherit; font-size: .85rem;
       color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
       border-radius: 10px; padding: .5rem .7rem; }
     .acars-search:focus { outline: none; border-color: var(--accent); }
@@ -477,7 +507,8 @@
     .acars-filters { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .55rem; }
     .acars-chip { font-size: .76rem; color: var(--dim); cursor: pointer;
       background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px;
-      padding: .3rem .7rem; user-select: none; }
+      padding: .42rem .85rem; min-height: 36px; user-select: none;
+      display: inline-flex; align-items: center; }
     .acars-chip.on { color: var(--text); border-color: var(--accent);
       background: linear-gradient(180deg, rgba(77,163,255,.16), rgba(77,163,255,.06)); }
 
@@ -571,13 +602,17 @@
     .amsg-pos { font-size: .68rem; color: #9fe3b1; cursor: pointer; direction: ltr;
       background: rgba(63,185,80,.12); border: 1px solid rgba(63,185,80,.4);
       border-radius: 999px; padding: .1rem .5rem; }
-    .acars-empty { color: #5c6878; font-size: .8rem; text-align: center; margin: .8rem 0 .2rem; }
+    /* empty state: אייקון גדול עדין מעל הטקסט (📡 ל-ACARS, 🛰️ ל-VDL2) */
+    .acars-empty { color: #5c6878; font-size: .8rem; text-align: center; margin: 1rem 0 .4rem; }
+    .acars-empty::before { content: "📡"; display: block; font-size: 2rem;
+      opacity: .45; margin-bottom: .35rem; filter: grayscale(.4); }
+    #vdl2Empty::before { content: "🛰️"; }
 
-    /* לוח ATIS sticky (A9) */
+    /* לוח ATIS sticky (A9) — מידע חשוב, מודגש בענבר כדי לבלוט מעל הפיד */
     .acars-atis { margin-top: .55rem; padding: .45rem .7rem; border-radius: 10px; font-size: .78rem;
-      color: var(--text); background: rgba(139,153,171,.12); border: 1px solid var(--border);
+      color: var(--text); background: rgba(217,169,61,.08); border: 1px solid rgba(217,169,61,.35);
       direction: ltr; text-align: left; }
-    .acars-atis b { color: var(--dim); font-size: .7rem; display: block; margin-bottom: .15rem; }
+    .acars-atis b { color: var(--amber); font-size: .7rem; display: block; margin-bottom: .15rem; }
 
     /* badge שגיאת קישור/CRC/פענוח */
     .amsg-err { font-size: .65rem; font-weight: 700; direction: ltr; white-space: nowrap;
@@ -604,6 +639,21 @@
     .ad-spoof { font-size: .68rem; font-weight: 700; color: #f0a8a3;
       background: rgba(229,83,75,.14); border: 1px solid rgba(229,83,75,.4);
       border-radius: 999px; padding: .04rem .42rem; white-space: nowrap; }
+
+    /* כרטיס חדש בפיד: כניסה עדינה (מסומן ב-JS רק להודעות שטרם רונדרו) */
+    @keyframes amsg-in { from { opacity: 0; transform: translateY(-8px); } }
+    .amsg-new { animation: amsg-in .4s ease both; }
+
+    /* נגישות: טבעת פוקוס לניווט מקלדת (לא מופיעה בלחיצת עכבר/מגע) */
+    :where(button, a.ghost, input, summary, .acars-chip):focus-visible {
+      outline: 2px solid var(--accent); outline-offset: 2px;
+    }
+
+    /* העדפת מערכת לצמצום תנועה => בלי אנימציות דופקות/כניסה */
+    @media (prefers-reduced-motion: reduce) {
+      .pill.live .dot, .pill.busy .dot, .pwr.bad .pdot,
+      .overload, .play-main.playing, .amsg-new { animation: none; }
+    }
 
     .hidden { display: none !important; }
     .flex-col { display: flex; flex-direction: column; gap: .5rem; align-items: flex-start; }
@@ -636,7 +686,16 @@
     <span id="pill" class="pill"><span class="dot"></span><span id="status">טוען…</span></span>
     <div class="freq-display"><span id="curFreq">—</span> <small>MHz</small></div>
     <div class="freq-name" id="freqName"></div>
-    <audio id="player" controls preload="none"></audio>
+    <!-- ה-<audio> בלי controls — הפקדים המותאמים למטה מפעילים אותו (העיצוב אחיד בכל דפדפן) -->
+    <audio id="player" preload="none"></audio>
+    <div class="player-box" id="playerBox">
+      <button type="button" id="playBtn" class="play-main" aria-label="נגן / השהה" title="האזנה חיה">▶</button>
+      <div class="vol-row" id="volRow" title="עוצמת שמע">
+        <span>🔉</span>
+        <input type="range" id="vol" min="0" max="1" step="0.05" value="1" aria-label="עוצמת שמע" />
+        <span>🔊</span>
+      </div>
+    </div>
     <!-- מוצג כשה-SDR תפוס על-ידי ACARS (acarsActive=true) ומשתמש בכרטיסיית קול -->
     <div id="voiceAcarsBanner" class="hidden flex-col" style="margin:.6rem 0; padding:.65rem .9rem;
       background:rgba(77,163,255,.08); border:1px solid rgba(77,163,255,.25); border-radius:12px">
@@ -727,7 +786,7 @@
   <!-- יומן שידורים -->
   <section class="card">
     <p class="section-title">יומן שידורים</p>
-    <input id="actSearch" class="act-search" type="search"
+    <input id="actSearch" dir="auto" class="act-search" type="search"
            placeholder="חיפוש בתמלול…" autocomplete="off" />
     <div class="activity" id="activity">
       <p class="hint" style="margin:0">עוד אין שידורים — היומן מתמלא כשהסקוולץ׳ נפתח.</p>
@@ -880,7 +939,7 @@
 
     <!-- חיפוש + ייצוא -->
     <div class="acars-tools">
-      <input id="acarsSearch" class="acars-search" type="search"
+      <input id="acarsSearch" dir="auto" class="acars-search" type="search"
              placeholder="חיפוש: זנב / טיסה / label / טקסט…" autocomplete="off" />
       <span class="acars-export">
         <a class="ghost" id="acarsCsv" href="/api/acars/export?format=csv" download>⬇ CSV</a>
@@ -945,7 +1004,7 @@
     </div>
 
     <div class="acars-tools">
-      <input id="vdl2Search" class="acars-search" type="search"
+      <input id="vdl2Search" dir="auto" class="acars-search" type="search"
              placeholder="חיפוש: זנב / טיסה / ICAO / label / טקסט…" autocomplete="off" />
       <span class="acars-export">
         <a class="ghost" id="vdl2Csv" href="/api/vdl2/export?format=csv" download>⬇ CSV</a>
@@ -981,6 +1040,7 @@
     let applyModeInFlight = false; // מניעת לחיצות כפולות בזמן מעבר SDR (3-5 שניות)
     let acarsTimer = null;
     let acarsLastId = 0;          // cursor: ה-id האחרון שקיבלנו מ-/api/acars
+    let acarsFeedMax = 0;         // ה-id הגבוה שרונדר בפיד — לסימון "חדש" (אנימציה)
 
     /* ---------- API + PIN אופציונלי ---------- */
     // PIN פעיל רק אם השרת הוגדר עם AIRAM_PIN. אחרת לעולם לא נתבקש => חוויה זהה.
@@ -1910,7 +1970,7 @@
         if (txt) txt.textContent = (vdl2 && vdl2.active) ? "🛰️ המקלט כעת במצב VDL2 — אין שמע זמין"
                                                           : "📡 המקלט כעת במצב ACARS — אין שמע זמין";
       }
-      $("player").classList.toggle("hidden", show || sdrOff);
+      $("playerBox").classList.toggle("hidden", show || sdrOff);
       $("rfPanel").classList.toggle("hidden", show || sdrOff);
     }
     function renderPower() {
@@ -1923,6 +1983,15 @@
     function fmtTime(epoch) {
       const d = epoch ? new Date(epoch * 1000) : new Date();
       return d.toLocaleTimeString("he-IL", { hour12: false });
+    }
+    // זמן יחסי קצר לפיד/roster ("לפני 2 דק׳") — קריא יותר בסריקה; מעל שעה => שעה מלאה.
+    // הפיד/roster מרונדרים מחדש כל 30ש' (staleTimer) כך שהערכים לא מתיישנים.
+    function fmtRel(epoch) {
+      if (!epoch) return fmtTime(epoch);
+      const s = Date.now() / 1000 - epoch;
+      if (s < 60) return "עכשיו";
+      if (s < 3600) return "לפני " + Math.round(s / 60) + " דק׳";
+      return fmtTime(epoch);
     }
 
     /* ----- מפה (Leaflet, טעינה עצלנית + נפילה חיננית) ----- */
@@ -2195,7 +2264,7 @@
         }
         if (c.hasPos) row.appendChild(mkSpan("rr-pos", "📍"));
         row.appendChild(mkSpan("rr-count", "×" + c.count));
-        if (c.lastT != null) row.appendChild(mkSpan("rr-time", fmtTime(c.lastT)));
+        if (c.lastT != null) row.appendChild(mkSpan("rr-time", fmtRel(c.lastT)));
         box.appendChild(row);
       }
     }
@@ -2269,7 +2338,7 @@
     const mkSpan = (cls, txt) => { const s = document.createElement("span"); s.className = cls; s.textContent = txt; return s; };
 
     /* ----- כרטיס הודעה אחיד (לכל הפורמטים) ----- */
-    function renderAcarsMsg(m, blockCount) {
+    function renderAcarsMsg(m, blockCount, hasRetx) {
       const g = m.group || "text";
       const el = document.createElement("div");
       el.className = "amsg g-" + g;
@@ -2293,7 +2362,9 @@
         top.appendChild(mk("amsg-err", errLabels[m.error] || ("err " + m.error + " ⚠")));
       }
       if (m.freq != null) top.appendChild(mk("amsg-freq", Number(m.freq).toFixed(3)));
-      top.appendChild(mk("amsg-time", fmtTime(m.t)));
+      const tm = mk("amsg-time", fmtRel(m.t));
+      if (m.t) tm.title = new Date(m.t * 1000).toLocaleString("he-IL");
+      top.appendChild(tm);
       el.appendChild(top);
       // שורת meta (label · mode · msgno · level)
       const metaEl = document.createElement("div");
@@ -2317,6 +2388,12 @@
         if (metaParts.length || (blockCount && blockCount > 1)) metaEl.appendChild(document.createTextNode(" · "));
         const lvlSpan = mk(lvlCls, lvl.toFixed(0) + " dBFS");
         metaEl.appendChild(lvlSpan);
+      }
+      if (hasRetx) {                               // התקבל שוב (רטרנסמיט) — ה-CSS חיכה לזה
+        if (metaEl.childNodes.length || metaEl.textContent) metaEl.appendChild(document.createTextNode(" · "));
+        const rx = mk("amsg-retx", "↻ שודר שוב");
+        rx.title = "התקבל יותר מפעם אחת — מוצג העותק הנקי ביותר";
+        metaEl.appendChild(rx);
       }
       if (metaEl.childNodes.length || metaEl.textContent) el.appendChild(metaEl);
       if (m.decoded) el.appendChild(mk("amsg-decoded", m.decoded));
@@ -2432,7 +2509,16 @@
       ).reverse();  // חדש=>ישן
 
       feed.innerHTML = "";
-      for (const { m, count } of list) feed.appendChild(renderAcarsMsg(m, count));
+      // אנימציית כניסה רק להודעות שטרם רונדרו (id חדש) — רינדור-מחדש מסינון/חיפוש לא מהבהב
+      const prevMax = acarsFeedMax;
+      for (const { m, count, hasRetx } of list) {
+        const el = renderAcarsMsg(m, count, hasRetx);
+        if (typeof m.id === "number" && m.id > prevMax) {
+          el.classList.add("amsg-new");
+          if (m.id > acarsFeedMax) acarsFeedMax = m.id;
+        }
+        feed.appendChild(el);
+      }
       const empty = $("acarsEmpty");
       if (!acarsMsgs.length) { empty.textContent = "ממתין להודעות…"; empty.style.display = ""; }
       else if (!list.length) { empty.textContent = "אין תוצאות לסינון/חיפוש."; empty.style.display = ""; }
@@ -2454,6 +2540,7 @@
         // נטענה מחדש) => מאפסים קליינט כדי לא לפספס הודעות. המחזור הבא (since=0) ימשוך הכל.
         if (typeof data.cursor === "number" && data.cursor < acarsLastId) {
           acarsLastId = 0;
+          acarsFeedMax = 0;
           acarsMsgs.length = 0;
           for (const id in acarsMarkers) {
             if (acarsMap) acarsMap.removeLayer(acarsMarkers[id]);
@@ -2513,10 +2600,11 @@
       stopAcarsPolling();
       pollAcars();
       acarsTimer = setInterval(() => { if (!document.hidden) pollAcars(); }, 3000);
-      // דהיית "יצא מטווח" תלוית-זמן (לא רק בהודעות חדשות) => רענון עדין של roster/detail/עמעום
+      // דהיית "יצא מטווח" תלוית-זמן (לא רק בהודעות חדשות) => רענון עדין של roster/detail/עמעום.
+      // renderAcarsFeed גם — הזמנים היחסיים ("לפני X דק׳") בכרטיסים לא מתיישנים.
       acarsStaleTimer = setInterval(() => {
         if (document.hidden) return;
-        renderAcarsRoster(); renderAcarsDetail(); refreshStaleOpacity();
+        renderAcarsRoster(); renderAcarsDetail(); renderAcarsFeed(); refreshStaleOpacity();
       }, 30000);
     }
     function stopAcarsPolling() {
@@ -2541,6 +2629,7 @@
       let map = null, icon = null, leafLoading = false;
       let focus = null, filter = "all", active = false;
       let lastId = 0, banks = [], selFreqs = null;
+      let feedMax = 0;                                // ה-id הגבוה שרונדר — לסימון "חדש"
       let timer = null, staleTimer = null, inFlight = false, resizeT = null;
       const icaoToId = {};                            // icao -> מזהה-מטוס ראשי (tail/flight)
 
@@ -2791,7 +2880,7 @@
           }
           if (c.hasPos) row.appendChild(mkSpan("rr-pos", "📍"));
           row.appendChild(mkSpan("rr-count", "×" + c.count));
-          if (c.lastT != null) row.appendChild(mkSpan("rr-time", fmtTime(c.lastT)));
+          if (c.lastT != null) row.appendChild(mkSpan("rr-time", fmtRel(c.lastT)));
           box.appendChild(row);
         }
       }
@@ -2844,7 +2933,7 @@
       }
 
       /* ----- כרטיס הודעה אחיד ----- */
-      function renderMsg(m, blockCount) {
+      function renderMsg(m, blockCount, hasRetx) {
         const g = m.group || "text";
         const el = document.createElement("div"); el.className = "amsg g-" + g;
         const top = document.createElement("div"); top.className = "amsg-top";
@@ -2865,7 +2954,9 @@
           top.appendChild(mk("amsg-err", errLabels[m.error] || ("err " + m.error + " ⚠")));
         }
         if (m.freq != null) top.appendChild(mk("amsg-freq", Number(m.freq).toFixed(3)));
-        top.appendChild(mk("amsg-time", fmtTime(m.t)));
+        const tm = mk("amsg-time", fmtRel(m.t));
+        if (m.t) tm.title = new Date(m.t * 1000).toLocaleString("he-IL");
+        top.appendChild(tm);
         el.appendChild(top);
         const metaEl = document.createElement("div"); metaEl.className = "amsg-meta";
         const metaParts = [];
@@ -2883,6 +2974,12 @@
           const lvlCls = lvl > -30 ? "level-good" : lvl > -45 ? "level-ok" : "level-weak";
           if (metaParts.length || (blockCount && blockCount > 1)) metaEl.appendChild(document.createTextNode(" · "));
           metaEl.appendChild(mk(lvlCls, lvl.toFixed(0) + " dBFS"));
+        }
+        if (hasRetx) {                       // התקבל שוב (רטרנסמיט)
+          if (metaEl.childNodes.length || metaEl.textContent) metaEl.appendChild(document.createTextNode(" · "));
+          const rx = mk("amsg-retx", "↻ שודר שוב");
+          rx.title = "התקבל יותר מפעם אחת — מוצג העותק הנקי ביותר";
+          metaEl.appendChild(rx);
         }
         if (metaEl.childNodes.length || metaEl.textContent) el.appendChild(metaEl);
         if (m.decoded) el.appendChild(mk("amsg-decoded", m.decoded));
@@ -2960,9 +3057,20 @@
             else { blockMap.set(bk, { m, count: 1, hasRetx }); ordered.push({ bk, isSingle: false }); }
           } else ordered.push({ bk: null, isSingle: true, m, hasRetx });
         }
-        const list = ordered.map((o) => o.isSingle ? { m: o.m, count: 1 } : blockMap.get(o.bk)).reverse();
+        const list = ordered.map((o) => o.isSingle
+          ? { m: o.m, count: 1, hasRetx: o.hasRetx }
+          : blockMap.get(o.bk)).reverse();
         feed.innerHTML = "";
-        for (const { m, count } of list) feed.appendChild(renderMsg(m, count));
+        // אנימציית כניסה רק להודעות שטרם רונדרו (id חדש) — כמו בפיד ה-ACARS
+        const prevMax = feedMax;
+        for (const { m, count, hasRetx } of list) {
+          const el = renderMsg(m, count, hasRetx);
+          if (typeof m.id === "number" && m.id > prevMax) {
+            el.classList.add("amsg-new");
+            if (m.id > feedMax) feedMax = m.id;
+          }
+          feed.appendChild(el);
+        }
         const empty = E("Empty");
         if (!msgs.length) { empty.textContent = "ממתין להודעות… רוב התעבורה באזורנו על 136.975."; empty.style.display = ""; }
         else if (!list.length) { empty.textContent = "אין תוצאות לסינון/חיפוש."; empty.style.display = ""; }
@@ -3009,7 +3117,7 @@
           setActive(data.active);
           if (data.freqs) renderFreqs(data.freqs);
           if (typeof data.cursor === "number" && data.cursor < lastId) {   // השרת אותחל => איפוס
-            lastId = 0; msgs.length = 0;
+            lastId = 0; feedMax = 0; msgs.length = 0;
             for (const id in markers) { if (map) map.removeLayer(markers[id]); delete markers[id]; }
             for (const id in tracks) { if (map && tracks[id].line) map.removeLayer(tracks[id].line); delete tracks[id]; }
             for (const id in craft) delete craft[id];
@@ -3044,7 +3152,7 @@
         stopPolling();
         poll();
         timer = setInterval(() => { if (!document.hidden) poll(); }, 3000);
-        staleTimer = setInterval(() => { if (document.hidden) return; renderRoster(); renderDetail(); refreshStaleOpacity(); }, 30000);
+        staleTimer = setInterval(() => { if (document.hidden) return; renderRoster(); renderDetail(); renderFeed(); refreshStaleOpacity(); }, 30000);
       }
       function stopPolling() {
         if (timer) { clearInterval(timer); timer = null; }
@@ -3162,6 +3270,23 @@
       if (!document.hidden) wantPlaying = false;
       if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
     });
+
+    /* ---------- פקדי הנגן המותאם (ה-<audio> בלי controls) ---------- */
+    // לחיצה על ▶ תמיד מסנכרנת ל-live (reloadStream) — ברדיו חי אין "המשך מהמקום שעצרת"
+    $("playBtn").onclick = () => { if (player.paused) reloadStream(); else player.pause(); };
+    function renderPlayBtn() {
+      const b = $("playBtn");
+      b.textContent = player.paused ? "▶" : "⏸";
+      b.classList.toggle("playing", !player.paused);
+    }
+    player.addEventListener("play", renderPlayBtn);
+    player.addEventListener("pause", renderPlayBtn);
+    const volEl = $("vol");
+    const savedVol = parseFloat(localStorage.getItem("airam_vol"));
+    if (Number.isFinite(savedVol)) { volEl.value = savedVol; player.volume = savedVol; }
+    volEl.oninput = () => { player.volume = +volEl.value; localStorage.setItem("airam_vol", volEl.value); };
+    // iOS מתעלם מ-volume תוכנתי (רק כפתורי חומרה) => מסתירים את הסליידר שם
+    if (/iPhone|iPad|iPod/i.test(navigator.userAgent)) $("volRow").classList.add("hidden");
     let hiddenAt = 0;
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) { hiddenAt = Date.now(); return; }
