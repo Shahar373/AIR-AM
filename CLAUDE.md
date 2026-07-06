@@ -86,13 +86,13 @@ README.md                   # תיעוד למשתמש הקצה (התקנה + ש�
 CLAUDE.md                   # ← המסמך הזה: ארכיטקטורה + פיתוח.
 
 webtune/
-  app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, REST API, יומן,
-                            #   הקלטות, תמלול, METAR, מדדי RF, מעבר מצבים. ~2200 שורות.
+  app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, סריקה, REST API,
+                            #   יומן, הקלטות, תמלול, METAR, מדדי RF, מעבר מצבים. ~2700 שורות.
   adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS. thread נפרד.
                             #   ניתן להרצה ידנית: `python3 adsb.py [--selftest]`.
   static/
-    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~3900 שורות). PWA. 4 תצוגות:
-                            #   🏠 מרכז (בית/standby) + קול + ACARS + VDL2. תצוגת VDL2
+    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~4000 שורות). PWA. 4 תצוגות:
+                            #   🏠 מרכז (בית/standby/scan) + קול + ACARS + VDL2. תצוגת VDL2
                             #   בפקטורי createDataView (מופע נפרד מ-ACARS — אפס רגרסיה).
     manifest.webmanifest    # PWA manifest (התקנה כאפליקציה).
     sw.js                   # Service Worker (נדרש HTTPS).
@@ -126,6 +126,7 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_acars.py            # נרמול ACARS, latlon, labels, ATIS, OOOI, actype, מעברי מצב.
   test_vdl2.py             # נרמול VDL2 (מסלול A/B), env, מעברי מצב, ייצוא, health.
   test_boot.py             # _boot_restore: שחזור המצב באתחול (המתזמר) — 11 בדיקות.
+  test_scan.py             # מצב סריקה: validate_scan_plan, _scan_loop, /api/mode, /api/scan, boot restore.
   test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
 
 .github/workflows/ci.yml   # pytest + `bash -n` על install.sh ו-airam-wait-sdrplay.
@@ -174,10 +175,23 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   שרץ בפועל או None), `_enter_voice` (peer סימטרי של `_enter_acars`/`_enter_vdl2`:
   עצירת צרכני דאטה + write_config + verify), `_fail_to_off` (כישלון כניסה ⇒ standby +
   state off+prev_mode + payload 500 — **לעולם לא fallback לקול**). `/api/mode` הוא
-  dispatcher מאוחד לארבעת המצבים. `_boot_restore` (thread ב-startup) משחזר את המצב
-  השמור באתחול — ה-orchestration שמאפשר לאף צרכן לא להיות enabled ב-systemd.
+  dispatcher מאוחד לחמשת המצבים (voice/acars/vdl2/off/**scan**). `_boot_restore`
+  (thread ב-startup) משחזר את המצב השמור באתחול — ה-orchestration שמאפשר לאף צרכן
+  לא להיות enabled ב-systemd.
+- **מצב סריקה/סבב (scan) — "אפליקציית-על" מעל שלושת המצבים, לא צרכן/שירות רביעי:**
+  `_validate_scan_plan` (מאמת לוח: 1–8 "רגלים" `{mode,dwell_sec,freqs?}`),
+  `_scan_enter_leg` (כניסה לרגל בודדת דרך `_enter_voice`/`_enter_acars`/`_enter_vdl2`
+  — לא נועל TUNE_LOCK, כמו שאר ה-`_enter_*`), `_scan_activate` (נכנס לרגל 0 סינכרונית
+  + מתחיל thread לשאר הלוח), `_scan_loop` (thread: מסתובב בין הרגלים, נועל TUNE_LOCK
+  רק בזמן מעבר; כשל ברגל ⇒ דילוג לבאה; כשל של *כל* הרגלים ברצף ⇒ `off`, כמו כל מצב),
+  `_scan_stop_thread` (עוצר את הסבב הפעיל — נקרא ב*כל* מעבר `/api/mode`, כולל scan
+  חדש). `api_state`/`api_health` מיוחדים ל-scan: ה"מצב" הוא `scan` עצמו (לא הרגל
+  הנוכחית) — הרגל/הספירה-לאחור מגיעות מ-`GET /api/scan`.
 - **ACARS:** `_acars_listener` (thread, מאזין UDP 5556), `_normalize_acars` (הלב —
-  ממיר JSON גולמי לכרטיס אחיד: label→קטגוריה+כיוון, חילוץ נ"צ, ARINC-622, actype),
+  ממיר JSON גולמי לכרטיס אחיד: label→קטגוריה+כיוון, חילוץ נ"צ, ARINC-622, actype,
+  **מדדי איכות קליטה** — `level`=dBFS מקורי מהמפענח (נשמר כמות שהוא); `snr` מחושב
+  **רק** כש-`noise` קיים בקלט (acarsdec עצמו לא מספק רצפת רעש לכל הודעה — ראו
+  bullet הבא — כך שב-ACARS אמיתי `snr` תמיד None; ה-dBm נדחה במכוון, ראו §12),
   `_text_latlon`/`_scan_latlon` (חילוץ מיקום), פרסרים לפי label: `_parse_atis` (A9),
   `_parse_oooi_80` (80), `_parse_wx_alternates` (WX), `_parse_sa_media` (SA),
   `_parse_h1`+`_parse_fpn` (H1 sub-labels + תוכנית טיסה), `_parse_label15` (נ"צ, גם עם
@@ -190,9 +204,11 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   sdrplay חי), `_acars_window_error` (wrapper דק מעל `_window_error` הגנרי — ≤8 ערוצים,
   span ≤ `ACARS_WINDOW_MHZ`), `ACARS_BANKS` (בנקי תדרים, כל בנק בחלון אחד), `_today_start`.
 - **VDL2:** `_vdl2_listener` (thread, מאזין UDP 5557), `_normalize_vdl2` (הלב — סכמת
-  dumpvdl2 v2.6.0: **מסלול A** — `avlc.acars` קיים ⇒ מסנתז dict בסגנון acarsdec ומזרים
-  דרך `_normalize_acars` ⇒ *כל* הפרסרים הקיימים חלים בחינם; **מסלול B** — CPDLC/ADS-C
-  (`avlc.x25`, תקציר `_libacars_decode`) / XID / פריים גנרי. שדה `icao` חדש = כתובת
+  dumpvdl2 v2.6.0: **מסלול A** — `avlc.acars` קיים ⇒ מסנתז dict בסגנון acarsdec (כולל
+  `noise=sig_level`/`noise_level` ⇒ SNR אמיתי) ומזרים דרך `_normalize_acars` ⇒ *כל*
+  הפרסרים הקיימים חלים בחינם; **מסלול B** — CPDLC/ADS-C
+  (`avlc.x25`, תקציר `_libacars_decode`) / XID / פריים גנרי (גם כאן `level`+`snr`
+  ישירות מ-`sig_level`/`noise_level`). שדה `icao` חדש = כתובת
   ה-AVLC של צד-המטוס; `dir` מבני מסוג הכתובת דורס heuristics), `write_vdl2_env` (**ממיר
   MHz→Hz**, `VDL2_GAIN` מכיל את הדגל כולו או ריק), `_enter_vdl2` (עוצר rtl_airband+acars,
   מרים dumpvdl2, verify), `_vdl2_window_error`, `_vdl2_adsb`, `VDL2_BANKS`. התמדה:
@@ -233,13 +249,20 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 
 HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע ברקע).
 מתג תצוגות 🏠/📻/📡/🛰️ בראש — **🏠 מרכז (מסך הבית)** הוא ברירת המחדל והנחיתה של
-מצב off: כרטיס סטטוס, שלושה כרטיסי הפעלה שווי-מעמד (`renderHome`/`showHomeError`),
-ופאנלי המסלולים/METAR (מערכתיים — עברו לכאן מתצוגת הקול). הדף מושך מצב מ-`/api/*`
+מצב off/scan: כרטיס סטטוס, **ארבעה** כרטיסי הפעלה שווי-מעמד (📻/📡/🛰️/🔁 — `renderHome`/
+`showHomeError`), ופאנלי המסלולים/METAR (מערכתיים — עברו לכאן מתצוגת הקול). כרטיס
+הסריקה (`#homeCardScan`) כולל עורך לוח (`renderScanEditor` — הוספה/הסרה/עריכת רגלים,
+`scanLegs` בזיכרון בלבד עד לחיצת "התחל") וסטטוס חי (רגל נוכחית + ספירה-לאחור מקומית
+כל שנייה מול `scanStatus.next_switch_at` שמגיע מ-`GET /api/scan`). **אין תצוגה ייעודית
+לסריקה** — `showView`/`applyMode` נשארים מרובעים (home/voice/acars/vdl2 בלבד); `scan`
+תמיד ממופה ל-`"home"` (הוא "אפליקציית-על", לא תוכן-תצוגה). הדף מושך מצב מ-`/api/*`
 ב-polling; ה-pollers של airspace/power/METAR רצים בכל תצוגה, metrics/activity רק
-בקול, ו-`pollGlobalState` (10ש', `/api/health`) מיישר את חיווי המצב למציאות בלי
-לחטוף את הטאב. כפתורי עצירה ⇒ `applyMode("off")`; כפתור ⏻ מחזיר את `prev_mode`.
-עיצוב responsive (multi-column בטאבלט/דסקטופ). **אין build step** — עורכים את הקובץ
-ישירות. Leaflet vendored תחת `static/vendor/` (בלי CDN, עובד גם בלי אינטרנט).
+בקול, ו-`pollGlobalState` (10ש', `/api/health` + `/api/scan` כשסורקים) מיישר את חיווי
+המצב למציאות בלי לחטוף את הטאב. כפתורי עצירה ⇒ `applyMode("off")` (גם עצירת סריקה);
+כפתור ⏻ מחזיר את `prev_mode` (יכול להיות `"scan"`). עיצוב responsive (multi-column
+בטאבלט/דסקטופ; `.mode-cards` הוא `auto-fit` כדי לזרום נכון גם עם 4 כרטיסים).
+**אין build step** — עורכים את הקובץ ישירות. Leaflet vendored תחת `static/vendor/`
+(בלי CDN, עובד גם בלי אינטרנט).
 
 **טוקני עיצוב ב-`:root`:** גיאומטריה (`--r-card`/`--r-ctrl`/`--r-sm`), מרווח (`--sp-1..5`,
 בסיס 4px), הצללה (`--sh-card`/`--sh-1`/`--sh-blue`), משטחים (`--panel`/`--panel-2`/`--hover`)
@@ -251,8 +274,9 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 (closures) עם state/מפה/buffers משלו, לגמרי נפרד מ-ACARS (⇒ אפס רגרסיה ל-ACARS; ה-DOM
 של `#vdl2View` משתמש חוזר במחלקות ה-CSS `.acars-*`, אפס CSS חדש). הפקטורי עושה שימוש
 חוזר בעוזרים ה*טהורים* הגלובליים בלבד (`fmtTime`/`mkSpan`/`dirBadge`/`normReg`/`trackColor`/
-`CAT_GROUPS`/`MULTIBLOCK_RE`/`segSet`). `showView` מרובע (home/voice/acars/vdl2);
-`applyMode` מרובע (voice/acars/vdl2/off — off נוחת בתצוגת home).
+`CAT_GROUPS`/`MULTIBLOCK_RE`/`segSet`/`qualityCls` — האחרון חדש: מיון dBFS/SNR לשלוש
+רמות צבע, משותף לשני התצוגות). `showView` מרובע (home/voice/acars/vdl2);
+`applyMode` מחומש (voice/acars/vdl2/off/scan — off ו-scan שניהם נוחתים בתצוגת home).
 
 > בעריכת ה-UI: שמור על polling קל, על נפילה חיננית בלי רשת, ועל RTL/עברית נכונה.
 > שינוי שנוגע בשתי התצוגות — עדכן גם את קוד ה-ACARS וגם את הפקטורי (הם אינם משתפים קוד stateful).
@@ -267,14 +291,15 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 | GET | `/<path>` | נכסים סטטיים |
 | GET | `/live.m3u` | playlist לנגן חיצוני |
 | GET | `/stream` | proxy same-origin ל-Icecast (נדרש כש-HTTPS, mixed-content) |
-| GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`) |
+| GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `scan_plan`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`) |
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
-| POST | `/api/mode` | **מעבר מצב** voice/acars/**vdl2**/**off** (standby). דרך `_guard`. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
-| GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט) |
-| GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM) |
-| GET | `/api/vdl2` | הודעות VDL2 אחרונות (**היום בלבד**; `?all=1`) + שדה `adsb`. אותה סכמת כרטיס כמו ACARS + `icao` |
-| GET | `/api/vdl2/export?format=csv\|json` | ייצוא VDL2 (CSV עם BOM, עמודת `icao`) |
+| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
+| GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור) |
+| GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
+| GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM, עמודות `level`+`snr`) |
+| GET | `/api/vdl2` | הודעות VDL2 אחרונות (**היום בלבד**; `?all=1`) + שדה `adsb`. אותה סכמת כרטיס כמו ACARS + `icao`; `snr` תמיד אמיתי (dumpvdl2 מספק רצפת רעש) |
+| GET | `/api/vdl2/export?format=csv\|json` | ייצוא VDL2 (CSV עם BOM, עמודות `icao`+`level`+`snr`) |
 | GET | `/api/activity` | יומן שידורים |
 | GET | `/recordings/<name>` | קובץ הקלטה MP3 |
 | GET | `/api/metrics` | מדדי RF (SNR/signal/noise מ-stats_filepath) |
@@ -336,16 +361,29 @@ SDR (כולל rtl_airband) לא enabled, ובשדרוג `disable rtl_airband` א
 ## 12. מוסכמות וגוצ'אות (קרא לפני שינוי)
 
 - **כיוונון אחד בכל רגע:** RSP1B יחיד = תדר/מצב אחד פעיל. אל תנסה ריבוי ערוצים בו-זמני.
-- **ארבעה מצבי `app_mode`, שווי-מעמד:** `voice` (rtl_airband) · `acars` (acarsdec) ·
-  `vdl2` (dumpvdl2) · `off` (standby — **שלושת** הצרכנים עצורים, ה-SDR פנוי ליישום אחר).
-  **אין "מצב ראשי"**: כל המצבים (כולל `off`) **שורדים reboot** — אף צרכן לא enabled,
-  `_boot_restore` של airam-web משחזר את המצב השמור באתחול. **כישלון כניסה למצב ⇒
-  נפילה ל-`off`** (`_fail_to_off`), לעולם לא fallback לקול; חריג יחיד: רולבק *בתוך*
-  כיוונון קול לקונפיג האחרון שעבד (retry, לא עליונות-מצב), וגם הוא מאומת.
+- **חמישה מצבי `app_mode`, שווי-מעמד:** `voice` (rtl_airband) · `acars` (acarsdec) ·
+  `vdl2` (dumpvdl2) · `off` (standby — **שלושת** הצרכנים עצורים, ה-SDR פנוי ליישום אחר) ·
+  `scan` (סבב אוטומטי — **לא** צרכן/שירות רביעי, אלא thread שמסתובב בין קריאות ל-
+  `_enter_voice`/`_enter_acars`/`_enter_vdl2` הקיימים; ראו §5).
+  **אין "מצב ראשי"**: כל המצבים (כולל `off`/`scan`) **שורדים reboot** — אף צרכן לא
+  enabled, `_boot_restore` של airam-web משחזר את המצב השמור באתחול (עבור `scan`:
+  נכנס לרגל 0 מחדש — לא ממשיך מהאינדקס שבו נעצר, פשטות מכוונת). **כישלון כניסה
+  למצב ⇒ נפילה ל-`off`** (`_fail_to_off`), לעולם לא fallback לקול; חריגים: (1) רולבק
+  *בתוך* כיוונון קול לקונפיג האחרון שעבד (retry, לא עליונות-מצב), וגם הוא מאומת;
+  (2) כשל ברגל *בודדת* בסריקה מדלג לרגל הבאה — רק כשל של *כל* הרגלים ברצף נופל ל-off.
   `api_state`/`api_health` גוזרים את המצב מהמציאות, ובאין צרכן פעיל — מהכוונה
   השמורה; מצב שמור שלא רץ = תקלה (`mode_ok=False`/`ok=False`), standby ≠ תקלה.
+  ב-`scan` ה"מצב" המדווח הוא `scan` עצמו (לא הרגל הנוכחית) — ראו `/api/scan`.
   ברירת המחדל של state חסר היא `off` (התקנה טרייה נוחתת במסך הבית).
-  `_enter_standby`/`_voice_tune` עוצרים את *שני* הצרכנים האחרים.
+  `_enter_standby`/`_voice_tune` עוצרים את *שני* הצרכנים האחרים; `_scan_stop_thread`
+  נקרא ב*כל* מעבר `/api/mode` (גם למעבר בין תוכן-לוח שונה של scan עצמו).
+- **מדדי איכות קליטה — לעולם לא ממציאים ערך:** `level` (dBFS) הוא **תמיד** הערך הגולמי
+  מהמפענח, בלי עיבוד. `snr` מחושב **רק** כשיש רצפת רעש אמינה בקלט (VDL2 — `dumpvdl2`
+  מספק `sig_level`+`noise_level` לכל פריים); **ACARS לעולם לא מקבל SNR** כי `acarsdec`
+  עצמו לא מודד רצפת רעש לכל הודעה (נבדק במקור, לא מגבלת יישום שלנו). dBm **לא מומש**
+  (נדחה במכוון) — ACARS/VDL2 רצים כברירת מחדל עם AGC (רווח משתנה, לא ידוע לנו לכל
+  הודעה), כך שהמרת dBFS→dBm חסרת בסיס אמין בלי מעבר לרווח קבוע + כיול חד-פעמי.
+  אם מוסיפים dBm בעתיד — ודאו שהוא נשאר אופציונלי/כבוי-כברירת-מחדל ולעולם לא מוערך.
 - **בנקי ACARS/VDL2 = חלון אחד כל אחד:** acarsdec/dumpvdl2 מפענחים ערוצים מרובים בתוך
   חלון דגימה אחד (~2MHz). צביר 131.x ו-136.x רחוקים ~5MHz ⇒ לעולם לא יחד. בנק חדש חייב
   לעבור `_acars_window_error`/`_vdl2_window_error` (שניהם wrappers מעל `_window_error`).

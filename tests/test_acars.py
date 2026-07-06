@@ -83,6 +83,22 @@ def test_normalize_acars_empty_ack_tolerated():
     assert n["freq"] == 131.55
 
 
+def test_normalize_acars_level_kept_no_snr_without_noise():
+    """acarsdec לא מספק רצפת רעש לכל הודעה => level (dBFS) תמיד נשמר, אבל snr
+    חייב להישאר None — לעולם לא מוערך, כדי לא להציג ערך לא-אמין."""
+    n = app._normalize_acars({"timestamp": 1.0, "freq": 131.55, "level": -24.3, "error": 0})
+    assert n["level"] == -24.3
+    assert n["snr"] is None
+
+
+def test_normalize_acars_snr_computed_when_noise_present():
+    """כש-noise קיים בקלט (כמו שקורה במסלול A של VDL2) — snr מחושב כהפרש אמיתי,
+    לא מוערך."""
+    n = app._normalize_acars({"timestamp": 1.0, "freq": 131.55, "level": -20.0,
+                              "noise": -50.0, "error": 0})
+    assert n["snr"] == 30.0
+
+
 # --- listener + /api/acars roundtrip ----------------------------------------
 
 def test_acars_listener_and_api(client, monkeypatch):
