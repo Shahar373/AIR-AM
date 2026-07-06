@@ -32,6 +32,11 @@ def client(paths):
     return app.app.test_client()
 
 
+@pytest.fixture
+def no_sleep(monkeypatch):
+    monkeypatch.setattr(app.time, "sleep", lambda *a, **k: None)
+
+
 # --- render_config ----------------------------------------------------------
 
 def test_render_config_basic_structure():
@@ -157,11 +162,41 @@ def test_tune_failure_rolls_back(client, paths, monkeypatch):
     app.save_state({**app.DEFAULT_STATE, "freq": 132.5})
     monkeypatch.setattr(app, "_restart_and_verify", lambda: ("נכשל", "detail", False))
     rolled = []
-    monkeypatch.setattr(app, "_rollback", lambda prev: rolled.append(prev["freq"]))
+    # _rollback מאומת: True = הקונפיג הקודם עלה בהצלחה => נשארים בקול
+    monkeypatch.setattr(app, "_rollback", lambda prev: rolled.append(prev["freq"]) or True)
     r = client.post("/api/tune", json={"freq": 134.6})
     assert r.status_code == 500
     assert rolled == [132.5]
+    assert r.get_json()["state"]["app_mode"] == "voice"   # רולבק בתוך קול, לא נפילה ל-off
     assert app.load_state()["freq"] == 132.5          # state נשאר על האחרון שעבד
+
+
+def test_tune_rollback_failure_falls_to_off(client, paths, no_sleep, monkeypatch):
+    # גם הרולבק לתדר הקודם נכשל => נופלים ל-off (לא משאירים שירות בלולאת קריסה)
+    app.save_state({**app.DEFAULT_STATE, "freq": 132.5, "app_mode": "voice"})
+    monkeypatch.setattr(app, "_restart_and_verify", lambda: ("נכשל", "detail", False))
+    monkeypatch.setattr(app, "_rollback", lambda prev: False)
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: None)
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)
+    r = client.post("/api/tune", json={"freq": 134.6})
+    assert r.status_code == 500
+    body = r.get_json()
+    assert body["app_mode"] == "off" and body["state"]["app_mode"] == "off"
+    assert app.load_state()["app_mode"] == "off"
+
+
+def test_api_mode_voice_failure_falls_to_off(client, paths, no_sleep, monkeypatch):
+    # כניסה לקול ממצב דאטה שנכשלת (וגם הרולבק) => off, בדיוק כמו כל מצב אחר
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "acars"})
+    monkeypatch.setattr(app, "_restart_and_verify", lambda: ("נכשל", None, False))
+    monkeypatch.setattr(app, "_rollback", lambda prev: False)
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: None)
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)
+    r = client.post("/api/mode", json={"mode": "voice"})
+    assert r.status_code == 500
+    assert r.get_json()["state"]["app_mode"] == "off"
+    st = app.load_state()
+    assert st["app_mode"] == "off" and st["prev_mode"] == "acars"
 
 
 def test_tune_sdr_down_keeps_new_config(client, paths, monkeypatch):

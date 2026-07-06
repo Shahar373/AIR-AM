@@ -301,7 +301,10 @@ def load_presets():
 DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  "if_gain": IF_GAIN_DEFAULT, "rf_gain": RF_GAIN_DEFAULT,
                  "squelch_mode": "open", "squelch_snr": SNR_DEFAULT,  # ברירת מחדל ATIS => תמיד פתוח
-                 "app_mode": "voice",  # "voice" (rtl_airband) | "acars" (acarsdec) | "vdl2" (dumpvdl2) | "off" (standby)
+                 # "voice" (rtl_airband) | "acars" (acarsdec) | "vdl2" (dumpvdl2) | "off" (standby).
+                 # ברירת המחדל ניטרלית (off): אין "מצב ראשי" — התקנה טרייה נוחתת במסך
+                 # הבית והמשתמש בוחר מצב. המצב הנבחר שורד reboot (משוחזר ע"י _boot_restore).
+                 "app_mode": "off",
                  "acars_freqs": ACARS_FREQS_DEFAULT,
                  "vdl2_freqs": VDL2_FREQS_DEFAULT}
 
@@ -455,7 +458,9 @@ def _restart_and_verify():
 
 
 def _rollback(prev):
-    """כיוונון נכשל => משחזרים את ההגדרות האחרונות שעבדו ומרימים מחדש (best-effort)."""
+    """כיוונון נכשל => משחזרים את ההגדרות האחרונות שעבדו ומרימים מחדש.
+    מחזיר True אם השחזור הצליח (rtl_airband חי) — רולבק שנכשל מטופל אצל הקורא
+    בנפילה ל-off (לא משאירים שירות בלולאת קריסה ולא מעמידים פנים שהקול חזר)."""
     log.warning("rollback to %.3f MHz", prev["freq"])
     try:
         write_config(prev["freq"], prev["mod"], prev["agc"], prev["if_gain"],
@@ -463,7 +468,12 @@ def _rollback(prev):
         subprocess.run([*SUDO, "systemctl", "restart", "rtl_airband"],
                        capture_output=True, text=True, timeout=45)
     except Exception:
-        pass
+        return False
+    for _ in range(3):
+        time.sleep(0.5)
+        if not _is_active("rtl_airband"):
+            return False
+    return True
 
 
 # --- ACARS: listener, ring-buffer, ומעבר מצב -----------------------------
@@ -1612,6 +1622,55 @@ def _enter_standby():
     return "כיבוי המקלט נכשל — שירות עדיין פעיל", _journal_tail("rtl_airband")
 
 
+# --- רגיסטרי מצבים: קול/ACARS/VDL2 שווי-מעמד, off ניטרלי --------------------
+# תפיסת ההפעלה: ה-SDR הוא משאב, שלושת המצבים הם "אפליקציות" שוות-מעמד שמתחרות
+# עליו, ו-airam-web הוא המתזמר. אין "מצב ראשי" ואין fallback לקול — כישלון
+# כניסה למצב נופל ל-off (standby) עם שגיאה ברורה.
+MODE_SERVICE = {"voice": "rtl_airband", "acars": ACARS_SERVICE, "vdl2": VDL2_SERVICE}
+
+
+def _live_mode():
+    """המצב שרץ בפועל (לפי השירותים), או None כשאף צרכן לא פעיל.
+    קול נבדק ראשון: Conflicts ב-systemd מבטיח בלעדיות הדדית, אז אם rtl_airband
+    פעיל אין טעם לבדוק את השאר — חוסך קריאות systemctl במצב הנפוץ."""
+    for m in ("voice", "vdl2", "acars"):
+        if _is_active(MODE_SERVICE[m]):
+            return m
+    return None
+
+
+def _enter_voice(params):
+    """כניסה סימטרית לקול (peer של _enter_acars/_enter_vdl2): עוצר את שני צרכני
+    הדאטה, כותב את קונפיג rtl_airband ומרים עם אימות.
+    מחזיר (error, detail, sdr_down) — כמו _restart_and_verify."""
+    # אם acarsdec/dumpvdl2 רץ הוא מחזיק את ה-SDR => עוצרים מפורשות לפני שמרימים
+    # את rtl_airband (Conflicts גיבוי, אבל זה משחרר את המכשיר מיד).
+    for svc in (ACARS_SERVICE, VDL2_SERVICE):
+        if _is_active(svc):
+            try:
+                _sysctl("stop", svc, timeout=30)
+            except Exception:
+                pass
+    write_config(params["freq"], params["mod"], params["agc"], params["if_gain"],
+                 params["rf_gain"], params["squelch_mode"], params["squelch_snr"])
+    return _restart_and_verify()
+
+
+def _fail_to_off(st, err, detail, log_prefix):
+    """כישלון כניסה למצב => נפילה ל-off (standby) — לעולם לא fallback לקול.
+    עוצר את כל הצרכנים (best-effort), שומר state עם off + prev_mode, ומחזיר
+    (payload, 500) בחוזה שה-UI מכיר: app_mode/state תמיד off => נחיתה במסך הבית."""
+    log.warning("%s failed: %s — falling to standby", log_prefix, err)
+    try:
+        _enter_standby()   # שגיאה משנית לא מעניינת — ממילא מדווחים על המקורית
+    except Exception:
+        pass
+    new_state = {**st, "app_mode": "off", "prev_mode": st.get("app_mode", "off")}
+    save_state(new_state)
+    return {"ok": False, "error": err, "detail": detail,
+            "app_mode": "off", "state": new_state}, 500
+
+
 # --- נתיבים ----------------------------------------------------------------
 @app.route("/")
 def index():
@@ -1681,23 +1740,16 @@ def root_asset(fname):
 @app.route("/api/state")
 def api_state():
     st = load_state()
-    # מקור-אמת למצב = המציאות (השירות), לא רק ה-state השמור: אחרי reboot רק
-    # rtl_airband עולה (acars/vdl2 לא enabled), אז state ישן "acars"/"vdl2" => מתוקן.
-    # מרובע: vdl2/acars פעיל => הוא המצב; rtl_airband פעיל => voice; הכול כבוי *ו*-state
-    # מסומן off => standby מכוון (לא שורד reboot: rtl_airband enabled וחוזר לעלות).
-    # בדיקת rtl_airband *ראשונה*: Conflicts ב-systemd מבטיח שאם הוא פעיל, שני
-    # האחרים בהכרח כבויים (בלעדיות הדדית) => בטוח לדלג עליהם. חוסך 2 מתוך 3
-    # קריאות subprocess ל-systemctl במצב הנפוץ ביותר (voice).
-    if _is_active("rtl_airband"):
-        st["app_mode"] = "voice"
-    elif _is_active(VDL2_SERVICE):
-        st["app_mode"] = "vdl2"
-    elif _is_active(ACARS_SERVICE):
-        st["app_mode"] = "acars"
-    elif st.get("app_mode") == "off":
-        st["app_mode"] = "off"
-    else:
-        st["app_mode"] = "voice"          # בזמן עליית שירותים / מצב לא ידוע => ברירת מחדל
+    # מקור-אמת למצב = המציאות (השירות הפעיל), ובאין צרכן פעיל — הכוונה השמורה.
+    # אין ברירת-מחדל לקול: מצב שמור שאמור לרוץ אבל לא רץ מדווח כתקלה (mode_ok)
+    # במקום להעמיד פנים שאנחנו בקול. _live_mode בודק את rtl_airband ראשון
+    # (אופטימיזציית Conflicts — ראה שם).
+    live = _live_mode()
+    saved = st.get("app_mode", "off")
+    st["app_mode"] = live or saved
+    # mode_ok=False: המצב השמור אמור להריץ צרכן ואף אחד לא רץ (קריסה / עליית
+    # מערכת / _boot_restore עוד בדרך). True גם ב-off — standby מכוון אינו תקלה.
+    st["mode_ok"] = (live is not None) or (saved == "off")
     st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT, version=VERSION,
               acars_banks=ACARS_BANKS, vdl2_banks=VDL2_BANKS)
     return jsonify(st)
@@ -1739,13 +1791,21 @@ def api_health():
     vdl2_ok = services["airam-vdl2"] == "active"
     # standby מכוון: כל הצרכנים כבויים ו-state מסומן off => תקין, *לא* תקלה (אחרת
     # מצב הכיבוי שביקש המשתמש היה נראה כקריסה). sdrplay נשאר active במפה.
-    off_ok = (load_state().get("app_mode") == "off"
+    saved = load_state().get("app_mode", "off")
+    off_ok = (saved == "off"
               and services["rtl_airband"] != "active"
               and services["airam-acars"] != "active"
               and services["airam-vdl2"] != "active")
-    mode = ("vdl2" if vdl2_ok else "acars" if acars_ok
-            else "voice" if voice_ok else "off" if off_ok else "voice")
-    return jsonify(ok=(voice_ok or acars_ok or vdl2_ok or off_ok), app_mode=mode,
+    # המצב נגזר מהשירות הפעיל, ובאין פעיל — מהכוונה השמורה (אין ברירת-מחדל לקול).
+    # ok = בריאות המצב הנגזר בלבד: מצב שמור שלא רץ => ok=False (תקלה מדווחת),
+    # למשל אחרי קריסת שירות או בזמן ש-_boot_restore עוד מחזיר את המצב.
+    active = ("vdl2" if services["airam-vdl2"] == "active"
+              else "acars" if services["airam-acars"] == "active"
+              else "voice" if services["rtl_airband"] == "active" else None)
+    mode = active or saved
+    ok = (voice_ok if mode == "voice" else acars_ok if mode == "acars"
+          else vdl2_ok if mode == "vdl2" else off_ok)
+    return jsonify(ok=ok, app_mode=mode,
                    services=services, sdr_present=_sdr_present(), stats_age=stats_age)
 
 
@@ -2098,7 +2158,7 @@ def _parse_tune(data):
 
 
 def _voice_tune(params):
-    """מכוונן קול (rtl_airband). מבטיח יציאה ממצב ACARS תחילה (משחרר את ה-SDR).
+    """מכוונן קול (rtl_airband). מבטיח יציאה ממצב ACARS/VDL2 תחילה (משחרר את ה-SDR).
     מחזיר (payload, http_status). serialized תחת TUNE_LOCK."""
     if not TUNE_LOCK.acquire(blocking=False):
         # state בתשובה => ה-UI מיישר את התצוגה האופטימית חזרה למציאות
@@ -2106,24 +2166,14 @@ def _voice_tune(params):
                 "state": load_state()}, 409
     try:
         prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
-        # מצב משולב: אם acarsdec/dumpvdl2 רץ הוא מחזיק את ה-SDR => עוצרים מפורשות
-        # לפני שמרימים את rtl_airband (Conflicts גיבוי, אבל זה משחרר את המכשיר מיד).
-        for svc in (ACARS_SERVICE, VDL2_SERVICE):
-            if _is_active(svc):
-                try:
-                    _sysctl("stop", svc, timeout=30)
-                except Exception:
-                    pass
         new_state = {**params, "app_mode": "voice",
                      "acars_freqs": prev.get("acars_freqs", ACARS_FREQS_DEFAULT),
                      "vdl2_freqs": prev.get("vdl2_freqs", VDL2_FREQS_DEFAULT)}
         log.info("tune %.3f MHz mod=%s agc=%s if_gain=%d rf_gain=%d squelch=%s snr=%.1f (from %s)",
                  params["freq"], params["mod"], params["agc"], params["if_gain"],
                  params["rf_gain"], params["squelch_mode"], params["squelch_snr"], request.remote_addr)
-        write_config(params["freq"], params["mod"], params["agc"], params["if_gain"],
-                     params["rf_gain"], params["squelch_mode"], params["squelch_snr"])
 
-        err, detail, sdr_down = _restart_and_verify()
+        err, detail, sdr_down = _enter_voice(params)
         if err:
             log.warning("tune %.3f MHz failed: %s (sdr_down=%s)", params["freq"], err, sdr_down)
             if sdr_down:
@@ -2133,9 +2183,13 @@ def _voice_tune(params):
                 save_state(new_state)
                 return {"ok": False, "detail": detail, "state": new_state,
                         "error": err + " — התדר יוחל אוטומטית כשה-SDR יחובר"}, 500
-            _rollback(prev)   # config רע => לא משאירים את השירות בלולאת קריסה
-            return {"ok": False, "error": err + " (חזרתי לתדר הקודם)",
-                    "detail": detail, "state": {**prev, "app_mode": "voice"}}, 500
+            # config רע => מנסים את קונפיג הקול האחרון שעבד (retry בתוך קול, לא
+            # עליונות-מצב). רק אם גם הוא לא עולה — נופלים ל-off לפי הדוקטרינה.
+            if _rollback(prev):
+                return {"ok": False, "error": err + " (חזרתי לתדר הקודם)",
+                        "detail": detail, "state": {**prev, "app_mode": "voice"}}, 500
+            return _fail_to_off(prev, err + " — וגם החזרה לתדר הקודם נכשלה",
+                                detail, "voice tune")
 
         # נשמר רק אחרי שאומת שהשירות חי => state תמיד משקף הגדרות שעובדות
         save_state(new_state)
@@ -2301,90 +2355,17 @@ def api_vdl2_export():
 @app.route("/api/mode", methods=["POST"])
 def api_mode():
     """מעבר בין המצבים: קול (rtl_airband) / ACARS (acarsdec) / VDL2 (dumpvdl2) /
-    off (standby). SDR אחד בהחלפה — צרכן אחד בכל רגע.
+    off (standby). SDR אחד בהחלפה — צרכן אחד בכל רגע. המצבים שווי-מעמד:
+    כישלון כניסה לכל אחד מהם נופל ל-off (בלי fallback לקול).
     POST => עובר דרך _guard (Origin + PIN אופציונלי), כמו /api/tune."""
     data = request.get_json(silent=True) or {}
     mode = str(data.get("mode", "")).lower()
-
-    if mode == "vdl2":
-        if not TUNE_LOCK.acquire(blocking=False):
-            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב",
-                           state=load_state()), 409
-        try:
-            st = load_state()
-            freqs = _sanitize_freqs(data.get("freqs") or st.get("vdl2_freqs"),
-                                    VDL2_FREQS_DEFAULT)
-            werr = _vdl2_window_error(freqs)         # חייב להיכנס בחלון דגימה אחד
-            if werr:
-                return jsonify(ok=False, error=werr, state=load_state()), 400
-            log.info("mode -> VDL2 freqs=%s (from %s)", freqs, request.remote_addr)
-            err, detail = _enter_vdl2(freqs)
-            if err:
-                log.warning("enter VDL2 failed: %s", err)
-                # נכשל => מנסים לחזור לקול האחרון כדי לא להשאיר SDR בלי צרכן
-                try:
-                    write_config(st["freq"], st["mod"], st["agc"], st["if_gain"],
-                                 st["rf_gain"], st["squelch_mode"], st["squelch_snr"])
-                    _sysctl("restart", "rtl_airband", timeout=45)
-                except Exception:
-                    pass
-                return jsonify(ok=False, error=err, detail=detail,
-                               state={**st, "app_mode": "voice"}), 500
-            new_state = {**st, "app_mode": "vdl2", "vdl2_freqs": freqs}
-            save_state(new_state)
-            return jsonify(ok=True, app_mode="vdl2", vdl2_freqs=freqs)
-        finally:
-            TUNE_LOCK.release()
-
-    if mode == "acars":
-        if not TUNE_LOCK.acquire(blocking=False):
-            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב",
-                           state=load_state()), 409
-        try:
-            st = load_state()
-            freqs = _sanitize_freqs(data.get("freqs") or st.get("acars_freqs"))
-            werr = _acars_window_error(freqs)        # חייב להיכנס בחלון דגימה אחד
-            if werr:
-                return jsonify(ok=False, error=werr, state=load_state()), 400
-            log.info("mode -> ACARS freqs=%s (from %s)", freqs, request.remote_addr)
-            err, detail = _enter_acars(freqs)
-            if err:
-                log.warning("enter ACARS failed: %s", err)
-                # נכשל => מנסים לחזור לקול האחרון כדי לא להשאיר SDR בלי צרכן
-                try:
-                    write_config(st["freq"], st["mod"], st["agc"], st["if_gain"],
-                                 st["rf_gain"], st["squelch_mode"], st["squelch_snr"])
-                    _sysctl("restart", "rtl_airband", timeout=45)
-                except Exception:
-                    pass
-                return jsonify(ok=False, error=err, detail=detail,
-                               state={**st, "app_mode": "voice"}), 500
-            new_state = {**st, "app_mode": "acars", "acars_freqs": freqs}
-            save_state(new_state)
-            return jsonify(ok=True, app_mode="acars", acars_freqs=freqs)
-        finally:
-            TUNE_LOCK.release()
-
-    if mode == "off":
-        # כיבוי (standby): עוצר את שני צרכני ה-SDR ומשחרר את ה-RSP1B ליישום אחר.
-        # airam-web/הדף נשארים פעילים => אפשר להדליק שוב מה-UI בכל רגע.
-        if not TUNE_LOCK.acquire(blocking=False):
-            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב",
-                           state=load_state()), 409
-        try:
-            log.info("mode -> OFF (standby) (from %s)", request.remote_addr)
-            err, detail = _enter_standby()
-            if err:
-                log.warning("enter standby failed: %s", err)
-                return jsonify(ok=False, error=err, detail=detail, state=load_state()), 500
-            new_state = {**load_state(), "app_mode": "off"}
-            save_state(new_state)
-            return jsonify(ok=True, app_mode="off")
-        finally:
-            TUNE_LOCK.release()
+    if mode not in ("voice", "acars", "vdl2", "off"):
+        return jsonify(ok=False, error="mode לא תקין (voice/acars/vdl2/off)"), 400
 
     if mode == "voice":
-        # חוזר לקול עם ההגדרות השמורות האחרונות (כולל התדר האחרון שהאזנו לו)
+        # קול = כיוונון להגדרות השמורות האחרונות (או מפורשות). _voice_tune מחזיק
+        # את ה-TUNE_LOCK בעצמו => לא לוקחים אותו כאן (deadlock).
         st = load_state()
         params, perr = _parse_tune(data if "freq" in data else st)
         if perr:   # state פגום => נופלים לברירת מחדל
@@ -2392,27 +2373,116 @@ def api_mode():
         payload, status = _voice_tune(params)
         return jsonify(payload), status
 
-    return jsonify(ok=False, error="mode לא תקין (voice/acars/vdl2/off)"), 400
+    if not TUNE_LOCK.acquire(blocking=False):
+        return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב",
+                       state=load_state()), 409
+    try:
+        st = load_state()
+        if mode == "off":
+            # כיבוי (standby): עוצר את כל צרכני ה-SDR ומשחרר את ה-RSP1B ליישום
+            # אחר. airam-web/הדף נשארים פעילים => אפשר להדליק שוב מה-UI בכל רגע.
+            log.info("mode -> OFF (standby) (from %s)", request.remote_addr)
+            err, detail = _enter_standby()
+            if err:
+                log.warning("enter standby failed: %s", err)
+                return jsonify(ok=False, error=err, detail=detail, state=st), 500
+            # prev_mode => כפתור ההדלקה ב-UI מחזיר את המצב האחרון, בלי לקודד קול
+            new_state = {**st, "app_mode": "off",
+                         "prev_mode": st.get("app_mode", "off")}
+            save_state(new_state)
+            return jsonify(ok=True, app_mode="off")
+
+        # acars / vdl2 — מסלול דאטה סימטרי
+        key, default, wcheck, enter = (
+            ("acars_freqs", ACARS_FREQS_DEFAULT, _acars_window_error, _enter_acars)
+            if mode == "acars" else
+            ("vdl2_freqs", VDL2_FREQS_DEFAULT, _vdl2_window_error, _enter_vdl2))
+        freqs = _sanitize_freqs(data.get("freqs") or st.get(key), default)
+        werr = wcheck(freqs)                     # חייב להיכנס בחלון דגימה אחד
+        if werr:
+            return jsonify(ok=False, error=werr, state=st), 400
+        log.info("mode -> %s freqs=%s (from %s)", mode, freqs, request.remote_addr)
+        err, detail = enter(freqs)
+        if err:
+            payload, status = _fail_to_off(st, err, detail, "enter " + mode)
+            return jsonify(payload), status
+        new_state = {**st, "app_mode": mode, key: freqs}
+        save_state(new_state)
+        return jsonify(ok=True, app_mode=mode, **{key: freqs})
+    finally:
+        TUNE_LOCK.release()
+
+
+# --- שחזור מצב באתחול: airam-web הוא המתזמר ---------------------------------
+BOOT_SDR_WAIT_SEC = 90    # המתנה ל-SDR באתחול לפני ניסיון כניסה (USB enumeration איטי)
+
+
+def _config_stale():
+    """קונפיג הקול חסר או ישן (שדרוג: בלי stats_filepath למדדי RF / localtime
+    להקלטות) => צריך שכתוב לפני שמרימים את rtl_airband."""
+    try:
+        cur = CONFIG_PATH.read_text()
+    except OSError:
+        return True
+    return "stats_filepath" not in cur or "localtime" not in cur
+
+
+def _boot_restore():
+    """אורקסטרציית אתחול: אף צרכן SDR אינו enabled ב-systemd — airam-web (שעולה
+    תמיד) קורא את state.json ומחזיר את המצב השמור, כולל off. כך המצב הנבחר שורד
+    reboot בלי מצב ראשי ובלי הרחבת sudoers (רק restart/stop הקיימים).
+    רץ ב-thread daemon => לא חוסם את app.run; כל כישלון => off + לוג, לעולם לא
+    מפיל את שרת הווב."""
+    try:
+        st = load_state()
+        mode = st.get("app_mode", "off")
+        live = _live_mode()
+        if live == mode and not (mode == "voice" and _config_stale()):
+            return   # restart של airam-web באמצע סשן: הצרכן השמור כבר רץ
+        if mode == "off":
+            if live:   # אחרי reboot ממילא כלום לא רץ => no-op
+                _enter_standby()
+            return
+        # המתנה ל-SDR לפני הכניסה: ב-boot קר ה-USB עוד לא תמיד enumerated,
+        # ו-airam-wait-sdrplay (ExecStartPre) מכסה רק ~30 שניות נוספות.
+        for _ in range(BOOT_SDR_WAIT_SEC // 2):
+            if _sdr_present():
+                break
+            time.sleep(2)
+        if not TUNE_LOCK.acquire(blocking=False):
+            return   # המשתמש כבר בחר מצב מה-UI — כוונתו גוברת על השחזור
+        try:
+            if mode == "voice":
+                params, perr = _parse_tune(st)
+                if perr:   # state פגום => ברירת מחדל
+                    params, _ = _parse_tune(DEFAULT_STATE)
+                err, detail, sdr_down = _enter_voice(params)
+                if err and sdr_down:
+                    # הכוונה נשמרת: Restart=always של היחידה ימשיך לנסות,
+                    # udev ירים את sdrplay כשה-SDR יחובר; health מראה תקלה.
+                    log.warning("boot restore: SDR לא נוכח — הקול יעלה כשיחובר")
+                    return
+            elif mode == "acars":
+                err, _detail = _enter_acars(st.get("acars_freqs"))
+            else:
+                err, _detail = _enter_vdl2(st.get("vdl2_freqs"))
+            if err:
+                log.warning("boot restore -> %s failed: %s — falling to off", mode, err)
+                _enter_standby()
+                save_state({**st, "app_mode": "off", "prev_mode": mode})
+            else:
+                log.info("boot restore -> %s", mode)
+        finally:
+            TUNE_LOCK.release()
+    except Exception:
+        log.exception("boot restore crashed (ignored)")
 
 
 if __name__ == "__main__":
-    # ודא קובץ הגדרות עדכני: חסר => כותבים; קיים בלי תכונה שהממשק מסתמך עליה
-    # (שדרוג מגרסה ישנה: stats_filepath למדדי RF, localtime להקלטות) =>
-    # משכתבים ומרימים את rtl_airband פעם אחת כדי שהתכונות יפעלו.
-    try:
-        _cur = CONFIG_PATH.read_text()
-    except OSError:
-        _cur = None
-    if _cur is None or "stats_filepath" not in _cur or "localtime" not in _cur:
-        st = load_state()
-        write_config(st["freq"], st["mod"], st["agc"], st["if_gain"],
-                     st["rf_gain"], st["squelch_mode"], st["squelch_snr"])
-        if _cur is not None:   # שדרוג: השירות כבר רץ עם ההגדרות הישנות
-            try:
-                subprocess.run([*SUDO, "systemctl", "restart", "rtl_airband"],
-                               capture_output=True, timeout=60)
-            except Exception:
-                pass
+    # אין צרכן SDR enabled ב-systemd => שחזור המצב השמור (voice/acars/vdl2/off)
+    # נעשה כאן, ברקע. מכסה גם שדרוג קונפיג (stats_filepath/localtime) — כניסה
+    # לקול תמיד משכתבת את הקונפיג מה-state.
+    threading.Thread(target=_boot_restore, daemon=True).start()
     REC_DIR.mkdir(parents=True, exist_ok=True)
     threading.Thread(target=_activity_watcher, daemon=True).start()
     _load_acars_history()                                           # היסטוריית ACARS שורדת restart (לפני ה-listener)

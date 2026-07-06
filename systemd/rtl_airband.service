@@ -22,5 +22,6 @@ User=root
 Restart=always
 RestartSec=10
 
-[Install]
-WantedBy=multi-user.target
+# אין [Install] בכוונה: השירות *לא* enabled (לא עולה באתחול). כמו airam-acars
+# ו-airam-vdl2 — airam-web (המתזמר) קורא את state.json באתחול ומפעיל את המצב
+# השמור. אין "מצב ראשי": קול/ACARS/VDL2 שווי-מעמד, וכיבוי (off) שורד reboot.

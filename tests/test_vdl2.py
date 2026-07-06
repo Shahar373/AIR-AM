@@ -301,13 +301,20 @@ def test_api_mode_enter_vdl2(client, paths, no_sleep, monkeypatch):
     assert f"VDL2_FREQS={expect}" in app.VDL2_ENV_PATH.read_text()
 
 
-def test_api_mode_enter_vdl2_failure_recovers_voice(client, paths, no_sleep, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "freq": 121.5})
-    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+def test_api_mode_enter_vdl2_failure_falls_to_off(client, paths, no_sleep, monkeypatch):
+    # אין fallback לקול: כישלון כניסה למצב נופל ל-off (standby) — המצבים שווי-מעמד
+    app.save_state({**app.DEFAULT_STATE, "freq": 121.5, "app_mode": "acars"})
+    calls = []
+    monkeypatch.setattr(app, "_sysctl",
+                        lambda action, svc, timeout=45: calls.append((action, svc)) or _ok())
     monkeypatch.setattr(app, "_is_active", lambda svc: False)  # dumpvdl2 לא עלה => כישלון
     r = client.post("/api/mode", json={"mode": "vdl2"})
     assert r.status_code == 500
-    assert r.get_json()["state"]["app_mode"] == "voice"        # חזרה לקול
+    body = r.get_json()
+    assert body["app_mode"] == "off" and body["state"]["app_mode"] == "off"
+    assert body["state"]["prev_mode"] == "acars"               # המצב שממנו ניסינו לעבור
+    assert app.load_state()["app_mode"] == "off"
+    assert ("restart", "rtl_airband") not in calls             # שום ניסיון "לחזור לקול"
 
 
 def test_api_mode_vdl2_rejects_wide_window(client, paths, monkeypatch):
@@ -411,6 +418,19 @@ def test_api_health_off_not_fault_with_vdl2(client, paths, monkeypatch):
     monkeypatch.setattr(app, "_sdr_present", lambda: True)
     body = client.get("/api/health").get_json()
     assert body["ok"] and body["app_mode"] == "off"            # standby ≠ תקלה
+
+
+def test_api_health_fault_when_saved_mode_not_running(client, paths, monkeypatch):
+    # המצב השמור (vdl2) אמור לרוץ אבל אף צרכן לא פעיל => תקלה מדווחת עם המצב
+    # המקורי — לא טענת-"voice" שקטה כמו פעם
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "vdl2"})
+    def run(cmd, **kw):
+        active = "active" if cmd[-1] in ("sdrplay", "icecast2") else "inactive"
+        return types.SimpleNamespace(returncode=0, stdout=active, stderr="")
+    monkeypatch.setattr(app.subprocess, "run", run)
+    monkeypatch.setattr(app, "_sdr_present", lambda: True)
+    body = client.get("/api/health").get_json()
+    assert body["ok"] is False and body["app_mode"] == "vdl2"
 
 
 # --- התמדה: vdl2.jsonl -------------------------------------------------------
