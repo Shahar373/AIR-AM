@@ -7,6 +7,14 @@
 מוסכמה: כל PR מעדכן את `VERSION` ומוסיף שורות תחת `[Unreleased]`; בעת מיזוג ל-main
 מקדמים לכותרת גרסה ומתייגים את ה-commit.
 
+## [Unreleased]
+### תוקן
+- **`airam-vdl2.service` נכשל לעלות תמיד** — ה-`ExecStart` השתמש בדגל `--sample-rate`
+  שאינו קיים ב-dumpvdl2; הפרסר הפנימי שלו מדפיס usage ויוצא מיד (נראה בלוג כ"נכשל
+  לעלות" / "Deactivated successfully" אחרי הדפסת ה-help). קצב הדגימה של dumpvdl2 נגזר
+  מ-`--oversample` (`sample_rate = 105000 * oversample`); הוחלף ב-`--oversample 20`
+  שנותן את אותם 2.1MS/s שהיו מיועדים.
+
 ## [1.15.0] - 2026-07-06
 ### נוסף
 - **מבנה "חדר בקרה" — App Shell + גריד דשבורד** (רסטרקטורינג ויזואלי של `static/index.html`;

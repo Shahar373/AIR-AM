@@ -27,9 +27,12 @@ ExecStartPre=/usr/local/bin/airam-wait-sdrplay
 # ריק (ברירת מחדל) פשוט נעלם => AGC של הדרייבר. ‎${VDL2_MSG_FILTER} *עם* סוגריים
 # => ארגומנט יחיד (token בלי רווחים). התדרים ב-*Hz* (ראה vdl2.env).
 # הפורט (5557) חייב להתאים ל-VDL2_UDP_PORT ב-webtune/app.py.
+# ⚠ ל-dumpvdl2 *אין* דגל ‎--sample-rate — קצב הדגימה נגזר מ-‎--oversample
+# (sample_rate = 105000 * oversample). דגל לא-קיים גורם ל-dumpvdl2 להדפיס usage
+# ולהיכשל מיד (ExitFailure מהיר, נראה כ"נכשל לעלות"). oversample=20 => 2.1MS/s.
 # fallback שטח אם מסלול ה-SoapySDR מתנהג רע על החומרה: החלף את הקלט ב-
 #   --sdrplay3 0 --gr 40   (הדרייבר הנייטיבי; RSP1B נתמך מ-dumpvdl2 v2.6.0)
-ExecStart=/usr/local/bin/dumpvdl2 --soapysdr driver=sdrplay --sample-rate 2100000 $VDL2_GAIN --msg-filter ${VDL2_MSG_FILTER} --output decoded:json:udp:address=127.0.0.1,port=5557 $VDL2_FREQS
+ExecStart=/usr/local/bin/dumpvdl2 --soapysdr driver=sdrplay --oversample 20 $VDL2_GAIN --msg-filter ${VDL2_MSG_FILTER} --output decoded:json:udp:address=127.0.0.1,port=5557 $VDL2_FREQS
 # גישת חומרה (SDR) => כמו rtl_airband, רץ כ-root
 User=root
 Restart=always
