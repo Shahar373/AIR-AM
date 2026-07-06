@@ -392,14 +392,18 @@ cp "$REPO_DIR/systemd/airam-web.service"    /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-acars.service"  /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-vdl2.service"   /etc/systemd/system/
 systemctl daemon-reload
-# airam-acars ו-airam-vdl2 *לא* enabled בכוונה: מצב ברירת המחדל הוא קול (rtl_airband),
-# ו-airam-web מפעיל/עוצר אותם לפי בחירת המצב. Conflicts ב-units מבטיח שלא ירוצו יחד.
-systemctl enable sdrplay.service rtl_airband.service airam-web.service
+# אף צרכן SDR (rtl_airband / airam-acars / airam-vdl2) אינו enabled בכוונה:
+# אין "מצב ראשי" — airam-web (המתזמר, enabled) קורא את state.json באתחול ומשחזר
+# את המצב השמור האחרון, כולל off. Conflicts ב-units מבטיח שלא ירוצו יחד.
+systemctl enable sdrplay.service airam-web.service
+# שדרוג מגרסה ישנה (rtl_airband היה enabled ועלה תמיד באתחול) — אידמפוטנטי.
+systemctl disable rtl_airband.service >/dev/null 2>&1 || true
 # restart (ולא enable --now שהוא no-op לשירות שכבר רץ!) - אחרת בעדכון
 # הבינארי/הקוד/ה-units החדשים לא נטענים והשירותים ממשיכים לרוץ עם הישנים.
+# restart של sdrplay מרים דרך PartOf (try-restart) את צרכן ה-SDR *הפעיל כרגע*
+# ויהיה אשר יהיה — בלי להעיף משתמשי ACARS/VDL2 לקול כמו ה-restart הגורף הישן.
 systemctl restart sdrplay.service || warn "sdrplay.service לא עלה - בדוק חיבור ה-RSP1B."
 sleep 2
-systemctl restart rtl_airband.service || warn "rtl_airband לא עלה - בדוק journalctl -u rtl_airband"
 systemctl restart airam-web.service || warn "airam-web לא עלה - בדוק journalctl -u airam-web"
 
 IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"

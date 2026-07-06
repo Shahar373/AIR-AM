@@ -1,5 +1,7 @@
 [Unit]
 Description=AIR-AM web tuner (frequency selector UI)
+# airam-web הוא המתזמר (orchestrator) של ה-SDR: השירות היחיד שקם באתחול מבין
+# מפעילי-המצבים — קורא את state.json ומשחזר את המצב השמור (voice/acars/vdl2/off).
 After=network-online.target icecast2.service
 Wants=network-online.target
 

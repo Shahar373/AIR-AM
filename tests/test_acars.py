@@ -140,13 +140,33 @@ def test_api_mode_enter_acars(client, paths, no_sleep, monkeypatch):
     assert ("ACARS_FREQS=" + " ".join(app.ACARS_FREQS_DEFAULT)) in app.ACARS_ENV_PATH.read_text()
 
 
-def test_api_mode_enter_acars_failure_recovers_voice(client, paths, no_sleep, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "freq": 121.5})
-    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+def test_api_mode_enter_acars_failure_falls_to_off(client, paths, no_sleep, monkeypatch):
+    # אין fallback לקול: כישלון כניסה למצב נופל ל-off (standby) — המצבים שווי-מעמד
+    app.save_state({**app.DEFAULT_STATE, "freq": 121.5, "app_mode": "voice"})
+    calls = []
+    monkeypatch.setattr(app, "_sysctl",
+                        lambda action, svc, timeout=45: calls.append((action, svc)) or _ok())
     monkeypatch.setattr(app, "_is_active", lambda svc: False)  # acarsdec לא עלה => כישלון
     r = client.post("/api/mode", json={"mode": "acars"})
     assert r.status_code == 500
-    assert r.get_json()["state"]["app_mode"] == "voice"        # חזרה לקול
+    body = r.get_json()
+    assert body["app_mode"] == "off"                           # החוזה ל-UI: נחיתה בבית
+    assert body["state"]["app_mode"] == "off"
+    assert body["state"]["prev_mode"] == "voice"               # מה היה לפני הכישלון
+    assert app.load_state()["app_mode"] == "off"               # נשמר => שורד reboot
+    assert ("restart", "rtl_airband") not in calls             # שום ניסיון "לחזור לקול"
+    # standby עצר את כל הצרכנים
+    for svc in (app.ACARS_SERVICE, app.VDL2_SERVICE, "rtl_airband"):
+        assert ("stop", svc) in calls
+
+
+def test_api_mode_failure_response_shape(client, paths, no_sleep, monkeypatch):
+    # חוזה תשובת הכישלון של /api/mode — ה-UI מסתמך על המפתחות האלה
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)
+    body = client.post("/api/mode", json={"mode": "acars"}).get_json()
+    assert set(body) >= {"ok", "error", "detail", "app_mode", "state"}
+    assert body["ok"] is False and body["app_mode"] == "off"
 
 
 def test_api_mode_voice_stops_acars_and_tunes(client, paths, monkeypatch):
@@ -181,10 +201,26 @@ def test_api_tune_exits_acars_mode(client, paths, monkeypatch):
 def test_api_state_reports_live_mode(client, paths, monkeypatch):
     monkeypatch.setattr(app, "_is_active", lambda svc: svc == app.ACARS_SERVICE)
     assert client.get("/api/state").get_json()["app_mode"] == "acars"
+    # אף צרכן לא פעיל => הכוונה השמורה (בלי state שמור: ברירת המחדל הניטרלית off)
     monkeypatch.setattr(app, "_is_active", lambda svc: False)
     body = client.get("/api/state").get_json()
-    assert body["app_mode"] == "voice"
+    assert body["app_mode"] == "off"
+    assert body["mode_ok"] is True                 # standby מכוון אינו תקלה
     assert body["acars_freqs"] == list(app.ACARS_FREQS_DEFAULT)
+
+
+def test_api_state_idle_reports_saved_intent(client, paths, monkeypatch):
+    # המצב השמור אמור לרוץ אבל אף צרכן לא פעיל => מדווח את הכוונה + mode_ok=False
+    # (תקלה גלויה, לא "voice" שקט כמו פעם)
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "acars"})
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)
+    body = client.get("/api/state").get_json()
+    assert body["app_mode"] == "acars"
+    assert body["mode_ok"] is False
+    # מציאות-תחילה עדיין מנצחת: שירות פעיל דורס כוונה שמורה אחרת
+    monkeypatch.setattr(app, "_is_active", lambda svc: svc == app.VDL2_SERVICE)
+    body = client.get("/api/state").get_json()
+    assert body["app_mode"] == "vdl2" and body["mode_ok"] is True
 
 
 # --- התמדה: acars.jsonl + טעינה בעלייה --------------------------------------

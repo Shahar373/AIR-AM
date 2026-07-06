@@ -67,6 +67,13 @@
 Conflicts מול *שני* האחרים => כל הזוגות מכוסים, דו-כיווני) — הפעלת אחת עוצרת אוטומטית
 את השאר. **אי אפשר שניים מהם בו-זמנית עם SDR אחד.** מעבר מצב = ~3 שניות.
 
+**תפיסת ההפעלה — אין "מצב ראשי", airam-web הוא המתזמר:** קול/ACARS/VDL2 הם
+"אפליקציות" שוות-מעמד על משאב ה-SDR, ו-`off` (standby) הוא המצב הניטרלי היחיד.
+**אף צרכן SDR אינו enabled ב-systemd** (גם לא rtl_airband!) — `airam-web` (שעולה
+תמיד) קורא את `state.json` באתחול ומשחזר את המצב השמור דרך `_boot_restore` =>
+**המצב שורד reboot, כולל off**. כישלון כניסה לכל מצב נופל ל-`off` עם שגיאה ב-UI
+(`_fail_to_off`) — **לעולם אין fallback לקול**. עצירה מכל מצב = standby (מסך הבית).
+
 ---
 
 ## 3. מבנה המאגר (file-by-file)
@@ -84,7 +91,8 @@ webtune/
   adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS. thread נפרד.
                             #   ניתן להרצה ידנית: `python3 adsb.py [--selftest]`.
   static/
-    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~3200 שורות). PWA. תצוגת VDL2
+    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~3900 שורות). PWA. 4 תצוגות:
+                            #   🏠 מרכז (בית/standby) + קול + ACARS + VDL2. תצוגת VDL2
                             #   בפקטורי createDataView (מופע נפרד מ-ACARS — אפס רגרסיה).
     manifest.webmanifest    # PWA manifest (התקנה כאפליקציה).
     sw.js                   # Service Worker (נדרש HTTPS).
@@ -98,11 +106,12 @@ config/
                           #   ⚠ התדרים ב-Hz (dumpvdl2), בעוד state/UI ב-MHz.
 
 systemd/
-  sdrplay.service          # שירות SDRplay API.
-  rtl_airband.service      # קול. Requires=sdrplay, Conflicts=airam-acars. root. Restart=always.
-  airam-acars.service      # ACARS. Conflicts=rtl_airband. *לא* enabled (מופעל לפי המצב ב-UI). root.
+  sdrplay.service          # שירות SDRplay API. enabled.
+  rtl_airband.service      # קול. Requires=sdrplay, בלי [Install] — *לא* enabled. root. Restart=always.
+  airam-acars.service      # ACARS. Conflicts=rtl_airband. *לא* enabled. root.
   airam-vdl2.service       # VDL2 (dumpvdl2). Conflicts=rtl_airband+airam-acars. *לא* enabled. root.
-  airam-web.service        # שרת הווב. User=airam (לא-root). Restart=always.
+                           #   אף צרכן SDR לא עולה באתחול — airam-web (המתזמר) משחזר את המצב השמור.
+  airam-web.service        # שרת הווב + המתזמר. enabled. User=airam (לא-root). Restart=always.
 
 scripts/
   airam-wait-sdrplay       # שער מוכנות (ExecStartPre): מחכה שה-API *באמת* יענה, ומרים
@@ -113,9 +122,10 @@ udev/
 
 tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/systemd ממוקפים).
   conftest.py              # מוסיף webtune/ ל-sys.path.
-  test_app.py              # render_config, parse, presets, מדדים, יומן (389 שורות).
-  test_acars.py            # נרמול ACARS, latlon, labels, ATIS, OOOI, actype (453 שורות).
-  test_vdl2.py             # נרמול VDL2 (מסלול A/B), env, מעברי מצב, ייצוא (35 טסטים).
+  test_app.py              # render_config, parse, presets, מדדים, יומן, רולבק/נפילה-ל-off.
+  test_acars.py            # נרמול ACARS, latlon, labels, ATIS, OOOI, actype, מעברי מצב.
+  test_vdl2.py             # נרמול VDL2 (מסלול A/B), env, מעברי מצב, ייצוא, health.
+  test_boot.py             # _boot_restore: שחזור המצב באתחול (המתזמר) — 11 בדיקות.
   test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
 
 .github/workflows/ci.yml   # pytest + `bash -n` על install.sh ו-airam-wait-sdrplay.
@@ -158,7 +168,14 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 - **בניית קונפיג קול:** `render_config` → `write_config` (כתיבה אטומית), `_squelch_line`
   (מקור-אמת יחיד לשורת ה-squelch). תמיד ערוץ יחיד ממורכז (centerfreq מוסט ב-DC_OFFSET).
 - **restart מאומת + רולבק:** `_restart_and_verify` בודק שה-SDR נוכח ושהשירות עלה;
-  `_rollback` מחזיר לקונפיג קודם אם נכשל. כיוונון אחד בכל רגע (`TUNE_LOCK`).
+  `_rollback` מחזיר לקונפיג קודם אם נכשל **ומאומת** (מחזיר bool; כישלון ⇒ `_fail_to_off`).
+  כיוונון אחד בכל רגע (`TUNE_LOCK`).
+- **רגיסטרי מצבים (שוויון מצבים):** `MODE_SERVICE` (מצב→שירות), `_live_mode()` (המצב
+  שרץ בפועל או None), `_enter_voice` (peer סימטרי של `_enter_acars`/`_enter_vdl2`:
+  עצירת צרכני דאטה + write_config + verify), `_fail_to_off` (כישלון כניסה ⇒ standby +
+  state off+prev_mode + payload 500 — **לעולם לא fallback לקול**). `/api/mode` הוא
+  dispatcher מאוחד לארבעת המצבים. `_boot_restore` (thread ב-startup) משחזר את המצב
+  השמור באתחול — ה-orchestration שמאפשר לאף צרכן לא להיות enabled ב-systemd.
 - **ACARS:** `_acars_listener` (thread, מאזין UDP 5556), `_normalize_acars` (הלב —
   ממיר JSON גולמי לכרטיס אחיד: label→קטגוריה+כיוון, חילוץ נ"צ, ARINC-622, actype),
   `_text_latlon`/`_scan_latlon` (חילוץ מיקום), פרסרים לפי label: `_parse_atis` (A9),
@@ -182,8 +199,10 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   `_append_vdl2_log`/`_trim_vdl2_log`/`_load_vdl2_history` (clones של צמד ה-ACARS).
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_transcribe_worker` (thread whisper אופציונלי), `_sweep_recordings` (retention).
-- **`__main__`:** מבטיח קונפיג עדכני, מרים threads (activity, acars, **vdl2**, transcribe,
-  adsb), `app.run(threaded=True)` — threaded **חובה** כי `/stream` הוא חיבור ארוך-טווח.
+- **`__main__`:** מרים את thread השחזור `_boot_restore` (מחזיר את המצב השמור, כולל
+  שכתוב קונפיג ישן בשדרוג — `_config_stale`) + threads (activity, acars, **vdl2**,
+  transcribe, adsb), `app.run(threaded=True)` — threaded **חובה** כי `/stream` הוא
+  חיבור ארוך-טווח.
 
 ---
 
@@ -213,9 +232,14 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 ## 7. ה-UI (`static/index.html`)
 
 HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע ברקע).
-מתג מצב 📻/📡/🛰️ בראש. הדף מושך מצב מ-`/api/*` ב-polling. עיצוב responsive (multi-column
-בטאבלט/דסקטופ). **אין build step** — עורכים את הקובץ ישירות. Leaflet vendored תחת
-`static/vendor/` (בלי CDN, עובד גם בלי אינטרנט — אריחי OSM יורדים חיננית בלי רשת).
+מתג תצוגות 🏠/📻/📡/🛰️ בראש — **🏠 מרכז (מסך הבית)** הוא ברירת המחדל והנחיתה של
+מצב off: כרטיס סטטוס, שלושה כרטיסי הפעלה שווי-מעמד (`renderHome`/`showHomeError`),
+ופאנלי המסלולים/METAR (מערכתיים — עברו לכאן מתצוגת הקול). הדף מושך מצב מ-`/api/*`
+ב-polling; ה-pollers של airspace/power/METAR רצים בכל תצוגה, metrics/activity רק
+בקול, ו-`pollGlobalState` (10ש', `/api/health`) מיישר את חיווי המצב למציאות בלי
+לחטוף את הטאב. כפתורי עצירה ⇒ `applyMode("off")`; כפתור ⏻ מחזיר את `prev_mode`.
+עיצוב responsive (multi-column בטאבלט/דסקטופ). **אין build step** — עורכים את הקובץ
+ישירות. Leaflet vendored תחת `static/vendor/` (בלי CDN, עובד גם בלי אינטרנט).
 
 **טוקני עיצוב ב-`:root`:** גיאומטריה (`--r-card`/`--r-ctrl`/`--r-sm`), מרווח (`--sp-1..5`,
 בסיס 4px), הצללה (`--sh-card`/`--sh-1`/`--sh-blue`), משטחים (`--panel`/`--panel-2`/`--hover`)
@@ -227,7 +251,8 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 (closures) עם state/מפה/buffers משלו, לגמרי נפרד מ-ACARS (⇒ אפס רגרסיה ל-ACARS; ה-DOM
 של `#vdl2View` משתמש חוזר במחלקות ה-CSS `.acars-*`, אפס CSS חדש). הפקטורי עושה שימוש
 חוזר בעוזרים ה*טהורים* הגלובליים בלבד (`fmtTime`/`mkSpan`/`dirBadge`/`normReg`/`trackColor`/
-`CAT_GROUPS`/`MULTIBLOCK_RE`/`segSet`). `showView`/`applyMode` מרובעים (voice/acars/vdl2/off).
+`CAT_GROUPS`/`MULTIBLOCK_RE`/`segSet`). `showView` מרובע (home/voice/acars/vdl2);
+`applyMode` מרובע (voice/acars/vdl2/off — off נוחת בתצוגת home).
 
 > בעריכת ה-UI: שמור על polling קל, על נפילה חיננית בלי רשת, ועל RTL/עברית נכונה.
 > שינוי שנוגע בשתי התצוגות — עדכן גם את קוד ה-ACARS וגם את הפקטורי (הם אינם משתפים קוד stateful).
@@ -242,10 +267,10 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 | GET | `/<path>` | נכסים סטטיים |
 | GET | `/live.m3u` | playlist לנגן חיצוני |
 | GET | `/stream` | proxy same-origin ל-Icecast (נדרש כש-HTTPS, mixed-content) |
-| GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `acars_banks`, `vdl2_banks`, `vdl2_freqs`) |
+| GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`) |
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
-| POST | `/api/mode` | **מעבר מצב** voice/acars/**vdl2**/**off** (standby). דרך `_guard`. |
+| POST | `/api/mode` | **מעבר מצב** voice/acars/**vdl2**/**off** (standby). דרך `_guard`. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
 | GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM) |
 | GET | `/api/vdl2` | הודעות VDL2 אחרונות (**היום בלבד**; `?all=1`) + שדה `adsb`. אותה סכמת כרטיס כמו ACARS + `icao` |
@@ -284,11 +309,13 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 5. `Icecast2` (מאזין בלי סיסמה). 6. קונפיג התחלתי + state (6b: יצירת משתמש `airam` +
 sudoers ממוקד — **6 פקודות systemctl**: restart/stop × rtl_airband/airam-acars/airam-vdl2;
 seeding של `acars.env`+`vdl2.env`). 7. שרת הווב (7b: תמלול whisper אופציונלי,
-`INSTALL_WHISPER=1`). 8. שירותי systemd (`airam-acars` ו-`airam-vdl2` מותקנים אך **לא**
-enabled — מופעלים לפי המצב ב-UI).
+`INSTALL_WHISPER=1`). 8. שירותי systemd — **enabled רק `sdrplay`+`airam-web`**; אף צרכן
+SDR (כולל rtl_airband) לא enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב
+משוחזר באתחול ע"י `_boot_restore` של airam-web.
 
-הסקריפט **בונה מחדש רק כשצריך** (חתימת בנייה פר-רכיב) ובסוף **מפעיל מחדש את כל השירותים**
-→ אין reboot. דגלים: `INSTALL_WHISPER=1` (תמלול), עדכון `SDRPLAY_VER`/`DUMPVDL2_VER` בגרסה חדשה.
+הסקריפט **בונה מחדש רק כשצריך** (חתימת בנייה פר-רכיב) ובסוף מרים את `sdrplay`
+(שמרים דרך PartOf את הצרכן *הפעיל*) ואת `airam-web` → אין reboot ואין העפה של
+משתמשי דאטה לקול. דגלים: `INSTALL_WHISPER=1` (תמלול), עדכון `SDRPLAY_VER`/`DUMPVDL2_VER` בגרסה חדשה.
 
 ---
 
@@ -309,11 +336,16 @@ enabled — מופעלים לפי המצב ב-UI).
 ## 12. מוסכמות וגוצ'אות (קרא לפני שינוי)
 
 - **כיוונון אחד בכל רגע:** RSP1B יחיד = תדר/מצב אחד פעיל. אל תנסה ריבוי ערוצים בו-זמני.
-- **ארבעה מצבי `app_mode`:** `voice` (rtl_airband) · `acars` (acarsdec) · `vdl2` (dumpvdl2) ·
-  `off` (standby — **שלושת** הצרכנים עצורים, ה-SDR פנוי ליישום אחר). `off` **אינו שורד
-  reboot** (רק rtl_airband enabled). `api_state`/`api_health` גוזרים את המצב מהמציאות
-  (מציאות-תחילה, מרובע) + intent; standby ≠ תקלה. `_enter_standby`/`_voice_tune` עוצרים
-  את *שני* הצרכנים האחרים.
+- **ארבעה מצבי `app_mode`, שווי-מעמד:** `voice` (rtl_airband) · `acars` (acarsdec) ·
+  `vdl2` (dumpvdl2) · `off` (standby — **שלושת** הצרכנים עצורים, ה-SDR פנוי ליישום אחר).
+  **אין "מצב ראשי"**: כל המצבים (כולל `off`) **שורדים reboot** — אף צרכן לא enabled,
+  `_boot_restore` של airam-web משחזר את המצב השמור באתחול. **כישלון כניסה למצב ⇒
+  נפילה ל-`off`** (`_fail_to_off`), לעולם לא fallback לקול; חריג יחיד: רולבק *בתוך*
+  כיוונון קול לקונפיג האחרון שעבד (retry, לא עליונות-מצב), וגם הוא מאומת.
+  `api_state`/`api_health` גוזרים את המצב מהמציאות, ובאין צרכן פעיל — מהכוונה
+  השמורה; מצב שמור שלא רץ = תקלה (`mode_ok=False`/`ok=False`), standby ≠ תקלה.
+  ברירת המחדל של state חסר היא `off` (התקנה טרייה נוחתת במסך הבית).
+  `_enter_standby`/`_voice_tune` עוצרים את *שני* הצרכנים האחרים.
 - **בנקי ACARS/VDL2 = חלון אחד כל אחד:** acarsdec/dumpvdl2 מפענחים ערוצים מרובים בתוך
   חלון דגימה אחד (~2MHz). צביר 131.x ו-136.x רחוקים ~5MHz ⇒ לעולם לא יחד. בנק חדש חייב
   לעבור `_acars_window_error`/`_vdl2_window_error` (שניהם wrappers מעל `_window_error`).
