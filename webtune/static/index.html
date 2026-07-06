@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#0a0e14" />
+  <meta name="theme-color" content="#131316" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#f7f7f8" media="(prefers-color-scheme: light)" />
   <title>AIR-AM · בורר תדרים</title>
   <!-- PWA: התקנה כאפליקציה ("הוסף למסך הבית") + שמע ברקע -->
   <link rel="manifest" href="/manifest.webmanifest" />
@@ -17,152 +18,284 @@
   <meta name="apple-mobile-web-app-title" content="AIR-AM" />
   <style>
     :root {
-      color-scheme: dark;
+      color-scheme: light dark;
       /* --- משטחים (סקאלת רום עדינה: הכרטיס "מתרומם" מהרקע דרך ניגודיות משטח, לא רק צל) --- */
-      --bg: #090b10;
-      --panel: #131923;
-      --panel-2: #0e131b;
-      --hover: #1c2634;
+      --bg: #131316;
+      --panel: #1c1d21;
+      --panel-2: #18191c;
+      --hover: #24262b;
       /* --- קווים (hairline עדין + גרסה מודגשת למצב פעיל/פוקוס) --- */
-      --border: #212a37;
-      --border-strong: #303c4d;
+      --border: #2c2e33;
+      --border-strong: #3c3f46;
       /* --- מותג / הדגשה --- */
-      --accent: #4da3ff;
-      --accent-2: #82c2ff;
-      --green: #3fb950;
-      --amber: #d9a93d;
-      --red: #e5534b;
-      --text: #e9eef7;
-      --dim: #93a1b3;
+      --accent: #6ea8fe;
+      --accent-rgb: 110,168,254;
+      --accent-hover: #8bbcff;
+      --accent-2: #a8c7fa;
+      --green: #5fce85;
+      --green-rgb: 95,206,133;
+      --amber: #dcae4d;
+      --amber-rgb: 220,174,77;
+      --red: #ec7b73;
+      --red-rgb: 236,123,115;
+      --purple: #b98bfa;
+      --teal: #4fe0cb;
+      --text: #e8e8ea;
+      --dim: #9a9da3;
+      --dim-rgb: 154,157,163;
       /* טוקנים עזר */
-      --green-fg: #9fe3b1;
-      --amber-fg: #ecd49a;
-      --red-fg: #f1a49e;
-      --text-faint: #5c6878;
-      /* --- גיאומטריה אחידה (רדיוסים) --- */
-      --r-card: 16px;
-      --r-ctrl: 12px;
-      --r-sm: 10px;
+      --green-fg: #b7f0c5;
+      --amber-fg: #f3dba3;
+      --red-fg: #f7b7b1;
+      --text-faint: #63666c;
+      /* משטחי-משנה (מילוי עדין ניטרלי, טבעת מד/פס, מתג כבוי, זכוכית מתג-מצב) */
+      --wash: rgba(255,255,255,.045);
+      --track: rgba(0,0,0,.35);
+      --switch-off: #34373d;
+      --glass: rgba(19,19,22,.72);
+      /* --- גיאומטריה אחידה (רדיוסים) — הודקו לסגנון אפליקציית-בקרה (פינות מדודות) --- */
+      --r-card: 12px;
+      --r-ctrl: 10px;
+      --r-sm: 8px;
       /* --- סקאלת מרווח (בסיס 4px) — קצב אנכי עקבי --- */
       --sp-1: .25rem; --sp-2: .5rem; --sp-3: .75rem; --sp-4: 1rem; --sp-5: 1.5rem;
+      /* --- גופן מונו לקריאוֹת מספריות (מכשור) — stack מערכת בלבד (offline) --- */
+      --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      /* --- גובה הסרגל העליון (appbar+statusbar) — ל-sticky-offset של פאנל המפה --- */
+      --topbar-h: 96px;
       /* --- הצללה מרובדת ורכה (במקום צל שחור אחיד וכבד) --- */
-      --sh-1: 0 1px 2px rgba(0,0,0,.35);
-      --sh-card: 0 1px 1px rgba(0,0,0,.22), 0 12px 30px -16px rgba(0,0,0,.75);
-      --sh-blue: 0 6px 20px rgba(31,111,235,.32);
+      --sh-1: 0 1px 2px rgba(0,0,0,.4);
+      --sh-card: 0 1px 1px rgba(0,0,0,.22), 0 10px 22px -16px rgba(0,0,0,.55);
+      --sh-blue: 0 2px 10px rgba(var(--accent-rgb),.22);
+    }
+    /* מצב בהיר: אותם טוקנים, גוונים ניטרליים-חמים במקום כחול-שחור; ה-fg מוחלף
+       בגוון *כהה* (לא בהיר) של אותו צבע — כדי לשמור ניגודיות טקסט-על-tint על רקע לבן */
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f7f7f8;
+        --panel: #ffffff;
+        --panel-2: #f0f1f3;
+        --hover: #e8e9ec;
+        --border: #dcdde0;
+        --border-strong: #c6c8cc;
+        --accent: #3468d8;
+        --accent-rgb: 52,104,216;
+        --accent-hover: #2657b8;
+        --accent-2: #245bd1;
+        --green: #1c7a37;
+        --green-rgb: 28,122,55;
+        --amber: #93690a;
+        --amber-rgb: 147,105,10;
+        --red: #c22e20;
+        --red-rgb: 194,46,32;
+        --purple: #7c3aed;
+        --teal: #0f9488;
+        --text: #1c1d1f;
+        --dim: #5f6368;
+        --dim-rgb: 95,99,104;
+        --green-fg: #1c7a37;
+        --amber-fg: #8a6208;
+        --red-fg: #b3261e;
+        --text-faint: #80838a;
+        --wash: rgba(0,0,0,.035);
+        --track: rgba(0,0,0,.07);
+        --switch-off: #d6d8dc;
+        --glass: rgba(247,247,248,.72);
+        --sh-1: 0 1px 2px rgba(16,24,40,.06);
+        --sh-card: 0 1px 1px rgba(16,24,40,.03), 0 8px 20px -14px rgba(16,24,40,.12);
+        --sh-blue: 0 2px 8px rgba(var(--accent-rgb),.16);
+      }
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html { height: 100%; }
     body {
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Heebo", sans-serif;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans Hebrew", "Arial Hebrew", Arial, sans-serif;
       -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
       text-rendering: optimizeLegibility;
-      background:
-        radial-gradient(1100px 460px at 50% -8%, rgba(77,163,255,.11) 0%, transparent 60%),
-        var(--bg);
-      background-attachment: fixed;
+      /* רקע שטוח (חדר-בקרה) — הסרגל העליון edge-to-edge, בלי glow ובלי max-width על הגוף */
+      background: var(--bg);
       color: var(--text);
       line-height: 1.5;
       letter-spacing: .003em;
       margin: 0;
-      padding: max(1rem, env(safe-area-inset-top)) 1rem calc(2rem + env(safe-area-inset-bottom));
+      min-height: 100%;
+    }
+    /* עוטף התוכן — נושא את רוחב-העמוד המרכזי (במקום ה-body) כדי שהסרגל יהיה מלא-רוחב */
+    main.content {
+      display: block;
       max-width: 560px;
       margin-inline: auto;
-      min-height: 100%;
+      padding: var(--sp-4) var(--sp-4) calc(2rem + env(safe-area-inset-bottom));
     }
 
     /* ---------- פריסה רספונסיבית (טלפון / טאבלט / מחשב) ---------- */
-    /* ברירת מחדל (טלפון / טאבלט portrait): עמודה אחת, הכרטיסים נערמים כרגיל */
-    .layout { display: flex; flex-direction: column; }
-    .col { display: flex; flex-direction: column; }
 
-    /* טאבלט landscape (Lenovo M8 ~853px) / לפטופ קטן: דאשבורד דו-עמודתי */
+    /* טאבלט landscape (Lenovo M8 ~853px) / לפטופ קטן: גריד דשבורד */
     @media (min-width: 700px) {
-      body { max-width: 940px; }
-      .layout { flex-direction: row; align-items: flex-start; gap: 1rem; }
-      .col-main { flex: 1.1 1 0; min-width: 0; }
-      .col-side { flex: 1 1 0; min-width: 0; }
+      main.content { max-width: 1040px; }
       /* המספר הגדול מתאים לרוחב העמודה ולא לרוחב המסך המלא */
       .freq-display { font-size: clamp(2.6rem, 6vw, 3.6rem); }
-
-      /* ACARS: מפה גדולה לצד הפיד */
-      .acars-body { display: flex; align-items: flex-start; gap: 1rem; }
-      .acars-col-map { flex: 1.3 1 0; min-width: 0; position: sticky; top: .5rem; }
-      .acars-col-feed { flex: 1 1 0; min-width: 0; }
-      .acars-map { height: clamp(360px, 60vh, 560px); }
-      .acars-feed { max-height: 62vh; overflow-y: auto; }
     }
 
-    /* מחשב נייד / דסקטופ: עמודות רחבות יותר + הגדלת ממשק פרופורציונלית */
+    /* מחשב נייד / דסקטופ — צפיפות-מידע גבוהה יותר */
     @media (min-width: 1024px) {
-      html { font-size: 17px; }
-      body { max-width: 1180px; }
-      .layout { gap: 1.4rem; }
-      .acars-body { gap: 1.4rem; }
+      main.content { max-width: 1280px; }
+      .panel-bd { padding: .8rem .95rem; }
+      .presets { gap: .4rem; }
+      .setting { padding: .55rem 0; }
     }
 
-    /* ---------- כותרת ---------- */
-    header { display: flex; align-items: center; gap: .6rem; margin: .1rem 0 1.1rem; }
-    header .logo {
-      font-size: 1.12rem; line-height: 1; flex: none;
-      width: 2.15rem; height: 2.15rem;
+    /* מסך רחב מאוד: שלוש עמודות */
+    @media (min-width: 1440px) {
+      main.content { max-width: 1560px; }
+    }
+
+    /* ---------- סרגל-על (App Bar) + רצועת סטטוס — קבועים לראש המסך ---------- */
+    /* דביק ומלא-רוחב: זכוכית מטושטשת מעל התוכן, גבול תחתון עדין. */
+    .topbar {
+      position: sticky; top: 0; z-index: 1100;
+      background: var(--glass);
+      -webkit-backdrop-filter: saturate(1.6) blur(14px); backdrop-filter: saturate(1.6) blur(14px);
+      border-bottom: 1px solid var(--border);
+      padding-top: env(safe-area-inset-top);
+    }
+    .appbar {
+      display: flex; align-items: center; gap: var(--sp-3);
+      padding: .45rem var(--sp-4); min-height: 52px;
+    }
+    .brand { display: flex; align-items: center; gap: .55rem; flex: none; }
+    .brand .logo {
+      font-size: 1.05rem; line-height: 1; flex: none;
+      width: 2rem; height: 2rem;
       display: inline-flex; align-items: center; justify-content: center;
-      border-radius: 11px;
-      background: linear-gradient(155deg, rgba(77,163,255,.24), rgba(77,163,255,.05));
-      border: 1px solid rgba(77,163,255,.32);
+      border-radius: 9px;
+      background: rgba(var(--accent-rgb),.14);
+      border: 1px solid rgba(var(--accent-rgb),.32);
       box-shadow: inset 0 1px 0 rgba(255,255,255,.07);
     }
-    header h1 { font-size: 1.3rem; margin: 0; font-weight: 800; letter-spacing: .07em; line-height: 1; }
-    header .tag {
-      color: var(--dim); font-size: .72rem; margin-inline-start: auto; text-align: end;
-      font-variant-numeric: tabular-nums; letter-spacing: .01em; line-height: 1.35;
+    .brand-txt { display: flex; flex-direction: column; gap: .1rem; line-height: 1; }
+    .brand-txt h1 { font-size: 1.05rem; margin: 0; font-weight: 700; letter-spacing: .04em; line-height: 1; }
+    .brand-txt .tag {
+      color: var(--dim); font-size: .66rem; font-variant-numeric: tabular-nums;
+      letter-spacing: .01em; line-height: 1; white-space: nowrap;
     }
+    .seg-modes { flex: 1 1 auto; min-width: 0; }
+    .seg-modes.seg { max-width: 420px; margin-inline: auto; }
+    .appbar-end { margin-inline-start: auto; flex: none; display: flex; align-items: center; gap: var(--sp-2); }
 
-    .card {
-      background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
-      border: 1px solid var(--border);
-      border-radius: var(--r-card);
-      padding: 1.1rem;
-      margin-bottom: .85rem;
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.035), var(--sh-card);
+    /* רצועת סטטוס: נורות חיווי חיות ברמת-מערכת (סטטוס/מתח/GPS) — תמיד גלויה */
+    .statusbar {
+      display: flex; align-items: center; gap: var(--sp-2);
+      padding: .3rem var(--sp-4) .45rem;
+      overflow-x: auto; scrollbar-width: none;
+      font-size: .74rem; white-space: nowrap;
+      border-top: 1px solid var(--border);
+    }
+    .statusbar::-webkit-scrollbar { display: none; }
+    .statusbar > * { flex: none; }
+    .statusbar .sb-label { color: var(--text-faint); letter-spacing: .06em; font-weight: 600; }
+    .statusbar .pwr { margin: 0; }
+
+    @media (max-width: 560px) {
+      /* מובייל: מפנים מקום למתג-המצב — מסתירים את טקסט-המותג (הלוגו נשאר) */
+      .brand-txt { display: none; }
+      .seg-modes.seg { max-width: none; }
+      .seg-modes.seg button { padding: .5rem .3rem; font-size: .8rem; }
+      .appbar { gap: var(--sp-2); padding: .45rem .6rem; }
+      .power-btn { padding: .5rem .6rem; }
+      .statusbar { padding-inline: .7rem; }
+    }
+    @media (min-width: 700px) { :root { --topbar-h: 92px; } }
+
+    /* ---------- רכיב פאנל אחיד (אנטומיית חדר-בקרה: כותרת + גוף + כותרת-תחתית) ---------- */
+    .panel {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: var(--r-card); box-shadow: var(--sh-card);
+      display: flex; flex-direction: column; min-width: 0; margin: 0;
+    }
+    .panel-hd {
+      display: flex; align-items: center; gap: var(--sp-2);
+      padding: .5rem .9rem; border-bottom: 1px solid var(--border);
+    }
+    .panel-hd .ttl {
+      font-size: .72rem; font-weight: 700; color: var(--dim);
+      letter-spacing: .07em; margin: 0;
+    }
+    .panel-hd .hd-end { margin-inline-start: auto; display: flex; gap: var(--sp-2); align-items: center; }
+    .panel-tools { padding: .5rem .9rem 0; }
+    .panel-bd { padding: var(--sp-4); min-height: 0; }
+    .panel-ft { padding: var(--sp-3) var(--sp-4); border-top: 1px solid var(--border); }
+    .panel-bd.flush { padding: 0; }
+    /* מדדי RF בתוך פאנל ייעודי — להשטיח את הקופסה הפנימית (הפאנל כבר נותן מסגרת) */
+    .p-rf .panel-bd .rf { background: none; border: 0; margin: 0; padding: 0; }
+
+    /* ---------- גריד הדשבורד (תצוגת קול) ---------- */
+    .dash { display: grid; grid-template-columns: minmax(0,1fr); gap: var(--sp-3); align-items: start; }
+    @media (min-width: 700px) {
+      .dash {
+        grid-template-columns: minmax(0,1.1fr) minmax(0,1fr); gap: var(--sp-4);
+        grid-template-areas:
+          "radio activity"
+          "rf activity"
+          "presets airspace"
+          "presets metar"
+          "settings settings";
+      }
+      .p-radio { grid-area: radio; } .p-rf { grid-area: rf; } .p-presets { grid-area: presets; }
+      .p-activity { grid-area: activity; } .p-airspace { grid-area: airspace; }
+      .p-metar { grid-area: metar; } .p-settings { grid-area: settings; }
+      /* היומן = קונסולה גוללת בתוך העמודה שלו */
+      .p-activity .activity { max-height: 46vh; overflow-y: auto; }
+    }
+    @media (min-width: 1440px) {
+      .dash {
+        grid-template-columns: minmax(0,1.15fr) minmax(0,1fr) minmax(0,1fr);
+        grid-template-areas:
+          "radio activity airspace"
+          "rf activity metar"
+          "presets activity settings"
+          "presets activity settings";
+      }
+      .p-activity .activity { max-height: none; }
     }
 
     /* ---------- תצוגת הרדיו ---------- */
-    .radio { text-align: center; padding-top: .5rem; }
+    /* פאנל הרדיו: התוכן ממורכז (מספר התדר, נגן) */
+    .p-radio .panel-bd { text-align: center; padding-top: .9rem; }
     .pill {
       display: inline-flex; align-items: center; gap: .45rem;
       font-size: .8rem; color: var(--dim);
-      background: rgba(255,255,255,.04);
+      background: var(--wash);
       border: 1px solid var(--border);
       border-radius: 999px; padding: .3rem .8rem;
       min-height: 1.4rem;
     }
-    .pill .dot { width: .55rem; height: .55rem; border-radius: 50%; background: #59626e; flex: none; }
-    .pill.live { color: #9fe3b1; border-color: rgba(63,185,80,.4); }
+    .pill .dot { width: .55rem; height: .55rem; border-radius: 50%; background: var(--text-faint); flex: none; }
+    .pill.live { color: var(--green-fg); border-color: rgba(var(--green-rgb),.4); }
     .pill.live .dot { background: var(--green); animation: pulse 1.6s ease-out infinite; }
-    .pill.busy { color: #ecd49a; border-color: rgba(217,169,61,.4); }
+    .pill.busy { color: var(--amber-fg); border-color: rgba(var(--amber-rgb),.4); }
     .pill.busy .dot { background: var(--amber); animation: pulse 1s ease-out infinite; }
-    .pill.err { color: #f1a49e; border-color: rgba(229,83,75,.45); }
+    .pill.err { color: var(--red-fg); border-color: rgba(var(--red-rgb),.45); }
     .pill.err .dot { background: var(--red); }
     @keyframes pulse {
-      0% { box-shadow: 0 0 0 0 rgba(125,200,140,.45); }
-      100% { box-shadow: 0 0 0 .55rem rgba(125,200,140,0); }
+      0% { box-shadow: 0 0 0 0 rgba(var(--green-rgb),.45); }
+      100% { box-shadow: 0 0 0 .55rem rgba(var(--green-rgb),0); }
     }
 
+    /* מספר התדר: קריאת-מכשור מוצקה (בלי גרדיאנט — סגנון חדר-בקרה נקי) */
     .freq-display {
       direction: ltr;
+      font-family: var(--font-mono);
       font-variant-numeric: tabular-nums;
-      font-weight: 800;
+      font-weight: 600;
       font-size: clamp(3rem, 14vw, 3.9rem);
       line-height: 1;
-      letter-spacing: -.015em;
+      letter-spacing: -.01em;
       margin: .5rem 0 .15rem;
-      color: var(--accent-2);                 /* fallback למקרה שclip לא נתמך */
-      background: linear-gradient(180deg, #aad5ff 0%, var(--accent) 90%);
-      -webkit-background-clip: text; background-clip: text;
-      -webkit-text-fill-color: transparent;
+      color: var(--accent-2);
     }
     .freq-display small { font-size: 1rem; font-weight: 600; letter-spacing: 0;
-      margin-inline-start: .1rem; -webkit-text-fill-color: var(--dim); color: var(--dim); }
+      margin-inline-start: .1rem; color: var(--dim); }
     .freq-name { color: var(--dim); font-size: .88rem; min-height: 1.3em; margin-bottom: .2rem; }
 
     /* ---------- נגן מותאם (ה-<audio> בלי controls; הפקדים שלנו) ---------- */
@@ -172,15 +305,15 @@
       width: 76px; height: 76px; border-radius: 50%;
       display: flex; align-items: center; justify-content: center;
       font-size: 1.7rem; line-height: 1; padding: 0;
-      color: #fff; background: linear-gradient(180deg, #3a8bf9, #1f6feb);
+      color: #fff; background: var(--accent);
       border-color: transparent;
-      box-shadow: 0 8px 24px rgba(31,111,235,.4), inset 0 1px 0 rgba(255,255,255,.22);
+      box-shadow: 0 4px 16px rgba(var(--accent-rgb),.3), inset 0 1px 0 rgba(255,255,255,.22);
     }
-    .play-main:hover { background: linear-gradient(180deg, #4a96fb, #1a5ede); }
+    .play-main:hover { background: var(--accent-hover); }
     .play-main.playing { animation: pulse-blue 1.8s ease-out infinite; }
     @keyframes pulse-blue {
-      0% { box-shadow: 0 6px 20px rgba(31,111,235,.35), 0 0 0 0 rgba(77,163,255,.45); }
-      100% { box-shadow: 0 6px 20px rgba(31,111,235,.35), 0 0 0 .8rem rgba(77,163,255,0); }
+      0% { box-shadow: 0 4px 16px rgba(var(--accent-rgb),.28), 0 0 0 0 rgba(var(--accent-rgb),.4); }
+      100% { box-shadow: 0 4px 16px rgba(var(--accent-rgb),.28), 0 0 0 .7rem rgba(var(--accent-rgb),0); }
     }
     .vol-row { display: flex; align-items: center; gap: .5rem; width: min(240px, 80%);
       color: var(--dim); font-size: .8rem; }
@@ -202,14 +335,14 @@
     .rf canvas { flex: 1; min-width: 0; height: 38px; }
     .rf-row { display: flex; align-items: center; gap: .5rem; font-size: .72rem; color: var(--dim); margin-top: .45rem; }
     .rf-row > span:first-child { min-width: 2.2em; }
-    .rf-row .bar { flex: 1; height: 6px; background: #1a212c; border-radius: 999px; overflow: hidden; }
+    .rf-row .bar { flex: 1; height: 6px; background: var(--track); border-radius: 999px; overflow: hidden; }
     .rf-row .bar i { display: block; height: 100%; width: 0%; border-radius: 999px;
-      background: linear-gradient(90deg, #2f81f7, #7cc4ff); transition: width .35s ease; }
-    .rf-row.noise .bar i { background: #59626e; }
+      background: var(--accent); transition: width .35s ease; }
+    .rf-row.noise .bar i { background: var(--text-faint); }
     .rf-row .val { direction: ltr; font-variant-numeric: tabular-nums; min-width: 5em;
       text-align: end; color: var(--text); }
     .rf.stale { opacity: .45; }
-    .rf .nodata { font-size: .72rem; color: #5c6878; margin: .2rem 0 0; display: none; }
+    .rf .nodata { font-size: .72rem; color: var(--text-faint); margin: .2rem 0 0; display: none; }
     .rf.stale .nodata { display: block; }
 
     /* ---------- מסלולים פעילים (ADS-B) ---------- */
@@ -222,40 +355,36 @@
     }
     .aw-label { font-size: .75rem; color: var(--dim); }
     .aw-rwy {
-      direction: ltr; font-variant-numeric: tabular-nums;
-      font-weight: 800; font-size: 2.2rem; line-height: 1.2;
+      direction: ltr; font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+      font-weight: 700; font-size: 2.2rem; line-height: 1.2;
       display: flex; align-items: baseline; justify-content: center; gap: .35rem;
-      background: linear-gradient(180deg, var(--accent-2), var(--accent));
-      -webkit-background-clip: text; background-clip: text;
-      -webkit-text-fill-color: transparent; color: transparent;
+      color: var(--accent);
     }
     /* מספר הנחיתות ירוק - תואם את צבע המסלול המודגש במפה */
-    .aw-col:first-child .aw-rwy { background: linear-gradient(180deg, #7ee2a8, var(--green));
-      -webkit-background-clip: text; background-clip: text; }
+    .aw-col:first-child .aw-rwy { color: var(--green); }
     .aw-sec {
-      font-size: 1rem; font-weight: 600;
-      -webkit-text-fill-color: var(--accent); color: var(--accent);
+      font-size: 1rem; font-weight: 600; color: var(--accent);
     }
-    .aw-col:first-child .aw-sec { -webkit-text-fill-color: #2e8f43; color: #2e8f43; }
+    .aw-col:first-child .aw-sec { color: var(--green); }
     .aw-meta { margin-top: .55rem; min-height: 1.2em; }
     .aw.stale .aw-cols, .aw.stale .aw-meta { opacity: .45; }
-    .aw .nodata { font-size: .72rem; color: #5c6878; margin: .35rem 0 0; display: none; }
+    .aw .nodata { font-size: .72rem; color: var(--text-faint); margin: .35rem 0 0; display: none; }
     .aw.stale .nodata { display: block; }
 
     /* מפת המסלולים: SVG בקנה מידה, נבנה ב-JS מאותן קואורדינטות של adsb.py */
     .aw-map { display: block; width: 100%; height: 200px; margin-top: .65rem; direction: ltr;
-      background: radial-gradient(130% 100% at 50% 0%, rgba(77,163,255,.055), transparent 70%), var(--panel-2);
+      background: radial-gradient(130% 100% at 50% 0%, rgba(var(--accent-rgb),.055), transparent 70%), var(--panel-2);
       border: 1px solid var(--border); border-radius: var(--r-ctrl); }
     .aw.stale .aw-map { opacity: .45; }
-    .aw-map .rwy { stroke: #3a4453; stroke-width: 7; stroke-linecap: round; }
-    .aw-map .rwy.land { stroke: var(--green); filter: drop-shadow(0 0 4px rgba(63,185,80,.55)); }
-    .aw-map .rwy.land-sec { stroke: #2e8f43; }
+    .aw-map .rwy { stroke: var(--border-strong); stroke-width: 7; stroke-linecap: round; }
+    .aw-map .rwy.land { stroke: var(--green); filter: drop-shadow(0 0 4px rgba(var(--green-rgb),.55)); }
+    .aw-map .rwy.land-sec { stroke: var(--green); }
     .aw-map .rwy.to { stroke: var(--accent); }
     .aw-map .rwy-lbl { fill: var(--dim); font-size: 11px; font-weight: 600; }
-    .aw-map .north { fill: #5c6878; font-size: 10px; }
+    .aw-map .north { fill: var(--text-faint); font-size: 10px; }
     .aw-map .arr { display: none; color: var(--green); }
     .aw-map .arr.on { display: inline; }
-    .aw-map .arr.sec { color: #2e8f43; opacity: .75; }
+    .aw-map .arr.sec { color: var(--green); opacity: .75; }
     .aw-map .arr.to { color: var(--accent); }
     .aw-map .arr line { stroke: currentColor; stroke-width: 2; stroke-dasharray: 6 5;
       animation: aw-flow 1.1s linear infinite; }
@@ -273,21 +402,21 @@
       font-family: inherit; font-size: .9rem; font-weight: 600; cursor: pointer;
       line-height: 1.25;
       color: var(--text);
-      background: rgba(255,255,255,.045);
+      background: var(--wash);
       border: 1px solid var(--border);
       border-radius: var(--r-ctrl);
-      padding: .55rem .9rem;
+      padding: var(--sp-2) var(--sp-4);
       min-height: 38px;
       transition: transform .07s ease, background .15s ease, border-color .15s ease, box-shadow .15s ease;
     }
     button:hover, a.ghost:hover { background: var(--hover); border-color: var(--border-strong); }
     button:active, a.ghost:active { transform: translateY(1px) scale(.99); }
     button.primary {
-      background: linear-gradient(180deg, #3a8bf9, #1f6feb);
+      background: var(--accent);
       border-color: transparent; color: #fff;
       box-shadow: var(--sh-blue), inset 0 1px 0 rgba(255,255,255,.18);
     }
-    button.primary:hover { background: linear-gradient(180deg, #4a96fb, #2373ef); }
+    button.primary:hover { background: var(--accent-hover); }
     button.ghost, a.ghost {
       color: var(--dim); font-weight: 500; font-size: .82rem; padding: .48rem .85rem; min-height: 34px;
       text-decoration: none; text-align: center; display: inline-flex;
@@ -307,12 +436,12 @@
       transition: border-color .15s ease, box-shadow .15s ease;
     }
     .tune-row input:focus { outline: none; border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(77,163,255,.16); }
-    .tune-row input::placeholder { direction: rtl; font-size: .9rem; color: #5c6878; }
+      box-shadow: 0 0 0 3px rgba(var(--accent-rgb),.16); }
+    .tune-row input::placeholder { direction: rtl; font-size: .9rem; color: var(--text-faint); }
 
     /* ---------- פריסטים ---------- */
     .section-title { font-size: .74rem; font-weight: 600; color: var(--dim); margin: 0 0 .65rem; letter-spacing: .02em; }
-    .presets { display: grid; grid-template-columns: repeat(2, 1fr); gap: .5rem; }
+    .presets { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--sp-2); }
     .presets button {
       display: flex; flex-direction: column; gap: .28rem;
       align-items: flex-start; text-align: start;
@@ -326,25 +455,25 @@
     }
     .presets button .badge {
       font-size: .65rem; color: var(--amber);
-      border: 1px solid rgba(217,169,61,.35); border-radius: 999px;
+      border: 1px solid rgba(var(--amber-rgb),.35); border-radius: 999px;
       padding: 0 .45rem; margin-inline-start: auto;
     }
     .presets button.active {
       border-color: var(--accent);
-      background: linear-gradient(180deg, rgba(77,163,255,.16), rgba(77,163,255,.06));
+      background: rgba(var(--accent-rgb),.14);
     }
     .presets button .row1 { display: flex; width: 100%; align-items: center; gap: .4rem; }
     .presets button .del {
       margin-inline-start: auto; flex: none;
       color: var(--red); font-size: .85rem; line-height: 1;
-      border: 1px solid rgba(229,83,75,.4); border-radius: 999px;
+      border: 1px solid rgba(var(--red-rgb),.4); border-radius: 999px;
       padding: .15rem .45rem;
     }
     .presets.editing button { border-style: dashed; }
 
     /* ---------- הגדרות ---------- */
     .setting { display: flex; align-items: center; justify-content: space-between; gap: .8rem;
-      padding: .65rem 0; border-bottom: 1px solid var(--border); }
+      padding: var(--sp-3) 0; border-bottom: 1px solid var(--border); }
     .setting:last-of-type { border-bottom: 0; }
 
     .seg { display: inline-flex; background: var(--panel-2); border: 1px solid var(--border);
@@ -353,15 +482,15 @@
     .seg button { border: 1px solid transparent; border-radius: 8px; background: transparent;
       color: var(--dim); font-size: .85rem; font-weight: 500; padding: .44rem .8rem;
       transition: background .15s ease, color .15s ease, border-color .15s ease; }
-    .seg button.on { background: linear-gradient(180deg, rgba(77,163,255,.20), rgba(77,163,255,.08));
-      color: var(--text); font-weight: 600; border-color: rgba(77,163,255,.30);
+    .seg button.on { background: rgba(var(--accent-rgb),.16);
+      color: var(--text); font-weight: 600; border-color: rgba(var(--accent-rgb),.3);
       box-shadow: var(--sh-1); }
 
     .switch { position: relative; width: 46px; height: 27px; flex: none; }
     .switch input { opacity: 0; width: 100%; height: 100%; margin: 0; position: absolute; inset: 0; cursor: pointer; }
     .switch .track { position: absolute; inset: 0; border-radius: 999px;
-      background: #2a3442; transition: background .15s ease; pointer-events: none; }
-    .switch input:checked + .track { background: linear-gradient(180deg, #3a8bf9, #1f6feb); }
+      background: var(--switch-off); transition: background .15s ease; pointer-events: none; }
+    .switch input:checked + .track { background: var(--accent); }
     .switch .track::after { content: ""; position: absolute; top: 3px; inset-inline-start: 3px;
       width: 21px; height: 21px; border-radius: 50%; background: #fff;
       box-shadow: 0 1px 2px rgba(0,0,0,.4); transition: transform .18s cubic-bezier(.3,.7,.4,1); }
@@ -387,12 +516,12 @@
       font-size: .78rem; color: var(--dim); text-align: start;
       background: var(--panel-2); border: 1px solid var(--border);
       border-radius: 10px; padding: .45rem .65rem; }
-    .pwr .pdot { width: .55rem; height: .55rem; border-radius: 50%; background: #59626e; flex: none; }
-    .pwr.ok { color: #9fe3b1; border-color: rgba(63,185,80,.35); }
+    .pwr .pdot { width: .55rem; height: .55rem; border-radius: 50%; background: var(--text-faint); flex: none; }
+    .pwr.ok { color: var(--green-fg); border-color: rgba(var(--green-rgb),.35); }
     .pwr.ok .pdot { background: var(--green); }
-    .pwr.warn { color: #ecd49a; border-color: rgba(217,169,61,.4); }
+    .pwr.warn { color: var(--amber-fg); border-color: rgba(var(--amber-rgb),.4); }
     .pwr.warn .pdot { background: var(--amber); }
-    .pwr.bad { color: #f1a49e; border-color: rgba(229,83,75,.45); }
+    .pwr.bad { color: var(--red-fg); border-color: rgba(var(--red-rgb),.45); }
     .pwr.bad .pdot { background: var(--red); animation: pulse 1.2s ease-out infinite; }
 
     /* ---------- בקרת רווח (Gain) ---------- */
@@ -401,20 +530,20 @@
       font-size: .68rem; font-weight: 700; letter-spacing: .02em;
       color: #fff; background: var(--red); border-radius: 999px;
       padding: .14rem .6rem; margin-inline-start: auto; white-space: nowrap;
-      box-shadow: 0 0 0 0 rgba(229,83,75,.5); animation: pulse-red 1.1s ease-out infinite;
+      box-shadow: 0 0 0 0 rgba(var(--red-rgb),.5); animation: pulse-red 1.1s ease-out infinite;
     }
     @keyframes pulse-red {
-      0% { box-shadow: 0 0 0 0 rgba(229,83,75,.5); }
-      100% { box-shadow: 0 0 0 .5rem rgba(229,83,75,0); }
+      0% { box-shadow: 0 0 0 0 rgba(var(--red-rgb),.5); }
+      100% { box-shadow: 0 0 0 .5rem rgba(var(--red-rgb),0); }
     }
     .gain-readout { display: flex; align-items: center; justify-content: space-between;
-      padding: .7rem 0; border-bottom: 1px solid var(--border); }
+      padding: var(--sp-3) 0; border-bottom: 1px solid var(--border); }
     .gain-readout > span:first-child { font-size: .9rem; }
     .gain-readout .val { direction: ltr; color: var(--dim); font-size: .85rem; }
     .gain-readout .val b { font-size: 1.4rem; font-weight: 800; color: var(--accent-2);
       font-variant-numeric: tabular-nums; margin-inline-end: .15rem; }
     .gain-slider { display: flex; align-items: center; gap: .7rem;
-      padding: .6rem 0; border-bottom: 1px solid var(--border); transition: opacity .15s ease; }
+      padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); transition: opacity .15s ease; }
     .gain-slider:last-of-type { border-bottom: 0; }
     .gain-slider > span:first-child { font-size: .88rem; color: var(--dim); min-width: 5em; }
     .gain-slider input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
@@ -423,7 +552,7 @@
     .gain-slider.dim { opacity: .4; }
     .gain-slider.dim input[type="range"] { cursor: not-allowed; }
 
-    .hint { color: #5c6878; font-size: .78rem; line-height: 1.55; margin: .6rem 0 0; }
+    .hint { color: var(--text-faint); font-size: .78rem; line-height: 1.55; margin: .6rem 0 0; }
 
     /* ---------- יומן שידורים ---------- */
     .act-row { display: flex; align-items: center; gap: .55rem;
@@ -438,7 +567,7 @@
       direction: ltr; font-variant-numeric: tabular-nums; }
     .act-row button.play { flex: none; padding: .3rem .75rem; font-size: .8rem;
       border-radius: 999px; }
-    .act-row button.play.playing { background: linear-gradient(180deg, #2f81f7, #1f6feb);
+    .act-row button.play.playing { background: var(--accent);
       border-color: transparent; }
     .act-item { border-bottom: 1px solid var(--border); }
     .act-item:last-child { border-bottom: 0; }
@@ -464,39 +593,29 @@
       background: var(--panel-2); border: 1px solid var(--border);
       border-radius: 10px; padding: .6rem; max-height: 9rem; overflow: auto;
     }
-    /* ---------- מתג מצב (קול / ACARS / VDL2) ---------- */
-    /* דביק לראש המסך: בתצוגות הדאטה הדף ארוך, וכך מחליפים מצב בלי לגלול חזרה */
-    .modebar {
-      position: sticky; top: env(safe-area-inset-top, 0px); z-index: 1100;
-      margin: 0 -1rem 1rem; padding: .5rem 1rem;
-      background: rgba(9,11,16,.72);
-      -webkit-backdrop-filter: saturate(1.6) blur(14px); backdrop-filter: saturate(1.6) blur(14px);
-      border-bottom: 1px solid var(--border);
-      display: flex; gap: .5rem; align-items: stretch;
-    }
-    .modebar .seg { flex: 1; }
-    .modebar .seg button { flex: 1; padding: .58rem .35rem; font-size: .88rem; white-space: nowrap; }
+    /* ---------- מתג מצב (קול / ACARS / VDL2) — יושב במרכז ה-appbar ---------- */
+    .seg-modes.seg button { padding: .5rem .4rem; font-size: .86rem; white-space: nowrap; }
     /* כפתור כיבוי/הפעלת המקלט (standby): משחרר את ה-SDR ליישום אחר, הדף נשאר חי */
     .power-btn { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel-2);
-      color: var(--text); font-size: .82rem; padding: .55rem .75rem; cursor: pointer; white-space: nowrap; }
-    .power-btn.on { background: linear-gradient(180deg, rgba(63,185,80,.22), rgba(63,185,80,.10));
-      border-color: rgba(63,185,80,.5); color: #6fe089; }
+      color: var(--text); font-size: .82rem; padding: .5rem .7rem; cursor: pointer; white-space: nowrap; min-height: 38px; }
+    .power-btn.on { background: rgba(var(--green-rgb),.16);
+      border-color: rgba(var(--green-rgb),.5); color: var(--green-fg); }
     .power-btn:disabled { opacity: .5; cursor: default; }
     /* באנר standby בתצוגת קול */
     .standby-banner { margin: .6rem 0; padding: .75rem .9rem; border-radius: 12px;
-      background: rgba(63,185,80,.08); border: 1px solid rgba(63,185,80,.28);
+      background: rgba(var(--green-rgb),.08); border: 1px solid rgba(var(--green-rgb),.28);
       display: flex; flex-direction: column; gap: .55rem; }
-    .standby-banner span { font-size: .9rem; color: #6fe089; }
+    .standby-banner span { font-size: .9rem; color: var(--green-fg); }
     /* בורר בנקי תדרי ACARS */
     .acars-banks { display: flex; flex-wrap: wrap; gap: .4rem; margin: .15rem 0 .1rem; }
     .acars-banks button { border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
       background: var(--panel-2); color: var(--text); font-size: .78rem; font-weight: 500;
       padding: .38rem .78rem; min-height: 34px; }
-    .acars-banks button.on { background: linear-gradient(180deg, rgba(77,163,255,.18), rgba(77,163,255,.08));
-      border-color: rgba(77,163,255,.5); color: var(--accent-2); }
+    .acars-banks button.on { background: rgba(var(--accent-rgb),.14);
+      border-color: rgba(var(--accent-rgb),.5); color: var(--accent-2); }
     /* נקודה ירוקה על הכרטיסייה שה-SDR באמת פעיל בה (ייתכן שונה מהתצוגה) */
     .seg button .live-pip { display: none; width: 7px; height: 7px; border-radius: 50%;
-      background: #3fb950; vertical-align: middle; margin-inline-end: 5px; }
+      background: var(--green); vertical-align: middle; margin-inline-end: 5px; }
     .seg button.sdr-live .live-pip { display: inline-block; }
     /* סרגל בקרת SDR בתצוגת ACARS */
     .acars-sdr-bar { padding: .5rem 0 .6rem; border-bottom: 1px solid var(--border);
@@ -507,22 +626,46 @@
       padding: .48rem .7rem; min-height: 36px; line-height: 1.2; }
     .acars-sdr-bar .sdr-hint { margin: .45rem 0 0; font-size: .78rem; color: var(--dim); }
 
-    /* ---------- ACARS ---------- */
-    .acars-head { display: flex; align-items: center; justify-content: space-between;
-      gap: .6rem; flex-wrap: wrap; }
+    /* ---------- ACARS / VDL2 — פריסת "חדר בקרה" ---------- */
+    /* תצוגת דאטה = ערימת פאנלים (בקרה → רצועת סטטיסטיקה → מפה+פיד) */
+    .view { display: flex; flex-direction: column; gap: var(--sp-3); }
     .acars-freqs { direction: ltr; font-variant-numeric: tabular-nums;
       font-size: .78rem; color: var(--dim); }
 
-    /* מפה (Leaflet). במובייל נמוכה יותר — שהפיד (התוכן העיקרי) ייכנס מעל קו המסך;
-       בדסקטופ ה-media query למעלה מגדיל אותה לצד הפיד. */
-    .acars-map { width: 100%; height: 190px; border-radius: 12px; margin-top: .6rem;
-      border: 1px solid var(--border); background: var(--panel-2); }
+    /* רצועת הסטטיסטיקה: 5 מונים + sparkline; במובייל ה-spark גולש למטה */
+    .dl-strip { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+    .dl-strip .acars-stats { flex: 1 1 100%; }
+    .dl-strip .rate-spark { flex: 1 1 100%; }
+    /* גוף: מפה + פיד — נערמים במובייל, גריד בדסקטופ */
+    .acars-body { display: flex; flex-direction: column; gap: var(--sp-3); }
+    @media (min-width: 700px) {
+      .dl-strip { flex-wrap: nowrap; gap: var(--sp-4); }
+      .dl-strip .acars-stats { flex: 1 1 auto; }
+      .dl-strip .rate-spark { flex: 0 0 220px; }
+      .acars-body {
+        display: grid; grid-template-columns: minmax(0,1.3fr) minmax(0,1fr);
+        gap: var(--sp-4); align-items: start;
+      }
+      /* המפה דביקה מתחת לסרגל העליון (הפיד גולל בתוך הפאנל — max-height בסיסי) */
+      .dl-map { position: sticky; top: calc(var(--topbar-h) + var(--sp-2)); }
+      .dl-map .acars-map { height: clamp(360px, 60vh, 560px); }
+    }
+
+    /* מפה (Leaflet). ב-panel-bd.flush היא ממלאת את רוחב הפאנל בלי מסגרת כפולה. */
+    .acars-map { width: 100%; height: 190px;
+      background: var(--panel-2); }
+    /* פינות עליונות של המפה נגזרות מהפאנל; התחתונות ישרות (יש panel-ft מתחת) */
+    .dl-map .panel-bd.flush { overflow: hidden; }
     .leaflet-container { background: var(--panel-2); font: inherit; }
-    /* אריחי OSM כהים (filter: invert + hue) */
+    /* אריחי OSM: הפוכים/כהים כברירת מחדל (וכשאין תמיכת prefers-color-scheme) */
     .leaflet-tile { filter: brightness(.5) invert(1) contrast(.85) hue-rotate(180deg) saturate(.65); }
-    /* Popup כהה */
+    @media (prefers-color-scheme: light) {
+      /* במצב בהיר: אריחי OSM רגילים (לא הפוכים) */
+      .leaflet-tile { filter: none; }
+    }
+    /* Popup */
     .leaflet-popup-content-wrapper, .leaflet-popup-tip {
-      background: var(--panel); color: var(--text); box-shadow: 0 3px 14px rgba(0,0,0,.55); }
+      background: var(--panel); color: var(--text); box-shadow: 0 3px 14px rgba(0,0,0,.3); }
     .leaflet-popup-content a { color: var(--accent); }
     /* כפתורי zoom כהים */
     .leaflet-bar a, .leaflet-bar a:hover {
@@ -531,28 +674,26 @@
     .acars-map-note { font-size: .74rem; color: var(--dim); margin: .45rem 0 0; text-align: center; }
 
     /* שורת סטטיסטיקה — grid של 5 עמודות שוות => הפריט החמישי לא "מתייתם" לשורה נפרדת */
-    .acars-stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: .4rem; margin-top: .65rem; }
+    .acars-stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: .4rem; }
     .acars-stat { text-align: center; padding: .5rem .25rem;
       background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-sm); }
     .acars-stat b { display: block; font-size: 1.2rem; font-weight: 800; color: var(--accent-2);
       font-variant-numeric: tabular-nums; direction: ltr; line-height: 1.1; margin-bottom: .1rem; }
     .acars-stat span { display: block; font-size: .62rem; color: var(--dim); line-height: 1.15; }
 
-    /* קצב הודעות: sparkline (כמו .rf canvas בתצוגת הקול) — מגמה קצרת-טווח מתחת לסטטיסטיקה */
-    .rate-spark { display: flex; align-items: center; gap: .5rem; margin-top: .5rem;
+    /* קצב הודעות: sparkline (כמו .rf canvas בתצוגת הקול) — מגמה קצרת-טווח */
+    .rate-spark { display: flex; align-items: center; gap: .5rem;
       padding: .4rem .65rem; background: var(--panel-2); border: 1px solid var(--border);
       border-radius: 10px; font-size: .78rem; color: var(--dim); }
     .rate-spark canvas { flex: 1; min-width: 0; height: 22px; }
 
-    /* סרגל כלים: חיפוש + ייצוא */
-    .acars-tools { display: flex; gap: .5rem; margin-top: .65rem; align-items: center; }
     /* direction נקבע ע"י dir="auto" במרקאפ — מקלידים בעיקר זנבות/labels לטיניים */
-    .acars-search { flex: 1; min-width: 0; font: inherit; font-size: .85rem;
+    .acars-search { width: 100%; font: inherit; font-size: .85rem;
       color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
-      border-radius: 10px; padding: .5rem .7rem; }
+      border-radius: var(--r-sm); padding: .5rem .7rem; }
     .acars-search:focus { outline: none; border-color: var(--accent); }
     .acars-export { display: flex; gap: .35rem; flex: none; }
-    .acars-export a { padding: .5rem .7rem; font-size: .8rem; }
+    .acars-export a { padding: .35rem .6rem; font-size: .78rem; min-height: 30px; }
 
     /* צ'יפים לסינון קטגוריה */
     .acars-filters { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .55rem; }
@@ -561,12 +702,12 @@
       padding: .38rem .8rem; min-height: 34px; user-select: none;
       display: inline-flex; align-items: center; }
     .acars-chip.on { color: var(--text); border-color: var(--accent);
-      background: linear-gradient(180deg, rgba(77,163,255,.16), rgba(77,163,255,.06)); }
+      background: rgba(var(--accent-rgb),.14); }
 
     /* drill-down: צ'יפ המטוס הממוקד */
     .acars-focus { display: flex; align-items: center; gap: .5rem; margin-top: .5rem;
       font-size: .82rem; color: var(--text); direction: ltr;
-      background: linear-gradient(180deg, rgba(77,163,255,.16), rgba(77,163,255,.06));
+      background: rgba(var(--accent-rgb),.14);
       border: 1px solid var(--accent); border-radius: 999px; padding: .25rem .35rem .25rem .8rem; }
     .acars-focus-x { flex: none; min-height: 40px; padding: .25rem .7rem; font-size: .8rem;
       border-radius: 999px; color: var(--dim); }
@@ -583,18 +724,18 @@
       background: var(--panel-2); border: 1px solid var(--border); color: var(--text); }
     .acars-rrow:hover { border-color: var(--accent); }
     .acars-rrow.on { border-color: var(--accent);
-      background: linear-gradient(180deg, rgba(77,163,255,.16), rgba(77,163,255,.06)); }
+      background: rgba(var(--accent-rgb),.14); }
     .acars-rrow.stale { opacity: .5; }
     /* מזהים קבועים (זנב/זמן/מונה) לא נשברים לעולם; רק שם-הטיסה מתכווץ עם ellipsis */
     .rr-tail { font-weight: 700; color: var(--accent-2); direction: ltr; white-space: nowrap; flex: none; }
     .rr-flight { color: var(--dim); direction: ltr; font-size: .8rem;
       min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .rr-pos { color: #9fe3b1; font-size: .72rem; flex: none; }
+    .rr-pos { color: var(--green-fg); font-size: .72rem; flex: none; }
     .rr-count { margin-inline-start: auto; color: var(--dim); font-size: .72rem; flex: none; white-space: nowrap;
       direction: ltr; font-variant-numeric: tabular-nums; }
     .rr-time { color: var(--dim); font-size: .68rem; direction: ltr; font-variant-numeric: tabular-nums;
       white-space: nowrap; flex: none; }
-    .acars-roster-empty { color: #5c6878; font-size: .78rem; text-align: center; padding: .5rem; }
+    .acars-roster-empty { color: var(--text-faint); font-size: .78rem; text-align: center; padding: .5rem; }
 
     /* פאנל פירוט למטוס הנבחר */
     .acars-detail { margin-top: .6rem; background: var(--panel-2); border: 1px solid var(--border);
@@ -613,10 +754,10 @@
     /* badge כיוון uplink/downlink (בכרטיס, roster ופירוט) */
     .amsg-dir, .rr-dir { font-size: .68rem; font-weight: 700; direction: ltr; white-space: nowrap;
       border-radius: 999px; padding: .04rem .42rem; border: 1px solid transparent; }
-    .dir-uplink { color: #ecd49a; background: rgba(217,169,61,.14); border-color: rgba(217,169,61,.4); }
-    .dir-downlink { color: #9fe3b1; background: rgba(63,185,80,.14); border-color: rgba(63,185,80,.4); }
+    .dir-uplink { color: var(--amber-fg); background: rgba(var(--amber-rgb),.14); border-color: rgba(var(--amber-rgb),.4); }
+    .dir-downlink { color: var(--green-fg); background: rgba(var(--green-rgb),.14); border-color: rgba(var(--green-rgb),.4); }
 
-    .acars-feed { margin-top: .6rem; display: flex; flex-direction: column; gap: .5rem;
+    .acars-feed { display: flex; flex-direction: column; gap: .5rem;
       max-height: 62vh; overflow: auto; }
     .amsg { background: var(--panel-2); border: 1px solid var(--border);
       border-radius: var(--r-ctrl); padding: .6rem .7rem; border-inline-start: 3px solid var(--border); }
@@ -624,7 +765,7 @@
     .amsg-tail { font-weight: 700; color: var(--accent-2); direction: ltr; white-space: nowrap; }
     .amsg-flight { color: var(--text); direction: ltr; white-space: nowrap; }
     .amsg-tail.clickable, .amsg-flight.clickable { cursor: pointer;
-      text-decoration: underline dotted rgba(124,196,255,.5); text-underline-offset: 2px; }
+      text-decoration: underline dotted rgba(var(--accent-rgb),.5); text-underline-offset: 2px; }
     .amsg-freq { color: var(--accent); direction: ltr; font-variant-numeric: tabular-nums; font-size: .78rem; }
     .amsg-time { margin-inline-start: auto; color: var(--dim); font-size: .72rem;
       direction: ltr; font-variant-numeric: tabular-nums; }
@@ -639,48 +780,48 @@
     /* badge קטגוריה + קיבוץ צבעוני (תואם group מהשרת) */
     .amsg-cat { font-size: .66rem; font-weight: 700; border-radius: 999px;
       padding: .08rem .5rem; white-space: nowrap; border: 1px solid transparent; }
-    .cat-position { color: #9fe3b1; background: rgba(63,185,80,.14); border-color: rgba(63,185,80,.4); }
-    .cat-clearance { color: var(--accent-2); background: rgba(77,163,255,.14); border-color: rgba(77,163,255,.4); }
-    .cat-oooi { color: #ecd49a; background: rgba(217,169,61,.14); border-color: rgba(217,169,61,.4); }
-    .cat-tech { color: var(--dim); background: rgba(139,153,171,.12); border-color: var(--border); }
-    .cat-comm { color: var(--dim); background: rgba(139,153,171,.10); border-color: var(--border); }
-    .cat-text { color: #c9d3e0; background: rgba(255,255,255,.05); border-color: var(--border); }
+    .cat-position { color: var(--green-fg); background: rgba(var(--green-rgb),.14); border-color: rgba(var(--green-rgb),.4); }
+    .cat-clearance { color: var(--accent-2); background: rgba(var(--accent-rgb),.14); border-color: rgba(var(--accent-rgb),.4); }
+    .cat-oooi { color: var(--amber-fg); background: rgba(var(--amber-rgb),.14); border-color: rgba(var(--amber-rgb),.4); }
+    .cat-tech { color: var(--dim); background: rgba(var(--dim-rgb),.12); border-color: var(--border); }
+    .cat-comm { color: var(--dim); background: rgba(var(--dim-rgb),.1); border-color: var(--border); }
+    .cat-text { color: var(--text); background: var(--hover); border-color: var(--border); }
     .amsg.g-position { border-inline-start-color: var(--green); }
     .amsg.g-clearance { border-inline-start-color: var(--accent); }
     .amsg.g-oooi { border-inline-start-color: var(--amber); }
-    .amsg.g-tech { border-inline-start-color: #a371f7; }
-    .amsg.g-comm { border-inline-start-color: #2dd4bf; }
+    .amsg.g-tech { border-inline-start-color: var(--purple); }
+    .amsg.g-comm { border-inline-start-color: var(--teal); }
     .amsg.g-text { border-inline-start-color: var(--text-faint); }
 
     /* chip מיקום (לחיצה => מיקוד במפה) */
-    .amsg-pos { font-size: .68rem; color: #9fe3b1; cursor: pointer; direction: ltr;
-      background: rgba(63,185,80,.12); border: 1px solid rgba(63,185,80,.4);
+    .amsg-pos { font-size: .68rem; color: var(--green-fg); cursor: pointer; direction: ltr;
+      background: rgba(var(--green-rgb),.12); border: 1px solid rgba(var(--green-rgb),.4);
       border-radius: 999px; padding: .1rem .5rem; }
     /* empty state: אייקון גדול עדין מעל הטקסט (📡 ל-ACARS, 🛰️ ל-VDL2) */
-    .acars-empty { color: #5c6878; font-size: .8rem; text-align: center; margin: 1rem 0 .4rem; }
+    .acars-empty { color: var(--text-faint); font-size: .8rem; text-align: center; margin: 1rem 0 .4rem; }
     .acars-empty::before { content: "📡"; display: block; font-size: 2rem;
       opacity: .45; margin-bottom: .35rem; filter: grayscale(.4); }
     #vdl2Empty::before { content: "🛰️"; }
 
     /* לוח ATIS sticky (A9) — מידע חשוב, מודגש בענבר כדי לבלוט מעל הפיד */
     .acars-atis { margin-top: .55rem; padding: .45rem .7rem; border-radius: 10px; font-size: .78rem;
-      color: var(--text); background: rgba(217,169,61,.08); border: 1px solid rgba(217,169,61,.35);
+      color: var(--text); background: rgba(var(--amber-rgb),.08); border: 1px solid rgba(var(--amber-rgb),.35);
       direction: ltr; text-align: left; }
     .acars-atis b { color: var(--amber); font-size: .7rem; display: block; margin-bottom: .15rem; }
 
     /* badge שגיאת קישור/CRC/פענוח */
     .amsg-err { font-size: .65rem; font-weight: 700; direction: ltr; white-space: nowrap;
-      border-radius: 999px; padding: .04rem .42rem; border: 1px solid rgba(239,68,68,.4);
-      color: #fca5a5; background: rgba(239,68,68,.12); }
+      border-radius: 999px; padding: .04rem .42rem; border: 1px solid rgba(var(--red-rgb),.4);
+      color: var(--red-fg); background: rgba(var(--red-rgb),.12); }
 
     /* צביעת רמת אות לפי dBFS */
-    .level-good { color: #22c55e; }
-    .level-ok   { color: #eab308; }
-    .level-weak { color: #ef4444; }
+    .level-good { color: var(--green); }
+    .level-ok   { color: var(--amber); }
+    .level-weak { color: var(--red); }
 
     /* badge ×N לקיבוץ multi-block */
     .amsg-block-count { font-size: .65rem; font-weight: 700; color: var(--dim);
-      background: rgba(139,153,171,.15); border: 1px solid var(--border);
+      background: rgba(var(--dim-rgb),.15); border: 1px solid var(--border);
       border-radius: 999px; padding: .04rem .42rem; direction: ltr; }
     /* badge reTX (רטרנסמיט) */
     .amsg-retx { font-size: .65rem; color: var(--dim); opacity: .7; direction: ltr; }
@@ -690,8 +831,8 @@
 
     /* העשרת ADS-B: badge "משדר כעת" ב-roster + התראת שיבוש בפאנל הפירוט */
     .rr-adsb { font-size: .72rem; }
-    .ad-spoof { font-size: .68rem; font-weight: 700; color: #f0a8a3;
-      background: rgba(229,83,75,.14); border: 1px solid rgba(229,83,75,.4);
+    .ad-spoof { font-size: .68rem; font-weight: 700; color: var(--red-fg);
+      background: rgba(var(--red-rgb),.14); border: 1px solid rgba(var(--red-rgb),.4);
       border-radius: 999px; padding: .04rem .42rem; white-space: nowrap; }
 
     /* כרטיס חדש בפיד: כניסה עדינה (מסומן ב-JS רק להודעות שטרם רונדרו) */
@@ -715,6 +856,21 @@
     body.loading .pill .dot { animation: skel-pulse 1.3s ease-in-out infinite; }
     @keyframes skel-pulse { 0%, 100% { opacity: .3; } 50% { opacity: .8; } }
 
+    /* ---------- שפת "מכשור": קריאוֹת מספריות במונו + נורות LED ---------- */
+    /* גופן מונו + tabular-nums לכל הקריאוֹת המספריות => יישור ספרות יציב, מראה מדדים */
+    .rf .snr b, .rf-row .val, .gain-readout .val b, .gain-slider .val,
+    .sub-setting .val, .sub-setting .numval, .acars-stat b, .acars-freqs, .amsg-time,
+    .amsg-freq, .act-row .t, .act-row .f, .act-row .dur, .rr-count, .rr-time, .rr-tail,
+    #metarRaw, #verTag {
+      font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    }
+    /* נורות LED: זוהר עדין רק במצב פעיל (חי/תקין/SDR-פעיל) — כמו נוריות בלוח בקרה */
+    .pill.live .dot, .pwr.ok .pdot, .seg button.sdr-live .live-pip {
+      box-shadow: 0 0 6px 1px rgba(var(--green-rgb),.6);
+    }
+    .pill.busy .dot { box-shadow: 0 0 6px 1px rgba(var(--amber-rgb),.55); }
+    .pill.err .dot, .pwr.bad .pdot { box-shadow: 0 0 6px 1px rgba(var(--red-rgb),.6); }
+
     /* נגישות: טבעת פוקוס לניווט מקלדת (לא מופיעה בלחיצת עכבר/מגע) */
     :where(button, a.ghost, input, summary, .acars-chip):focus-visible {
       outline: 2px solid var(--accent); outline-offset: 2px;
@@ -734,30 +890,44 @@
 <!-- body.loading: הוסר ב-JS ברגע ש-/api/state חוזר (הצלחה או כישלון) — עד אז
      התדר/סטטוס דוהים בעדינות במקום להישאר "—"/"טוען…" יבשים (ראה .skel-* ב-CSS) -->
 <body class="loading">
-  <header>
-    <span class="logo">✈️</span>
-    <h1>AIR-AM</h1>
-    <span class="tag" id="verTag">SDRplay RSP1B</span>
-  </header>
-
-  <!-- מתג מצב: קול (rtl_airband) / ACARS (acarsdec) / VDL2 (dumpvdl2) — SDR אחד בהחלפה -->
-  <div class="modebar">
-    <div class="seg" id="modeSeg">
-      <button type="button" data-v="voice" class="on"><span class="live-pip"></span>📻 קול</button>
-      <button type="button" data-v="acars"><span class="live-pip"></span>📡 ACARS</button>
-      <button type="button" data-v="vdl2"><span class="live-pip"></span>🛰️ VDL2</button>
+  <!-- ===================== סרגל-על + רצועת סטטוס ===================== -->
+  <div class="topbar">
+    <header class="appbar">
+      <div class="brand">
+        <span class="logo">✈️</span>
+        <div class="brand-txt"><h1>AIR-AM</h1><span class="tag" id="verTag">SDRplay RSP1B</span></div>
+      </div>
+      <!-- מתג מצב: קול (rtl_airband) / ACARS (acarsdec) / VDL2 (dumpvdl2) — SDR אחד בהחלפה -->
+      <div class="seg seg-modes" id="modeSeg">
+        <button type="button" data-v="voice" class="on"><span class="live-pip"></span>📻 קול</button>
+        <button type="button" data-v="acars"><span class="live-pip"></span>📡 ACARS</button>
+        <button type="button" data-v="vdl2"><span class="live-pip"></span>🛰️ VDL2</button>
+      </div>
+      <div class="appbar-end">
+        <!-- כיבוי/הפעלת המקלט (standby): עוצר את ה-SDR ומשחרר אותו ליישום אחר; הדף נשאר חי -->
+        <button type="button" id="powerBtn" class="power-btn" title="כיבוי/הפעלת המקלט — משחרר את ה-SDR ליישום אחר">⏻ כיבוי</button>
+      </div>
+    </header>
+    <!-- רצועת סטטוס: נורות חיווי חיות ברמת-מערכת (סטטוס שירות / מתח Pi / שיבוש GPS) -->
+    <div class="statusbar">
+      <span class="sb-label">מערכת</span>
+      <span id="pill" class="pill"><span class="dot"></span><span id="status">טוען…</span></span>
+      <!-- חיווי מתח ל-Raspberry Pi (מוסתר עד /api/power) -->
+      <div class="pwr hidden" id="pwrChip" title="מתח האספקה ל-Raspberry Pi">
+        <span class="pdot"></span><span id="pwrText">בודק מתח…</span>
+      </div>
+      <!-- שיבוש GPS (מוסק מ-ADS-B) — חיווי ברמת-מערכת -->
+      <span id="gpsPill" class="pill"><span class="dot"></span><span id="gpsTxt">GPS — אין נתונים</span></span>
     </div>
-    <!-- כיבוי/הפעלת המקלט (standby): עוצר את ה-SDR ומשחרר אותו ליישום אחר; הדף נשאר חי -->
-    <button type="button" id="powerBtn" class="power-btn" title="כיבוי/הפעלת המקלט — משחרר את ה-SDR ליישום אחר">⏻ כיבוי</button>
   </div>
 
+  <main class="content">
   <!-- ===================== תצוגת קול ===================== -->
   <div id="voiceView">
-  <div class="layout">
-  <div class="col col-main">
-  <!-- תצוגת הרדיו -->
-  <section class="card radio">
-    <span id="pill" class="pill"><span class="dot"></span><span id="status">טוען…</span></span>
+  <div class="dash">
+  <!-- פאנל הרדיו -->
+  <section class="panel p-radio">
+    <div class="panel-bd">
     <div class="freq-display"><span id="curFreq">—</span> <small>MHz</small></div>
     <div class="freq-name" id="freqName"></div>
     <!-- ה-<audio> בלי controls — הפקדים המותאמים למטה מפעילים אותו (העיצוב אחיד בכל דפדפן) -->
@@ -772,7 +942,7 @@
     </div>
     <!-- מוצג כשה-SDR תפוס על-ידי ACARS (acarsActive=true) ומשתמש בכרטיסיית קול -->
     <div id="voiceAcarsBanner" class="hidden flex-col" style="margin:.6rem 0; padding:.65rem .9rem;
-      background:rgba(77,163,255,.08); border:1px solid rgba(77,163,255,.25); border-radius:12px">
+      background:rgba(var(--accent-rgb),.08); border:1px solid rgba(var(--accent-rgb),.25); border-radius:12px">
       <span style="font-size:.85rem; color:var(--accent-2)">📡 המקלט כעת במצב ACARS — אין שמע זמין</span>
       <button id="voiceActivateBtn" class="primary" style="font-size:.85rem; padding:.55rem .9rem">
         🎧 חזור לקול
@@ -785,7 +955,34 @@
       <button id="standbyOnBtn" class="primary" style="font-size:.9rem; padding:.55rem .9rem">▶ הפעל מקלט</button>
     </div>
 
-    <!-- מדדי RF חיים (statsd מ-rtl_airband) -->
+    <div class="player-row">
+      <button id="syncBtn" class="ghost" title="התחבר מחדש לנקודת השידור החיה">⟳ סנכרן ל-live</button>
+      <a id="extBtn" class="ghost" href="/live.m3u" role="button"
+         title="פתח את הסטרים בנגן שמע חיצוני (ממשיך לנגן ברקע)">🎧 נגן חיצוני</a>
+    </div>
+
+    <details class="err hidden" id="errBox">
+      <summary>פרטי שגיאה</summary>
+      <pre id="errDetail"></pre>
+    </details>
+    </div><!-- /panel-bd -->
+    <!-- כיוונון תדר חופשי — footer של פאנל הרדיו -->
+    <div class="panel-ft">
+      <div class="tune-row">
+        <input id="freqInput" type="number" inputmode="decimal" step="0.005" min="0.1" max="1999.5"
+               placeholder="תדר חופשי, למשל 134.600" />
+        <button id="tuneBtn" class="primary">כוונן</button>
+      </div>
+      <!-- רמז לא-חוסם בלבד: השרת מקבל כל תדר חוקי (NFM למשל שימושי מחוץ לתחום) -->
+      <p class="hint hidden" id="bandHint" style="margin:.5rem .2rem 0; color: var(--amber);">
+        ⚠️ מחוץ לתחום התעופה (118–137 MHz) — שידורי תעופה לא יישמעו שם</p>
+    </div>
+  </section>
+
+  <!-- פאנל מדדי RF חיים (statsd מ-rtl_airband) -->
+  <section class="panel p-rf">
+    <div class="panel-hd"><p class="ttl">מדדי RF</p></div>
+    <div class="panel-bd">
     <div class="rf stale" id="rfPanel">
       <div class="top">
         <span class="snr"><b id="rfSnr">—</b> dB SNR</span>
@@ -803,39 +1000,17 @@
       </div>
       <p class="nodata">אין נתוני RF — ממתין למקלט…</p>
     </div>
-
-    <div class="player-row">
-      <button id="syncBtn" class="ghost" title="התחבר מחדש לנקודת השידור החיה">⟳ סנכרן ל-live</button>
-      <a id="extBtn" class="ghost" href="/live.m3u" role="button"
-         title="פתח את הסטרים בנגן שמע חיצוני (ממשיך לנגן ברקע)">🎧 נגן חיצוני</a>
-    </div>
-
-    <!-- חיווי מתח ל-Raspberry Pi (קריטי בהזנה מסוללה ניידת) -->
-    <div class="pwr hidden" id="pwrChip" title="מתח האספקה ל-Raspberry Pi">
-      <span class="pdot"></span><span id="pwrText">בודק מתח…</span>
-    </div>
-    <details class="err hidden" id="errBox">
-      <summary>פרטי שגיאה</summary>
-      <pre id="errDetail"></pre>
-    </details>
+    </div><!-- /panel-bd -->
   </section>
 
-  <!-- תדר חופשי -->
-  <section class="tune-row" style="margin-bottom:.9rem">
-    <input id="freqInput" type="number" inputmode="decimal" step="0.005" min="0.1" max="1999.5"
-           placeholder="תדר חופשי, למשל 134.600" />
-    <button id="tuneBtn" class="primary">כוונן</button>
-  </section>
-  <!-- רמז לא-חוסם בלבד: השרת מקבל כל תדר חוקי (NFM למשל שימושי מחוץ לתחום) -->
-  <p class="hint hidden" id="bandHint" style="margin:-.55rem .2rem .9rem; color: var(--amber);">
-    ⚠️ מחוץ לתחום התעופה (118–137 MHz) — שידורי תעופה לא יישמעו שם</p>
-
-  <!-- פריסטים -->
-  <section class="card">
-    <p class="section-title" style="display:flex;align-items:center;gap:.5rem">תדרים שמורים
-      <button type="button" id="editPresetsBtn" class="ghost"
-              style="margin-inline-start:auto;padding:.25rem .65rem">✎ עריכה</button>
-    </p>
+  <!-- פאנל פריסטים -->
+  <section class="panel p-presets">
+    <div class="panel-hd"><p class="ttl">תדרים שמורים</p>
+      <div class="hd-end">
+        <button type="button" id="editPresetsBtn" class="ghost" style="padding:.25rem .65rem">✎ עריכה</button>
+      </div>
+    </div>
+    <div class="panel-bd">
     <div class="presets" id="presets">
       <!-- שלד טעינה: renderPresets() מרוקן ומחליף אוטומטית ברגע ש-/api/state חוזר -->
       <button type="button" class="skel" disabled aria-hidden="true" tabindex="-1">
@@ -863,36 +1038,39 @@
         <button type="button" id="pAdd" class="primary">הוסף פריסט</button>
       </div>
     </div>
+    </div><!-- /panel-bd -->
   </section>
-  </div><!-- /col-main -->
 
-  <div class="col col-side">
-  <!-- יומן שידורים -->
-  <section class="card">
-    <p class="section-title">יומן שידורים</p>
-    <input id="actSearch" dir="auto" class="act-search" type="search"
-           placeholder="חיפוש בתמלול…" autocomplete="off" />
+  <!-- פאנל יומן שידורים -->
+  <section class="panel p-activity">
+    <div class="panel-hd"><p class="ttl">יומן שידורים</p></div>
+    <div class="panel-tools">
+      <input id="actSearch" dir="auto" class="act-search" type="search"
+             placeholder="חיפוש בתמלול…" autocomplete="off" />
+    </div>
+    <div class="panel-bd">
     <div class="activity" id="activity">
       <p class="hint" style="margin:0">עוד אין שידורים — היומן מתמלא כשהסקוולץ׳ נפתח.</p>
     </div>
     <p class="hint">כל שידור מוקלט אוטומטית ונשמר זמנית (~200 אחרונים) ·
       במצב סקוולץ׳ "פתוח" (ATIS) אין הקלטה.</p>
+    </div><!-- /panel-bd -->
   </section>
 
-  <!-- METAR נתב"ג (מוצג רק כשיש נתונים; דורש אינטרנט בצד ה-Pi) -->
-  <section class="card hidden" id="metarCard">
-    <p class="section-title">מזג אוויר נתב״ג · METAR</p>
-    <p id="metarDecoded" style="font-size:.92rem;margin:.2rem 0 .4rem"></p>
+  <!-- פאנל METAR נתב"ג (מוצג רק כשיש נתונים; דורש אינטרנט בצד ה-Pi) -->
+  <section class="panel p-metar hidden" id="metarCard">
+    <div class="panel-hd"><p class="ttl">מזג אוויר נתב״ג · METAR</p></div>
+    <div class="panel-bd">
+    <p id="metarDecoded" style="font-size:.92rem;margin:0 0 .4rem"></p>
     <p id="metarRaw" class="hint" style="direction:ltr;text-align:left;
        font-variant-numeric:tabular-nums;margin:0;word-break:break-word"></p>
+    </div><!-- /panel-bd -->
   </section>
 
-  <!-- מסלולים פעילים + GPS (מוסק מ-ADS-B, ראה /api/airspace) -->
-  <section class="card">
-    <div class="aw-head">
-      <p class="section-title">מסלולים פעילים · נתב״ג</p>
-      <span id="gpsPill" class="pill"><span class="dot"></span><span id="gpsTxt">GPS — אין נתונים</span></span>
-    </div>
+  <!-- פאנל מסלולים פעילים (מוסק מ-ADS-B, ראה /api/airspace); GPS עבר לרצועת הסטטוס -->
+  <section class="panel p-airspace">
+    <div class="panel-hd"><p class="ttl">מסלולים פעילים · נתב״ג</p></div>
+    <div class="panel-bd">
     <div class="aw stale" id="awBody">
       <div class="aw-cols">
         <div class="aw-col">
@@ -907,11 +1085,13 @@
       <p class="hint aw-meta" id="awMeta"></p>
       <p class="nodata">אין נתוני ADS-B — ממתין לרשת…</p>
     </div>
+    </div><!-- /panel-bd -->
   </section>
 
-  <!-- הגדרות -->
-  <section class="card">
-    <p class="section-title">הגדרות קליטה</p>
+  <!-- פאנל הגדרות -->
+  <section class="panel p-settings">
+    <div class="panel-hd"><p class="ttl">הגדרות קליטה</p></div>
+    <div class="panel-bd">
 
     <div class="setting">
       <span>אפנון</span>
@@ -969,151 +1149,190 @@
 
     <p class="hint">אוטומטי מתאים לרוב התדרים · ל-ATIS ושידור רציף בחר "פתוח" ·
       "ידני" אם הסקוולץ׳ נפתח על רעש או חותך דיבור. שינוי הגדרה מוחל מיד על התדר הנוכחי.</p>
+    </div><!-- /panel-bd -->
   </section>
-  </div><!-- /col-side -->
-  </div><!-- /layout -->
+  </div><!-- /dash -->
   </div><!-- /voiceView -->
 
   <!-- ===================== תצוגת ACARS ===================== -->
-  <section class="card hidden" id="acarsView">
-    <div class="acars-head">
-      <span id="acarsPill" class="pill"><span class="dot"></span><span id="acarsStatus">טוען…</span></span>
-      <span class="acars-freqs" id="acarsFreqs"></span>
-    </div>
-    <!-- בורר בנקי תדרים: כל בנק נכנס בחלון דגימה אחד; 131.x ו-136.x בבנקים נפרדים -->
-    <div class="acars-banks" id="acarsBanks"></div>
-    <!-- סרגל בקרת SDR: מתעדכן לפי acarsActive (מצב ה-SDR האמיתי, לא הכרטיסייה) -->
-    <div id="acarsSdrBar" class="acars-sdr-bar">
-      <!-- כשה-SDR בקול ומעיינים בהיסטוריה -->
-      <div id="sdrInactive">
-        <button id="acarsActivateBtn" class="primary" style="width:100%">▶ הפעל קליטת ACARS חיה</button>
-        <p class="sdr-hint">מציג היסטוריה · השמע ממשיך לרוץ. לחץ כדי להעביר את ה-SDR ל-ACARS (השמע ייפסק).</p>
-      </div>
-      <!-- כש-acarsdec פעיל -->
-      <div id="sdrActiveCtrl" class="hidden">
-        <div class="sdr-btns">
-          <button id="acarsStopBtn">⏹ עצור / חזור לקול</button>
-          <button id="towerBtn">🎧 מגדל · 134.600</button>
+  <section class="view hidden" id="acarsView">
+    <!-- פאנל בקרת מקלט -->
+    <section class="panel dl-ctl">
+      <div class="panel-hd"><p class="ttl">קליטת ACARS</p>
+        <div class="hd-end">
+          <span id="acarsPill" class="pill"><span class="dot"></span><span id="acarsStatus">טוען…</span></span>
+          <span class="acars-freqs" id="acarsFreqs"></span>
         </div>
-        <p class="sdr-hint">ACARS פעיל — ה-SDR מפענח נתונים. השמע אינו זמין.</p>
+      </div>
+      <div class="panel-bd">
+        <!-- בורר בנקי תדרים: כל בנק נכנס בחלון דגימה אחד; 131.x ו-136.x בבנקים נפרדים -->
+        <div class="acars-banks" id="acarsBanks"></div>
+        <!-- סרגל בקרת SDR: מתעדכן לפי acarsActive (מצב ה-SDR האמיתי, לא הכרטיסייה) -->
+        <div id="acarsSdrBar" class="acars-sdr-bar">
+          <!-- כשה-SDR בקול ומעיינים בהיסטוריה -->
+          <div id="sdrInactive">
+            <button id="acarsActivateBtn" class="primary" style="width:100%">▶ הפעל קליטת ACARS חיה</button>
+            <p class="sdr-hint">מציג היסטוריה · השמע ממשיך לרוץ. לחץ כדי להעביר את ה-SDR ל-ACARS (השמע ייפסק).</p>
+          </div>
+          <!-- כש-acarsdec פעיל -->
+          <div id="sdrActiveCtrl" class="hidden">
+            <div class="sdr-btns">
+              <button id="acarsStopBtn">⏹ עצור / חזור לקול</button>
+              <button id="towerBtn">🎧 מגדל · 134.600</button>
+            </div>
+            <p class="sdr-hint">ACARS פעיל — ה-SDR מפענח נתונים. השמע אינו זמין.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- רצועת סטטיסטיקה ברוחב מלא (חתימת חדר-בקרה) -->
+    <div class="dl-strip">
+      <div class="acars-stats">
+        <div class="acars-stat"><b id="acStTotal">0</b><span>הודעות</span></div>
+        <div class="acars-stat"><b id="acStRate">0</b><span>הודעות/דק׳</span></div>
+        <div class="acars-stat"><b id="acStCraft">0</b><span>מטוסים</span></div>
+        <div class="acars-stat"><b id="acStPos">0</b><span>עם מיקום</span></div>
+        <div class="acars-stat"><b id="acStAdsb">0</b><span>🛰 ADS‑B</span></div>
+      </div>
+      <!-- מגמת קצב ההודעות (2 הדקות האחרונות) -->
+      <div class="rate-spark" title="קצב הודעות · 2 הדקות האחרונות">
+        <span>📈</span><canvas id="acRateSpark"></canvas>
       </div>
     </div>
 
     <div class="acars-body">
-    <div class="acars-col-map">
-    <!-- מפה (Leaflet) — מטוסים עם מיקום מ-ACARS (ADS-C/CPDLC); מתמלאת לאט -->
-    <div id="acarsMap" class="acars-map"></div>
-    <p class="acars-map-note hidden" id="acarsMapNote"></p>
-    <!-- פאנל פירוט למטוס הנבחר (מתחת למפה; מוסתר עד לבחירה) -->
-    <div class="acars-detail hidden" id="acarsDetail"></div>
-    </div><!-- /acars-col-map -->
+      <!-- פאנל מפה -->
+      <section class="panel dl-map">
+        <div class="panel-hd"><p class="ttl">מפה · מטוסים</p></div>
+        <!-- מפה (Leaflet) — מטוסים עם מיקום מ-ACARS (ADS-C/CPDLC); מתמלאת לאט -->
+        <div class="panel-bd flush"><div id="acarsMap" class="acars-map"></div></div>
+        <div class="panel-ft">
+          <p class="acars-map-note hidden" id="acarsMapNote"></p>
+          <!-- פאנל פירוט למטוס הנבחר (מוסתר עד לבחירה) -->
+          <div class="acars-detail hidden" id="acarsDetail"></div>
+        </div>
+      </section>
 
-    <div class="acars-col-feed">
-    <!-- סטטיסטיקה -->
-    <div class="acars-stats">
-      <div class="acars-stat"><b id="acStTotal">0</b><span>הודעות</span></div>
-      <div class="acars-stat"><b id="acStRate">0</b><span>הודעות/דק׳</span></div>
-      <div class="acars-stat"><b id="acStCraft">0</b><span>מטוסים</span></div>
-      <div class="acars-stat"><b id="acStPos">0</b><span>עם מיקום</span></div>
-      <div class="acars-stat"><b id="acStAdsb">0</b><span>🛰 ADS‑B</span></div>
+      <!-- פאנל פיד הודעות -->
+      <section class="panel dl-feed">
+        <div class="panel-hd"><p class="ttl">פיד הודעות</p>
+          <div class="hd-end">
+            <span class="acars-export">
+              <a class="ghost" id="acarsCsv" href="/api/acars/export?format=csv" download>⬇ CSV</a>
+              <a class="ghost" id="acarsJson" href="/api/acars/export?format=json" download>JSON</a>
+            </span>
+          </div>
+        </div>
+        <div class="panel-tools">
+          <input id="acarsSearch" dir="auto" class="acars-search" type="search"
+                 placeholder="חיפוש: זנב / טיסה / label / טקסט…" autocomplete="off" />
+          <!-- צ'יפים לסינון קטגוריה (נבנים דינמית לפי הקבוצות שהופיעו) -->
+          <div class="acars-filters" id="acarsFilters"></div>
+          <!-- רשימת מטוסים (roster): בחירת מטוס => הצגתו במפה + סינון הפיד. מתקפל במובייל. -->
+          <details class="acars-roster-wrap" id="acarsRosterWrap" open>
+            <summary>✈️ מטוסים (<span id="acarsRosterCount">0</span>)</summary>
+            <div class="acars-roster" id="acarsRoster"></div>
+          </details>
+          <!-- drill-down: צ'יפ המטוס הממוקד (לחיצה על זנב בכרטיס/popup); ✕ מנקה -->
+          <div class="acars-focus hidden" id="acarsFocusChip"></div>
+          <!-- לוח ATIS sticky (מוסתר כברירת מחדל; מתמלא כשמגיעה הודעת A9) -->
+          <div class="acars-atis hidden" id="acarsAtis"></div>
+        </div>
+        <div class="panel-bd">
+          <div class="acars-feed" id="acarsFeed"></div>
+          <p class="acars-empty" id="acarsEmpty">ממתין להודעות…</p>
+        </div>
+      </section>
     </div>
-    <!-- מגמת קצב ההודעות (2 הדקות האחרונות) — כמו .rf canvas בתצוגת הקול -->
-    <div class="rate-spark" title="קצב הודעות · 2 הדקות האחרונות">
-      <span>📈</span><canvas id="acRateSpark"></canvas>
-    </div>
-
-    <!-- לוח ATIS sticky (מוסתר כברירת מחדל; מתמלא כשמגיעה הודעת A9) -->
-    <div class="acars-atis hidden" id="acarsAtis"></div>
-
-    <!-- חיפוש + ייצוא -->
-    <div class="acars-tools">
-      <input id="acarsSearch" dir="auto" class="acars-search" type="search"
-             placeholder="חיפוש: זנב / טיסה / label / טקסט…" autocomplete="off" />
-      <span class="acars-export">
-        <a class="ghost" id="acarsCsv" href="/api/acars/export?format=csv" download>⬇ CSV</a>
-        <a class="ghost" id="acarsJson" href="/api/acars/export?format=json" download>JSON</a>
-      </span>
-    </div>
-    <!-- צ'יפים לסינון קטגוריה (נבנים דינמית לפי הקבוצות שהופיעו) -->
-    <div class="acars-filters" id="acarsFilters"></div>
-    <!-- רשימת מטוסים (roster): בחירת מטוס => הצגתו במפה + סינון הפיד. מתקפל במובייל. -->
-    <details class="acars-roster-wrap" id="acarsRosterWrap" open>
-      <summary>✈️ מטוסים (<span id="acarsRosterCount">0</span>)</summary>
-      <div class="acars-roster" id="acarsRoster"></div>
-    </details>
-    <!-- drill-down: צ'יפ המטוס הממוקד (לחיצה על זנב בכרטיס/popup); ✕ מנקה -->
-    <div class="acars-focus hidden" id="acarsFocusChip"></div>
-
-    <div class="acars-feed" id="acarsFeed"></div>
-    <p class="acars-empty" id="acarsEmpty">ממתין להודעות…</p>
-    </div><!-- /acars-col-feed -->
-    </div><!-- /acars-body -->
   </section>
 
   <!-- ===================== תצוגת VDL2 ===================== -->
-  <!-- שימוש חוזר במחלקות ה-.acars-* (אפס CSS חדש); ה-JS מנוהל בנפרד עם prefix vdl2 -->
-  <section class="card hidden" id="vdl2View">
-    <div class="acars-head">
-      <span id="vdl2Pill" class="pill"><span class="dot"></span><span id="vdl2Status">טוען…</span></span>
-      <span class="acars-freqs" id="vdl2Freqs"></span>
-    </div>
-    <!-- בורר בנקי תדרים: כל הצביר 136.7–137.0 נכנס בחלון דגימה אחד -->
-    <div class="acars-banks" id="vdl2Banks"></div>
-    <!-- סרגל בקרת SDR: מתעדכן לפי vdl2Active (מצב ה-SDR האמיתי, לא הכרטיסייה) -->
-    <div id="vdl2SdrBar" class="acars-sdr-bar">
-      <div id="vdl2Inactive">
-        <button id="vdl2ActivateBtn" class="primary" style="width:100%">▶ הפעל קליטת VDL2 חיה</button>
-        <p class="sdr-hint">מציג היסטוריה · השמע ממשיך לרוץ. לחץ כדי להעביר את ה-SDR ל-VDL2 (השמע ייפסק).</p>
-      </div>
-      <div id="vdl2ActiveCtrl" class="hidden">
-        <div class="sdr-btns">
-          <button id="vdl2StopBtn">⏹ עצור / חזור לקול</button>
-          <button id="vdl2TowerBtn">🎧 מגדל · 134.600</button>
+  <!-- מבנה מקבּיל לתצוגת ACARS (שימוש חוזר במחלקות ה-.acars-*/.dl-*; ה-JS עם prefix vdl2) -->
+  <section class="view hidden" id="vdl2View">
+    <!-- פאנל בקרת מקלט -->
+    <section class="panel dl-ctl">
+      <div class="panel-hd"><p class="ttl">קליטת VDL2</p>
+        <div class="hd-end">
+          <span id="vdl2Pill" class="pill"><span class="dot"></span><span id="vdl2Status">טוען…</span></span>
+          <span class="acars-freqs" id="vdl2Freqs"></span>
         </div>
-        <p class="sdr-hint">VDL2 פעיל — ה-SDR מפענח נתונים. השמע אינו זמין.</p>
+      </div>
+      <div class="panel-bd">
+        <!-- בורר בנקי תדרים: כל הצביר 136.7–137.0 נכנס בחלון דגימה אחד -->
+        <div class="acars-banks" id="vdl2Banks"></div>
+        <!-- סרגל בקרת SDR: מתעדכן לפי vdl2Active (מצב ה-SDR האמיתי, לא הכרטיסייה) -->
+        <div id="vdl2SdrBar" class="acars-sdr-bar">
+          <div id="vdl2Inactive">
+            <button id="vdl2ActivateBtn" class="primary" style="width:100%">▶ הפעל קליטת VDL2 חיה</button>
+            <p class="sdr-hint">מציג היסטוריה · השמע ממשיך לרוץ. לחץ כדי להעביר את ה-SDR ל-VDL2 (השמע ייפסק).</p>
+          </div>
+          <div id="vdl2ActiveCtrl" class="hidden">
+            <div class="sdr-btns">
+              <button id="vdl2StopBtn">⏹ עצור / חזור לקול</button>
+              <button id="vdl2TowerBtn">🎧 מגדל · 134.600</button>
+            </div>
+            <p class="sdr-hint">VDL2 פעיל — ה-SDR מפענח נתונים. השמע אינו זמין.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- רצועת סטטיסטיקה ברוחב מלא -->
+    <div class="dl-strip">
+      <div class="acars-stats">
+        <div class="acars-stat"><b id="vdl2StTotal">0</b><span>הודעות</span></div>
+        <div class="acars-stat"><b id="vdl2StRate">0</b><span>הודעות/דק׳</span></div>
+        <div class="acars-stat"><b id="vdl2StCraft">0</b><span>מטוסים</span></div>
+        <div class="acars-stat"><b id="vdl2StPos">0</b><span>עם מיקום</span></div>
+        <div class="acars-stat"><b id="vdl2StAdsb">0</b><span>🛰 ADS‑B</span></div>
+      </div>
+      <div class="rate-spark" title="קצב הודעות · 2 הדקות האחרונות">
+        <span>📈</span><canvas id="vdl2RateSpark"></canvas>
       </div>
     </div>
 
     <div class="acars-body">
-    <div class="acars-col-map">
-    <!-- מפה (Leaflet) — מטוסים עם מיקום מ-VDL2 (ADS-C); מתמלאת לאט -->
-    <div id="vdl2Map" class="acars-map"></div>
-    <p class="acars-map-note hidden" id="vdl2MapNote"></p>
-    <div class="acars-detail hidden" id="vdl2Detail"></div>
-    </div><!-- /acars-col-map -->
+      <!-- פאנל מפה -->
+      <section class="panel dl-map">
+        <div class="panel-hd"><p class="ttl">מפה · מטוסים</p></div>
+        <!-- מפה (Leaflet) — מטוסים עם מיקום מ-VDL2 (ADS-C); מתמלאת לאט -->
+        <div class="panel-bd flush"><div id="vdl2Map" class="acars-map"></div></div>
+        <div class="panel-ft">
+          <p class="acars-map-note hidden" id="vdl2MapNote"></p>
+          <div class="acars-detail hidden" id="vdl2Detail"></div>
+        </div>
+      </section>
 
-    <div class="acars-col-feed">
-    <div class="acars-stats">
-      <div class="acars-stat"><b id="vdl2StTotal">0</b><span>הודעות</span></div>
-      <div class="acars-stat"><b id="vdl2StRate">0</b><span>הודעות/דק׳</span></div>
-      <div class="acars-stat"><b id="vdl2StCraft">0</b><span>מטוסים</span></div>
-      <div class="acars-stat"><b id="vdl2StPos">0</b><span>עם מיקום</span></div>
-      <div class="acars-stat"><b id="vdl2StAdsb">0</b><span>🛰 ADS‑B</span></div>
+      <!-- פאנל פיד הודעות -->
+      <section class="panel dl-feed">
+        <div class="panel-hd"><p class="ttl">פיד הודעות</p>
+          <div class="hd-end">
+            <span class="acars-export">
+              <a class="ghost" id="vdl2Csv" href="/api/vdl2/export?format=csv" download>⬇ CSV</a>
+              <a class="ghost" id="vdl2Json" href="/api/vdl2/export?format=json" download>JSON</a>
+            </span>
+          </div>
+        </div>
+        <div class="panel-tools">
+          <input id="vdl2Search" dir="auto" class="acars-search" type="search"
+                 placeholder="חיפוש: זנב / טיסה / ICAO / label / טקסט…" autocomplete="off" />
+          <div class="acars-filters" id="vdl2Filters"></div>
+          <details class="acars-roster-wrap" id="vdl2RosterWrap" open>
+            <summary>✈️ מטוסים (<span id="vdl2RosterCount">0</span>)</summary>
+            <div class="acars-roster" id="vdl2Roster"></div>
+          </details>
+          <div class="acars-focus hidden" id="vdl2FocusChip"></div>
+        </div>
+        <div class="panel-bd">
+          <div class="acars-feed" id="vdl2Feed"></div>
+          <p class="acars-empty" id="vdl2Empty">ממתין להודעות… רוב התעבורה באזורנו על 136.975.</p>
+        </div>
+      </section>
     </div>
-    <div class="rate-spark" title="קצב הודעות · 2 הדקות האחרונות">
-      <span>📈</span><canvas id="vdl2RateSpark"></canvas>
-    </div>
-
-    <div class="acars-tools">
-      <input id="vdl2Search" dir="auto" class="acars-search" type="search"
-             placeholder="חיפוש: זנב / טיסה / ICAO / label / טקסט…" autocomplete="off" />
-      <span class="acars-export">
-        <a class="ghost" id="vdl2Csv" href="/api/vdl2/export?format=csv" download>⬇ CSV</a>
-        <a class="ghost" id="vdl2Json" href="/api/vdl2/export?format=json" download>JSON</a>
-      </span>
-    </div>
-    <div class="acars-filters" id="vdl2Filters"></div>
-    <details class="acars-roster-wrap" id="vdl2RosterWrap" open>
-      <summary>✈️ מטוסים (<span id="vdl2RosterCount">0</span>)</summary>
-      <div class="acars-roster" id="vdl2Roster"></div>
-    </details>
-    <div class="acars-focus hidden" id="vdl2FocusChip"></div>
-
-    <div class="acars-feed" id="vdl2Feed"></div>
-    <p class="acars-empty" id="vdl2Empty">ממתין להודעות… רוב התעבורה באזורנו על 136.975.</p>
-    </div><!-- /acars-col-feed -->
-    </div><!-- /acars-body -->
   </section>
+
+  </main>
 
   <script>
     const $ = (id) => document.getElementById(id);
@@ -2163,6 +2382,14 @@
           iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41],
         });
         setTimeout(() => acarsMap.invalidateSize(), 60);   // הקונטיינר זה עתה הוצג
+        // בפריסת הדשבורד גודל פאנל-המפה עשוי להשתנות בלי resize-חלון (reflow גריד,
+        // פתיחת roster) => ResizeObserver מבטיח שהאריחים לא נחתכים.
+        if (window.ResizeObserver) {
+          new ResizeObserver(() => {
+            clearTimeout(acarsResizeT);
+            acarsResizeT = setTimeout(() => acarsMap.invalidateSize(), 120);
+          }).observe($("acarsMap"));
+        }
         for (const m of acarsMsgs) upsertMarker(m);        // בונה markers/שובלים (לא מצרף למפה)
         renderMapSelection();                              // מצייר את הנבחר או מציג הערה ריקה
       } catch (e) { mapFail("שגיאה בטעינת המפה"); }
@@ -2882,6 +3109,13 @@
             iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41],
           });
           setTimeout(() => map.invalidateSize(), 60);
+          // כמו ב-ACARS: פאנל-המפה בדשבורד עשוי להשתנות בגודלו בלי resize-חלון
+          if (window.ResizeObserver) {
+            new ResizeObserver(() => {
+              clearTimeout(resizeT);
+              resizeT = setTimeout(() => map.invalidateSize(), 120);
+            }).observe($(opts.prefix + "Map"));
+          }
           for (const m of msgs) upsertMarker(m);
           renderMapSelection();
         } catch (e) { mapFail("שגיאה בטעינת המפה"); }
