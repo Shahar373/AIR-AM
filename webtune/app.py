@@ -1029,13 +1029,22 @@ def _parse_pdc(text):
 def _normalize_acars(m):
     """מצמצם הודעת acarsdec JSON לשדות שה-UI מציג, בפורמט *אחיד* לכל סוגי ההודעות:
     קטגוריה קריאה (label => תיאור), קבוצה (לצבע), ומיקום (lat/lon) כשזמין. עמיד
-    לשדות חסרים (הרבה הודעות ACARS הן ACK ריק בלי tail/flight/text)."""
+    לשדות חסרים (הרבה הודעות ACARS הן ACK ריק בלי tail/flight/text).
+    מדדי איכות קליטה: "level" (dBFS) מגיע ישירות מהמפענח — נשמר כמות שהוא, בלי
+    עיבוד. "snr" מחושב רק כש-"noise" (רצפת רעש) קיים בקלט — acarsdec עצמו *לא*
+    מספק רצפת רעש לכל הודעה (בניגוד ל-dumpvdl2), אז בהודעות ACARS אמיתיות snr
+    יהיה None תמיד; רק VDL2 (מסלול A, שמזרים raw דרך הפונקציה הזו) מזין "noise"
+    ומקבל SNR אמיתי. לעולם לא מעריכים ערך משוער — אם אין נתון אמין, השדה חסר."""
     def g(*keys):
         for k in keys:
             v = m.get(k)
             if v not in (None, ""):
                 return v
         return None
+
+    level = g("level")
+    noise = g("noise")
+    snr = round(level - noise, 1) if (level is not None and noise is not None) else None
 
     text = g("text")
     if isinstance(text, str):
@@ -1122,7 +1131,8 @@ def _normalize_acars(m):
     return {
         "t": g("timestamp") or time.time(),   # epoch seconds (float) מ-acarsdec (חסר => עכשיו)
         "freq": g("freq"),                    # MHz
-        "level": g("level"),                  # dBFS
+        "level": level,                       # dBFS — מקורי מהמפענח, לא מעובד
+        "snr": snr,                           # dB — רק כש-noise זמין (ר' docstring); אחרת None
         "label": label,
         "category": category,                 # תיאור קריא אחיד (label/ARINC-622)
         "group": group,                       # קבוצה לצבע ב-UI / עמודה בייצוא
@@ -1296,7 +1306,9 @@ def _normalize_vdl2(m):
         freq_mhz = round(float(v.get("freq")) / 1e6, 3) if v.get("freq") else None
     except (TypeError, ValueError):
         freq_mhz = None
-    level = v.get("sig_level")
+    level = v.get("sig_level")             # dBFS — מקורי מהמפענח
+    noise = v.get("noise_level")           # dBFS — רצפת רעש; dumpvdl2 מודד בעצמו (בניגוד ל-acarsdec)
+    snr = round(level - noise, 1) if (level is not None and noise is not None) else None
 
     # זהות + כיוון מבניים משכבת ה-AVLC: src=Aircraft => downlink (עובדה פיזית,
     # אמינה יותר מכל heuristic של label/טקסט => דורסת את _acars_direction בסוף).
@@ -1320,6 +1332,7 @@ def _normalize_vdl2(m):
             "timestamp": t,
             "freq": freq_mhz,
             "level": level,
+            "noise": noise,                   # מוזן ל-_normalize_acars => snr אמיתי (לא הודעה משוערת)
             "mode": acars.get("mode"),
             "label": acars.get("label"),
             "tail": acars.get("reg"),         # יתכן '.' מוביל — כמו acarsdec (norm_reg מטפל)
@@ -1360,7 +1373,7 @@ def _normalize_vdl2(m):
             ft = avlc.get("frame_type")
             category = f"VDL2 · {ft}" if ft else "VDL2"
         card = {
-            "t": t, "freq": freq_mhz, "level": level,
+            "t": t, "freq": freq_mhz, "level": level, "snr": snr,
             "label": None, "category": category, "group": group,
             "tail": None, "flight": None, "mode": None, "msgno": None,
             "dir": None, "lat": lat, "lon": lon, "pos_src": pos_src,
@@ -1671,6 +1684,145 @@ def _fail_to_off(st, err, detail, log_prefix):
             "app_mode": "off", "state": new_state}, 500
 
 
+# --- מצב סריקה/סבב: מחזור אוטומטי בין המצבים לפי לוח זמנים ------------------
+# "רגל" (leg) = {"mode": voice/acars/vdl2, "dwell_sec": int, "freqs": [...]?}.
+# thread נפרד מסתובב בין הרגלים; נועל TUNE_LOCK רק בזמן מעבר (לא בזמן ההמתנה)
+# => עצירה/מעבר מצב ידני של המשתמש מתערבים כמעט מיד, לא ממתינים לרגל שלמה.
+# כשל ברגל => דילוג לבאה כמעט מיד; כשל של *כל* הרגלים ברצף (סבב שלם בלי אף
+# הצלחה) => נופל ל-off, בדיוק כמו כשל כניסה לכל מצב אחר (אין fallback לקול).
+SCAN_DWELL_MIN, SCAN_DWELL_MAX = 10, 3600   # שניות — הגנה מפני ערכים אבסורדיים
+SCAN_LEGS_MAX = 8                            # הגנה מפני לוחות ענק
+
+_scan_lock = threading.Lock()      # מגן על _scan_thread/_scan_thread_stop/_scan_status
+_scan_thread = None
+_scan_thread_stop = None           # Event של ה-thread *הפעיל* הנוכחי (לא גלובלי משותף —
+                                    # כל thread מקבל Event משלו, כדי שסבב חדש לא "יבטל" ישן)
+_scan_status = {"idx": -1, "leg": None, "next_switch_at": None, "plan": []}
+
+
+def _validate_scan_plan(raw):
+    """מוודא לוח סריקה: רשימה לא-ריקה (עד SCAN_LEGS_MAX) של רגלים תקינים —
+    מצב voice/acars/vdl2 + dwell_sec בטווח סביר + (ל-acars/vdl2) תדרים תקינים
+    שנכנסים בחלון דגימה אחד. מחזיר לוח מנורמל או None אם לא תקין."""
+    if not isinstance(raw, list) or not (1 <= len(raw) <= SCAN_LEGS_MAX):
+        return None
+    plan = []
+    for leg in raw:
+        if not isinstance(leg, dict):
+            return None
+        mode = leg.get("mode")
+        if mode not in ("voice", "acars", "vdl2"):
+            return None
+        try:
+            dwell = int(leg.get("dwell_sec"))
+        except (TypeError, ValueError):
+            return None
+        if not (SCAN_DWELL_MIN <= dwell <= SCAN_DWELL_MAX):
+            return None
+        clean = {"mode": mode, "dwell_sec": dwell}
+        if mode in ("acars", "vdl2") and leg.get("freqs"):
+            default = ACARS_FREQS_DEFAULT if mode == "acars" else VDL2_FREQS_DEFAULT
+            wcheck = _acars_window_error if mode == "acars" else _vdl2_window_error
+            freqs = _sanitize_freqs(leg.get("freqs"), default)
+            if wcheck(freqs):
+                return None
+            clean["freqs"] = freqs
+        plan.append(clean)
+    return plan
+
+
+def _scan_enter_leg(leg):
+    """נכנס לרגל בודדת (מצב+תדרים/כיוונון). *לא* נועל TUNE_LOCK — הקורא אחראי
+    (עקבי עם _enter_voice/_enter_acars/_enter_vdl2). מחזיר (error, detail)."""
+    mode = leg["mode"]
+    if mode == "voice":
+        params, perr = _parse_tune(load_state())
+        if perr:
+            params, _ = _parse_tune(DEFAULT_STATE)
+        err, detail, _sdr_down = _enter_voice(params)
+        return err, detail
+    key = "acars_freqs" if mode == "acars" else "vdl2_freqs"
+    default = ACARS_FREQS_DEFAULT if mode == "acars" else VDL2_FREQS_DEFAULT
+    enter = _enter_acars if mode == "acars" else _enter_vdl2
+    freqs = leg.get("freqs") or load_state().get(key) or default
+    return enter(freqs)
+
+
+def _scan_stop_thread():
+    """עוצר את thread הסריקה הפעיל (אם יש) ומחכה שיסיים. אין-אופ אם לא רץ סבב.
+    לא נועל TUNE_LOCK — ה-thread עצמו מחזיק אותו רק לזמן קצר בכל מעבר רגל."""
+    global _scan_thread, _scan_thread_stop
+    with _scan_lock:
+        thread, stop_evt = _scan_thread, _scan_thread_stop
+        _scan_thread = _scan_thread_stop = None
+        if stop_evt:
+            stop_evt.set()
+    if thread and thread.is_alive():
+        thread.join(timeout=15)
+
+
+def _scan_loop(stop_evt, plan, start_idx, first_dwell):
+    """thread: ממתין first_dwell על הרגל שכבר הוכנסה (start_idx-1), ואז מסתובב
+    בין שאר רגלי הלוח עד עצירה. stop_evt ייחודי-לקריאה-הזו (לא גלובלי) => סבב
+    חדש שמתחיל אחר-כך לא "מבטל בטעות" thread ישן שעדיין מסיים את היציאה."""
+    idx = start_idx
+    remaining = first_dwell
+    consecutive_fail = 0
+    while not stop_evt.is_set():
+        while remaining > 0 and not stop_evt.is_set():
+            step = min(1.0, remaining)
+            time.sleep(step)
+            remaining -= step
+        if stop_evt.is_set():
+            break
+        leg = plan[idx % len(plan)]
+        if not TUNE_LOCK.acquire(timeout=5):
+            remaining = 1
+            continue
+        try:
+            err, detail = _scan_enter_leg(leg)
+        finally:
+            TUNE_LOCK.release()
+        if err:
+            log.warning("scan: leg %d (%s) failed: %s", idx % len(plan), leg["mode"], err)
+            consecutive_fail += 1
+            if consecutive_fail >= len(plan):
+                log.warning("scan: כל הרגלים נכשלו בסבב — נופל ל-off")
+                _enter_standby()
+                cur = load_state()
+                save_state({**cur, "app_mode": "off", "prev_mode": "scan"})
+                with _scan_lock:
+                    _scan_status.update(idx=-1, leg=None, next_switch_at=None)
+                return
+            idx += 1
+            remaining = 1     # מנסים את הבאה כמעט מיד — לא ממתינים dwell מלא אחרי כשל
+            continue
+        consecutive_fail = 0
+        with _scan_lock:
+            _scan_status.update(idx=idx % len(plan), leg=leg,
+                                next_switch_at=time.time() + leg["dwell_sec"])
+        remaining = leg["dwell_sec"]
+        idx += 1
+
+
+def _scan_activate(plan):
+    """מפעיל סבב סריקה: נכנס לרגל 0 (הקורא מחזיק את TUNE_LOCK — עקבי עם שאר
+    _enter_*), ואם הצליחה מתחיל thread לשאר הסבב. מחזיר (error, detail)."""
+    global _scan_thread, _scan_thread_stop
+    err, detail = _scan_enter_leg(plan[0])
+    if err:
+        return err, detail
+    stop_evt = threading.Event()
+    thread = threading.Thread(target=_scan_loop, args=(stop_evt, plan, 1, plan[0]["dwell_sec"]),
+                              daemon=True)
+    with _scan_lock:
+        _scan_status.update(idx=0, leg=plan[0], next_switch_at=time.time() + plan[0]["dwell_sec"],
+                            plan=plan)
+        _scan_thread, _scan_thread_stop = thread, stop_evt
+    thread.start()
+    return None, None
+
+
 # --- נתיבים ----------------------------------------------------------------
 @app.route("/")
 def index():
@@ -1746,10 +1898,16 @@ def api_state():
     # (אופטימיזציית Conflicts — ראה שם).
     live = _live_mode()
     saved = st.get("app_mode", "off")
-    st["app_mode"] = live or saved
-    # mode_ok=False: המצב השמור אמור להריץ צרכן ואף אחד לא רץ (קריסה / עליית
-    # מערכת / _boot_restore עוד בדרך). True גם ב-off — standby מכוון אינו תקלה.
-    st["mode_ok"] = (live is not None) or (saved == "off")
+    if saved == "scan":
+        # סריקה: "המצב" הוא scan עצמו (לא הרגל הנוכחית) — הרגל/הספירה לאחור
+        # מגיעות מ-/api/scan. תקין כל עוד *איזשהו* צרכן פעיל (הרגל הנוכחית).
+        st["app_mode"] = "scan"
+        st["mode_ok"] = live is not None
+    else:
+        st["app_mode"] = live or saved
+        # mode_ok=False: המצב השמור אמור להריץ צרכן ואף אחד לא רץ (קריסה / עליית
+        # מערכת / _boot_restore עוד בדרך). True גם ב-off — standby מכוון אינו תקלה.
+        st["mode_ok"] = (live is not None) or (saved == "off")
     st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT, version=VERSION,
               acars_banks=ACARS_BANKS, vdl2_banks=VDL2_BANKS)
     return jsonify(st)
@@ -1802,9 +1960,13 @@ def api_health():
     active = ("vdl2" if services["airam-vdl2"] == "active"
               else "acars" if services["airam-acars"] == "active"
               else "voice" if services["rtl_airband"] == "active" else None)
-    mode = active or saved
-    ok = (voice_ok if mode == "voice" else acars_ok if mode == "acars"
-          else vdl2_ok if mode == "vdl2" else off_ok)
+    if saved == "scan":
+        # סריקה: תקין כל עוד הרגל הנוכחית (איזשהו צרכן) פועלת בפועל.
+        mode, ok = "scan", active is not None
+    else:
+        mode = active or saved
+        ok = (voice_ok if mode == "voice" else acars_ok if mode == "acars"
+              else vdl2_ok if mode == "vdl2" else off_ok)
     return jsonify(ok=ok, app_mode=mode,
                    services=services, sdr_present=_sdr_present(), stats_age=stats_age)
 
@@ -2241,11 +2403,11 @@ def api_acars():
                    cursor=cursor, messages=msgs, adsb=_acars_adsb())
 
 
-ACARS_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "mode", "label",
+ACARS_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "snr", "mode", "label",
                      "category", "group", "dir", "tail", "flight", "actype", "msgno", "error",
                      "lat", "lon", "pos_src", "text"]
 # ייצוא VDL2 = אותן עמודות + icao (זהות AVLC לפריימים בלי רישום) אחרי flight
-VDL2_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "mode", "label",
+VDL2_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "snr", "mode", "label",
                     "category", "group", "dir", "tail", "flight", "icao", "actype", "msgno",
                     "error", "lat", "lon", "pos_src", "text"]
 
@@ -2355,13 +2517,15 @@ def api_vdl2_export():
 @app.route("/api/mode", methods=["POST"])
 def api_mode():
     """מעבר בין המצבים: קול (rtl_airband) / ACARS (acarsdec) / VDL2 (dumpvdl2) /
-    off (standby). SDR אחד בהחלפה — צרכן אחד בכל רגע. המצבים שווי-מעמד:
-    כישלון כניסה לכל אחד מהם נופל ל-off (בלי fallback לקול).
-    POST => עובר דרך _guard (Origin + PIN אופציונלי), כמו /api/tune."""
+    off (standby) / scan (סבב אוטומטי בין המצבים). SDR אחד בהחלפה — צרכן אחד
+    בכל רגע. המצבים שווי-מעמד: כישלון כניסה לכל אחד מהם נופל ל-off (בלי
+    fallback לקול). POST => עובר דרך _guard (Origin + PIN אופציונלי), כמו /api/tune."""
     data = request.get_json(silent=True) or {}
     mode = str(data.get("mode", "")).lower()
-    if mode not in ("voice", "acars", "vdl2", "off"):
-        return jsonify(ok=False, error="mode לא תקין (voice/acars/vdl2/off)"), 400
+    if mode not in ("voice", "acars", "vdl2", "off", "scan"):
+        return jsonify(ok=False, error="mode לא תקין (voice/acars/vdl2/off/scan)"), 400
+
+    _scan_stop_thread()   # כל מעבר מצב (כולל scan עם לוח חדש) עוצר סבב קודם
 
     if mode == "voice":
         # קול = כיוונון להגדרות השמורות האחרונות (או מפורשות). _voice_tune מחזיק
@@ -2392,6 +2556,20 @@ def api_mode():
             save_state(new_state)
             return jsonify(ok=True, app_mode="off")
 
+        if mode == "scan":
+            plan = _validate_scan_plan(data.get("plan") or st.get("scan_plan"))
+            if plan is None:
+                return jsonify(ok=False, error="לוח סריקה לא תקין (1-8 רגלים, "
+                               "כל רגל מצב+זמן שהייה תקין)", state=st), 400
+            log.info("mode -> SCAN plan=%s (from %s)", plan, request.remote_addr)
+            err, detail = _scan_activate(plan)
+            if err:
+                payload, status = _fail_to_off(st, err, detail, "enter scan (leg 0)")
+                return jsonify(payload), status
+            new_state = {**st, "app_mode": "scan", "scan_plan": plan}
+            save_state(new_state)
+            return jsonify(ok=True, app_mode="scan", scan_plan=plan)
+
         # acars / vdl2 — מסלול דאטה סימטרי
         key, default, wcheck, enter = (
             ("acars_freqs", ACARS_FREQS_DEFAULT, _acars_window_error, _enter_acars)
@@ -2411,6 +2589,16 @@ def api_mode():
         return jsonify(ok=True, app_mode=mode, **{key: freqs})
     finally:
         TUNE_LOCK.release()
+
+
+@app.route("/api/scan")
+def api_scan():
+    """סטטוס סבב הסריקה החי: רגל נוכחית, אינדקס, ומועד המעבר הבא — ל-UI
+    (ספירה לאחור, הדגשת הרגל הפעילה). ריק/idx=-1 כשאין סבב פעיל."""
+    with _scan_lock:
+        status = dict(_scan_status)
+        active = _scan_thread is not None and _scan_thread.is_alive()
+    return jsonify(ok=True, active=active, **status)
 
 
 # --- שחזור מצב באתחול: airam-web הוא המתזמר ---------------------------------
@@ -2437,6 +2625,10 @@ def _boot_restore():
         st = load_state()
         mode = st.get("app_mode", "off")
         live = _live_mode()
+        # scan: live הוא תמיד voice/acars/vdl2/None, לעולם לא "scan" עצמו (זו
+        # אפליקציה מעל שלושת השירותים, לא שירות בפני עצמו) => הקיצור הזה תמיד
+        # מדלג עליו וסבב הסריקה תמיד מתחיל מחדש מרגל 0 אחרי restart של airam-web
+        # (גם אם רגל מסוימת כבר רצה תקין) — פשטות מכוונת, לא באג.
         if live == mode and not (mode == "voice" and _config_stale()):
             return   # restart של airam-web באמצע סשן: הצרכן השמור כבר רץ
         if mode == "off":
@@ -2464,8 +2656,14 @@ def _boot_restore():
                     return
             elif mode == "acars":
                 err, _detail = _enter_acars(st.get("acars_freqs"))
-            else:
+            elif mode == "vdl2":
                 err, _detail = _enter_vdl2(st.get("vdl2_freqs"))
+            else:   # scan
+                plan = _validate_scan_plan(st.get("scan_plan"))
+                if plan is None:
+                    err, _detail = "לוח סריקה שמור לא תקין", None
+                else:
+                    err, _detail = _scan_activate(plan)
             if err:
                 log.warning("boot restore -> %s failed: %s — falling to off", mode, err)
                 _enter_standby()

@@ -268,8 +268,9 @@
     }
     .home-state { font-size: .95rem; margin: 0 0 var(--sp-3); color: var(--dim); }
     .home-state b { color: var(--text); }
+    /* auto-fit (לא repeat(3) קבוע) => זורם נכון גם עם 4 כרטיסים (כולל "סריקה") */
     .mode-cards { display: grid; grid-template-columns: minmax(0,1fr); gap: var(--sp-3); }
-    @media (min-width: 700px) { .mode-cards { grid-template-columns: repeat(3, minmax(0,1fr)); } }
+    @media (min-width: 700px) { .mode-cards { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); } }
     .mode-card {
       display: flex; flex-direction: column; gap: var(--sp-2); align-items: flex-start;
       padding: var(--sp-4); border: 1px solid var(--border);
@@ -283,6 +284,11 @@
       font-family: var(--font-mono); font-variant-numeric: tabular-nums; direction: ltr;
     }
     .mode-card button { margin-top: auto; font-size: .9rem; padding: .55rem .95rem; }
+    .scan-editor { display: flex; flex-direction: column; gap: var(--sp-2); width: 100%; }
+    .scan-leg { display: flex; align-items: center; gap: var(--sp-2); }
+    .scan-leg select { flex: 1; min-width: 0; }
+    .scan-leg-dwell { width: 4.5rem; font-variant-numeric: tabular-nums; }
+    .scan-leg-del { padding: .2rem .55rem; }
 
     /* ---------- תצוגת הרדיו ---------- */
     /* פאנל הרדיו: התוכן ממורכז (מספר התדר, נגן) */
@@ -988,6 +994,17 @@
           <p class="mc-sub" id="homeVdl2Sub">—</p>
           <button type="button" class="primary" id="homeGoVdl2">▶ הפעל VDL2</button>
         </div>
+        <div class="mode-card" id="homeCardScan">
+          <div class="mc-title">🔁 סריקה
+            <span class="pill live hidden mc-live"><span class="dot"></span><span>פעיל</span></span></div>
+          <p class="mc-desc hint">מחזור אוטומטי בין המצבים לפי לוח זמנים — כשל ברגל מדלג לבאה</p>
+          <p class="mc-sub" id="homeScanSub">—</p>
+          <div class="scan-editor" id="homeScanEditor">
+            <div id="homeScanLegs"></div>
+            <button type="button" class="ghost" id="homeScanAddLeg">+ הוסף רגל</button>
+          </div>
+          <button type="button" class="primary" id="homeGoScan">🔁 התחל סריקה</button>
+        </div>
       </div>
     </div><!-- /panel-bd -->
   </section>
@@ -1418,6 +1435,12 @@
     let appMode = "home";         // התצוגה הנוכחית: "home" (מרכז) | "voice" | "acars" | "vdl2"
     let acarsActive = false;      // האם acarsdec פעיל בפועל ב-SDR (עשוי להיות שונה מ-appMode)
     let sdrOff = false;           // האם המקלט בכיבוי (standby) — שני הצרכנים עצורים, ה-SDR פנוי
+    let scanning = false;         // האם app_mode השמור הוא "scan" (סבב אוטומטי)
+    let scanStatus = { idx: -1, leg: null, next_switch_at: null };   // מ-/api/scan (רגל נוכחית)
+    let scanLegs = [{ mode: "voice", dwell_sec: 60 },
+                    { mode: "acars", dwell_sec: 120 },
+                    { mode: "vdl2", dwell_sec: 120 }];   // עורך הלוח במסך הבית (ברירת מחדל)
+    const SCAN_MODE_LABEL = { voice: "📻 קול", acars: "📡 ACARS", vdl2: "🛰️ VDL2" };
     let acarsBanks = [];          // בנקי תדרי ACARS מהשרת (כל בנק נכנס בחלון אחד)
     let selAcarsFreqs = null;     // התדרים הנבחרים להפעלת ACARS (בנק או מותאם)
     let applyModeInFlight = false; // מניעת לחיצות כפולות בזמן מעבר SDR (3-5 שניות)
@@ -2185,15 +2208,26 @@
                    : s["airam-acars"] === "active" ? "acars"
                    : s["rtl_airband"] === "active" ? "voice" : null;
         sdrOff = !live;
+        scanning = (h.app_mode === "scan");
         if ((live === "acars") !== acarsActive) setAcarsStatus(live === "acars");
         if (vdl2 && (live === "vdl2") !== vdl2.active) vdl2.setActive(live === "vdl2");
         updateSdrPip(); renderPower();
+        if (scanning) {
+          try {
+            const sc = await (await fetch("/api/scan")).json();
+            if (sc.ok) scanStatus = sc;
+          } catch (e) { /* לא קריטי — התצוגה תישאר עם הערך הקודם */ }
+        }
+        if (appMode === "home") renderHome();
         // הודעת תקלה רק במסך הבית — לא דורסים סטטוס חי של סטרים/פיד בתצוגות אחרות
         if (!h.ok && appMode === "home")
           setStatus("תקלה: המצב (" + (h.app_mode || "?") + ") לא רץ — בדוק את המערכת", "err");
       } catch (e) { /* offline — הסטטוס הראשי כבר מציג שגיאת רשת במקומות אחרים */ }
     }
     setInterval(pollGlobalState, 10000);
+    // ספירה-לאחור חלקה לרגל הבאה בסריקה — חישוב מקומי בלבד (בלי רשת) מול
+    // scanStatus.next_switch_at שהתקבל מ-/api/scan; מתעדכן כל שנייה כשהבית מוצג.
+    setInterval(() => { if (scanning && appMode === "home") renderHome(); }, 1000);
 
     /* ---------- מצבים: קול / ACARS / VDL2 / off — שווי-מעמד ---------- */
     // SDR אחד => החלפה: כל מצב עוצר את הצרכנים האחרים ומריץ את שלו. "home" הוא
@@ -2224,13 +2258,14 @@
       applyModeInFlight = true;
       _setModeButtons(true);                  // נטרל כפתורי SDR בזמן המעבר
       // המצב שעוזבים — נשמר כ-prev_mode מקומי כדי שכפתור ההדלקה יחזיר אותו
-      const leaving = sdrOff ? null : (vdl2 && vdl2.active) ? "vdl2" : acarsActive ? "acars" : "voice";
-      // mode "off" => נוחתים במסך הבית (התצוגה הניטרלית של standby)
+      const leaving = sdrOff ? null : scanning ? "scan" : (vdl2 && vdl2.active) ? "vdl2" : acarsActive ? "acars" : "voice";
+      // mode "off"/"scan" => נוחתים במסך הבית (אין תצוגה ייעודית לסריקה — היא "אפליקציית-על")
       sdrOff = (mode === "off");
-      showView(mode === "off" ? "home" : mode);   // עדכון אופטימי; אם השרת נכשל נסנכרן חזרה
+      scanning = (mode === "scan");
+      showView(mode === "off" || mode === "scan" ? "home" : mode);   // עדכון אופטימי; אם השרת נכשל נסנכרן חזרה
       if (mode !== "voice") { wantPlaying = false; player.pause(); }  // ה-SDR יוצא מקול
       setStatus(mode === "acars" ? "מפעיל ACARS…" : mode === "vdl2" ? "מפעיל VDL2…"
-                : mode === "off" ? "מכבה מקלט…" : "מפעיל קול…", "busy");
+                : mode === "scan" ? "מפעיל סריקה…" : mode === "off" ? "מכבה מקלט…" : "מפעיל קול…", "busy");
       try {
         const res = await apiSend("POST", "/api/mode", { mode, ...(extra || {}) });
         const data = await res.json();
@@ -2240,11 +2275,12 @@
           // כישלון כניסה למצב => השרת נופל ל-off (אין fallback לקול) — נוחתים בבית
           const back = (data.state && data.state.app_mode) || "off";
           sdrOff = (back === "off");
+          scanning = (back === "scan");
           setAcarsStatus(back === "acars");
           vdl2.setActive(back === "vdl2");
-          showView(back === "off" ? "home" : back);
+          showView(back === "off" || back === "scan" ? "home" : back);
           if (back === "off") showHomeError(data.error, data.detail);
-          renderPower();
+          renderPower(); renderHome();
           return false;
         }
         showError(null);
@@ -2255,6 +2291,12 @@
           setAcarsStatus(false); vdl2.setActive(false);   // ה-SDR כבוי => כל המפענחים לא פעילים
           renderPower(); renderHome();
           setStatus("מקלט בכיבוי (Standby)", "off");
+        } else if (mode === "scan") {
+          if (data.scan_plan) { scanLegs = data.scan_plan; renderScanEditor(); }
+          scanStatus = { idx: 0, leg: scanLegs[0], next_switch_at: null };
+          setAcarsStatus(scanLegs[0].mode === "acars"); vdl2.setActive(scanLegs[0].mode === "vdl2");
+          renderPower(); renderHome();
+          setStatus("סורק בין " + scanLegs.length + " מצבים", "on");
         } else if (mode === "voice") {
           sdrOff = false;
           setAcarsStatus(false); vdl2.setActive(false);   // SDR יצא ממצב דאטה
@@ -2290,7 +2332,7 @@
     function _setModeButtons(disabled) {
       ["acarsActivateBtn", "acarsStopBtn", "towerBtn", "voiceActivateBtn",
        "powerBtn", "standbyOnBtn",
-       "homeGoVoice", "homeGoAcars", "homeGoVdl2", "homeStopBtn",
+       "homeGoVoice", "homeGoAcars", "homeGoVdl2", "homeGoScan", "homeStopBtn",
        "vdl2ActivateBtn", "vdl2StopBtn", "vdl2TowerBtn"].forEach(id => {
         const el = $(id); if (el) el.disabled = disabled;
       });
@@ -2375,6 +2417,11 @@
       return s;
     }
 
+    // מיון איכות-קליטה גנרי (dBFS/SNR) לשלוש רמות צבע — משותף ל-ACARS ול-VDL2
+    function qualityCls(val, good, ok) {
+      return val > good ? "level-good" : val > ok ? "level-ok" : "level-weak";
+    }
+
     function renderAcarsFreqs(freqs) {
       $("acarsFreqs").textContent = (freqs || []).join(" · ");
     }
@@ -2450,7 +2497,14 @@
       // המצב החי נגזר מהדגלים המקומיים (מיושרים ע"י applyMode + pollGlobalState)
       const live = sdrOff ? null : (vdl2 && vdl2.active) ? "vdl2" : acarsActive ? "acars" : "voice";
       const txt = $("homeStateTxt");
-      if (live === "voice")
+      if (scanning) {
+        const leg = scanStatus.leg;
+        const legLabel = leg ? (SCAN_MODE_LABEL[leg.mode] || leg.mode) : (live ? SCAN_MODE_LABEL[live] : "—");
+        const secLeft = scanStatus.next_switch_at != null
+          ? Math.max(0, Math.round(scanStatus.next_switch_at - Date.now() / 1000)) : null;
+        txt.innerHTML = "🔁 <b>סורק</b> — רגל נוכחית: <b>" + legLabel + "</b>"
+          + (secLeft != null ? " · מעבר בעוד " + secLeft + "ש׳" : "");
+      } else if (live === "voice")
         txt.innerHTML = "המקלט במצב <b>📻 קול</b> — " + Number(current).toFixed(3) + " MHz";
       else if (live === "acars") txt.innerHTML = "המקלט במצב <b>📡 ACARS</b> — מאזין להודעות דאטה";
       else if (live === "vdl2") txt.innerHTML = "המקלט במצב <b>🛰️ VDL2</b> — מאזין להודעות דאטה";
@@ -2460,14 +2514,56 @@
       $("homeVoiceSub").textContent = Number.isFinite(Number(current)) ? Number(current).toFixed(3) + " MHz" : "—";
       $("homeAcarsSub").textContent = (selAcarsFreqs && selAcarsFreqs.length) ? selAcarsFreqs.join(" · ") : "—";
       $("homeVdl2Sub").textContent = (vdl2 && vdl2.selFreqs && vdl2.selFreqs.length) ? vdl2.selFreqs.join(" · ") : "—";
-      // סימון הכרטיס החי (מסגרת ירוקה + pill "פעיל")
+      $("homeScanSub").textContent = scanLegs.length
+        ? scanLegs.map((l) => (SCAN_MODE_LABEL[l.mode] || l.mode) + " " + l.dwell_sec + "ש׳").join(" ← ")
+        : "—";
+      // סימון הכרטיס החי (מסגרת ירוקה + pill "פעיל") — בסריקה, כרטיס "סריקה" הוא
+      // ה"חי" (לא כרטיס הרגל הנוכחית — הוא רק תת-הפרטים בטקסט הסטטוס למעלה)
       const cards = { voice: "homeCardVoice", acars: "homeCardAcars", vdl2: "homeCardVdl2" };
       for (const [m, id] of Object.entries(cards)) {
         const card = $(id);
-        card.classList.toggle("sdr-live", m === live);
+        const isLive = !scanning && m === live;
+        card.classList.toggle("sdr-live", isLive);
         const pill = card.querySelector(".mc-live");
-        if (pill) pill.classList.toggle("hidden", m !== live);
+        if (pill) pill.classList.toggle("hidden", !isLive);
       }
+      const scanCard = $("homeCardScan");
+      scanCard.classList.toggle("sdr-live", scanning);
+      const scanPill = scanCard.querySelector(".mc-live");
+      if (scanPill) scanPill.classList.toggle("hidden", !scanning);
+      $("homeGoScan").textContent = scanning ? "⏹ עצור סריקה" : "🔁 התחל סריקה";
+      $("homeScanEditor").classList.toggle("hidden", scanning);
+    }
+    function renderScanEditor() {
+      const box = $("homeScanLegs");
+      box.innerHTML = "";
+      scanLegs.forEach((leg, i) => {
+        const row = document.createElement("div");
+        row.className = "scan-leg";
+        const sel = document.createElement("select");
+        for (const m of ["voice", "acars", "vdl2"]) {
+          const opt = document.createElement("option");
+          opt.value = m; opt.textContent = SCAN_MODE_LABEL[m];
+          if (m === leg.mode) opt.selected = true;
+          sel.appendChild(opt);
+        }
+        sel.onchange = () => { scanLegs[i] = { ...scanLegs[i], mode: sel.value }; renderHome(); };
+        const dwell = document.createElement("input");
+        dwell.type = "number"; dwell.className = "scan-leg-dwell";
+        dwell.min = 10; dwell.max = 3600; dwell.value = leg.dwell_sec;
+        dwell.onchange = () => {
+          const v = parseInt(dwell.value, 10);
+          scanLegs[i] = { ...scanLegs[i], dwell_sec: Number.isFinite(v) ? Math.min(3600, Math.max(10, v)) : 60 };
+          renderHome();
+        };
+        const del = document.createElement("button");
+        del.type = "button"; del.className = "ghost scan-leg-del"; del.textContent = "✕";
+        del.title = "הסר רגל";
+        del.onclick = () => { scanLegs.splice(i, 1); renderScanEditor(); renderHome(); };
+        row.append(sel, dwell, document.createTextNode(" שנ׳ "), del);
+        box.appendChild(row);
+      });
+      $("homeScanAddLeg").classList.toggle("hidden", scanLegs.length >= 8);
     }
     function showHomeError(err, detail) {
       // שגיאת מעבר-מצב שמוצגת במסך הבית (הנחיתה של כישלון => off)
@@ -2888,12 +2984,15 @@
       } else {
         metaEl.textContent = metaParts.join(" · ");
       }
-      if (m.level != null) {                       // level עם צבע לפי עוצמה
+      if (m.level != null) {                       // level (dBFS, מקורי מהמפענח) עם צבע לפי עוצמה
         const lvl = Number(m.level);
-        const lvlCls = lvl > -30 ? "level-good" : lvl > -45 ? "level-ok" : "level-weak";
         if (metaParts.length || (blockCount && blockCount > 1)) metaEl.appendChild(document.createTextNode(" · "));
-        const lvlSpan = mk(lvlCls, lvl.toFixed(0) + " dBFS");
-        metaEl.appendChild(lvlSpan);
+        metaEl.appendChild(mk(qualityCls(lvl, -30, -45), lvl.toFixed(0) + " dBFS"));
+      }
+      if (m.snr != null) {                          // SNR — רק כשיש רצפת רעש אמינה (VDL2 בלבד; ACARS לא מספק)
+        const snr = Number(m.snr);
+        metaEl.appendChild(document.createTextNode(" · "));
+        metaEl.appendChild(mk(qualityCls(snr, 15, 8), snr.toFixed(0) + " dB SNR"));
       }
       if (hasRetx) {                               // התקבל שוב (רטרנסמיט) — ה-CSS חיכה לזה
         if (metaEl.childNodes.length || metaEl.textContent) metaEl.appendChild(document.createTextNode(" · "));
@@ -2969,7 +3068,7 @@
     // לא הורסות nodes שלא השתנו.
     function msgSig(m, count, hasRetx) {
       return JSON.stringify([m.id, m.tail, m.flight, m.icao, m.dir, m.category, m.group,
-        m.lat, m.lon, m.error, m.freq, m.level, m.label, m.mode, m.msgno, m.decoded,
+        m.lat, m.lon, m.error, m.freq, m.level, m.snr, m.label, m.mode, m.msgno, m.decoded,
         m.text, count, hasRetx]);
     }
     function patchMsgTime(el, m) {
@@ -3531,9 +3630,13 @@
         } else metaEl.textContent = metaParts.join(" · ");
         if (m.level != null) {
           const lvl = Number(m.level);
-          const lvlCls = lvl > -30 ? "level-good" : lvl > -45 ? "level-ok" : "level-weak";
           if (metaParts.length || (blockCount && blockCount > 1)) metaEl.appendChild(document.createTextNode(" · "));
-          metaEl.appendChild(mk(lvlCls, lvl.toFixed(0) + " dBFS"));
+          metaEl.appendChild(mk(qualityCls(lvl, -30, -45), lvl.toFixed(0) + " dBFS"));
+        }
+        if (m.snr != null) {                 // SNR אמיתי — dumpvdl2 מספק גם רצפת רעש
+          const snr = Number(m.snr);
+          metaEl.appendChild(document.createTextNode(" · "));
+          metaEl.appendChild(mk(qualityCls(snr, 15, 8), snr.toFixed(0) + " dB SNR"));
         }
         if (hasRetx) {                       // התקבל שוב (רטרנסמיט)
           if (metaEl.childNodes.length || metaEl.textContent) metaEl.appendChild(document.createTextNode(" · "));
@@ -3776,6 +3879,17 @@
     $("homeGoAcars").onclick = () => applyMode("acars", selAcarsFreqs ? { freqs: selAcarsFreqs } : undefined);
     $("homeGoVdl2").onclick = () => applyMode("vdl2", vdl2.selFreqs ? { freqs: vdl2.selFreqs } : undefined);
     $("homeStopBtn").onclick = () => applyMode("off");
+    $("homeScanAddLeg").onclick = () => {
+      if (scanLegs.length >= 8) return;
+      scanLegs.push({ mode: "acars", dwell_sec: 60 });
+      renderScanEditor(); renderHome();
+    };
+    $("homeGoScan").onclick = () => {
+      if (scanning) return applyMode("off");           // עצירת סריקה = standby, כמו שאר המצבים
+      if (!scanLegs.length) return;
+      applyMode("scan", { plan: scanLegs });
+    };
+    renderScanEditor();
     // כפתורי בקרת SDR בסרגל ACARS
     $("acarsActivateBtn").onclick = () => applyMode("acars", selAcarsFreqs ? { freqs: selAcarsFreqs } : undefined);
     $("acarsStopBtn").onclick = () => applyMode("off");   // עצירה = standby, לא "חזרה לקול"
@@ -3787,6 +3901,7 @@
       if (back === "acars") applyMode("acars", selAcarsFreqs ? { freqs: selAcarsFreqs } : undefined);
       else if (back === "vdl2") applyMode("vdl2", vdl2.selFreqs ? { freqs: vdl2.selFreqs } : undefined);
       else if (back === "voice") applyMode("voice");
+      else if (back === "scan") applyMode("scan");   // הפלאן נשלף מהשרת (scan_plan שמור)
       else showView("home");
     };
     // כפתורי "הפעל קול" בתוך תצוגת הקול — פעולת קול מפורשת (המשתמש בטאב קול)
@@ -3912,6 +4027,12 @@
         vdl2.setActive(true);               // מאתחל pip + SDR bar + banner מיד בטעינה
         showView("vdl2");
         setStatus("מצב VDL2 פעיל", "live");
+      } else if (st.app_mode === "scan" && st.mode_ok !== false) {
+        scanning = true;
+        if (st.scan_plan && st.scan_plan.length) { scanLegs = st.scan_plan; renderScanEditor(); }
+        showView("home");
+        setStatus("מצב סריקה פעיל", "live");
+        pollGlobalState();   // מיישר מיד את הרגל/pip החיים, בלי לחכות ל-poll התקופתי
       } else if (st.app_mode === "off") {
         sdrOff = true;                      // המקלט בכיבוי (standby) — אין שמע/דאטה
         updateSdrPip();

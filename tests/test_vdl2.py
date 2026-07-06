@@ -84,6 +84,9 @@ def test_normalize_vdl2_acars_label15_position():
     assert abs(n["t"] - (t0 + 0.25)) < 1e-6        # t.sec + t.usec/1e6
     assert n["freq"] == 136.975                    # Hz => MHz
     assert n["level"] == -22.1
+    # dumpvdl2 מספק גם sig_level וגם noise_level לכל פריים (בניגוד ל-acarsdec) =>
+    # snr מחושב תמיד כהפרש אמיתי, לא מוערך. noise_level קבוע ב-_vdl2 על -44.4.
+    assert n["snr"] == round(-22.1 - (-44.4), 1)
     assert (n["tail"], n["flight"], n["label"]) == (".4X-EKF", "LY0315", "15")
     assert n["msgno"] == "M55A"                    # msg_num + msg_num_seq
     assert n["error"] == 0
@@ -162,6 +165,9 @@ def test_normalize_vdl2_cpdlc_generic_card():
     assert "CLIMB TO FL350" in (n["decoded"] or "")
     assert n["dir"] == "uplink" and n["icao"] == "738065"
     assert n["tail"] is None and n["label"] is None
+    # מסלול B (כרטיס גנרי) מחשב snr ישירות מ-v["sig_level"]/v["noise_level"] —
+    # לא רק מסלול A (ACARS-over-VDL2) שעובר דרך _normalize_acars.
+    assert n["snr"] == round(-22.1 - (-44.4), 1)
 
 
 def test_normalize_vdl2_adsc_x25_position():
