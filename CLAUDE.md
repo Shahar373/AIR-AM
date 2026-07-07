@@ -88,11 +88,11 @@ CLAUDE.md                   # ← המסמך הזה: ארכיטקטורה + פי
 webtune/
   app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, סריקה, רוסטר
                             #   מאוחד, REST API, יומן, הקלטות, תמלול, METAR, מדדי RF,
-                            #   מעבר מצבים. ~2770 שורות.
+                            #   מעבר מצבים, ארכיון חיפוש. ~2850 שורות.
   adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS. thread נפרד.
                             #   ניתן להרצה ידנית: `python3 adsb.py [--selftest]`.
   static/
-    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~3400 שורות). PWA. 4 תצוגות:
+    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~3550 שורות). PWA. 4 תצוגות:
                             #   🏠 מרכז (בית/standby/scan) + קול + ACARS + VDL2. ACARS ו-VDL2
                             #   שני מופעים סימטריים של אותו פקטורי createDataView (ר' §7).
     manifest.webmanifest    # PWA manifest (התקנה כאפליקציה).
@@ -129,6 +129,7 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_boot.py             # _boot_restore: שחזור המצב באתחול (המתזמר) — 11 בדיקות.
   test_scan.py             # מצב סריקה: validate_scan_plan, _scan_loop, /api/mode, /api/scan, boot restore.
   test_roster.py           # רוסטר מטוסים מאוחד: היתוך זהות ACARS/VDL2/ADS-B, מיון, /api/aircraft.
+  test_archive.py          # ארכיון חיפוש רב-יומי: _day_bounds, ?day= ב-/api/acars ו-/api/vdl2.
   test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
 
 .github/workflows/ci.yml   # pytest + `bash -n` על install.sh ו-airam-wait-sdrplay.
@@ -181,14 +182,22 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   (thread ב-startup) משחזר את המצב השמור באתחול — ה-orchestration שמאפשר לאף צרכן
   לא להיות enabled ב-systemd.
 - **מצב סריקה/סבב (scan) — "אפליקציית-על" מעל שלושת המצבים, לא צרכן/שירות רביעי:**
-  `_validate_scan_plan` (מאמת לוח: 1–8 "רגלים" `{mode,dwell_sec,freqs?}`),
-  `_scan_enter_leg` (כניסה לרגל בודדת דרך `_enter_voice`/`_enter_acars`/`_enter_vdl2`
-  — לא נועל TUNE_LOCK, כמו שאר ה-`_enter_*`), `_scan_activate` (נכנס לרגל 0 סינכרונית
-  + מתחיל thread לשאר הלוח), `_scan_loop` (thread: מסתובב בין הרגלים, נועל TUNE_LOCK
-  רק בזמן מעבר; כשל ברגל ⇒ דילוג לבאה; כשל של *כל* הרגלים ברצף ⇒ `off`, כמו כל מצב),
-  `_scan_stop_thread` (עוצר את הסבב הפעיל — נקרא ב*כל* מעבר `/api/mode`, כולל scan
-  חדש). `api_state`/`api_health` מיוחדים ל-scan: ה"מצב" הוא `scan` עצמו (לא הרגל
-  הנוכחית) — הרגל/הספירה-לאחור מגיעות מ-`GET /api/scan`.
+  `_validate_scan_plan` (מאמת לוח: 1–8 "רגלים" `{mode,dwell_sec,freqs?,active_from?,
+  active_to?}` — שני שדות חלון-השעות חייבים להופיע ביחד, "HH:MM"),
+  `_leg_active_now` (האם הרגל בחלון השעות שלה כרגע — שעון מקומי, תומך בחלון
+  שחוצה חצות; בלי חלון בכלל = תמיד פעילה), `_scan_enter_leg` (כניסה לרגל בודדת
+  דרך `_enter_voice`/`_enter_acars`/`_enter_vdl2` — לא נועל TUNE_LOCK, כמו שאר
+  ה-`_enter_*`), `_scan_activate` (מוצא את הרגל הראשונה שבחלון השעות שלה כרגע
+  ונכנס אליה סינכרונית + מתחיל thread לשאר הלוח; אם אף רגל לא בחלון — **לא כשל**,
+  ה-SDR נשאר כבוי ו-thread ממתין), `_scan_loop` (thread: מסתובב בין הרגלים, נועל
+  TUNE_LOCK רק בזמן מעבר; רגל מחוץ לחלון מדולגת מיד — לא כשל; סבב שלם בלי אף
+  רגל בחלון ⇒ `SCAN_WINDOW_RECHECK_SEC`=30 שניות המתנה לפני שבודקים שוב, במקום
+  busy-loop; כשל *כניסה* ברגל ⇒ דילוג לבאה; כשל של *כל* הרגלים ברצף ⇒ `off`,
+  כמו כל מצב), `_scan_stop_thread` (עוצר את הסבב הפעיל — נקרא ב*כל* מעבר
+  `/api/mode`, כולל scan חדש). `api_state`/`api_health` מיוחדים ל-scan: ה"מצב"
+  הוא `scan` עצמו (לא הרגל הנוכחית) — הרגל/הספירה-לאחור מגיעות מ-`GET /api/scan`;
+  `mode_ok`/`ok` נשארים `True` גם כש"ממתין לחלון" (אף רגל לא אמורה לרוץ כרגע) —
+  לא רק כש-off מכוון.
 - **ACARS:** `_acars_listener` (thread, מאזין UDP 5556), `_normalize_acars` (הלב —
   ממיר JSON גולמי לכרטיס אחיד: label→קטגוריה+כיוון, חילוץ נ"צ, ARINC-622, actype,
   **מדדי איכות קליטה** — `level`=dBFS מקורי מהמפענח (נשמר כמות שהוא); `snr` מחושב
@@ -204,7 +213,9 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   `_acars_adsb` (העשרת ADS-B לזנבות שבזיכרון — ראה §6),
   `_enter_acars` (כתיבת env + מעבר שירות), `_enter_standby` (כיבוי **שלושת** הצרכנים, משאיר
   sdrplay חי), `_acars_window_error` (wrapper דק מעל `_window_error` הגנרי — ≤8 ערוצים,
-  span ≤ `ACARS_WINDOW_MHZ`), `ACARS_BANKS` (בנקי תדרים, כל בנק בחלון אחד), `_today_start`.
+  span ≤ `ACARS_WINDOW_MHZ`), `ACARS_BANKS` (בנקי תדרים, כל בנק בחלון אחד), `_today_start`,
+  `_day_bounds` (גבולות יום מקומי לארכיון החיפוש — `?day=YYYY-MM-DD` ב-`/api/acars`,
+  קורא מהדיסק דרך `_read_acars_log`, לא מהזיכרון; משותף גם ל-VDL2).
 - **VDL2:** `_vdl2_listener` (thread, מאזין UDP 5557), `_normalize_vdl2` (הלב — סכמת
   dumpvdl2 v2.6.0: **מסלול A** — `avlc.acars` קיים ⇒ מסנתז dict בסגנון acarsdec (כולל
   `noise=sig_level`/`noise_level` ⇒ SNR אמיתי) ומזרים דרך `_normalize_acars` ⇒ *כל*
@@ -260,8 +271,10 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 **רוסטר מטוסים מאוחד** (`renderRoster`/`pollRoster`, כל 20ש' — מציג היתוך ACARS+VDL2+
 ADS-B מ-`GET /api/aircraft`, כולל כשה-SDR ב-standby). כרטיס
 הסריקה (`#homeCardScan`) כולל עורך לוח (`renderScanEditor` — הוספה/הסרה/עריכת רגלים,
-`scanLegs` בזיכרון בלבד עד לחיצת "התחל") וסטטוס חי (רגל נוכחית + ספירה-לאחור מקומית
-כל שנייה מול `scanStatus.next_switch_at` שמגיע מ-`GET /api/scan`). **אין תצוגה ייעודית
+כולל שני שדות `<input type=time>` אופציונליים פר-רגל לחלון שעות (`active_from`/
+`active_to`, ריק=תמיד); `scanLegs` בזיכרון בלבד עד לחיצת "התחל") וסטטוס חי (רגל
+נוכחית + ספירה-לאחור מקומית כל שנייה מול `scanStatus.next_switch_at` שמגיע
+מ-`GET /api/scan`; "ממתין לחלון הזמן הבא" כשאף רגל לא בחלון שלה כרגע). **אין תצוגה ייעודית
 לסריקה** — `showView`/`applyMode` נשארים מרובעים (home/voice/acars/vdl2 בלבד); `scan`
 תמיד ממופה ל-`"home"` (הוא "אפליקציית-על", לא תוכן-תצוגה). הדף מושך מצב מ-`/api/*`
 ב-polling; ה-pollers של airspace/power/METAR/roster רצים בכל תצוגה, metrics/activity רק
@@ -287,17 +300,30 @@ cursor/filters משלו — כלום לא משותף בזיכרון בין הש�
 `opts.label` קובע את טקסט הסטטוס ("ACARS כבוי"/"מאזין · VDL2" וכו'). שני hooks
 אופציונליים (no-op כברירת מחדל, VDL2 לא מעביר אותם): `opts.onMessage(m)` — נקרא
 לכל הודעה חדשה ב-`poll()` (ACARS: מזין את לוח ה-ATIS sticky ב-label A9); `opts.onReset()`
-— נקרא כשה-cursor מתאפס (ACARS: מנקה את לוח ה-ATIS מהסשן הקודם). הפקטורי עושה
-שימוש חוזר בעוזרים ה*טהורים* הגלובליים בלבד (`fmtTime`/`mkSpan`/`dirBadge`/`normReg`/
-`trackColor`/`CAT_GROUPS`/`DIR_INFO`/`MULTIBLOCK_RE`/`RETRANS_WINDOW_S`/`msgSig`/
-`patchMsgTime`/`reconcileFeed`/`segSet`/`qualityCls` — מיון dBFS/SNR לשלוש רמות
-צבע). `showView` מרובע (home/voice/acars/vdl2); `applyMode` מחומש (voice/acars/
-vdl2/off/scan — off ו-scan שניהם נוחתים בתצוגת home).
+— נקרא כשה-cursor מתאפס (ACARS: מנקה את לוח ה-ATIS מהסשן הקודם). `opts.emptyHint`
+— טקסט מותאם למצב "אין הודעות עדיין" (VDL2 בלבד: הפניה לתדר 136.975; ACARS מקבל
+ברירת מחדל גנרית). הפקטורי עושה שימוש חוזר בעוזרים ה*טהורים* הגלובליים בלבד
+(`fmtTime`/`mkSpan`/`dirBadge`/`normReg`/`trackColor`/`CAT_GROUPS`/`DIR_INFO`/
+`MULTIBLOCK_RE`/`RETRANS_WINDOW_S`/`msgSig`/`patchMsgTime`/`reconcileFeed`/`segSet`/
+`qualityCls` — מיון dBFS/SNR לשלוש רמות צבע). `showView` מרובע (home/voice/acars/
+vdl2); `applyMode` מחומש (voice/acars/vdl2/off/scan — off ו-scan שניהם נוחתים
+בתצוגת home).
+
+**ארכיון חיפוש רב-יומי** (בתוך אותו פקטורי, שני התצוגות מקבלות בחינם): כרטיס
+`.acars-archive` (בורר `<input type=date>` + כפתור "🔎 חפש בארכיון" + "◀ חזרה
+לשידור חי") מעל תיבת החיפוש. `enterArchiveDay(day)` שולף `GET /api/<prefix>?day=`,
+שומר את המצב החי הנוכחי ב-`liveSnapshot` (msgs/lastId/feedMax/feedCache — פעם
+אחת, לא נדרס בביקורים חוזרים בארכיון), מחליף את `msgs` בתוכן היום שנבחר (מזהה
+`id` סינתטי-רציף, אין ל-jsonl), עוצר polling, ובונה מחדש markers/craft/roster/
+detail/feed מהנתונים הארכיוניים — **משתמש באותם renderStats/renderRoster/
+renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitArchive()` משחזר את
+`liveSnapshot` ומחדש polling. `show()` **לא** מחדש polling אם `archiveDay` עדיין
+מוגדר (מעבר בין תצוגות תוך כדי עיון בארכיון לא "שובר" אותו בטעות בחזרה).
 
 > בעריכת ה-UI: שמור על polling קל, על נפילה חיננית בלי רשת, ועל RTL/עברית נכונה.
 > שינוי שנוגע בשתי התצוגות — ערוך את הפקטורי `createDataView` (מקום אחד, שני המופעים
-> יורשים); שינוי ACARS-only/VDL2-only בלבד — דרך `opts` (label/prefix) או hook חדש
-> (`onMessage`/`onReset`), לא קוד מיוחד מחוץ לפקטורי.
+> יורשים); שינוי ACARS-only/VDL2-only בלבד — דרך `opts` (label/prefix/emptyHint) או
+> hook חדש (`onMessage`/`onReset`), לא קוד מיוחד מחוץ לפקטורי.
 
 ---
 
@@ -314,9 +340,9 @@ vdl2/off/scan — off ו-scan שניהם נוחתים בתצוגת home).
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
 | POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
 | GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור) |
-| GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
+| GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון; `?day=YYYY-MM-DD` ארכיון מהדיסק, snapshot סטטי) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט; לא ב-`?day=`). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM, עמודות `level`+`snr`) |
-| GET | `/api/vdl2` | הודעות VDL2 אחרונות (**היום בלבד**; `?all=1`) + שדה `adsb`. אותה סכמת כרטיס כמו ACARS + `icao`; `snr` תמיד אמיתי (dumpvdl2 מספק רצפת רעש) |
+| GET | `/api/vdl2` | הודעות VDL2 אחרונות (**היום בלבד**; `?all=1`; `?day=YYYY-MM-DD` ארכיון) + שדה `adsb`. אותה סכמת כרטיס כמו ACARS + `icao`; `snr` תמיד אמיתי (dumpvdl2 מספק רצפת רעש) |
 | GET | `/api/vdl2/export?format=csv\|json` | ייצוא VDL2 (CSV עם BOM, עמודות `icao`+`level`+`snr`) |
 | GET | `/api/aircraft` | רוסטר מטוסים מאוחד — היתוך ACARS+VDL2+ADS-B לפי זהות (רישום/icao/טיסה). חי בכל מצב |
 | GET | `/api/activity` | יומן שידורים |
@@ -386,10 +412,13 @@ SDR (כולל rtl_airband) לא enabled, ובשדרוג `disable rtl_airband` א
   `_enter_voice`/`_enter_acars`/`_enter_vdl2` הקיימים; ראו §5).
   **אין "מצב ראשי"**: כל המצבים (כולל `off`/`scan`) **שורדים reboot** — אף צרכן לא
   enabled, `_boot_restore` של airam-web משחזר את המצב השמור באתחול (עבור `scan`:
-  נכנס לרגל 0 מחדש — לא ממשיך מהאינדקס שבו נעצר, פשטות מכוונת). **כישלון כניסה
-  למצב ⇒ נפילה ל-`off`** (`_fail_to_off`), לעולם לא fallback לקול; חריגים: (1) רולבק
-  *בתוך* כיוונון קול לקונפיג האחרון שעבד (retry, לא עליונות-מצב), וגם הוא מאומת;
-  (2) כשל ברגל *בודדת* בסריקה מדלג לרגל הבאה — רק כשל של *כל* הרגלים ברצף נופל ל-off.
+  מוצא מחדש את הרגל הראשונה שבחלון השעות שלה — לא ממשיך מהאינדקס שבו נעצר, פשטות
+  מכוונת). **כישלון כניסה למצב ⇒ נפילה ל-`off`** (`_fail_to_off`), לעולם לא fallback
+  לקול; חריגים: (1) רולבק *בתוך* כיוונון קול לקונפיג האחרון שעבד (retry, לא
+  עליונות-מצב), וגם הוא מאומת; (2) כשל ברגל *בודדת* בסריקה מדלג לרגל הבאה — רק
+  כשל של *כל* הרגלים ברצף נופל ל-off; (3) רגל מחוץ לחלון השעות שלה (`active_from`/
+  `active_to`) מדולגת בשקט — **גם זו לא תקלה**, ואם אף רגל לא בחלון כרגע ה-SDR
+  נשאר כבוי ו-`mode_ok`/`ok` נשארים `True` ("ממתין", כמו standby מכוון).
   `api_state`/`api_health` גוזרים את המצב מהמציאות, ובאין צרכן פעיל — מהכוונה
   השמורה; מצב שמור שלא רץ = תקלה (`mode_ok=False`/`ok=False`), standby ≠ תקלה.
   ב-`scan` ה"מצב" המדווח הוא `scan` עצמו (לא הרגל הנוכחית) — ראו `/api/scan`.
