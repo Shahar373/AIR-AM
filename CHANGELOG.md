@@ -9,6 +9,29 @@
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-07-06
+### נוסף
+- **רוסטר מטוסים מאוחד (ACARS+VDL2+ADS-B)** — `GET /api/aircraft` חדש: מהתך את
+  היסטוריות ACARS ו-VDL2 שבזיכרון לפי זהות משותפת (רישום מנורמל קודם, אחרת icao,
+  אחרת מספר טיסה) ומעשיר ב-ADS-B חי (`adsb.aircraft_snapshot`) — כל מטוס מקבל
+  תגיות מקור (`sources`: acars/vdl2), ספירת הודעות, קטגוריה/מיקום/סוג אחרונים.
+  **חי בכל מצב** (גם standby/סריקה) — לא תלוי SDR הפעיל כרגע, כי שני ה-listeners
+  ו-thread ה-ADS-B רצים תמיד ברקע. פאנל חדש במסך הבית (`renderRoster`/`pollRoster`,
+  כל 20ש', ללא תלות ב-appMode — כמו airspace).
+### שונה
+- **סימטריית קוד מלאה: ACARS הפך למופע שני של `createDataView`** — פיצ'ר 1
+  ממפת הדרכים. הקוד הייעודי של ACARS (~780 שורות: buffers/מפה/roster/פיד/polling
+  כפולים) הוסר; `var acars = createDataView({prefix:"acars", mode:"acars",
+  label:"ACARS", onMessage, onReset})` מחליף אותו — אותו קוד בדיוק כמו VDL2,
+  אפס הבדל התנהגותי. הפקטורי עצמו הוכלל: נתיב ה-API (`/api/vdl2` → `/api/`+prefix),
+  טקסט הסטטוס ("VDL2"/"ACARS") ותגית ה-mode ב-`selectBank` פורמלו דרך `opts`
+  במקום קבועים; שני hooks אופציונליים חדשים (`onMessage`/`onReset`, no-op
+  כברירת מחדל) משמרים את התנהגות לוח ה-ATIS הייחודית ל-ACARS בלי קוד ACARS-only
+  מחוץ לפקטורי. שינויי ID ב-`#acarsView` ליישור עם `#vdl2View` (`sdrInactive`→
+  `acarsInactive` וכו', `towerBtn`→`acarsTowerBtn`) — סימטריה מלאה בתבנית ה-DOM.
+  refactor טהור: אומת ב-Chromium headless (הזרקת UDP סינתטית ל-ACARS/VDL2,
+  בדיקת badges/roster/detail/מפה/לוח-ATIS/כשל-מעבר-מצב) — אפס רגרסיה.
+
 ## [2.1.0] - 2026-07-06
 ### נוסף
 - **מצב סריקה/סבב 🔁 — מחזור אוטומטי בין המצבים לפי לוח זמנים**, כפיצ'ר שוויוני
