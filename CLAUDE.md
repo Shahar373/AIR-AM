@@ -86,14 +86,15 @@ README.md                   # תיעוד למשתמש הקצה (התקנה + ש�
 CLAUDE.md                   # ← המסמך הזה: ארכיטקטורה + פיתוח.
 
 webtune/
-  app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, סריקה, REST API,
-                            #   יומן, הקלטות, תמלול, METAR, מדדי RF, מעבר מצבים. ~2700 שורות.
+  app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, סריקה, רוסטר
+                            #   מאוחד, REST API, יומן, הקלטות, תמלול, METAR, מדדי RF,
+                            #   מעבר מצבים. ~2770 שורות.
   adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS. thread נפרד.
                             #   ניתן להרצה ידנית: `python3 adsb.py [--selftest]`.
   static/
-    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~4000 שורות). PWA. 4 תצוגות:
-                            #   🏠 מרכז (בית/standby/scan) + קול + ACARS + VDL2. תצוגת VDL2
-                            #   בפקטורי createDataView (מופע נפרד מ-ACARS — אפס רגרסיה).
+    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~3400 שורות). PWA. 4 תצוגות:
+                            #   🏠 מרכז (בית/standby/scan) + קול + ACARS + VDL2. ACARS ו-VDL2
+                            #   שני מופעים סימטריים של אותו פקטורי createDataView (ר' §7).
     manifest.webmanifest    # PWA manifest (התקנה כאפליקציה).
     sw.js                   # Service Worker (נדרש HTTPS).
     icon-*.png, apple-touch-icon.png
@@ -127,6 +128,7 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_vdl2.py             # נרמול VDL2 (מסלול A/B), env, מעברי מצב, ייצוא, health.
   test_boot.py             # _boot_restore: שחזור המצב באתחול (המתזמר) — 11 בדיקות.
   test_scan.py             # מצב סריקה: validate_scan_plan, _scan_loop, /api/mode, /api/scan, boot restore.
+  test_roster.py           # רוסטר מטוסים מאוחד: היתוך זהות ACARS/VDL2/ADS-B, מיון, /api/aircraft.
   test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
 
 .github/workflows/ci.yml   # pytest + `bash -n` על install.sh ו-airam-wait-sdrplay.
@@ -213,6 +215,10 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   MHz→Hz**, `VDL2_GAIN` מכיל את הדגל כולו או ריק), `_enter_vdl2` (עוצר rtl_airband+acars,
   מרים dumpvdl2, verify), `_vdl2_window_error`, `_vdl2_adsb`, `VDL2_BANKS`. התמדה:
   `_append_vdl2_log`/`_trim_vdl2_log`/`_load_vdl2_history` (clones של צמד ה-ACARS).
+- **רוסטר מטוסים מאוחד:** `_aircraft_identity` (מפתח זהות מהודעה מנורמלת — רישום
+  מנורמל קודם, אחרת icao, אחרת מספר טיסה), `_build_roster` (מהתך `_acars_msgs`+
+  `_vdl2_msgs` לפי הזהות, מעשיר ב-`adsb.aircraft_snapshot`, ממוין lastT יורד,
+  גזור ל-`ROSTER_MAX`) — **חי בכל מצב** (לא תלוי SDR הפעיל, ר' §12), `GET /api/aircraft`.
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_transcribe_worker` (thread whisper אופציונלי), `_sweep_recordings` (retention).
 - **`__main__`:** מרים את thread השחזור `_boot_restore` (מחזיר את המצב השמור, כולל
@@ -250,13 +256,15 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע ברקע).
 מתג תצוגות 🏠/📻/📡/🛰️ בראש — **🏠 מרכז (מסך הבית)** הוא ברירת המחדל והנחיתה של
 מצב off/scan: כרטיס סטטוס, **ארבעה** כרטיסי הפעלה שווי-מעמד (📻/📡/🛰️/🔁 — `renderHome`/
-`showHomeError`), ופאנלי המסלולים/METAR (מערכתיים — עברו לכאן מתצוגת הקול). כרטיס
+`showHomeError`), פאנלי המסלולים/METAR (מערכתיים — עברו לכאן מתצוגת הקול), ופאנל
+**רוסטר מטוסים מאוחד** (`renderRoster`/`pollRoster`, כל 20ש' — מציג היתוך ACARS+VDL2+
+ADS-B מ-`GET /api/aircraft`, כולל כשה-SDR ב-standby). כרטיס
 הסריקה (`#homeCardScan`) כולל עורך לוח (`renderScanEditor` — הוספה/הסרה/עריכת רגלים,
 `scanLegs` בזיכרון בלבד עד לחיצת "התחל") וסטטוס חי (רגל נוכחית + ספירה-לאחור מקומית
 כל שנייה מול `scanStatus.next_switch_at` שמגיע מ-`GET /api/scan`). **אין תצוגה ייעודית
 לסריקה** — `showView`/`applyMode` נשארים מרובעים (home/voice/acars/vdl2 בלבד); `scan`
 תמיד ממופה ל-`"home"` (הוא "אפליקציית-על", לא תוכן-תצוגה). הדף מושך מצב מ-`/api/*`
-ב-polling; ה-pollers של airspace/power/METAR רצים בכל תצוגה, metrics/activity רק
+ב-polling; ה-pollers של airspace/power/METAR/roster רצים בכל תצוגה, metrics/activity רק
 בקול, ו-`pollGlobalState` (10ש', `/api/health` + `/api/scan` כשסורקים) מיישר את חיווי
 המצב למציאות בלי לחטוף את הטאב. כפתורי עצירה ⇒ `applyMode("off")` (גם עצירת סריקה);
 כפתור ⏻ מחזיר את `prev_mode` (יכול להיות `"scan"`). עיצוב responsive (multi-column
@@ -269,17 +277,27 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 וקווים (`--border`/`--border-strong`). **השתמש בטוקנים בקוד חדש** במקום ערכים קשיחים —
 כך הקצב והגיאומטריה נשמרים עקביים, ושינוי במקום אחד מתפשט לכל הרכיבים.
 
-**תצוגת ACARS מול VDL2:** ACARS ממומש ישירות (globals `acars*` + `renderAcarsMsg`
-וכו'). תצוגת VDL2 ממומשת ב-**פקטורי `createDataView({prefix:"vdl2", ...})`** — מופע סגור
-(closures) עם state/מפה/buffers משלו, לגמרי נפרד מ-ACARS (⇒ אפס רגרסיה ל-ACARS; ה-DOM
-של `#vdl2View` משתמש חוזר במחלקות ה-CSS `.acars-*`, אפס CSS חדש). הפקטורי עושה שימוש
-חוזר בעוזרים ה*טהורים* הגלובליים בלבד (`fmtTime`/`mkSpan`/`dirBadge`/`normReg`/`trackColor`/
-`CAT_GROUPS`/`MULTIBLOCK_RE`/`segSet`/`qualityCls` — האחרון חדש: מיון dBFS/SNR לשלוש
-רמות צבע, משותף לשני התצוגות). `showView` מרובע (home/voice/acars/vdl2);
-`applyMode` מחומש (voice/acars/vdl2/off/scan — off ו-scan שניהם נוחתים בתצוגת home).
+**תצוגת ACARS ו-VDL2 — סימטריה מלאה:** שני מופעים עצמאיים של אותו **פקטורי
+`createDataView(opts)`** — `var acars = createDataView({prefix:"acars", mode:"acars",
+label:"ACARS", onMessage, onReset})` ו-`var vdl2 = createDataView({prefix:"vdl2",
+mode:"vdl2", label:"VDL2"})`. כל מופע הוא closure סגור לגמרי (state/מפה/buffers/
+cursor/filters משלו — כלום לא משותף בזיכרון בין השניים; ה-DOM של `#acarsView`/
+`#vdl2View` משתמש חוזר במחלקות ה-CSS `.acars-*`/`.dl-*`, אפס CSS כפול). `opts.prefix`
+קובע גם את ה-endpoint (`/api/`+prefix) וגם את פענוח ה-DOM ids (`E(suf) => $(prefix+suf)`);
+`opts.label` קובע את טקסט הסטטוס ("ACARS כבוי"/"מאזין · VDL2" וכו'). שני hooks
+אופציונליים (no-op כברירת מחדל, VDL2 לא מעביר אותם): `opts.onMessage(m)` — נקרא
+לכל הודעה חדשה ב-`poll()` (ACARS: מזין את לוח ה-ATIS sticky ב-label A9); `opts.onReset()`
+— נקרא כשה-cursor מתאפס (ACARS: מנקה את לוח ה-ATIS מהסשן הקודם). הפקטורי עושה
+שימוש חוזר בעוזרים ה*טהורים* הגלובליים בלבד (`fmtTime`/`mkSpan`/`dirBadge`/`normReg`/
+`trackColor`/`CAT_GROUPS`/`DIR_INFO`/`MULTIBLOCK_RE`/`RETRANS_WINDOW_S`/`msgSig`/
+`patchMsgTime`/`reconcileFeed`/`segSet`/`qualityCls` — מיון dBFS/SNR לשלוש רמות
+צבע). `showView` מרובע (home/voice/acars/vdl2); `applyMode` מחומש (voice/acars/
+vdl2/off/scan — off ו-scan שניהם נוחתים בתצוגת home).
 
 > בעריכת ה-UI: שמור על polling קל, על נפילה חיננית בלי רשת, ועל RTL/עברית נכונה.
-> שינוי שנוגע בשתי התצוגות — עדכן גם את קוד ה-ACARS וגם את הפקטורי (הם אינם משתפים קוד stateful).
+> שינוי שנוגע בשתי התצוגות — ערוך את הפקטורי `createDataView` (מקום אחד, שני המופעים
+> יורשים); שינוי ACARS-only/VDL2-only בלבד — דרך `opts` (label/prefix) או hook חדש
+> (`onMessage`/`onReset`), לא קוד מיוחד מחוץ לפקטורי.
 
 ---
 
@@ -300,6 +318,7 @@ HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע 
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM, עמודות `level`+`snr`) |
 | GET | `/api/vdl2` | הודעות VDL2 אחרונות (**היום בלבד**; `?all=1`) + שדה `adsb`. אותה סכמת כרטיס כמו ACARS + `icao`; `snr` תמיד אמיתי (dumpvdl2 מספק רצפת רעש) |
 | GET | `/api/vdl2/export?format=csv\|json` | ייצוא VDL2 (CSV עם BOM, עמודות `icao`+`level`+`snr`) |
+| GET | `/api/aircraft` | רוסטר מטוסים מאוחד — היתוך ACARS+VDL2+ADS-B לפי זהות (רישום/icao/טיסה). חי בכל מצב |
 | GET | `/api/activity` | יומן שידורים |
 | GET | `/recordings/<name>` | קובץ הקלטה MP3 |
 | GET | `/api/metrics` | מדדי RF (SNR/signal/noise מ-stats_filepath) |

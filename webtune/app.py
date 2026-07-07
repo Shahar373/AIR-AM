@@ -2514,6 +2514,78 @@ def api_vdl2_export():
     return _export_response(_read_vdl2_log(), VDL2_EXPORT_COLS, "airam-vdl2")
 
 
+ROSTER_MAX = 200   # תקרת גודל תגובה — הישנים ביותר נגזמים
+
+
+def _aircraft_identity(m):
+    """מפתח זהות מטוס מהודעה מנורמלת (ACARS/VDL2): רישום מנורמל קודם (חוצה
+    ACARS↔VDL2↔ADS-B), אחרת icao (פריימי VDL2 בלי tail), אחרת מספר טיסה."""
+    reg = adsb.norm_reg(m.get("tail"))
+    if reg:
+        return ("reg", reg)
+    if m.get("icao"):
+        return ("icao", str(m["icao"]).upper())
+    if m.get("flight"):
+        return ("flight", str(m["flight"]).upper())
+    return None
+
+
+def _build_roster():
+    """רוסטר מטוסים מאוחד: היתוך הודעות ACARS+VDL2 (בזיכרון) + ADS-B חי, לפי
+    זהות משותפת (רישום/icao/טיסה) — עצמאי לגמרי ממצב ה-SDR הפעיל, כי שני
+    ה-listeners וה-thread של adsb.py רצים תמיד ברקע (ר' §12 ב-CLAUDE.md)."""
+    craft = {}
+    with _acars_lock:
+        acars_snapshot = list(_acars_msgs)
+    with _vdl2_lock:
+        vdl2_snapshot = list(_vdl2_msgs)
+    for source, msgs in (("acars", acars_snapshot), ("vdl2", vdl2_snapshot)):
+        for m in msgs:
+            key = _aircraft_identity(m)
+            if key is None:
+                continue
+            c = craft.setdefault(key, {
+                "tail": None, "flight": None, "icao": None, "actype": None,
+                "sources": set(), "count": 0, "last_t": None,
+                "last_category": None, "last_group": None, "last_dir": None,
+                "lat": None, "lon": None, "pos_src": None, "_pos_t": None,
+            })
+            c["sources"].add(source)
+            c["count"] += 1
+            t = m.get("t") or 0
+            if c["last_t"] is None or t >= c["last_t"]:
+                c["last_t"] = t
+                c["last_category"] = m.get("category")
+                c["last_group"] = m.get("group")
+                c["last_dir"] = m.get("dir")
+            c["tail"] = c["tail"] or m.get("tail")
+            c["flight"] = c["flight"] or m.get("flight")
+            c["icao"] = c["icao"] or m.get("icao")
+            c["actype"] = c["actype"] or m.get("actype")
+            if m.get("lat") is not None and (c["_pos_t"] is None or t >= c["_pos_t"]):
+                c["lat"], c["lon"], c["pos_src"], c["_pos_t"] = m["lat"], m["lon"], m.get("pos_src"), t
+    regs = {adsb.norm_reg(c["tail"]) for c in craft.values() if c["tail"]}
+    regs.discard(None)
+    snap = adsb.aircraft_snapshot(regs) if regs else {}
+    out = []
+    for c in craft.values():
+        c = {k: v for k, v in c.items() if not k.startswith("_")}
+        c["sources"] = sorted(c["sources"])
+        reg = adsb.norm_reg(c["tail"]) if c["tail"] else None
+        if reg and reg in snap:
+            c["adsb"] = snap[reg]
+        out.append(c)
+    out.sort(key=lambda c: c["last_t"] or 0, reverse=True)
+    return out[:ROSTER_MAX]
+
+
+@app.route("/api/aircraft")
+def api_aircraft():
+    """רוסטר מטוסים מאוחד (ACARS+VDL2+ADS-B) — חי בכל מצב, כולל standby/סריקה
+    (הנתונים כבר בזיכרון/ADS-B, לא תלוי SDR הפעיל כרגע)."""
+    return jsonify(ok=True, aircraft=_build_roster())
+
+
 @app.route("/api/mode", methods=["POST"])
 def api_mode():
     """מעבר בין המצבים: קול (rtl_airband) / ACARS (acarsdec) / VDL2 (dumpvdl2) /
