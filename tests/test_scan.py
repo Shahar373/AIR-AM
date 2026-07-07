@@ -275,3 +275,125 @@ def test_boot_restore_scan_leg0_failure_falls_to_off(paths, no_sleep, monkeypatc
     app._boot_restore()
     st = app.load_state()
     assert st["app_mode"] == "off" and st["prev_mode"] == "scan"
+
+
+# --- חלונות שעות פר-רגל (active_from/active_to) ------------------------------
+
+def _at(monkeypatch, hh, mm=0):
+    """קובע את time.localtime() לשעה נתונה (שאר השדות לא רלוונטיים לבדיקת חלון)."""
+    fixed = time.struct_time((2026, 7, 6, hh, mm, 0, 0, 187, -1))
+    monkeypatch.setattr(app.time, "localtime", lambda *a: fixed)
+
+
+def test_leg_active_now_no_window_always_true(monkeypatch):
+    _at(monkeypatch, 3)
+    assert app._leg_active_now({"mode": "acars", "dwell_sec": 60}) is True
+
+
+def test_leg_active_now_within_window(monkeypatch):
+    leg = {"mode": "acars", "dwell_sec": 60, "active_from": "06:00", "active_to": "22:00"}
+    _at(monkeypatch, 12, 30)
+    assert app._leg_active_now(leg) is True
+
+
+def test_leg_active_now_outside_window(monkeypatch):
+    leg = {"mode": "acars", "dwell_sec": 60, "active_from": "06:00", "active_to": "22:00"}
+    _at(monkeypatch, 23, 0)
+    assert app._leg_active_now(leg) is False
+
+
+def test_leg_active_now_overnight_wraparound(monkeypatch):
+    leg = {"mode": "acars", "dwell_sec": 60, "active_from": "22:00", "active_to": "06:00"}
+    _at(monkeypatch, 23, 30)
+    assert app._leg_active_now(leg) is True
+    _at(monkeypatch, 2, 0)
+    assert app._leg_active_now(leg) is True
+    _at(monkeypatch, 12, 0)
+    assert app._leg_active_now(leg) is False
+
+
+def test_validate_scan_plan_accepts_valid_window():
+    leg = {"mode": "acars", "dwell_sec": 60, "active_from": "06:00", "active_to": "22:00"}
+    plan = app._validate_scan_plan([leg])
+    assert plan == [leg]
+
+
+def test_validate_scan_plan_rejects_bad_window_format():
+    assert app._validate_scan_plan([{"mode": "acars", "dwell_sec": 60,
+                                     "active_from": "25:00", "active_to": "06:00"}]) is None
+    assert app._validate_scan_plan([{"mode": "acars", "dwell_sec": 60,
+                                     "active_from": "9:00", "active_to": "06:00"}]) is None
+
+
+def test_validate_scan_plan_rejects_partial_window():
+    assert app._validate_scan_plan([{"mode": "acars", "dwell_sec": 60,
+                                     "active_from": "06:00"}]) is None
+    assert app._validate_scan_plan([{"mode": "acars", "dwell_sec": 60,
+                                     "active_to": "22:00"}]) is None
+
+
+# --- scan activate/loop עם חלונות שעות ---------------------------------------
+
+def test_scan_activate_skips_to_active_leg(paths, monkeypatch):
+    # בלי no_sleep בכוונה: VDL2_LEG.dwell_sec=120 אמיתי => ה-thread לא מספיק
+    # להתקדם לרגל הבאה (ACARS, לא בחלון) לפני שהבדיקה מסתיימת — לא תלוי-תזמון.
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    monkeypatch.setattr(app, "_leg_active_now", lambda leg: leg["mode"] == "vdl2")
+    err, detail = app._scan_activate([ACARS_LEG, VDL2_LEG])
+    assert err is None
+    assert app._scan_status["idx"] == 1 and app._scan_status["leg"] == VDL2_LEG
+
+
+def test_scan_activate_waits_when_no_leg_active(paths, no_sleep, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app, "_sysctl",
+                        lambda action, svc, timeout=45: calls.append((action, svc)) or _ok())
+    monkeypatch.setattr(app, "_leg_active_now", lambda leg: False)
+    err, detail = app._scan_activate([ACARS_LEG, VDL2_LEG])
+    assert err is None
+    assert calls == []                     # לא ניסינו להיכנס לשום רגל
+    assert app._scan_status["idx"] == -1 and app._scan_status["leg"] is None
+    assert app._scan_thread is not None and app._scan_thread.is_alive()
+
+
+def test_scan_loop_skips_leg_outside_window(paths, no_sleep):
+    calls = []
+
+    def fake_enter(leg):
+        calls.append(leg["mode"])
+        return None, None
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(app, "_scan_enter_leg", fake_enter)
+        mp.setattr(app, "_leg_active_now", lambda leg: leg["mode"] == "vdl2")
+        stop_evt = threading.Event()
+        plan = [ACARS_LEG, VDL2_LEG]
+        th = threading.Thread(target=app._scan_loop, args=(stop_evt, plan, 0, 0), daemon=True)
+        th.start()
+        time.sleep(0.2)
+        stop_evt.set()
+        th.join(timeout=5)
+    assert "acars" not in calls            # אף פעם לא בחלון => אף פעם לא נכנסת
+    assert "vdl2" in calls
+
+
+def test_api_state_scan_waiting_for_window_not_fault(client, paths, no_sleep, monkeypatch):
+    leg = {"mode": "acars", "dwell_sec": 60, "active_from": "02:00", "active_to": "03:00"}
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [leg]})
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)   # אין צרכן חי
+    _at(monkeypatch, 12, 0)                                    # מחוץ לחלון
+    st = client.get("/api/state").get_json()
+    assert st["app_mode"] == "scan" and st["mode_ok"] is True   # "ממתין", לא תקלה
+
+
+def test_api_health_scan_waiting_for_window_not_fault(client, paths, no_sleep, monkeypatch):
+    leg = {"mode": "acars", "dwell_sec": 60, "active_from": "02:00", "active_to": "03:00"}
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [leg]})
+    _at(monkeypatch, 12, 0)
+
+    def fake_run(cmd, **kw):
+        return types.SimpleNamespace(stdout="inactive", stderr="")
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+    h = client.get("/api/health").get_json()
+    assert h["app_mode"] == "scan" and h["ok"] is True

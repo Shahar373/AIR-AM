@@ -1190,6 +1190,18 @@ def _today_start():
     return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
 
 
+def _day_bounds(date_str):
+    """גבולות היום המקומי [start, end) עבור מחרוזת 'YYYY-MM-DD' (לארכיון החיפוש),
+    או None אם הפורמט לא תקין. עצמאי מ-_today_start — משמש לקריאה מהדיסק, לא
+    לרצפת "היום בלבד" של הפיד החי."""
+    try:
+        lt = time.strptime(date_str, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+    start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+    return start, start + 86400
+
+
 def _load_acars_history():
     """טוען את זנב acars.jsonl ל-ring buffer בעלייה => הודעות *היום* שורדות restart,
     ממוינות לפי זמן (t עולה) עם id רץ. נקרא *לפני* הפעלת thread ה-listener (אין מרוץ).
@@ -1692,6 +1704,22 @@ def _fail_to_off(st, err, detail, log_prefix):
 # הצלחה) => נופל ל-off, בדיוק כמו כשל כניסה לכל מצב אחר (אין fallback לקול).
 SCAN_DWELL_MIN, SCAN_DWELL_MAX = 10, 3600   # שניות — הגנה מפני ערכים אבסורדיים
 SCAN_LEGS_MAX = 8                            # הגנה מפני לוחות ענק
+SCAN_WINDOW_RECHECK_SEC = 30   # אחרי סבב שלם בלי אף רגל בחלון שעות — לפני שבודקים שוב
+_HHMM_RE = re.compile(r'^([01]\d|2[0-3]):[0-5]\d$')   # "HH:MM" (24h) לחלון שעות פר-רגל
+
+
+def _leg_active_now(leg):
+    """האם הרגל בחלון השעות שלה כרגע (שעון מקומי). בלי active_from/active_to
+    בכלל => תמיד פעילה. תומך בחלון שחוצה חצות (למשל 22:00–06:00)."""
+    frm, to = leg.get("active_from"), leg.get("active_to")
+    if not frm or not to:
+        return True
+    now = time.localtime()
+    cur = now.tm_hour * 60 + now.tm_min
+    fh, fm = (int(x) for x in frm.split(":"))
+    th, tm = (int(x) for x in to.split(":"))
+    f, t = fh * 60 + fm, th * 60 + tm
+    return (f <= cur < t) if f <= t else (cur >= f or cur < t)
 
 _scan_lock = threading.Lock()      # מגן על _scan_thread/_scan_thread_stop/_scan_status
 _scan_thread = None
@@ -1703,7 +1731,9 @@ _scan_status = {"idx": -1, "leg": None, "next_switch_at": None, "plan": []}
 def _validate_scan_plan(raw):
     """מוודא לוח סריקה: רשימה לא-ריקה (עד SCAN_LEGS_MAX) של רגלים תקינים —
     מצב voice/acars/vdl2 + dwell_sec בטווח סביר + (ל-acars/vdl2) תדרים תקינים
-    שנכנסים בחלון דגימה אחד. מחזיר לוח מנורמל או None אם לא תקין."""
+    שנכנסים בחלון דגימה אחד + (אופציונלי) חלון שעות "HH:MM"-"HH:MM" — שניהם
+    חייבים להיות תקינים ביחד, אחרת הרגל (וכל הלוח) נדחים. מחזיר לוח מנורמל או
+    None אם לא תקין."""
     if not isinstance(raw, list) or not (1 <= len(raw) <= SCAN_LEGS_MAX):
         return None
     plan = []
@@ -1720,6 +1750,11 @@ def _validate_scan_plan(raw):
         if not (SCAN_DWELL_MIN <= dwell <= SCAN_DWELL_MAX):
             return None
         clean = {"mode": mode, "dwell_sec": dwell}
+        frm, to = leg.get("active_from"), leg.get("active_to")
+        if frm or to:
+            if not (frm and to and _HHMM_RE.match(frm) and _HHMM_RE.match(to)):
+                return None
+            clean["active_from"], clean["active_to"] = frm, to
         if mode in ("acars", "vdl2") and leg.get("freqs"):
             default = ACARS_FREQS_DEFAULT if mode == "acars" else VDL2_FREQS_DEFAULT
             wcheck = _acars_window_error if mode == "acars" else _vdl2_window_error
@@ -1764,10 +1799,13 @@ def _scan_stop_thread():
 def _scan_loop(stop_evt, plan, start_idx, first_dwell):
     """thread: ממתין first_dwell על הרגל שכבר הוכנסה (start_idx-1), ואז מסתובב
     בין שאר רגלי הלוח עד עצירה. stop_evt ייחודי-לקריאה-הזו (לא גלובלי) => סבב
-    חדש שמתחיל אחר-כך לא "מבטל בטעות" thread ישן שעדיין מסיים את היציאה."""
+    חדש שמתחיל אחר-כך לא "מבטל בטעות" thread ישן שעדיין מסיים את היציאה.
+    רגל מחוץ לחלון השעות שלה מדולגת מיד (לא כשל); סבב שלם בלי אף רגל בחלון
+    => המתנה SCAN_WINDOW_RECHECK_SEC לפני שבודקים שוב (לא busy-loop)."""
     idx = start_idx
     remaining = first_dwell
     consecutive_fail = 0
+    consecutive_skip = 0    # רגלים רצופות שנעדרו-מחלון-שעות — לא כשל, רק "לא עכשיו"
     while not stop_evt.is_set():
         while remaining > 0 and not stop_evt.is_set():
             step = min(1.0, remaining)
@@ -1776,6 +1814,18 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell):
         if stop_evt.is_set():
             break
         leg = plan[idx % len(plan)]
+        if not _leg_active_now(leg):
+            consecutive_skip += 1
+            idx += 1
+            with _scan_lock:
+                _scan_status.update(idx=-1, leg=None, next_switch_at=None)
+            if consecutive_skip >= len(plan):
+                remaining = SCAN_WINDOW_RECHECK_SEC   # אף רגל לא בחלון — לא רודפים בלולאה
+                consecutive_skip = 0
+            else:
+                remaining = 0   # עוד רגלים לבדוק באותו סבב — ממשיכים מיד
+            continue
+        consecutive_skip = 0
         if not TUNE_LOCK.acquire(timeout=5):
             remaining = 1
             continue
@@ -1806,18 +1856,31 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell):
 
 
 def _scan_activate(plan):
-    """מפעיל סבב סריקה: נכנס לרגל 0 (הקורא מחזיק את TUNE_LOCK — עקבי עם שאר
-    _enter_*), ואם הצליחה מתחיל thread לשאר הסבב. מחזיר (error, detail)."""
+    """מפעיל סבב סריקה: מוצא את הרגל הראשונה שבחלון השעות שלה כרגע (אם אין
+    לאף רגל חלון — זו הרגל הראשונה, כרגיל) ונכנס אליה (הקורא מחזיק את
+    TUNE_LOCK — עקבי עם שאר _enter_*). אם אף רגל לא בחלון כרגע — **לא כשל**:
+    ה-SDR נשאר כבוי ומתחיל thread שממתין לחלון הבא (ר' _scan_loop).
+    מחזיר (error, detail) — error רק על כשל אמיתי בכניסה לרגל."""
     global _scan_thread, _scan_thread_stop
-    err, detail = _scan_enter_leg(plan[0])
+    active_idx = next((i for i, leg in enumerate(plan) if _leg_active_now(leg)), None)
+    if active_idx is None:
+        stop_evt = threading.Event()
+        thread = threading.Thread(target=_scan_loop, args=(stop_evt, plan, 0, 0), daemon=True)
+        with _scan_lock:
+            _scan_status.update(idx=-1, leg=None, next_switch_at=None, plan=plan)
+            _scan_thread, _scan_thread_stop = thread, stop_evt
+        thread.start()
+        return None, None
+    err, detail = _scan_enter_leg(plan[active_idx])
     if err:
         return err, detail
     stop_evt = threading.Event()
-    thread = threading.Thread(target=_scan_loop, args=(stop_evt, plan, 1, plan[0]["dwell_sec"]),
+    thread = threading.Thread(target=_scan_loop,
+                              args=(stop_evt, plan, active_idx + 1, plan[active_idx]["dwell_sec"]),
                               daemon=True)
     with _scan_lock:
-        _scan_status.update(idx=0, leg=plan[0], next_switch_at=time.time() + plan[0]["dwell_sec"],
-                            plan=plan)
+        _scan_status.update(idx=active_idx, leg=plan[active_idx],
+                            next_switch_at=time.time() + plan[active_idx]["dwell_sec"], plan=plan)
         _scan_thread, _scan_thread_stop = thread, stop_evt
     thread.start()
     return None, None
@@ -1900,9 +1963,12 @@ def api_state():
     saved = st.get("app_mode", "off")
     if saved == "scan":
         # סריקה: "המצב" הוא scan עצמו (לא הרגל הנוכחית) — הרגל/הספירה לאחור
-        # מגיעות מ-/api/scan. תקין כל עוד *איזשהו* צרכן פעיל (הרגל הנוכחית).
+        # מגיעות מ-/api/scan. תקין כל עוד *איזשהו* צרכן פעיל (הרגל הנוכחית), *או*
+        # שאף רגל לא אמורה לרוץ כרגע (כולן מחוץ לחלון השעות שלהן — "ממתין", לא תקלה).
+        plan = st.get("scan_plan") or []
+        any_due = any(_leg_active_now(leg) for leg in plan) if plan else True
         st["app_mode"] = "scan"
-        st["mode_ok"] = live is not None
+        st["mode_ok"] = (live is not None) or not any_due
     else:
         st["app_mode"] = live or saved
         # mode_ok=False: המצב השמור אמור להריץ צרכן ואף אחד לא רץ (קריסה / עליית
@@ -1949,7 +2015,8 @@ def api_health():
     vdl2_ok = services["airam-vdl2"] == "active"
     # standby מכוון: כל הצרכנים כבויים ו-state מסומן off => תקין, *לא* תקלה (אחרת
     # מצב הכיבוי שביקש המשתמש היה נראה כקריסה). sdrplay נשאר active במפה.
-    saved = load_state().get("app_mode", "off")
+    saved_state = load_state()
+    saved = saved_state.get("app_mode", "off")
     off_ok = (saved == "off"
               and services["rtl_airband"] != "active"
               and services["airam-acars"] != "active"
@@ -1961,8 +2028,11 @@ def api_health():
               else "acars" if services["airam-acars"] == "active"
               else "voice" if services["rtl_airband"] == "active" else None)
     if saved == "scan":
-        # סריקה: תקין כל עוד הרגל הנוכחית (איזשהו צרכן) פועלת בפועל.
-        mode, ok = "scan", active is not None
+        # סריקה: תקין כל עוד הרגל הנוכחית (איזשהו צרכן) פועלת, *או* שאף רגל לא
+        # אמורה לרוץ כרגע (חלון שעות) — "ממתין" אינו תקלה.
+        plan = saved_state.get("scan_plan") or []
+        any_due = any(_leg_active_now(leg) for leg in plan) if plan else True
+        mode, ok = "scan", (active is not None) or not any_due
     else:
         mode = active or saved
         ok = (voice_ok if mode == "voice" else acars_ok if mode == "acars"
@@ -2385,7 +2455,17 @@ def _acars_adsb():
 def api_acars():
     """הודעות ACARS אחרונות. ?since=<id> => רק חדשות מאותו cursor (פולינג יעיל).
     כברירת מחדל מוחזרות רק הודעות *היום* (שעון ה-Pi) => סשן חדש לא מוצף בתעבורת
-    ימים קודמים. ?all=1 => כל מה שבזיכרון; ההיסטוריה המלאה תמיד זמינה בייצוא."""
+    ימים קודמים. ?all=1 => כל מה שבזיכרון; ההיסטוריה המלאה תמיד זמינה בייצוא.
+    ?day=YYYY-MM-DD => ארכיון: קורא מהדיסק (acars.jsonl, לא מהזיכרון) ומחזיר
+    את כל הודעות אותו יום מקומי — מצב סטטי (בלי cursor/adsb), עצמאי מהפיד החי."""
+    day = request.args.get("day")
+    if day:
+        bounds = _day_bounds(day)
+        if bounds is None:
+            return jsonify(ok=False, error="תאריך לא תקין (פורמט: YYYY-MM-DD)"), 400
+        start, end = bounds
+        msgs = [r for r in _read_acars_log() if start <= (r.get("t") or 0) < end]
+        return jsonify(ok=True, day=day, messages=msgs)
     try:
         since = int(request.args.get("since", 0))
     except (TypeError, ValueError):
@@ -2491,7 +2571,16 @@ def _vdl2_adsb():
 @app.route("/api/vdl2")
 def api_vdl2():
     """הודעות VDL2 אחרונות. ?since=<id> => רק חדשות מאותו cursor (פולינג יעיל).
-    כברירת מחדל רק הודעות *היום*; ?all=1 => כל מה שבזיכרון (כמו /api/acars)."""
+    כברירת מחדל רק הודעות *היום*; ?all=1 => כל מה שבזיכרון (כמו /api/acars).
+    ?day=YYYY-MM-DD => ארכיון מהדיסק (vdl2.jsonl), כמו ב-/api/acars."""
+    day = request.args.get("day")
+    if day:
+        bounds = _day_bounds(day)
+        if bounds is None:
+            return jsonify(ok=False, error="תאריך לא תקין (פורמט: YYYY-MM-DD)"), 400
+        start, end = bounds
+        msgs = [r for r in _read_vdl2_log() if start <= (r.get("t") or 0) < end]
+        return jsonify(ok=True, day=day, messages=msgs)
     try:
         since = int(request.args.get("since", 0))
     except (TypeError, ValueError):

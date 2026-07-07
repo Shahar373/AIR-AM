@@ -288,6 +288,7 @@
     .scan-leg { display: flex; align-items: center; gap: var(--sp-2); }
     .scan-leg select { flex: 1; min-width: 0; }
     .scan-leg-dwell { width: 4.5rem; font-variant-numeric: tabular-nums; }
+    .scan-leg-time { width: 5.4rem; font-variant-numeric: tabular-nums; font-size: .82rem; }
     .scan-leg-del { padding: .2rem .55rem; }
 
     /* ---------- תצוגת הרדיו ---------- */
@@ -737,6 +738,13 @@
     .acars-search:focus { outline: none; border-color: var(--accent); }
     .acars-export { display: flex; gap: .35rem; flex: none; }
     .acars-export a { padding: .35rem .6rem; font-size: .78rem; min-height: 30px; }
+
+    /* ארכיון חיפוש רב-יומי (בורר תאריך + חזרה לשידור חי) */
+    .acars-archive { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; margin-bottom: .5rem; }
+    .acars-archive input[type=date] { font: inherit; font-size: .82rem; color: var(--text);
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+      padding: .35rem .5rem; }
+    .acars-archive button { padding: .35rem .6rem; font-size: .78rem; min-height: 30px; }
 
     /* צ'יפים לסינון קטגוריה */
     .acars-filters { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .55rem; }
@@ -1337,6 +1345,13 @@
           </div>
         </div>
         <div class="panel-tools">
+          <!-- ארכיון חיפוש רב-יומי: קורא מהדיסק (acars.jsonl), לא תלוי בפיד החי -->
+          <div class="acars-archive" id="acarsArchive">
+            <input type="date" id="acarsArchiveDate" />
+            <button type="button" class="ghost" id="acarsArchiveGo">🔎 חפש בארכיון</button>
+            <button type="button" class="ghost hidden" id="acarsArchiveLive">◀ חזרה לשידור חי</button>
+            <span class="hint hidden" id="acarsArchiveLabel"></span>
+          </div>
           <input id="acarsSearch" dir="auto" class="acars-search" type="search"
                  placeholder="חיפוש: זנב / טיסה / label / טקסט…" autocomplete="off" />
           <!-- צ'יפים לסינון קטגוריה (נבנים דינמית לפי הקבוצות שהופיעו) -->
@@ -1427,6 +1442,12 @@
           </div>
         </div>
         <div class="panel-tools">
+          <div class="acars-archive" id="vdl2Archive">
+            <input type="date" id="vdl2ArchiveDate" />
+            <button type="button" class="ghost" id="vdl2ArchiveGo">🔎 חפש בארכיון</button>
+            <button type="button" class="ghost hidden" id="vdl2ArchiveLive">◀ חזרה לשידור חי</button>
+            <span class="hint hidden" id="vdl2ArchiveLabel"></span>
+          </div>
           <input id="vdl2Search" dir="auto" class="acars-search" type="search"
                  placeholder="חיפוש: זנב / טיסה / ICAO / label / טקסט…" autocomplete="off" />
           <div class="acars-filters" id="vdl2Filters"></div>
@@ -2416,11 +2437,16 @@
       const txt = $("homeStateTxt");
       if (scanning) {
         const leg = scanStatus.leg;
-        const legLabel = leg ? (SCAN_MODE_LABEL[leg.mode] || leg.mode) : (live ? SCAN_MODE_LABEL[live] : "—");
-        const secLeft = scanStatus.next_switch_at != null
-          ? Math.max(0, Math.round(scanStatus.next_switch_at - Date.now() / 1000)) : null;
-        txt.innerHTML = "🔁 <b>סורק</b> — רגל נוכחית: <b>" + legLabel + "</b>"
-          + (secLeft != null ? " · מעבר בעוד " + secLeft + "ש׳" : "");
+        if (!leg && !live) {
+          // אף רגל לא בחלון השעות שלה כרגע — לא תקלה, רק ממתין (ר' _leg_active_now)
+          txt.innerHTML = "🔁 <b>סורק</b> — ממתין לחלון הזמן הבא של אחת הרגלים";
+        } else {
+          const legLabel = leg ? (SCAN_MODE_LABEL[leg.mode] || leg.mode) : (live ? SCAN_MODE_LABEL[live] : "—");
+          const secLeft = scanStatus.next_switch_at != null
+            ? Math.max(0, Math.round(scanStatus.next_switch_at - Date.now() / 1000)) : null;
+          txt.innerHTML = "🔁 <b>סורק</b> — רגל נוכחית: <b>" + legLabel + "</b>"
+            + (secLeft != null ? " · מעבר בעוד " + secLeft + "ש׳" : "");
+        }
       } else if (live === "voice")
         txt.innerHTML = "המקלט במצב <b>📻 קול</b> — " + Number(current).toFixed(3) + " MHz";
       else if (live === "acars") txt.innerHTML = "המקלט במצב <b>📡 ACARS</b> — מאזין להודעות דאטה";
@@ -2432,7 +2458,8 @@
       $("homeAcarsSub").textContent = (acars.selFreqs && acars.selFreqs.length) ? acars.selFreqs.join(" · ") : "—";
       $("homeVdl2Sub").textContent = (vdl2 && vdl2.selFreqs && vdl2.selFreqs.length) ? vdl2.selFreqs.join(" · ") : "—";
       $("homeScanSub").textContent = scanLegs.length
-        ? scanLegs.map((l) => (SCAN_MODE_LABEL[l.mode] || l.mode) + " " + l.dwell_sec + "ש׳").join(" ← ")
+        ? scanLegs.map((l) => (SCAN_MODE_LABEL[l.mode] || l.mode) + " " + l.dwell_sec + "ש׳"
+            + (l.active_from ? " (" + l.active_from + "–" + l.active_to + ")" : "")).join(" ← ")
         : "—";
       // סימון הכרטיס החי (מסגרת ירוקה + pill "פעיל") — בסריקה, כרטיס "סריקה" הוא
       // ה"חי" (לא כרטיס הרגל הנוכחית — הוא רק תת-הפרטים בטקסט הסטטוס למעלה)
@@ -2473,11 +2500,30 @@
           scanLegs[i] = { ...scanLegs[i], dwell_sec: Number.isFinite(v) ? Math.min(3600, Math.max(10, v)) : 60 };
           renderHome();
         };
+        // חלון שעות אופציונלי: ריק בשני השדות = הרגל פעילה תמיד. תומך בחלון
+        // שחוצה חצות (למשל 22:00–06:00) — ר' _leg_active_now בשרת.
+        const from = document.createElement("input");
+        from.type = "time"; from.className = "scan-leg-time"; from.title = "פעילה החל מ־ (ריק = תמיד)";
+        from.value = leg.active_from || "";
+        from.onchange = () => {
+          scanLegs[i] = { ...scanLegs[i] };
+          if (from.value) scanLegs[i].active_from = from.value; else delete scanLegs[i].active_from;
+          renderHome();
+        };
+        const to = document.createElement("input");
+        to.type = "time"; to.className = "scan-leg-time"; to.title = "עד־ (ריק = תמיד)";
+        to.value = leg.active_to || "";
+        to.onchange = () => {
+          scanLegs[i] = { ...scanLegs[i] };
+          if (to.value) scanLegs[i].active_to = to.value; else delete scanLegs[i].active_to;
+          renderHome();
+        };
         const del = document.createElement("button");
         del.type = "button"; del.className = "ghost scan-leg-del"; del.textContent = "✕";
         del.title = "הסר רגל";
         del.onclick = () => { scanLegs.splice(i, 1); renderScanEditor(); renderHome(); };
-        row.append(sel, dwell, document.createTextNode(" שנ׳ "), del);
+        row.append(sel, dwell, document.createTextNode(" שנ׳ "),
+                  from, document.createTextNode("–"), to, del);
         box.appendChild(row);
       });
       $("homeScanAddLeg").classList.toggle("hidden", scanLegs.length >= 8);
@@ -2586,6 +2632,8 @@
       const feedCache = new Map();                    // key => { sig, el } — reconcileFeed (רינדור אינקרמנטלי, כמו ACARS)
       let timer = null, staleTimer = null, inFlight = false, resizeT = null;
       const icaoToId = {};                            // icao -> מזהה-מטוס ראשי (tail/flight)
+      let archiveDay = null;      // תאריך ארכיון פעיל (YYYY-MM-DD) או null (שידור חי)
+      let liveSnapshot = null;    // מצב חי שמור בזמן ביקור בארכיון — לשחזור ב-exitArchive
 
       // אותו מטוס פיזי עשוי לשדר גם ACARS-over-VDL2 (עם tail) וגם CPDLC/XID (רק icao,
       // בלי tail/flight) — בלי המיפוי הזה הם היו נכנסים לשני מפתחות נפרדים (roster/מפה
@@ -3042,7 +3090,11 @@
         }));
         reconcileFeed(feed, feedCache, entries);
         const empty = E("Empty");
-        if (!msgs.length) { empty.textContent = "ממתין להודעות… רוב התעבורה באזורנו על 136.975."; empty.style.display = ""; }
+        if (!msgs.length) {
+          empty.textContent = archiveDay ? "אין הודעות בתאריך " + archiveDay + "."
+                                        : (opts.emptyHint || "ממתין להודעות…");
+          empty.style.display = "";
+        }
         else if (!list.length) { empty.textContent = "אין תוצאות לסינון/חיפוש."; empty.style.display = ""; }
         else empty.style.display = "none";
         feed.scrollTop = stick ? 0 : Math.max(0, feed.scrollHeight - distBottom);
@@ -3075,6 +3127,47 @@
         E("Inactive").classList.toggle("hidden", on);
         E("ActiveCtrl").classList.toggle("hidden", !on);
         renderVoiceAcarsBanner();
+      }
+
+      /* ----- ארכיון חיפוש רב-יומי: קורא יום שלם מהדיסק (?day=), מחליף את msgs
+         זמנית תוך שמירת המצב החי ל-liveSnapshot; exitArchive משחזר אותו. ----- */
+      function _rebuildFromMsgs() {
+        for (const id in markers) { if (map) map.removeLayer(markers[id]); delete markers[id]; }
+        for (const id in tracks) { if (map && tracks[id].line) map.removeLayer(tracks[id].line); delete tracks[id]; }
+        for (const id in craft) delete craft[id];
+        for (const k in icaoToId) delete icaoToId[k];
+        for (const m of msgs) { updateCraft(m); upsertMarker(m); }
+        setFocus(null);
+        renderStats(); renderFilters(); renderRoster(); renderDetail(); renderFeed();
+        renderMapSelection();
+      }
+      async function enterArchiveDay(day) {
+        const data = await (await fetch("/api/" + opts.prefix + "?day=" + day)).json();
+        if (!data.ok) throw new Error(data.error || "שגיאה בטעינת הארכיון");
+        if (!liveSnapshot) {
+          liveSnapshot = { msgs: msgs.slice(), lastId, feedMax,
+                          feedCacheEntries: Array.from(feedCache.entries()) };
+        }
+        stopPolling();
+        archiveDay = day;
+        msgs.length = 0;
+        (data.messages || []).forEach((m, i) => { m.id = i + 1; msgs.push(m); });
+        feedCache.clear();
+        feedMax = msgs.length ? Math.max(...msgs.map((m) => m.id)) : 0;   // בלי אנימציית "חדש" בארכיון
+        ensureMap();
+        _rebuildFromMsgs();
+      }
+      function exitArchive() {
+        if (!liveSnapshot) return;
+        archiveDay = null;
+        msgs.length = 0;
+        liveSnapshot.msgs.forEach((m) => msgs.push(m));
+        lastId = liveSnapshot.lastId; feedMax = liveSnapshot.feedMax;
+        feedCache.clear();
+        liveSnapshot.feedCacheEntries.forEach(([k, v]) => feedCache.set(k, v));
+        liveSnapshot = null;
+        _rebuildFromMsgs();
+        startPolling();
       }
 
       /* ----- polling ----- */
@@ -3139,16 +3232,43 @@
       window.addEventListener("resize", relayoutMap);
       window.addEventListener("orientationchange", relayoutMap);
 
+      E("ArchiveDate").max = new Date().toISOString().slice(0, 10);   // אין טעם לחפש "מחר"
+      E("ArchiveGo").onclick = async () => {
+        const day = E("ArchiveDate").value;
+        if (!day) return;
+        E("ArchiveGo").disabled = true;
+        try {
+          await enterArchiveDay(day);
+          E("ArchiveLive").classList.remove("hidden");
+          const lbl = E("ArchiveLabel");
+          lbl.textContent = "מציג ארכיון: " + day + " (" + msgs.length + " הודעות)";
+          lbl.classList.remove("hidden");
+          setStatus(opts.label + " · ארכיון " + day, "busy");
+        } catch (e) {
+          setStatus("שגיאה בטעינת הארכיון: " + e.message, "err");
+        } finally {
+          E("ArchiveGo").disabled = false;
+        }
+      };
+      E("ArchiveLive").onclick = () => {
+        exitArchive();
+        E("ArchiveLive").classList.add("hidden");
+        E("ArchiveLabel").classList.add("hidden");
+        setStatus(opts.label + " · שידור חי" + (active ? "" : " (כבוי)"), active ? "live" : "");
+      };
+
       return {
         get active() { return active; },
         get selFreqs() { return selFreqs; },
+        get archiveDay() { return archiveDay; },
         setActive, poll, renderFreqs, renderBanks, relayoutMap,
+        enterArchiveDay, exitArchive,
         setSelFreqs(f) { selFreqs = f; },
         setBanks(b) { banks = b || []; renderBanks(); },
         show() {
           ensureMap();
           renderStats(); renderFilters(); renderRoster(); renderDetail(); renderFeed();
-          startPolling();
+          if (!archiveDay) startPolling();   // בארכיון: לא מחדשים שידור חי בחזרה לתצוגה
         },
         hide() { stopPolling(); },
       };
@@ -3159,7 +3279,8 @@
       onMessage: (m) => { if (m.label === "A9" && m.decoded) updateAtisPanel(m); },
       onReset: () => $("acarsAtis").classList.add("hidden"),
     });
-    var vdl2 = createDataView({ prefix: "vdl2", mode: "vdl2", label: "VDL2" });
+    var vdl2 = createDataView({ prefix: "vdl2", mode: "vdl2", label: "VDL2",
+      emptyHint: "ממתין להודעות… רוב התעבורה באזורנו על 136.975." });
 
     /* ---------- רוסטר מטוסים מאוחד (ACARS+VDL2+ADS-B), מסך הבית ---------- */
     // חי בכל מצב (לא רק כשצופים ב-ACARS/VDL2) — /api/aircraft מהתך את שתי
