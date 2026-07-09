@@ -391,9 +391,11 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
 
 def _atomic_write(path, text):
     """כתיבה אטומית (tmp + rename): rtl_airband יכול לעלות בכל רגע
-    (Restart=always / udev) ואסור שיקרא קובץ חצי-כתוב."""
+    (Restart=always / udev) ואסור שיקרא קובץ חצי-כתוב. tmp ייחודי לפר-thread
+    (pid+ident) => שתי בקשות מקבילות (PUT /api/presets וכו') לא דורסות זו את
+    קובץ ה-tmp של זו; ה-rename האחרון פשוט מנצח (last-write-wins), בלי קובץ פגום."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_suffix(f"{path.suffix}.tmp{os.getpid()}-{threading.get_ident()}")
     tmp.write_text(text)
     os.replace(tmp, path)
 
@@ -1193,13 +1195,17 @@ def _today_start():
 def _day_bounds(date_str):
     """גבולות היום המקומי [start, end) עבור מחרוזת 'YYYY-MM-DD' (לארכיון החיפוש),
     או None אם הפורמט לא תקין. עצמאי מ-_today_start — משמש לקריאה מהדיסק, לא
-    לרצפת "היום בלבד" של הפיד החי."""
+    לרצפת "היום בלבד" של הפיד החי.
+    ⚠ end מחושב עם mktime על tm_mday+1 (לא start+86400): ישראל עוברת שעון קיץ/חורף
+    (ימים של 23/25 שעות) — mktime עם isdst=-1 מנרמל את tm_mday+1 (גם 32 וכו') ומחשב
+    מחדש DST ליום החדש, כך שהגבול תמיד חצות-אמיתי, לא +24h קבוע."""
     try:
         lt = time.strptime(date_str, "%Y-%m-%d")
     except (ValueError, TypeError):
         return None
     start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
-    return start, start + 86400
+    end = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + 1, 0, 0, 0, 0, 0, -1))
+    return start, end
 
 
 def _load_acars_history():
@@ -1253,7 +1259,13 @@ def _acars_listener():
             msg = json.loads(data.decode("utf-8", "replace"))
         except (ValueError, UnicodeError):
             continue                          # דאטהגרם לא-JSON => מתעלמים
-        rec = _normalize_acars(msg)
+        try:
+            rec = _normalize_acars(msg)
+        except Exception:
+            # שדה עם טיפוס בלתי-צפוי (label כרשימה, level כמחרוזת וכו') לא יפיל
+            # את ה-thread לצמיתות — הפיד ימשיך לזרום להודעות הבאות.
+            log.exception("ACARS: נרמול נכשל על דאטהגרם — מדולג")
+            continue
 
         # בדיקת dedup: רק להודעות עם tail+text (ACK ריקים אינם מוחזרים)
         tail, label, text = rec.get("tail"), rec.get("label"), rec.get("text") or ""
@@ -1454,7 +1466,12 @@ def _vdl2_listener():
             msg = json.loads(data.decode("utf-8", "replace"))
         except (ValueError, UnicodeError):
             continue                          # דאטהגרם לא-JSON => מתעלמים
-        rec = _normalize_vdl2(msg)
+        try:
+            rec = _normalize_vdl2(msg)
+        except Exception:
+            # שדה עם טיפוס בלתי-צפוי לא יפיל את ה-thread לצמיתות (כמו ב-ACARS).
+            log.exception("VDL2: נרמול נכשל על דאטהגרם — מדולג")
+            continue
         if rec is None:
             # פריים לא בר-הצגה (בלי AVLC, סכמה לא תואמת וכו') — לוג תקופתי (לא רועש)
             # כדי להבדיל "אין תעבורה" מ"dumpvdl2 שינה סכמה" בלי לקרוא קוד.
@@ -1710,7 +1727,9 @@ _HHMM_RE = re.compile(r'^([01]\d|2[0-3]):[0-5]\d$')   # "HH:MM" (24h) לחלון
 
 def _leg_active_now(leg):
     """האם הרגל בחלון השעות שלה כרגע (שעון מקומי). בלי active_from/active_to
-    בכלל => תמיד פעילה. תומך בחלון שחוצה חצות (למשל 22:00–06:00)."""
+    בכלל => תמיד פעילה. תומך בחלון שחוצה חצות (למשל 22:00–06:00).
+    from==to => חלון של 24 שעות (תמיד פעילה) — לא "אף פעם"; זו הכוונה הסבירה
+    של משתמש שממלא את אותה שעה בשני השדות, לא לוח ריק בשקט."""
     frm, to = leg.get("active_from"), leg.get("active_to")
     if not frm or not to:
         return True
@@ -1719,6 +1738,8 @@ def _leg_active_now(leg):
     fh, fm = (int(x) for x in frm.split(":"))
     th, tm = (int(x) for x in to.split(":"))
     f, t = fh * 60 + fm, th * 60 + tm
+    if f == t:
+        return True
     return (f <= cur < t) if f <= t else (cur >= f or cur < t)
 
 _scan_lock = threading.Lock()      # מגן על _scan_thread/_scan_thread_stop/_scan_status
@@ -1752,7 +1773,8 @@ def _validate_scan_plan(raw):
         clean = {"mode": mode, "dwell_sec": dwell}
         frm, to = leg.get("active_from"), leg.get("active_to")
         if frm or to:
-            if not (frm and to and _HHMM_RE.match(frm) and _HHMM_RE.match(to)):
+            if not (isinstance(frm, str) and isinstance(to, str)
+                    and _HHMM_RE.match(frm) and _HHMM_RE.match(to)):
                 return None
             clean["active_from"], clean["active_to"] = frm, to
         if mode in ("acars", "vdl2") and leg.get("freqs"):
@@ -1785,7 +1807,10 @@ def _scan_enter_leg(leg):
 
 def _scan_stop_thread():
     """עוצר את thread הסריקה הפעיל (אם יש) ומחכה שיסיים. אין-אופ אם לא רץ סבב.
-    לא נועל TUNE_LOCK — ה-thread עצמו מחזיק אותו רק לזמן קצר בכל מעבר רגל."""
+    לא נועל TUNE_LOCK — ה-thread עצמו מחזיק אותו רק לזמן קצר בכל מעבר רגל.
+    מאפס את _scan_status כשבאמת עצרנו thread — אחרת /api/scan מחזיר לרגע רגל/
+    ספירה-לאחור של סבב שכבר בוטל (הקורא ב-api_mode עומד להחליף אותם מיד, אבל
+    בין הבקשות הבאות ה-status לא צריך להישאר "מזוהם")."""
     global _scan_thread, _scan_thread_stop
     with _scan_lock:
         thread, stop_evt = _scan_thread, _scan_thread_stop
@@ -1794,18 +1819,28 @@ def _scan_stop_thread():
             stop_evt.set()
     if thread and thread.is_alive():
         thread.join(timeout=15)
+    if thread:
+        with _scan_lock:
+            _scan_status.update(idx=-1, leg=None, next_switch_at=None)
 
 
-def _scan_loop(stop_evt, plan, start_idx, first_dwell):
+def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
     """thread: ממתין first_dwell על הרגל שכבר הוכנסה (start_idx-1), ואז מסתובב
     בין שאר רגלי הלוח עד עצירה. stop_evt ייחודי-לקריאה-הזו (לא גלובלי) => סבב
     חדש שמתחיל אחר-כך לא "מבטל בטעות" thread ישן שעדיין מסיים את היציאה.
-    רגל מחוץ לחלון השעות שלה מדולגת מיד (לא כשל); סבב שלם בלי אף רגל בחלון
-    => המתנה SCAN_WINDOW_RECHECK_SEC לפני שבודקים שוב (לא busy-loop)."""
+    consumer_active = האם צרכן SDR רץ בפועל כשה-thread מתחיל (True כשהתחלנו
+    ברגל שהוכנסה כבר ע"י _scan_activate; False כשאף רגל לא הייתה בחלון וה-SDR
+    נשאר כבוי). רגל מחוץ לחלון השעות שלה מדולגת מיד (לא כשל); סבב שלם בלי אף
+    רגל בחלון => מכבים את הצרכן הרץ (אם יש) ומחכים SCAN_WINDOW_RECHECK_SEC לפני
+    שבודקים שוב (לא busy-loop) — כך שהחלון-שנסגר-באמצע-סבב באמת משתיק את ה-SDR,
+    לא רק את החיווי ב-UI. רגל שזהה בדיוק לרגל שכבר רצה (מצב+תדרים) לא נכנסת
+    מחדש — נמנעים מ-restart מיותר של השירות כשהלוח מכיל רק רגל אחת (או רגל
+    שחוזרת על עצמה) עם dwell קצר."""
     idx = start_idx
     remaining = first_dwell
     consecutive_fail = 0
     consecutive_skip = 0    # רגלים רצופות שנעדרו-מחלון-שעות — לא כשל, רק "לא עכשיו"
+    last_entered = plan[(start_idx - 1) % len(plan)] if consumer_active else None
     while not stop_evt.is_set():
         while remaining > 0 and not stop_evt.is_set():
             step = min(1.0, remaining)
@@ -1820,12 +1855,32 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell):
             with _scan_lock:
                 _scan_status.update(idx=-1, leg=None, next_switch_at=None)
             if consecutive_skip >= len(plan):
+                # סבב שלם בלי אף רגל בחלון => אין מה לשדר עכשיו, מכבים בפועל
+                # (לא רק מסתירים מה-UI) — אחרת הרגל האחרונה שרצה ממשיכה לשדר
+                # כל עוד אף רגל אחרת לא נכנסת בפועל.
+                if consumer_active:
+                    log.info("scan: אף רגל לא בחלון השעות — מכבה את הצרכן הפעיל")
+                    _enter_standby()
+                    consumer_active = False
+                    last_entered = None
                 remaining = SCAN_WINDOW_RECHECK_SEC   # אף רגל לא בחלון — לא רודפים בלולאה
                 consecutive_skip = 0
             else:
                 remaining = 0   # עוד רגלים לבדוק באותו סבב — ממשיכים מיד
             continue
         consecutive_skip = 0
+        same = (last_entered is not None and last_entered["mode"] == leg["mode"]
+                and last_entered.get("freqs") == leg.get("freqs"))
+        if same:
+            # אותה רגל בדיוק כבר רצה (מצב+תדרים) — אין טעם ב-restart של השירות,
+            # רק מרעננים את הטיימר. חוסך נתק שמע/הקלטות כל dwell בלוח עם רגל
+            # יחידה (או רגלים חוזרות) בעלת חלון שעות.
+            with _scan_lock:
+                _scan_status.update(idx=idx % len(plan), leg=leg,
+                                    next_switch_at=time.time() + leg["dwell_sec"])
+            remaining = leg["dwell_sec"]
+            idx += 1
+            continue
         if not TUNE_LOCK.acquire(timeout=5):
             remaining = 1
             continue
@@ -1839,6 +1894,8 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell):
             if consecutive_fail >= len(plan):
                 log.warning("scan: כל הרגלים נכשלו בסבב — נופל ל-off")
                 _enter_standby()
+                if stop_evt.is_set():
+                    return   # מעבר מצב אחר כבר תפס פיקוד בינתיים — לא דורסים את ה-state שלו
                 cur = load_state()
                 save_state({**cur, "app_mode": "off", "prev_mode": "scan"})
                 with _scan_lock:
@@ -1848,6 +1905,10 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell):
             remaining = 1     # מנסים את הבאה כמעט מיד — לא ממתינים dwell מלא אחרי כשל
             continue
         consecutive_fail = 0
+        consumer_active = True
+        last_entered = leg
+        if stop_evt.is_set():
+            return   # נעצרנו בדיוק אחרי כניסה מוצלחת — לא כותבים סטטוס של סבב שכבר בוטל
         with _scan_lock:
             _scan_status.update(idx=idx % len(plan), leg=leg,
                                 next_switch_at=time.time() + leg["dwell_sec"])
@@ -1865,7 +1926,7 @@ def _scan_activate(plan):
     active_idx = next((i for i, leg in enumerate(plan) if _leg_active_now(leg)), None)
     if active_idx is None:
         stop_evt = threading.Event()
-        thread = threading.Thread(target=_scan_loop, args=(stop_evt, plan, 0, 0), daemon=True)
+        thread = threading.Thread(target=_scan_loop, args=(stop_evt, plan, 0, 0, False), daemon=True)
         with _scan_lock:
             _scan_status.update(idx=-1, leg=None, next_switch_at=None, plan=plan)
             _scan_thread, _scan_thread_stop = thread, stop_evt
@@ -1876,7 +1937,7 @@ def _scan_activate(plan):
         return err, detail
     stop_evt = threading.Event()
     thread = threading.Thread(target=_scan_loop,
-                              args=(stop_evt, plan, active_idx + 1, plan[active_idx]["dwell_sec"]),
+                              args=(stop_evt, plan, active_idx + 1, plan[active_idx]["dwell_sec"], True),
                               daemon=True)
     with _scan_lock:
         _scan_status.update(idx=active_idx, leg=plan[active_idx],
@@ -2686,23 +2747,49 @@ def api_mode():
     if mode not in ("voice", "acars", "vdl2", "off", "scan"):
         return jsonify(ok=False, error="mode לא תקין (voice/acars/vdl2/off/scan)"), 400
 
-    _scan_stop_thread()   # כל מעבר מצב (כולל scan עם לוח חדש) עוצר סבב קודם
+    # קודם ולידציה סטטית (לא תלוית-נעילה: פענוח פרמטרים/לוח/תדרים) — בקשה עם
+    # פרמטרים לא-תקינים (400) לא נוגעת בסבב סריקה פעיל בכלל (אחרת סבב תקין
+    # נעצר "בחינם" והמצב נשאר תקוע על הרגל האחרונה בלי סבב שממשיך אותו — "scan
+    # זומבי"). _scan_stop_thread() עצמו נקרא רק *אחרי* שתפסנו את TUNE_LOCK
+    # (בתוך ה-try למטה) — כך שאם יש סבב סריקה פעיל שמחזיק את הנעילה לרגע קצר
+    # (מעבר רגל), אנחנו כבר בטוחים שנחזיק אותה בעצמנו לפני שננסה לעצור אותו,
+    # ולא ניתקל ב-409 שקרי בגלל תחרות-עצמית עם הסבב. timeout קטן (לא 0) סופג
+    # בדיוק את החלון הקצר הזה; רק חסימה ממושכת אמיתית (פעולה אחרת) עדיין
+    # מחזירה 409 — ובלי לגעת בסבב כלל.
+    st = load_state()
 
     if mode == "voice":
         # קול = כיוונון להגדרות השמורות האחרונות (או מפורשות). _voice_tune מחזיק
         # את ה-TUNE_LOCK בעצמו => לא לוקחים אותו כאן (deadlock).
-        st = load_state()
         params, perr = _parse_tune(data if "freq" in data else st)
         if perr:   # state פגום => נופלים לברירת מחדל
             params, _ = _parse_tune(DEFAULT_STATE)
+        _scan_stop_thread()
         payload, status = _voice_tune(params)
         return jsonify(payload), status
 
-    if not TUNE_LOCK.acquire(blocking=False):
+    plan = freqs = key = enter = None
+    if mode == "scan":
+        plan = _validate_scan_plan(data.get("plan") or st.get("scan_plan"))
+        if plan is None:
+            return jsonify(ok=False, error="לוח סריקה לא תקין (1-8 רגלים, "
+                           "כל רגל מצב+זמן שהייה תקין)", state=st), 400
+    elif mode in ("acars", "vdl2"):
+        key, default, wcheck, enter = (
+            ("acars_freqs", ACARS_FREQS_DEFAULT, _acars_window_error, _enter_acars)
+            if mode == "acars" else
+            ("vdl2_freqs", VDL2_FREQS_DEFAULT, _vdl2_window_error, _enter_vdl2))
+        freqs = _sanitize_freqs(data.get("freqs") or st.get(key), default)
+        werr = wcheck(freqs)                     # חייב להיכנס בחלון דגימה אחד
+        if werr:
+            return jsonify(ok=False, error=werr, state=st), 400
+
+    if not TUNE_LOCK.acquire(timeout=0.5):
         return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב",
                        state=load_state()), 409
     try:
-        st = load_state()
+        _scan_stop_thread()   # תפסנו את הנעילה — הבקשה תקינה, עוצרים סבב קודם (אם יש)
+        st = load_state()     # רענון אחרי stop_thread — לא לדרוס שינוי מקביל
         if mode == "off":
             # כיבוי (standby): עוצר את כל צרכני ה-SDR ומשחרר את ה-RSP1B ליישום
             # אחר. airam-web/הדף נשארים פעילים => אפשר להדליק שוב מה-UI בכל רגע.
@@ -2718,10 +2805,6 @@ def api_mode():
             return jsonify(ok=True, app_mode="off")
 
         if mode == "scan":
-            plan = _validate_scan_plan(data.get("plan") or st.get("scan_plan"))
-            if plan is None:
-                return jsonify(ok=False, error="לוח סריקה לא תקין (1-8 רגלים, "
-                               "כל רגל מצב+זמן שהייה תקין)", state=st), 400
             log.info("mode -> SCAN plan=%s (from %s)", plan, request.remote_addr)
             err, detail = _scan_activate(plan)
             if err:
@@ -2732,14 +2815,6 @@ def api_mode():
             return jsonify(ok=True, app_mode="scan", scan_plan=plan)
 
         # acars / vdl2 — מסלול דאטה סימטרי
-        key, default, wcheck, enter = (
-            ("acars_freqs", ACARS_FREQS_DEFAULT, _acars_window_error, _enter_acars)
-            if mode == "acars" else
-            ("vdl2_freqs", VDL2_FREQS_DEFAULT, _vdl2_window_error, _enter_vdl2))
-        freqs = _sanitize_freqs(data.get("freqs") or st.get(key), default)
-        werr = wcheck(freqs)                     # חייב להיכנס בחלון דגימה אחד
-        if werr:
-            return jsonify(ok=False, error=werr, state=st), 400
         log.info("mode -> %s freqs=%s (from %s)", mode, freqs, request.remote_addr)
         err, detail = enter(freqs)
         if err:
@@ -2805,6 +2880,16 @@ def _boot_restore():
         if not TUNE_LOCK.acquire(blocking=False):
             return   # המשתמש כבר בחר מצב מה-UI — כוונתו גוברת על השחזור
         try:
+            # ⚠ בין load_state() בראש הפונקציה לכאן עברו עד BOOT_SDR_WAIT_SEC
+            # שניות (המתנה ל-SDR) — אם המשתמש הספיק לבחור מצב אחר מה-UI *ואותה
+            # בחירה כבר הסתיימה* (הנעילה שוב פנויה), st הישן היה דורס אותה.
+            # קוראים מחדש ומוותרים על השחזור אם המצב השמור השתנה בינתיים.
+            st2 = load_state()
+            if st2.get("app_mode", "off") != mode:
+                log.info("boot restore: המצב השמור השתנה בזמן ההמתנה ל-SDR (%s) — מוותרים על השחזור",
+                         st2.get("app_mode"))
+                return
+            st = st2
             if mode == "voice":
                 params, perr = _parse_tune(st)
                 if perr:   # state פגום => ברירת מחדל

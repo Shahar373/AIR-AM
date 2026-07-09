@@ -41,6 +41,33 @@ def test_day_bounds_rejects_bad_format():
     assert app._day_bounds(None) is None
 
 
+def test_day_bounds_handles_dst_transition_days():
+    """ישראל (וארה"ב) עוברות שעון קיץ/חורף => לא כל יום הוא 86400 שניות.
+    end-start חייב להיות הפרש-הזמן-האמיתי (23h/25h), לא +86400 קבוע, אחרת
+    שעה שלמה של הודעות נעלמת/מוכפלת בארכיון החיפוש סביב המעבר.
+    משתמשים ב-America/New_York (כלל DST פשוט וקבוע) כדי שהבדיקה תהיה
+    דטרמיניסטית בכל סביבת CI, בלי תלות בחוק הישראלי המשתנה."""
+    import os
+    old_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        # 2024-03-10: קפיצה קדימה לשעון קיץ (יום של 23 שעות)
+        start, end = app._day_bounds("2024-03-10")
+        assert end - start == 23 * 3600
+        assert end == time.mktime((2024, 3, 11, 0, 0, 0, 0, 0, -1))
+        # 2024-11-03: חזרה לשעון חורף (יום של 25 שעות)
+        start, end = app._day_bounds("2024-11-03")
+        assert end - start == 25 * 3600
+        assert end == time.mktime((2024, 11, 4, 0, 0, 0, 0, 0, -1))
+    finally:
+        if old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old_tz
+        time.tzset()
+
+
 def test_api_acars_day_returns_only_that_day(client, paths):
     app._append_acars_log({"t": _day_epoch("2026-07-01"), "tail": "4X-OLD", "text": "yesterday"})
     app._append_acars_log({"t": _day_epoch("2026-07-02"), "tail": "4X-TODAY", "text": "today"})

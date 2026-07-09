@@ -6,6 +6,7 @@
 # ============================================================================
 import json
 import os
+import threading
 import time
 
 import pytest
@@ -235,6 +236,34 @@ def test_presets_rejects_invalid(client, paths, bad):
 def test_presets_corrupt_file_falls_back(client, paths):
     app.PRESETS_PATH.write_text("{broken")
     assert len(client.get("/api/presets").get_json()["presets"]) == len(app.DEFAULT_PRESETS)
+
+
+def test_atomic_write_concurrent_threads_dont_corrupt_file(paths):
+    """שני threads שכותבים לאותו path במקביל (כמו שתי בקשות PUT /api/presets)
+    לא אמורים להתנגש על אותו קובץ tmp — tmp ייחודי לפר-thread. התוצאה הסופית
+    היא תמיד אחד משני התכנים המלאים (last-write-wins), לא קובץ פגום/מעורבב."""
+    target = paths / "concurrent.json"
+    texts = ["A" * 50000, "B" * 50000]     # ארוך מספיק שה-write לא יהיה אטומי-כרונית ב-OS
+    errors = []
+
+    def writer(text):
+        try:
+            for _ in range(20):
+                app._atomic_write(target, text)
+        except Exception as e:                    # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=writer, args=(t,)) for t in texts]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=10)
+
+    assert errors == []
+    content = target.read_text()
+    assert content in texts                        # לא קובץ פגום/מעורבב מהשתיים
+    # לא נשארו קובצי tmp דלוקים
+    assert list(paths.glob("concurrent.json.tmp*")) == []
 
 
 # --- יומן שידורים והקלטות -----------------------------------------------------
