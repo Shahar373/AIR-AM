@@ -397,3 +397,119 @@ def test_api_health_scan_waiting_for_window_not_fault(client, paths, no_sleep, m
     monkeypatch.setattr(app.subprocess, "run", fake_run)
     h = client.get("/api/health").get_json()
     assert h["app_mode"] == "scan" and h["ok"] is True
+
+
+# --- באג: חלון שנסגר באמצע סבב חייב לכבות את הצרכן הרץ בפועל, לא רק את החיווי ----
+
+def test_scan_loop_turns_off_consumer_when_window_closes_mid_scan(paths, no_sleep, monkeypatch):
+    """רגל יחידה עם חלון שעות: אחרי שה-dwell מסתיים ואף רגל לא בחלון (כולל היא
+    עצמה), הצרכן שכבר רץ (consumer_active=True, כאילו _scan_activate הכניס אותו)
+    חייב להיכבות בפועל — לא רק להיעלם מ-_scan_status."""
+    standby_calls = []
+    monkeypatch.setattr(app, "_enter_standby", lambda: standby_calls.append(1) or (None, None))
+    monkeypatch.setattr(app, "_leg_active_now", lambda leg: False)   # אף רגל לא בחלון, אף פעם
+    stop_evt = threading.Event()
+    leg = {"mode": "acars", "dwell_sec": 60, "active_from": "08:00", "active_to": "20:00"}
+    plan = [leg]
+    # start_idx=0, first_dwell=0, consumer_active=True: כאילו leg כבר הוכנס ע"י
+    # _scan_activate (הרגל שרצה כשה-thread התחיל).
+    th = threading.Thread(target=app._scan_loop, args=(stop_evt, plan, 0, 0, True), daemon=True)
+    th.start()
+    time.sleep(0.2)
+    stop_evt.set()
+    th.join(timeout=5)
+    assert standby_calls, "הצרכן הרץ היה אמור להיכבות כשאף רגל לא בחלון"
+
+
+def test_scan_loop_no_standby_when_nothing_was_running(paths, no_sleep, monkeypatch):
+    """אם אף רגל מעולם לא נכנסה (consumer_active=False, כמו ב-_scan_activate
+    כשאף רגל לא הייתה בחלון מלכתחילה) — אין צורך לכבות שום דבר."""
+    standby_calls = []
+    monkeypatch.setattr(app, "_enter_standby", lambda: standby_calls.append(1) or (None, None))
+    monkeypatch.setattr(app, "_leg_active_now", lambda leg: False)
+    stop_evt = threading.Event()
+    plan = [{"mode": "acars", "dwell_sec": 60, "active_from": "08:00", "active_to": "20:00"}]
+    th = threading.Thread(target=app._scan_loop, args=(stop_evt, plan, 0, 0, False), daemon=True)
+    th.start()
+    time.sleep(0.2)
+    stop_evt.set()
+    th.join(timeout=5)
+    assert standby_calls == []
+
+
+def test_scan_loop_does_not_restart_identical_leg_each_dwell(paths, no_sleep, monkeypatch):
+    """לוח עם רגל יחידה (או רגלים חוזרות): כניסה חוזרת לאותה רגל בדיוק (מצב+
+    תדרים) לא אמורה לגרום ל-restart מיותר של השירות בכל dwell."""
+    calls = []
+
+    def fake_enter(leg):
+        calls.append(leg["mode"])
+        return None, None
+
+    monkeypatch.setattr(app, "_scan_enter_leg", fake_enter)
+    stop_evt = threading.Event()
+    leg = {"mode": "voice", "dwell_sec": 60}
+    plan = [leg]
+    th = threading.Thread(target=app._scan_loop, args=(stop_evt, plan, 1, 60, True), daemon=True)
+    th.start()
+    time.sleep(0.2)
+    stop_evt.set()
+    th.join(timeout=5)
+    # last_entered אותחל מ-plan[(1-1)%1]=plan[0]=leg (consumer_active=True) => כל
+    # מחזור מזהה "אותה רגל" ולא קורא ל-_scan_enter_leg בכלל.
+    assert calls == []
+
+
+# --- באג: /api/mode לא אמור לגעת בסבב פעיל אם הבקשה תיכשל בולידציה --------------
+
+def test_api_mode_invalid_new_plan_does_not_stop_running_scan(client, paths, no_sleep, monkeypatch):
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    client.post("/api/mode", json={"mode": "scan", "plan": [ACARS_LEG, VDL2_LEG]})
+    thread_before = app._scan_thread
+    assert thread_before is not None and thread_before.is_alive()
+    r = client.post("/api/mode", json={"mode": "scan", "plan": [{"mode": "acars", "dwell_sec": 1}]})
+    assert r.status_code == 400
+    # הסבב הקודם (התקין) לא נגע בו כלל — אותו thread עדיין רץ
+    assert app._scan_thread is thread_before and app._scan_thread.is_alive()
+    assert app.load_state()["app_mode"] == "scan"
+
+
+def test_api_mode_tune_lock_busy_does_not_stop_running_scan(client, paths, monkeypatch):
+    """כש-TUNE_LOCK תפוס ע"י פעולה אחרת (409), סבב סריקה פעיל לא אמור להיעצר —
+    אחרת נשאר "scan זומבי": state עדיין scan אבל אין thread שממשיך אותו.
+    בלי no_sleep בכוונה (כמו test_scan_activate_skips_to_active_leg): dwell
+    אמיתי (60ש') => thread הסריקה יושב בהמתנה ולא מתחרה על TUNE_LOCK, כך
+    שתפיסת הנעילה כאן דטרמיניסטית ולא תלוית-תזמון."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    client.post("/api/mode", json={"mode": "scan", "plan": [ACARS_LEG, VDL2_LEG]})
+    thread_before = app._scan_thread
+    assert thread_before is not None and thread_before.is_alive()
+    assert app.TUNE_LOCK.acquire(blocking=False)   # מדמה פעולה מתמשכת אחרת
+    try:
+        r = client.post("/api/mode", json={"mode": "acars", "freqs": ["131.525"]})
+        assert r.status_code == 409
+    finally:
+        app.TUNE_LOCK.release()
+    assert app._scan_thread is thread_before and app._scan_thread.is_alive()
+    assert app.load_state()["app_mode"] == "scan"
+
+
+# --- באג: active_from==active_to אמור להיות "תמיד פעיל", לא "אף פעם" -----------
+
+def test_leg_active_now_from_equals_to_means_always(monkeypatch):
+    leg = {"mode": "acars", "dwell_sec": 60, "active_from": "09:00", "active_to": "09:00"}
+    _at(monkeypatch, 3, 0)
+    assert app._leg_active_now(leg) is True
+    _at(monkeypatch, 23, 59)
+    assert app._leg_active_now(leg) is True
+
+
+# --- באג: active_from/active_to שאינם מחרוזת (JSON תקין) לא אמורים לזרוק 500 ----
+
+def test_validate_scan_plan_rejects_non_string_window_fields():
+    assert app._validate_scan_plan([{"mode": "acars", "dwell_sec": 60,
+                                     "active_from": 900, "active_to": "22:00"}]) is None
+    assert app._validate_scan_plan([{"mode": "acars", "dwell_sec": 60,
+                                     "active_from": ["06", "00"], "active_to": "22:00"}]) is None

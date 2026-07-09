@@ -136,3 +136,20 @@ def test_boot_restore_never_raises(paths, monkeypatch):
     # חוזה הבטיחות: כל חריגה נבלעת — _boot_restore לעולם לא מפיל את שרת הווב
     monkeypatch.setattr(app, "load_state", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
     app._boot_restore()          # לא זורק
+
+
+def test_boot_restore_state_changed_while_waiting_for_sdr(paths, no_sleep, sysctl_calls, monkeypatch):
+    # בין load_state() בראש הפונקציה לתפיסת TUNE_LOCK עוברת המתנה ל-SDR (עד
+    # BOOT_SDR_WAIT_SEC שניות). אם המשתמש הספיק לבחור מצב אחר מה-UI *ואותה
+    # בחירה כבר הסתיימה* (הנעילה שוב פנויה) — השחזור חייב לוותר, לא לדרוס אותה
+    # עם ה-state הישן שנקרא לפני ההמתנה.
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "voice", "freq": 121.5})
+
+    def sdr_present_and_switch():
+        # מדמה שהמשתמש עבר ל-acars מה-UI *בזמן* שה-boot restore חיכה ל-SDR
+        app.save_state({**app.DEFAULT_STATE, "app_mode": "acars", "acars_freqs": ["131.550"]})
+        return True
+    monkeypatch.setattr(app, "_sdr_present", sdr_present_and_switch)
+    app._boot_restore()
+    assert sysctl_calls == []                        # לא נגע בכוונה הישנה (voice) בכלל
+    assert app.load_state()["app_mode"] == "acars"    # הבחירה הטרייה של המשתמש נשמרת

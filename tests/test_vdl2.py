@@ -287,6 +287,47 @@ def test_vdl2_listener_and_api(client, monkeypatch):
     assert client.get("/api/vdl2?since=%d" % cursor).get_json()["messages"] == []
 
 
+def test_vdl2_listener_survives_normalize_exception(client, monkeypatch):
+    """sig_level לא-מספרי => TypeError בחיסור level-noise בתוך _normalize_vdl2.
+    לא אמור להפיל את ה-thread לצמיתות — הפיד ממשיך לזרום להודעות הבאות.
+    פורט ייעודי — כדי לא להתנגש עם ה-listener הקבוע-חי שנפתח כבר
+    ב-test_vdl2_listener_and_api באותו תהליך pytest."""
+    free_port = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    free_port.bind(("127.0.0.1", 0))
+    port = free_port.getsockname()[1]
+    free_port.close()
+    monkeypatch.setattr(app, "VDL2_UDP_PORT", port)
+
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    _reset_buffer()
+    th = threading.Thread(target=app._vdl2_listener, daemon=True)
+    th.start()
+    time.sleep(0.2)
+
+    now = int(time.time())
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    bad = _vdl2(_avlc_downlink({"acars": {"err": False, "crc_ok": True, "reg": ".4X-BAD",
+                                          "label": "H1", "msg_text": "boom"}}),
+                t_sec=now, sig="bad")   # לא מספר => TypeError
+    s.sendto(json.dumps(bad).encode(), (app.ACARS_UDP_HOST, port))
+    s.sendto(json.dumps(_vdl2(_avlc_downlink({"acars": {
+        "err": False, "crc_ok": True, "reg": ".4X-OK", "label": "H1",
+        "msg_text": "still alive"}}), t_sec=now + 1)).encode(),
+        (app.ACARS_UDP_HOST, port))
+
+    deadline = time.time() + 3
+    data = {"messages": []}
+    while time.time() < deadline:
+        data = client.get("/api/vdl2?since=0").get_json()
+        if len(data["messages"]) >= 1:
+            break
+        time.sleep(0.05)
+
+    assert th.is_alive()                            # ה-thread לא מת
+    assert len(data["messages"]) == 1                # ההודעה התקינה עברה
+    assert data["messages"][0]["tail"] == ".4X-OK"
+
+
 # --- /api/mode: כניסה/יציאה מ-VDL2 -------------------------------------------
 
 def test_api_mode_enter_vdl2(client, paths, no_sleep, monkeypatch):

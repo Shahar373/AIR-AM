@@ -134,6 +134,47 @@ def test_acars_listener_and_api(client, monkeypatch):
     assert client.get("/api/acars?since=%d" % cursor).get_json()["messages"] == []
 
 
+def test_acars_listener_survives_normalize_exception(client, monkeypatch):
+    """דאטהגרם עם שדה מטיפוס לא-צפוי (label כרשימה => unhashable ב-ACARS_LABELS.get)
+    לא אמור להפיל את ה-thread לצמיתות — הפיד ממשיך לזרום להודעות הבאות.
+    פורט ייעודי (לא ה-port הגלובלי) — כדי לא להתנגש עם ה-listener הקבוע-חי
+    שכבר נפתח ב-test_acars_listener_and_api באותו תהליך pytest."""
+    free_port = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    free_port.bind(("127.0.0.1", 0))
+    port = free_port.getsockname()[1]
+    free_port.close()
+    monkeypatch.setattr(app, "ACARS_UDP_PORT", port)
+
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    with app._acars_lock:
+        app._acars_msgs.clear()
+        app._acars_seq = 0
+    th = threading.Thread(target=app._acars_listener, daemon=True)
+    th.start()
+    time.sleep(0.2)
+
+    now = time.time()
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # label כרשימה => TypeError (unhashable) בתוך _normalize_acars
+    s.sendto(json.dumps({"timestamp": now, "label": ["A9"], "text": "boom"}).encode(),
+             (app.ACARS_UDP_HOST, port))
+    s.sendto(json.dumps({"timestamp": now + 1, "freq": 131.55, "tail": "4X-OK",
+                         "label": "H1", "text": "still alive"}).encode(),
+             (app.ACARS_UDP_HOST, port))
+
+    deadline = time.time() + 3
+    data = {"messages": []}
+    while time.time() < deadline:
+        data = client.get("/api/acars?since=0").get_json()
+        if len(data["messages"]) >= 1:
+            break
+        time.sleep(0.05)
+
+    assert th.is_alive()                            # ה-thread לא מת
+    assert len(data["messages"]) == 1                # ההודעה התקינה עברה
+    assert data["messages"][0]["tail"] == "4X-OK"
+
+
 # --- /api/mode --------------------------------------------------------------
 
 def test_api_mode_invalid(client, paths):
