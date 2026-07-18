@@ -15,6 +15,7 @@ def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "ACARS_ENV_PATH", tmp_path / "acars.env")
     monkeypatch.setattr(app, "VDL2_ENV_PATH", tmp_path / "vdl2.env")
+    monkeypatch.setattr(app, "SATCOM_ENV_PATH", tmp_path / "satcom.env")
     return tmp_path
 
 
@@ -65,6 +66,17 @@ def test_boot_restore_vdl2_enters_vdl2(paths, no_sleep, sysctl_calls, monkeypatc
     assert ("restart", app.VDL2_SERVICE) in sysctl_calls
     assert "VDL2_FREQS=136975000" in app.VDL2_ENV_PATH.read_text()   # MHz→Hz
     assert app.load_state()["app_mode"] == "vdl2"
+
+
+def test_boot_restore_satcom_enters_satcom(paths, no_sleep, sysctl_calls, monkeypatch):
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "satcom", "satcom_freqs": ["AF1"]})
+    monkeypatch.setattr(app, "_is_active", lambda svc: ("restart", svc) in sysctl_calls)
+    app._boot_restore()
+    assert ("restart", app.SATCOM_SERVICE) in sysctl_calls
+    assert "SATCOM_SATELLITE=AF1" in app.SATCOM_ENV_PATH.read_text()
+    # קריטי: satcom חייב לעבור בענף ה-elif המפורש שלו ב-_boot_restore ולא ליפול
+    # ל-else הגנרי (scan) — לוח סריקה לא תקין (None) שם היה מפיל ל-off.
+    assert app.load_state()["app_mode"] == "satcom"
 
 
 def test_boot_restore_off_is_noop(paths, no_sleep, sysctl_calls):

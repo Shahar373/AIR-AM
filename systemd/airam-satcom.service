@@ -1,0 +1,41 @@
+[Unit]
+Description=AIR-AM - Inmarsat L-band satellite ACARS decoder (inmarsat-sniffer, SDRplay RSP1B)
+Documentation=https://github.com/alphafox02/inmarsat-sniffer
+After=network-online.target sdrplay.service
+Wants=network-online.target
+# Requires => עצירת sdrplay עוצרת גם את inmarsat-sniffer (תלות קשיחה ב-API).
+# PartOf => restart של sdrplay מפעיל אותנו מחדש אם אנחנו הצרכן הפעיל כרגע
+# (try-restart) — בלי זה dependency-stop משאיר את התחנה שקטה. ראה rtl_airband.service.
+Requires=sdrplay.service
+PartOf=sdrplay.service
+# מצב משולב = SDR אחד בהחלפה: רק צרכן-SDR אחד פעיל בכל רגע. Conflicts דו-כיווני
+# מול *שלושת* הצרכנים האחרים => הפעלת inmarsat-sniffer עוצרת אוטומטית את
+# rtl_airband/acarsdec/dumpvdl2 (וההפך). ההצהרה כאן בלבד מספיקה (Conflicts
+# דו-כיווני) — אין צורך לערוך את שלוש היחידות הקיימות.
+Conflicts=rtl_airband.service airam-acars.service airam-vdl2.service
+# בלי הגבלת קצב-הפעלה => מתאושש לנצח (ניתוק/חיבור USB, מרוץ אתחול)
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# קובץ ההגדרות (אופציונלי, '-') - airam-web כותב אותו במעבר למצב SATCOM.
+# systemd מנתח KEY=VALUE *בבטחה* (לא מריץ shell) => קובץ הניתן-לכתיבה ע"י airam
+# לא יכול להסליל הרצת קוד כ-root (בניגוד ל-source ב-bash).
+EnvironmentFile=-/etc/airam/satcom.env
+# שער מוכנות: מחכה שה-SDRplay API באמת יענה לפני הרצת inmarsat-sniffer (כמו rtl_airband)
+ExecStartPre=/usr/local/bin/airam-wait-sdrplay
+# ⚠ החלפת אנטנה (VHF airband <-> L-band + LNA) היא פעולה *ידנית* של המשתמש —
+# ר' docs/satcom-feasibility.md §3. ‏$SATCOM_BIAS_TEE *ללא* סוגריים => נעלם
+# לגמרי כשריק (bias-T כבוי); כשמלא ("-B") מדליק את ה-bias-T של ה-RSP1B שמזין
+# את ה-LNA הצמוד לאנטנת ה-L-band. ‏--satellite=AF1 (Alphasat, +25.0E) הוא
+# ברירת המחדל ל-EMEA/ישראל — ר' SATCOM_SATELLITES/SATCOM_FREQS_DEFAULT ב-app.py.
+# הפורט (5558) חייב להתאים ל-SATCOM_UDP_PORT ב-webtune/app.py.
+ExecStart=/usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero --soapy-gain=${SATCOM_GAIN} $SATCOM_BIAS_TEE --udp=127.0.0.1:5558 --station-id=airam
+# גישת חומרה (SDR) => כמו rtl_airband, רץ כ-root
+User=root
+Restart=always
+RestartSec=10
+
+# שים לב: השירות *לא* enabled (לא עולה באתחול) — כמו כל צרכני ה-SDR. airam-web
+# (המתזמר) משחזר את המצב השמור באתחול ומפעיל/עוצר לפי בחירת המצב בממשק
+# (דרך sudoers ממוקד). אין "מצב ראשי" — קול/ACARS/VDL2/SATCOM שווי-מעמד.

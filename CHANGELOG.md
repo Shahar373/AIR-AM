@@ -8,6 +8,24 @@
 מקדמים לכותרת גרסה ומתייגים את ה-commit.
 
 ## [Unreleased]
+### נוסף
+- **מצב `satcom` — קליטת ACARS דרך לוויין Inmarsat (L-band)**, צרכן SDR רביעי
+  שווה-מעמד לצד voice/acars/vdl2. מפענח: `inmarsat-sniffer` (alphafox02) —
+  בינארי CLI עצמאי (בלי Qt/GUI, בניגוד ל-JAERO המקורי), נעוץ ל-commit ידוע-טוב
+  (אין releases רשמיים לפרויקט). הפלט מסונתז ל-dict בסגנון acarsdec ומוזרם דרך
+  `_normalize_acars` הקיים — בדיוק כמו מסלול A של VDL2 — כך שכל הפרסרים
+  (ATIS/OOOI/PDC/label-15/16/H1/ARINC-622 כולל ADS-C), הרוסטר המאוחד, המפה
+  והארכיון חלים עליו בחינם. `airam-satcom.service` חדש (Conflicts דו-כיווני מול
+  שלושת הצרכנים האחרים, לא enabled — כמו כל צרכן SDR). לוויין ברירת מחדל:
+  `AF1` (Alphasat, +25.0E) ל-EMEA/ישראל.
+- **חומרה נדרשת (נפרדת מאנטנת ה-airband): אנטנת L-band RHCP + LNA** (למשל
+  Nooelec SAWbird+ IO), מוזן מ-bias-T של ה-RSP1B (‎-B, מודלק *רק* במצב satcom).
+  החלפת האנטנה בין VHF ל-L-band **ידנית** — ה-UI מציג באנר-הוראה בכניסה/יציאה
+  ממצב satcom. פירוט מלא (BOM, כיוון אנטנה, סכמת JSON מאומתת מהמקור) ב-
+  `docs/satcom-feasibility.md`.
+- `GET /api/satcom` + `/api/satcom/export` (אותה סכמה כמו `/api/acars`, בלי
+  `level`/`snr`/`freq` — inmarsat-sniffer לא חושף אותם ב---feed/--udp, ולכן
+  לעולם לא מומצאים — ר' §12 ב-CLAUDE.md).
 
 ## [2.4.0] - 2026-07-09
 ### תוקן
