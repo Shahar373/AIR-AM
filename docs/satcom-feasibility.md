@@ -229,6 +229,7 @@ SATCOM_SNIFFER_COMMIT = 2827b3a0c7cd349783aeee4621096db14f43264a  (2026-06-03)
 - **Phase 1 — backend** (`app.py` + `satcom.env` + `airam-satcom.service`) + `test_satcom.py`/`test_boot.py`.
   לפני מימוש `_normalize_satcom`: להריץ `inmarsat-sniffer --feed -v` על ה-Pi ולתעד שורת JSON
   אמיתית אחת (ראו האזהרה ב-§4.1 — אל תסמכו על סכמת ה-README בלבד).
-- **Phase 2 — UI** (מופע `createDataView`, כרטיס בית, view, באנר החלפת אנטנה ידנית).
+- ~~**Phase 2 — UI**~~ **בוצע** (מופע `createDataView` רביעי, כרטיס בית, view,
+  בורר-לוויין, באנר החלפת אנטנה ידנית) — אומת בדפדפן (Chromium), בלי שגיאות JS.
 - **Phase 3 — install.sh** (שלב 4d — קצר, ללא Qt/xvfb — sudoers, העתקות).
 - **Phase 4 — תיעוד/גרסה** (VERSION/CHANGELOG/README/CLAUDE).

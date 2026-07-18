@@ -189,8 +189,19 @@ VDL2_MSG_FILTER = "all,-avlc_s,-acars_nodata,-gsif,-x25_control,-idrp_keepalive,
 SATCOM_SERVICE = "airam-satcom"
 SATCOM_ENV_PATH = Path("/etc/airam/satcom.env")
 SATCOM_UDP_PORT = 5558                # חייב להתאים ל-SATCOM_UDP ב-satcom.env
-SATCOM_SATELLITES = {"4F3", "3F5", "AF1", "F1"}  # דגלי --satellite= (ר' --list-satellites)
-SATCOM_FREQS_DEFAULT = ["AF1"]        # Alphasat (+25.0E) — משמש ל-EMEA/ישראל
+# "בנקים" של satcom = לוויינים (geostationary), לא צבירי-תדרים כמו ACARS/VDL2 —
+# כל "בנק" הוא לוויין יחיד (freqs בן-איבר-יחיד עם דגל ה---satellite=). זה מאפשר
+# ל-UI לעשות שימוש חוזר במנגנון בורר-הבנקים הקיים כבורר-לוויין, בלי קוד מיוחד.
+# דגלי הלוויין ושמותיהם מאומתים מ-`inmarsat-sniffer --list-satellites` (ר'
+# docs/satcom-feasibility.md §2). AF1 (Alphasat, +25.0E) ברירת המחדל ל-ישראל.
+SATCOM_BANKS = [
+    {"id": "AF1", "name": "Alphasat · EMEA (25°E)", "freqs": ["AF1"]},
+    {"id": "4F3", "name": "I-4 F3 · אמריקה (98°W)", "freqs": ["4F3"]},
+    {"id": "3F5", "name": "I-3 F5 · אטלנטי (54°W)", "freqs": ["3F5"]},
+    {"id": "F1", "name": "I-6 F1 · אוק' הודי/שקט (83°E)", "freqs": ["F1"]},
+]
+SATCOM_SATELLITES = {b["id"] for b in SATCOM_BANKS}  # דגלי --satellite= תקינים
+SATCOM_FREQS_DEFAULT = SATCOM_BANKS[0]["freqs"]      # ["AF1"] — Alphasat, ל-EMEA/ישראל
 SATCOM_GAIN_DEFAULT = 40              # dB, ‎--soapy-gain (ברירת המחדל של הכלי עצמו)
 SATCOM_BUF_MAX = 500                  # הודעות אחרונות בזיכרון (כמו ACARS/VDL2)
 SATCOM_LOG_PATH = Path("/var/lib/airam/satcom.jsonl")
@@ -2289,7 +2300,7 @@ def api_state():
         # מערכת / _boot_restore עוד בדרך). True גם ב-off — standby מכוון אינו תקלה.
         st["mode_ok"] = (live is not None) or (saved == "off")
     st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT, version=VERSION,
-              acars_banks=ACARS_BANKS, vdl2_banks=VDL2_BANKS)
+              acars_banks=ACARS_BANKS, vdl2_banks=VDL2_BANKS, satcom_banks=SATCOM_BANKS)
     return jsonify(st)
 
 
