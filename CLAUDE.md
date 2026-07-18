@@ -47,10 +47,11 @@
                    │      SDRplay API service (sdrplay.service)          │
                    │                       │                             │
                    │      ┌────────────────┼────────────────┐            │
-   קול 📻          │ rtl_airband       acarsdec         dumpvdl2 │ VDL2 🛰️
-   / ACARS 📡      │ (AM/NFM→MP3)    (ACARS→JSON)     (VDL2→JSON) │  (Conflicts
-   (Conflicts) ◄───┤      │           │ UDP 5556       │ UDP 5557 │   3-כיווני)
-                   │ Icecast2 :8000   └──── airam-web :8080 ──────┘            │
+   קול 📻          │ rtl_airband  acarsdec   dumpvdl2   inmarsat-sniffer │
+   / ACARS 📡      │ (AM/NFM→MP3) (ACARS→   (VDL2→     (SATCOM ACARS→    │
+   / VDL2 🛰️       │      │       JSON 5556) JSON 5557) JSON 5558) 📶    │
+   / SATCOM 📶     │ Icecast2 :8000   └──── airam-web :8080 ──────┘  (Conflicts
+   (Conflicts) ◄───┤      │                       │              4-כיווני)   │
                    │      │                       │                            │
                    └──────┼───────────────────────┼────────────────────────────┘
                           ▼                        ▼
@@ -62,12 +63,13 @@
 ```
 
 **העיקרון המכריע — SDR אחד, בהחלפה:** ל-RSP1B יכול לגשת **תהליך אחד בלבד** בכל רגע.
-`rtl_airband` (קול), `acarsdec` (ACARS) ו-`dumpvdl2` (VDL2) הם שלושה תהליכים נפרדים
-שמתחרים על אותו מקלט. לכן יחידות ה-systemd מוגדרות `Conflicts` (`airam-vdl2` מצהיר
-Conflicts מול *שני* האחרים => כל הזוגות מכוסים, דו-כיווני) — הפעלת אחת עוצרת אוטומטית
-את השאר. **אי אפשר שניים מהם בו-זמנית עם SDR אחד.** מעבר מצב = ~3 שניות.
+`rtl_airband` (קול), `acarsdec` (ACARS), `dumpvdl2` (VDL2) ו-`inmarsat-sniffer`
+(SATCOM) הם ארבעה תהליכים נפרדים שמתחרים על אותו מקלט. לכן יחידות ה-systemd מוגדרות
+`Conflicts` (כל יחידה מצהירה Conflicts מול *כל* קודמותיה => כל הזוגות מכוסים,
+דו-כיווני; `airam-satcom` מצהיר מול שלושת האחרים) — הפעלת אחת עוצרת אוטומטית את השאר.
+**אי אפשר שניים מהם בו-זמנית עם SDR אחד.** מעבר מצב = ~3 שניות.
 
-**תפיסת ההפעלה — אין "מצב ראשי", airam-web הוא המתזמר:** קול/ACARS/VDL2 הם
+**תפיסת ההפעלה — אין "מצב ראשי", airam-web הוא המתזמר:** קול/ACARS/VDL2/SATCOM הם
 "אפליקציות" שוות-מעמד על משאב ה-SDR, ו-`off` (standby) הוא המצב הניטרלי היחיד.
 **אף צרכן SDR אינו enabled ב-systemd** (גם לא rtl_airband!) — `airam-web` (שעולה
 תמיד) קורא את `state.json` באתחול ומשחזר את המצב השמור דרך `_boot_restore` =>
@@ -86,9 +88,9 @@ README.md                   # תיעוד למשתמש הקצה (התקנה + ש�
 CLAUDE.md                   # ← המסמך הזה: ארכיטקטורה + פיתוח.
 
 webtune/
-  app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, סריקה, רוסטר
-                            #   מאוחד, REST API, יומן, הקלטות, תמלול, METAR, מדדי RF,
-                            #   מעבר מצבים, ארכיון חיפוש. ~2850 שורות.
+  app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, SATCOM, סריקה,
+                            #   רוסטר מאוחד, REST API, יומן, הקלטות, תמלול, METAR, מדדי RF,
+                            #   מעבר מצבים, ארכיון חיפוש. ~3000 שורות.
   adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS. thread נפרד.
                             #   ניתן להרצה ידנית: `python3 adsb.py [--selftest]`.
   static/
@@ -105,12 +107,15 @@ config/
   acars.env               # ברירת-מחדל ל-acarsdec (EnvironmentFile). ⚠ נדרס ע"י app.py בכל מעבר ACARS.
   vdl2.env                # ברירת-מחדל ל-dumpvdl2 (EnvironmentFile). ⚠ נדרס ע"י app.py בכל מעבר VDL2.
                           #   ⚠ התדרים ב-Hz (dumpvdl2), בעוד state/UI ב-MHz.
+  satcom.env              # ברירת-מחדל ל-inmarsat-sniffer (EnvironmentFile). ⚠ נדרס ע"י app.py
+                          #   בכל מעבר SATCOM. לוויין (AF1 ברירת מחדל), gain, bias-tee.
 
 systemd/
   sdrplay.service          # שירות SDRplay API. enabled.
   rtl_airband.service      # קול. Requires=sdrplay, בלי [Install] — *לא* enabled. root. Restart=always.
   airam-acars.service      # ACARS. Conflicts=rtl_airband. *לא* enabled. root.
   airam-vdl2.service       # VDL2 (dumpvdl2). Conflicts=rtl_airband+airam-acars. *לא* enabled. root.
+  airam-satcom.service     # SATCOM (inmarsat-sniffer). Conflicts=שלושת האחרים. *לא* enabled. root.
                            #   אף צרכן SDR לא עולה באתחול — airam-web (המתזמר) משחזר את המצב השמור.
   airam-web.service        # שרת הווב + המתזמר. enabled. User=airam (לא-root). Restart=always.
 
@@ -126,7 +131,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_app.py              # render_config, parse, presets, מדדים, יומן, רולבק/נפילה-ל-off.
   test_acars.py            # נרמול ACARS, latlon, labels, ATIS, OOOI, actype, מעברי מצב.
   test_vdl2.py             # נרמול VDL2 (מסלול A/B), env, מעברי מצב, ייצוא, health.
-  test_boot.py             # _boot_restore: שחזור המצב באתחול (המתזמר) — 11 בדיקות.
+  test_satcom.py           # נרמול SATCOM (inmarsat-sniffer JSON, מאומת מהמקור), env, מעברי מצב, ייצוא.
+  test_boot.py             # _boot_restore: שחזור המצב באתחול (המתזמר) — כולל SATCOM.
   test_scan.py             # מצב סריקה: validate_scan_plan, _scan_loop, /api/mode, /api/scan, boot restore.
   test_roster.py           # רוסטר מטוסים מאוחד: היתוך זהות ACARS/VDL2/ADS-B, מיון, /api/aircraft.
   test_archive.py          # ארכיון חיפוש רב-יומי: _day_bounds, ?day= ב-/api/acars ו-/api/vdl2.
@@ -150,11 +156,13 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 | `/etc/rtl_airband/airband.conf` | קונפיג קול חי (תדר נבחר) | app.py בכל `/api/tune` |
 | `/etc/airam/acars.env` | תדרי ACARS חיים | app.py בכל מעבר ל-ACARS |
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
+| `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain, bias-tee (`-B`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/off, acars_freqs, vdl2_freqs) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
 | `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
+| `/var/lib/airam/satcom.jsonl` | היסטוריית SATCOM (שורדת restart, retention 5000) | _satcom_listener |
 | `/var/lib/airam/activity.jsonl` | יומן שידורים (retention 500) | _activity_watcher |
 | `/var/lib/airam/recordings/` | הקלטות MP3 (200 קבצים / 100MB) | rtl_airband, נמחק ע"י app.py |
 | `/run/rtl_airband_stats.txt` | מדדי RF (tmpfs, ~1Hz) | rtl_airband |
@@ -175,12 +183,13 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   `_rollback` מחזיר לקונפיג קודם אם נכשל **ומאומת** (מחזיר bool; כישלון ⇒ `_fail_to_off`).
   כיוונון אחד בכל רגע (`TUNE_LOCK`).
 - **רגיסטרי מצבים (שוויון מצבים):** `MODE_SERVICE` (מצב→שירות), `_live_mode()` (המצב
-  שרץ בפועל או None), `_enter_voice` (peer סימטרי של `_enter_acars`/`_enter_vdl2`:
-  עצירת צרכני דאטה + write_config + verify), `_fail_to_off` (כישלון כניסה ⇒ standby +
-  state off+prev_mode + payload 500 — **לעולם לא fallback לקול**). `/api/mode` הוא
-  dispatcher מאוחד לחמשת המצבים (voice/acars/vdl2/off/**scan**). `_boot_restore`
-  (thread ב-startup) משחזר את המצב השמור באתחול — ה-orchestration שמאפשר לאף צרכן
-  לא להיות enabled ב-systemd.
+  שרץ בפועל או None), `_enter_voice` (peer סימטרי של `_enter_acars`/`_enter_vdl2`/
+  `_enter_satcom`: עצירת צרכני דאטה + write_config + verify), `_fail_to_off` (כישלון
+  כניסה ⇒ standby + state off+prev_mode + payload 500 — **לעולם לא fallback לקול**).
+  `/api/mode` הוא dispatcher מאוחד לששת המצבים (voice/acars/vdl2/**satcom**/off/**scan**);
+  acars/vdl2/satcom חולקים זנב גנרי `(key, default, sanitize, wcheck, enter)`.
+  `_boot_restore` (thread ב-startup) משחזר את המצב השמור באתחול — ה-orchestration
+  שמאפשר לאף צרכן לא להיות enabled ב-systemd.
 - **מצב סריקה/סבב (scan) — "אפליקציית-על" מעל שלושת המצבים, לא צרכן/שירות רביעי:**
   `_validate_scan_plan` (מאמת לוח: 1–8 "רגלים" `{mode,dwell_sec,freqs?,active_from?,
   active_to?}` — שני שדות חלון-השעות חייבים להופיע ביחד, "HH:MM"),
@@ -216,7 +225,7 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   `_parse_label16`/`_parse_nav_fuel` (16/1L, נ"צ עשרוני — לא-מתועדים ב-ARINC, זוהו
   מקליטה אמיתית; **CPDLC נבדק ונמצא ללא תעבורה בפועל** בקליטה שנבדקה — לא מומש),
   `_acars_adsb` (העשרת ADS-B לזנבות שבזיכרון — ראה §6),
-  `_enter_acars` (כתיבת env + מעבר שירות), `_enter_standby` (כיבוי **שלושת** הצרכנים, משאיר
+  `_enter_acars` (כתיבת env + מעבר שירות), `_enter_standby` (כיבוי **ארבעת** הצרכנים, משאיר
   sdrplay חי), `_acars_window_error` (wrapper דק מעל `_window_error` הגנרי — ≤8 ערוצים,
   span ≤ `ACARS_WINDOW_MHZ`), `ACARS_BANKS` (בנקי תדרים, כל בנק בחלון אחד), `_today_start`,
   `_day_bounds` (גבולות יום מקומי לארכיון החיפוש — `?day=YYYY-MM-DD` ב-`/api/acars`,
@@ -231,16 +240,27 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   MHz→Hz**, `VDL2_GAIN` מכיל את הדגל כולו או ריק), `_enter_vdl2` (עוצר rtl_airband+acars,
   מרים dumpvdl2, verify), `_vdl2_window_error`, `_vdl2_adsb`, `VDL2_BANKS`. התמדה:
   `_append_vdl2_log`/`_trim_vdl2_log`/`_load_vdl2_history` (clones של צמד ה-ACARS).
+- **SATCOM (מצב רביעי, ACARS דרך לוויין Inmarsat):** `_satcom_listener` (thread, מאזין
+  UDP 5558 מ-`inmarsat-sniffer`), `_normalize_satcom` (מסלול יחיד — הכלי מפיק רק ACARS:
+  מסנתז dict בסגנון acarsdec משדות `isu.acars.*` (סכמת JAERO JSONdump, אומתה מ-`feed.c`
+  במקור) ומזרים דרך `_normalize_acars` ⇒ כל הפרסרים חלים; `arinc622` מקונן ⇒ ADS-C בחינם;
+  `src/dst.type` "Aircraft/Ground Earth Station" קובע `dir` מבני. **בלי `level`/`snr`/`freq`**
+  — הכלי לא חושף אותם (§12), ו-`isu.refno`≠MSN ⇒ `msgno` לא ממופה), `write_satcom_env`
+  (לוויין `--satellite=`, `SATCOM_GAIN`=`--sdrplay-gain` (נייטיבי, לא `--soapy-gain`) או
+  ריק=AGC, `SATCOM_BIAS_TEE`=`-B`/ריק), `_enter_satcom` (עוצר שלושת האחרים, מרים
+  inmarsat-sniffer, verify), `_sanitize_satellite`/`_satcom_window_error` (לוויין יחיד
+  מתוך `SATCOM_BANKS`, לא בנק תדרים), `SATCOM_BANKS` (לוויינים: AF1/4F3/3F5/F1). התמדה:
+  `_append_satcom_log`/`_trim_satcom_log`/`_load_satcom_history` (clones של צמד ה-VDL2).
 - **רוסטר מטוסים מאוחד:** `_aircraft_identity` (מפתח זהות מהודעה מנורמלת — רישום
   מנורמל קודם, אחרת icao, אחרת מספר טיסה), `_build_roster` (מהתך `_acars_msgs`+
-  `_vdl2_msgs` לפי הזהות, מעשיר ב-`adsb.aircraft_snapshot`, ממוין lastT יורד,
-  גזור ל-`ROSTER_MAX`) — **חי בכל מצב** (לא תלוי SDR הפעיל, ר' §12), `GET /api/aircraft`.
+  `_vdl2_msgs`+`_satcom_msgs` לפי הזהות, מעשיר ב-`adsb.aircraft_snapshot`, ממוין lastT
+  יורד, גזור ל-`ROSTER_MAX`) — **חי בכל מצב** (לא תלוי SDR הפעיל, ר' §12), `GET /api/aircraft`.
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_transcribe_worker` (thread whisper אופציונלי), `_sweep_recordings` (retention).
 - **`__main__`:** מרים את thread השחזור `_boot_restore` (מחזיר את המצב השמור, כולל
   שכתוב קונפיג ישן בשדרוג — `_config_stale`) + threads (activity, acars, **vdl2**,
-  transcribe, adsb), `app.run(threaded=True)` — threaded **חובה** כי `/stream` הוא
-  חיבור ארוך-טווח.
+  **satcom**, transcribe, adsb), `app.run(threaded=True)` — threaded **חובה** כי
+  `/stream` הוא חיבור ארוך-טווח.
 
 ---
 
@@ -270,23 +290,23 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 ## 7. ה-UI (`static/index.html`)
 
 HTML יחיד עם CSS+JS inline. PWA (manifest + sw.js + MediaSession לשמע ברקע).
-מתג תצוגות 🏠/📻/📡/🛰️ בראש — **🏠 מרכז (מסך הבית)** הוא ברירת המחדל והנחיתה של
-מצב off/scan: כרטיס סטטוס, **ארבעה** כרטיסי הפעלה שווי-מעמד (📻/📡/🛰️/🔁 — `renderHome`/
+מתג תצוגות 🏠/📻/📡/🛰️/📶 בראש — **🏠 מרכז (מסך הבית)** הוא ברירת המחדל והנחיתה של
+מצב off/scan: כרטיס סטטוס, **חמישה** כרטיסי הפעלה שווי-מעמד (📻/📡/🛰️/📶/🔁 — `renderHome`/
 `showHomeError`), פאנלי המסלולים/METAR (מערכתיים — עברו לכאן מתצוגת הקול), ופאנל
 **רוסטר מטוסים מאוחד** (`renderRoster`/`pollRoster`, כל 20ש' — מציג היתוך ACARS+VDL2+
-ADS-B מ-`GET /api/aircraft`, כולל כשה-SDR ב-standby). כרטיס
+ADS-B מ-`GET /api/aircraft`, כולל כשה-SDR ב-standby; כולל מקור `satcom` 📶). כרטיס
 הסריקה (`#homeCardScan`) כולל עורך לוח (`renderScanEditor` — הוספה/הסרה/עריכת רגלים,
 כולל שני שדות `<input type=time>` אופציונליים פר-רגל לחלון שעות (`active_from`/
 `active_to`, ריק=תמיד); `scanLegs` בזיכרון בלבד עד לחיצת "התחל") וסטטוס חי (רגל
 נוכחית + ספירה-לאחור מקומית כל שנייה מול `scanStatus.next_switch_at` שמגיע
 מ-`GET /api/scan`; "ממתין לחלון הזמן הבא" כשאף רגל לא בחלון שלה כרגע). **אין תצוגה ייעודית
-לסריקה** — `showView`/`applyMode` נשארים מרובעים (home/voice/acars/vdl2 בלבד); `scan`
-תמיד ממופה ל-`"home"` (הוא "אפליקציית-על", לא תוכן-תצוגה). הדף מושך מצב מ-`/api/*`
+לסריקה** — `showView` מחזיק חמש תצוגות (home/voice/acars/vdl2/**satcom**) ו-`applyMode`
+שישה מצבים; `scan` תמיד ממופה ל-`"home"` (הוא "אפליקציית-על", לא תוכן-תצוגה). הדף מושך מצב מ-`/api/*`
 ב-polling; ה-pollers של airspace/power/METAR/roster רצים בכל תצוגה, metrics/activity רק
 בקול, ו-`pollGlobalState` (10ש', `/api/health` + `/api/scan` כשסורקים) מיישר את חיווי
 המצב למציאות בלי לחטוף את הטאב. כפתורי עצירה ⇒ `applyMode("off")` (גם עצירת סריקה);
 כפתור ⏻ מחזיר את `prev_mode` (יכול להיות `"scan"`). עיצוב responsive (multi-column
-בטאבלט/דסקטופ; `.mode-cards` הוא `auto-fit` כדי לזרום נכון גם עם 4 כרטיסים).
+בטאבלט/דסקטופ; `.mode-cards` הוא `auto-fit` כדי לזרום נכון גם עם 5 כרטיסים).
 **אין build step** — עורכים את הקובץ ישירות. Leaflet vendored תחת `static/vendor/`
 (בלי CDN, עובד גם בלי אינטרנט).
 
@@ -295,26 +315,29 @@ ADS-B מ-`GET /api/aircraft`, כולל כשה-SDR ב-standby). כרטיס
 וקווים (`--border`/`--border-strong`). **השתמש בטוקנים בקוד חדש** במקום ערכים קשיחים —
 כך הקצב והגיאומטריה נשמרים עקביים, ושינוי במקום אחד מתפשט לכל הרכיבים.
 
-**תצוגת ACARS ו-VDL2 — סימטריה מלאה:** שני מופעים עצמאיים של אותו **פקטורי
+**תצוגת ACARS / VDL2 / SATCOM — סימטריה מלאה:** שלושה מופעים עצמאיים של אותו **פקטורי
 `createDataView(opts)`** — `var acars = createDataView({prefix:"acars", mode:"acars",
-label:"ACARS", onMessage, onReset})` ו-`var vdl2 = createDataView({prefix:"vdl2",
-mode:"vdl2", label:"VDL2"})`. כל מופע הוא closure סגור לגמרי (state/מפה/buffers/
-cursor/filters משלו — כלום לא משותף בזיכרון בין השניים; ה-DOM של `#acarsView`/
-`#vdl2View` משתמש חוזר במחלקות ה-CSS `.acars-*`/`.dl-*`, אפס CSS כפול). `opts.prefix`
+label:"ACARS", onMessage, onReset})`, `var vdl2 = createDataView({prefix:"vdl2",
+mode:"vdl2", label:"VDL2"})`, ו-`var satcom = createDataView({prefix:"satcom",
+mode:"satcom", label:"SATCOM"})`. כל מופע הוא closure סגור לגמרי (state/מפה/buffers/
+cursor/filters משלו — כלום לא משותף בזיכרון בין השלושה; ה-DOM של `#acarsView`/
+`#vdl2View`/`#satcomView` משתמש חוזר במחלקות ה-CSS `.acars-*`/`.dl-*`, אפס CSS כפול). `opts.prefix`
 קובע גם את ה-endpoint (`/api/`+prefix) וגם את פענוח ה-DOM ids (`E(suf) => $(prefix+suf)`);
 `opts.label` קובע את טקסט הסטטוס ("ACARS כבוי"/"מאזין · VDL2" וכו'). שני hooks
 אופציונליים (no-op כברירת מחדל, VDL2 לא מעביר אותם): `opts.onMessage(m)` — נקרא
 לכל הודעה חדשה ב-`poll()` (ACARS: מזין את לוח ה-ATIS sticky ב-label A9); `opts.onReset()`
 — נקרא כשה-cursor מתאפס (ACARS: מנקה את לוח ה-ATIS מהסשן הקודם). `opts.emptyHint`
-— טקסט מותאם למצב "אין הודעות עדיין" (VDL2 בלבד: הפניה לתדר 136.975; ACARS מקבל
-ברירת מחדל גנרית). הפקטורי עושה שימוש חוזר בעוזרים ה*טהורים* הגלובליים בלבד
-(`fmtTime`/`mkSpan`/`dirBadge`/`normReg`/`trackColor`/`CAT_GROUPS`/`DIR_INFO`/
-`MULTIBLOCK_RE`/`RETRANS_WINDOW_S`/`msgSig`/`patchMsgTime`/`reconcileFeed`/`segSet`/
-`qualityCls` — מיון dBFS/SNR לשלוש רמות צבע). `showView` מרובע (home/voice/acars/
-vdl2); `applyMode` מחומש (voice/acars/vdl2/off/scan — off ו-scan שניהם נוחתים
-בתצוגת home).
+— טקסט מותאם למצב "אין הודעות עדיין" (VDL2: הפניה לתדר 136.975; SATCOM: הפניה
+לאנטנת L-band/Alphasat; ACARS מקבל ברירת מחדל גנרית). הפקטורי עושה שימוש חוזר
+בעוזרים ה*טהורים* הגלובליים בלבד (`fmtTime`/`mkSpan`/`dirBadge`/`normReg`/`trackColor`/
+`CAT_GROUPS`/`DIR_INFO`/`MULTIBLOCK_RE`/`RETRANS_WINDOW_S`/`msgSig`/`patchMsgTime`/
+`reconcileFeed`/`segSet`/`qualityCls` — מיון dBFS/SNR לשלוש רמות צבע). `showView`
+מחומש (home/voice/acars/vdl2/satcom); `applyMode` משושה (voice/acars/vdl2/satcom/off/
+scan — off ו-scan שניהם נוחתים בתצוגת home). ל-SATCOM אין בורר-תדרים אלא בורר-לוויין
+(אותו מנגנון `setBanks`, כל "בנק" = לוויין), וב-`#satcomView` באנר-הוראה קבוע על
+החלפת אנטנת ה-L-band הידנית + תזכורת toast בעצירה.
 
-**ארכיון חיפוש רב-יומי** (בתוך אותו פקטורי, שני התצוגות מקבלות בחינם): כרטיס
+**ארכיון חיפוש רב-יומי** (בתוך אותו פקטורי, שלוש התצוגות מקבלות בחינם): כרטיס
 `.acars-archive` (בורר `<input type=date>` + כפתור "🔎 חפש בארכיון" + "◀ חזרה
 לשידור חי") מעל תיבת החיפוש. `enterArchiveDay(day)` שולף `GET /api/<prefix>?day=`,
 שומר את המצב החי הנוכחי ב-`liveSnapshot` (msgs/lastId/feedMax/feedCache — פעם
@@ -326,9 +349,9 @@ renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitAr
 מוגדר (מעבר בין תצוגות תוך כדי עיון בארכיון לא "שובר" אותו בטעות בחזרה).
 
 > בעריכת ה-UI: שמור על polling קל, על נפילה חיננית בלי רשת, ועל RTL/עברית נכונה.
-> שינוי שנוגע בשתי התצוגות — ערוך את הפקטורי `createDataView` (מקום אחד, שני המופעים
-> יורשים); שינוי ACARS-only/VDL2-only בלבד — דרך `opts` (label/prefix/emptyHint) או
-> hook חדש (`onMessage`/`onReset`), לא קוד מיוחד מחוץ לפקטורי.
+> שינוי שנוגע לכל תצוגות-הדאטה — ערוך את הפקטורי `createDataView` (מקום אחד, שלושת
+> המופעים יורשים); שינוי ACARS-only/VDL2-only/SATCOM-only בלבד — דרך `opts`
+> (label/prefix/emptyHint) או hook חדש (`onMessage`/`onReset`), לא קוד מיוחד מחוץ לפקטורי.
 
 ---
 
@@ -343,13 +366,15 @@ renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitAr
 | GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `scan_plan`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`) |
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
-| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
+| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים). כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
 | GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור) |
 | GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון; `?day=YYYY-MM-DD` ארכיון מהדיסק, snapshot סטטי) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט; לא ב-`?day=`). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM, עמודות `level`+`snr`) |
 | GET | `/api/vdl2` | הודעות VDL2 אחרונות (**היום בלבד**; `?all=1`; `?day=YYYY-MM-DD` ארכיון) + שדה `adsb`. אותה סכמת כרטיס כמו ACARS + `icao`; `snr` תמיד אמיתי (dumpvdl2 מספק רצפת רעש) |
 | GET | `/api/vdl2/export?format=csv\|json` | ייצוא VDL2 (CSV עם BOM, עמודות `icao`+`level`+`snr`) |
-| GET | `/api/aircraft` | רוסטר מטוסים מאוחד — היתוך ACARS+VDL2+ADS-B לפי זהות (רישום/icao/טיסה). חי בכל מצב |
+| GET | `/api/satcom` | הודעות SATCOM (Inmarsat, inmarsat-sniffer) אחרונות — אותם `?since=`/`?all=1`/`?day=`. אותה סכמת כרטיס כמו ACARS; **בלי** `level`/`snr`/`freq`/`adsb` (המפענח לא חושף אותם ב---feed/--udp — לעולם לא מומצאים, ראו §12) |
+| GET | `/api/satcom/export?format=csv\|json` | ייצוא SATCOM (אותן עמודות כמו ACARS export) |
+| GET | `/api/aircraft` | רוסטר מטוסים מאוחד — היתוך ACARS+VDL2+SATCOM+ADS-B לפי זהות (רישום/icao/טיסה). חי בכל מצב |
 | GET | `/api/activity` | יומן שידורים |
 | GET | `/recordings/<name>` | קובץ הקלטה MP3 |
 | GET | `/api/metrics` | מדדי RF (SNR/signal/noise מ-stats_filepath) |
@@ -411,10 +436,12 @@ SDR (כולל rtl_airband) לא enabled, ובשדרוג `disable rtl_airband` א
 ## 12. מוסכמות וגוצ'אות (קרא לפני שינוי)
 
 - **כיוונון אחד בכל רגע:** RSP1B יחיד = תדר/מצב אחד פעיל. אל תנסה ריבוי ערוצים בו-זמני.
-- **חמישה מצבי `app_mode`, שווי-מעמד:** `voice` (rtl_airband) · `acars` (acarsdec) ·
-  `vdl2` (dumpvdl2) · `off` (standby — **שלושת** הצרכנים עצורים, ה-SDR פנוי ליישום אחר) ·
-  `scan` (סבב אוטומטי — **לא** צרכן/שירות רביעי, אלא thread שמסתובב בין קריאות ל-
-  `_enter_voice`/`_enter_acars`/`_enter_vdl2` הקיימים; ראו §5).
+- **שישה מצבי `app_mode`, שווי-מעמד:** `voice` (rtl_airband) · `acars` (acarsdec) ·
+  `vdl2` (dumpvdl2) · `satcom` (inmarsat-sniffer — ACARS דרך לוויין Inmarsat, ר' §5/
+  docs/satcom-feasibility.md) · `off` (standby — **ארבעת** הצרכנים עצורים, ה-SDR פנוי
+  ליישום אחר) · `scan` (סבב אוטומטי — **לא** צרכן/שירות נוסף, אלא thread שמסתובב בין
+  קריאות ל-`_enter_voice`/`_enter_acars`/`_enter_vdl2` הקיימים; ראו §5. `satcom` **אינו**
+  scannable כרגע — MVP מכוון).
   **אין "מצב ראשי"**: כל המצבים (כולל `off`/`scan`) **שורדים reboot** — אף צרכן לא
   enabled, `_boot_restore` של airam-web משחזר את המצב השמור באתחול (עבור `scan`:
   מוצא מחדש את הרגל הראשונה שבחלון השעות שלה — לא ממשיך מהאינדקס שבו נעצר, פשטות
@@ -428,14 +455,22 @@ SDR (כולל rtl_airband) לא enabled, ובשדרוג `disable rtl_airband` א
   השמורה; מצב שמור שלא רץ = תקלה (`mode_ok=False`/`ok=False`), standby ≠ תקלה.
   ב-`scan` ה"מצב" המדווח הוא `scan` עצמו (לא הרגל הנוכחית) — ראו `/api/scan`.
   ברירת המחדל של state חסר היא `off` (התקנה טרייה נוחתת במסך הבית).
-  `_enter_standby`/`_voice_tune` עוצרים את *שני* הצרכנים האחרים; `_scan_stop_thread`
+  `_enter_standby`/`_voice_tune` עוצרים את *שלושת* הצרכנים האחרים; `_scan_stop_thread`
   נקרא ב*כל* מעבר `/api/mode` (גם למעבר בין תוכן-לוח שונה של scan עצמו).
+- **⚠ satcom דורש החלפת אנטנה פיזית *ידנית*** (VHF airband ↔ L-band+LNA) —
+  ר' docs/satcom-feasibility.md §3. הבחירה במצב מהטלפון **לא** מבצעת את ההחלפה
+  עצמה; ה-`satcom_freqs` ב-state הוא רשימה בת-איבר-יחיד עם דגל לוויין (geostationary,
+  למשל `["AF1"]`) ולא בנק ערוצים כמו ACARS/VDL2 — `_sanitize_satellite`/
+  `_satcom_window_error` מחליפים את `_sanitize_freqs`/`_window_error` עבורו.
 - **מדדי איכות קליטה — לעולם לא ממציאים ערך:** `level` (dBFS) הוא **תמיד** הערך הגולמי
   מהמפענח, בלי עיבוד. `snr` מחושב **רק** כשיש רצפת רעש אמינה בקלט (VDL2 — `dumpvdl2`
   מספק `sig_level`+`noise_level` לכל פריים); **ACARS לעולם לא מקבל SNR** כי `acarsdec`
-  עצמו לא מודד רצפת רעש לכל הודעה (נבדק במקור, לא מגבלת יישום שלנו). dBm **לא מומש**
-  (נדחה במכוון) — ACARS/VDL2 רצים כברירת מחדל עם AGC (רווח משתנה, לא ידוע לנו לכל
-  הודעה), כך שהמרת dBFS→dBm חסרת בסיס אמין בלי מעבר לרווח קבוע + כיול חד-פעמי.
+  עצמו לא מודד רצפת רעש לכל הודעה (נבדק במקור, לא מגבלת יישום שלנו). **SATCOM (inmarsat-
+  sniffer) גם לעולם לא מקבל level/snr/freq** — אומת ישירות מ-`feed_aero_message` במקור
+  (`feed.c`): הכלי לא חושף אותם ב---feed/--udp כלל, בניגוד ל-README (ר' §2 ב-
+  docs/satcom-feasibility.md — דוגמה למה בדיקת מקור > תמצות משני). dBm **לא מומש**
+  (נדחה במכוון) — ACARS/VDL2/SATCOM רצים כברירת מחדל עם AGC (רווח משתנה, לא ידוע לנו
+  לכל הודעה), כך שהמרת dBFS→dBm חסרת בסיס אמין בלי מעבר לרווח קבוע + כיול חד-פעמי.
   אם מוסיפים dBm בעתיד — ודאו שהוא נשאר אופציונלי/כבוי-כברירת-מחדל ולעולם לא מוערך.
 - **בנקי ACARS/VDL2 = חלון אחד כל אחד:** acarsdec/dumpvdl2 מפענחים ערוצים מרובים בתוך
   חלון דגימה אחד (~2MHz). צביר 131.x ו-136.x רחוקים ~5MHz ⇒ לעולם לא יחד. בנק חדש חייב

@@ -177,6 +177,37 @@ VDL2_LOG_KEEP = 5000                  # retention על הדיסק (זנב נשמ
 # נשארים: acars (התוכן העיקרי), x25 data (CPDLC/ADS-C), xid (אירועי logon, קצב נמוך).
 VDL2_MSG_FILTER = "all,-avlc_s,-acars_nodata,-gsif,-x25_control,-idrp_keepalive,-esis"
 
+# --- SATCOM (מצב רביעי: ACARS דרך לוויין Inmarsat, L-band) -------------------
+# תעבורת ACARS מעל אוקיינוסים/אזורים בלי כיסוי VHF עוברת דרך לוויין Inmarsat
+# Classic Aero. inmarsat-sniffer (alphafox02) מפענח את זה מה-RSP1B (אנטנת
+# L-band+LNA נפרדת, מוחלפת *ידנית* מול אנטנת ה-airband — ר' README/docs) ושולח
+# JSON ל-UDP; שדה isu.acars מסונתז ל-dict בסגנון acarsdec ומוזרם דרך
+# _normalize_acars, בדיוק כמו מסלול A של VDL2 (ר' _normalize_satcom).
+# הלוויין (לא "תדרים") הוא הפרמטר הנבחר: geostationary => כיוון אנטנה חד-פעמי,
+# אין "בנקים" כמו ACARS/VDL2. לכן satcom_freqs (בשם, לסימטריה עם acars/vdl2 ב-
+# /api/mode) הוא רשימה בת-איבר-יחיד עם דגל הלוויין (למשל ["AF1"] = Alphasat).
+SATCOM_SERVICE = "airam-satcom"
+SATCOM_ENV_PATH = Path("/etc/airam/satcom.env")
+SATCOM_UDP_PORT = 5558                # חייב להתאים ל-SATCOM_UDP ב-satcom.env
+# "בנקים" של satcom = לוויינים (geostationary), לא צבירי-תדרים כמו ACARS/VDL2 —
+# כל "בנק" הוא לוויין יחיד (freqs בן-איבר-יחיד עם דגל ה---satellite=). זה מאפשר
+# ל-UI לעשות שימוש חוזר במנגנון בורר-הבנקים הקיים כבורר-לוויין, בלי קוד מיוחד.
+# דגלי הלוויין ושמותיהם מאומתים מ-`inmarsat-sniffer --list-satellites` (ר'
+# docs/satcom-feasibility.md §2). AF1 (Alphasat, +25.0E) ברירת המחדל ל-ישראל.
+SATCOM_BANKS = [
+    {"id": "AF1", "name": "Alphasat · EMEA (25°E)", "freqs": ["AF1"]},
+    {"id": "4F3", "name": "I-4 F3 · אמריקה (98°W)", "freqs": ["4F3"]},
+    {"id": "3F5", "name": "I-3 F5 · אטלנטי (54°W)", "freqs": ["3F5"]},
+    {"id": "F1", "name": "I-6 F1 · אוק' הודי/שקט (83°E)", "freqs": ["F1"]},
+]
+SATCOM_SATELLITES = {b["id"] for b in SATCOM_BANKS}  # דגלי --satellite= תקינים
+SATCOM_FREQS_DEFAULT = SATCOM_BANKS[0]["freqs"]      # ["AF1"] — Alphasat, ל-EMEA/ישראל
+# רווח ברירת מחדל = AGC (ריק, כמו ACARS/VDL2). לרווח ידני מעבירים gRdB ל-
+# write_satcom_env => --sdrplay-gain (הפחתה, קטן=רווח גדול). לא --soapy-gain (ר' שם).
+SATCOM_BUF_MAX = 500                  # הודעות אחרונות בזיכרון (כמו ACARS/VDL2)
+SATCOM_LOG_PATH = Path("/var/lib/airam/satcom.jsonl")
+SATCOM_LOG_KEEP = 5000                # retention על הדיסק (זנב נשמר; ייצוא לניתוח)
+
 # הקלטות: rtl_airband כותב קובץ MP3 לכל שידור (split_on_transmission) בשם
 # <REC_BASENAME>_YYYYMMDD_HHMMSS_<Hz>.mp3 (.tmp בזמן כתיבה, rename בסגירה
 # ~0.5ש' אחרי שהסקוולץ' נסגר). קובץ שהסתיים = אירוע ביומן השידורים.
@@ -301,12 +332,14 @@ def load_presets():
 DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  "if_gain": IF_GAIN_DEFAULT, "rf_gain": RF_GAIN_DEFAULT,
                  "squelch_mode": "open", "squelch_snr": SNR_DEFAULT,  # ברירת מחדל ATIS => תמיד פתוח
-                 # "voice" (rtl_airband) | "acars" (acarsdec) | "vdl2" (dumpvdl2) | "off" (standby).
+                 # "voice" (rtl_airband) | "acars" (acarsdec) | "vdl2" (dumpvdl2) |
+                 # "satcom" (inmarsat-sniffer) | "off" (standby).
                  # ברירת המחדל ניטרלית (off): אין "מצב ראשי" — התקנה טרייה נוחתת במסך
                  # הבית והמשתמש בוחר מצב. המצב הנבחר שורד reboot (משוחזר ע"י _boot_restore).
                  "app_mode": "off",
                  "acars_freqs": ACARS_FREQS_DEFAULT,
-                 "vdl2_freqs": VDL2_FREQS_DEFAULT}
+                 "vdl2_freqs": VDL2_FREQS_DEFAULT,
+                 "satcom_freqs": SATCOM_FREQS_DEFAULT}
 
 
 # --- שורת ה-squelch: מקור אמת יחיד -----------------------------------------
@@ -488,6 +521,12 @@ _vdl2_lock = threading.Lock()
 _vdl2_msgs = collections.deque(maxlen=VDL2_BUF_MAX)
 _vdl2_seq = 0                  # cursor נפרד ל-/api/vdl2
 _vdl2_drop_count = 0           # פריימים לא-מזוהים (סכמה לא תואמת) — נחשף בלוג תקופתי
+
+# --- SATCOM: ring-buffer נפרד (אותה תבנית) ---------------------------------
+_satcom_lock = threading.Lock()
+_satcom_msgs = collections.deque(maxlen=SATCOM_BUF_MAX)
+_satcom_seq = 0                # cursor נפרד ל-/api/satcom
+_satcom_drop_count = 0         # הודעות לא-מזוהות (סכמה לא תואמת) — נחשף בלוג תקופתי
 
 
 def _scan_latlon(obj):
@@ -1506,6 +1545,154 @@ def _vdl2_listener():
             _trim_vdl2_log()
 
 
+# --- SATCOM: normalize + listener (מסלול יחיד, בניגוד ל-VDL2) ----------------
+def _normalize_satcom(m):
+    """ממיר הודעת inmarsat-sniffer JSON (סכמת JAERO JSONdump, כפי שנפלטת מ-
+    feed_aero_message ב-inmarsat-sniffer/feed.c — אומתה מהמקור, *לא* מ-README)
+    לאותה סכמת כרטיס אחידה של _normalize_acars. מסלול יחיד (לא A/B כמו VDL2):
+    הכלי (במצב --mode=aero, היחיד הנתמך כרגע) מפיק *רק* הודעות ACARS מפוענחות.
+    מחזיר None להודעה לא בת-הצגה (בלי isu.acars — למשל STD-C/EGC, שלא מופעל).
+    ⚠ בשונה מ-acarsdec/dumpvdl2: אין level/noise/freq ברמת ההודעה (המפענח לא
+    חושף אותם ב---feed/--udp) — level/snr תמיד None, בלי המצאת ערך (ר' §12
+    ב-CLAUDE.md: "לעולם לא ממציאים ערך"). מיקום מגיע רק מטקסט ההודעה (כמו
+    ACARS רגיל) או מ-arinc622 (ADS-C) המקונן תחת isu.acars.arinc622 — בדיוק
+    כמו VDL2 מסלול A, כך שכל הפרסרים הקיימים (כולל ADS-C) חלים בחינם.
+    src/dst.type ("Aircraft Earth Station"/"Ground Earth Station") הם עובדה
+    מבנית של הכלי (לא heuristic) => דורסים את _acars_direction, כמו ה-icao/dir
+    המבניים של VDL2 (AES/GES הם מרחב-כתובות של Inmarsat, *לא* ICAO 24-bit —
+    לכן לא ממופים ל-card["icao"], כדי לא לבלבל את זהות הרוסטר עם VDL2)."""
+    isu = m.get("isu")
+    if not isinstance(isu, dict):
+        return None
+    acars = isu.get("acars")
+    if not isinstance(acars, dict):
+        return None
+    t_obj = m.get("t") or {}
+    try:
+        t = float(t_obj.get("sec") or 0) + float(t_obj.get("usec") or 0) / 1e6
+    except (TypeError, ValueError):
+        t = 0
+    t = t or time.time()
+    raw = {
+        "timestamp": t,
+        "mode": acars.get("mode"),
+        "label": acars.get("label"),
+        "tail": acars.get("reg"),
+        "flight": acars.get("flight"),
+        # msgno (MSN של ACARS) לא נחשף ע"י inmarsat-sniffer: isu.refno/qno הם
+        # מספרי-רצף של שכבת הלוויין (uint8), *לא* ה-MSN הקלאסי — לא ממפים אותם
+        # ל-msgno כדי לא להטעות (ר' §12 ב-CLAUDE.md: לא מזייפים/ממפים-שגוי ערך).
+        "text": acars.get("msg_text"),
+        "error": 0,   # רק הודעות שעברו פענוח/CRC מגיעות ל-feed_aero_message מלכתחילה
+    }
+    apps = acars.get("arinc622")
+    if isinstance(apps, dict):
+        raw["libacars"] = apps
+    card = _normalize_acars(raw)
+    src_type = str((isu.get("src") or {}).get("type") or "").lower()
+    dst_type = str((isu.get("dst") or {}).get("type") or "").lower()
+    if "aircraft" in src_type:
+        card["dir"] = "downlink"
+    elif "aircraft" in dst_type:
+        card["dir"] = "uplink"
+    return card
+
+
+def _append_satcom_log(rec):
+    _append_jsonl_log(SATCOM_LOG_PATH, rec)
+
+
+def _trim_satcom_log():
+    _trim_jsonl_log(SATCOM_LOG_PATH, SATCOM_LOG_KEEP)
+
+
+def _load_satcom_history():
+    """טוען את זנב satcom.jsonl ל-ring buffer בעלייה (היום בלבד, כמו ACARS/VDL2).
+    נקרא *לפני* הפעלת thread ה-listener (אין מרוץ)."""
+    global _satcom_seq
+    try:
+        lines = SATCOM_LOG_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    recs = []
+    for ln in lines[-SATCOM_BUF_MAX:]:
+        try:
+            recs.append(json.loads(ln))
+        except ValueError:
+            continue
+    floor = _today_start()
+    recs = [r for r in recs if (r.get("t") or 0) >= floor]
+    recs.sort(key=lambda r: r.get("t") or 0)
+    with _satcom_lock:
+        for r in recs:
+            _satcom_seq += 1
+            r["id"] = _satcom_seq
+            _satcom_msgs.append(r)
+    if recs:
+        log.info("SATCOM: נטענו %d הודעות מההיסטוריה", len(recs))
+
+
+def _satcom_listener():
+    """thread רקע: מאזין ל-UDP מ-inmarsat-sniffer (‎--udp=127.0.0.1:5558), שומר
+    ל-satcom.jsonl ומכניס ל-ring buffer. רץ תמיד (גם כשהמצב אחר) — פשוט לא
+    מגיעות דאטהגרמות כש-inmarsat-sniffer כבוי. dedup כמו ב-ACARS/VDL2: זהות =
+    tail (רוב הודעות ה-ACARS הלוויני נושאות רישום, בניגוד ל-icao ב-VDL2)."""
+    global _satcom_seq, _satcom_drop_count
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind((ACARS_UDP_HOST, SATCOM_UDP_PORT))
+    except OSError:
+        log.warning("SATCOM listener: port %d busy - /api/satcom יחזיר ריק", SATCOM_UDP_PORT)
+        return
+    seen = 0
+    _dedup: dict = {}
+    while True:
+        try:
+            data, _ = sock.recvfrom(65535)
+        except OSError:
+            continue
+        try:
+            msg = json.loads(data.decode("utf-8", "replace"))
+        except (ValueError, UnicodeError):
+            continue                          # דאטהגרם לא-JSON => מתעלמים
+        try:
+            rec = _normalize_satcom(msg)
+        except Exception:
+            # שדה עם טיפוס בלתי-צפוי לא יפיל את ה-thread לצמיתות (כמו ב-ACARS/VDL2)
+            log.exception("SATCOM: נרמול נכשל על דאטהגרם — מדולג")
+            continue
+        if rec is None:
+            _satcom_drop_count += 1
+            if _satcom_drop_count % 200 == 1:
+                log.warning("SATCOM: הודעה לא זוהתה (סכמה לא תואמת?) — %d עד כה", _satcom_drop_count)
+            continue
+
+        ident = rec.get("tail")
+        text = rec.get("text") or ""
+        ts = rec.get("t") or time.time()
+        if ident and text:
+            dedup_key = (ident, rec.get("label"), text[:80])
+            prev_ts, prev_rec = _dedup.get(dedup_key, (0, None))
+            if prev_rec is not None and ts - prev_ts < 90:
+                with _satcom_lock:             # prev_rec חי גם ב-_satcom_msgs => מוטציה תחת נעילה
+                    prev_rec["retry_count"] = prev_rec.get("retry_count", 1) + 1
+                continue
+            _dedup[dedup_key] = (ts, rec)
+            if len(_dedup) > 500:
+                cutoff = ts - 90
+                for k in [k for k, (t0, _) in _dedup.items() if t0 < cutoff]:
+                    del _dedup[k]
+
+        _append_satcom_log(rec)               # התמדה לפני הקצאת id (הקובץ נקי מ-id)
+        with _satcom_lock:
+            _satcom_seq += 1
+            rec["id"] = _satcom_seq
+            _satcom_msgs.append(rec)
+        seen += 1
+        if seen % 200 == 0:
+            _trim_satcom_log()
+
+
 def _is_active(service):
     """is-active הוא קריאת-קריאה => לא דורש sudo (עובד לכל משתמש)."""
     try:
@@ -1560,6 +1747,35 @@ def _vdl2_window_error(freqs):
     return _window_error(freqs, VDL2_MAX_CHANNELS, VDL2_WINDOW_MHZ, "dumpvdl2")
 
 
+_SAT_RE = re.compile(r"^[A-Z0-9]{2,4}$")   # פורמט דגל לוויין (טוקן קצר) לפני כתיבה ל-env
+
+
+def _sanitize_satellite(freqs, default=None):
+    """כמו _sanitize_freqs: מסנן *פורמט* בלבד (טוקן אלפאנומרי קצר) לפני כתיבה
+    ל-env, לא "לוויין מוכר" — זו אחריות _satcom_window_error (בדיוק כמו ש-
+    _sanitize_freqs לא בודק שהתדר בבנק תקין, רק שהוא תדר). ההפרדה הזו קריטית:
+    "XYZ" (פורמט תקין, לוויין לא-קיים) חייב לעבור הלאה ל-window_error ולקבל
+    400 מסודר — לא ליפול בשקט לברירת המחדל (בניגוד לג'אנק אמיתי כמו "$(reboot)").
+    מחזיר תמיד רשימה בת-איבר-יחיד (geostationary => לוויין אחד, לא בנק)."""
+    out = [str(f).strip().upper() for f in (freqs or [])
+           if _SAT_RE.match(str(f).strip().upper())]
+    return out[:1] or list(default if default is not None else SATCOM_FREQS_DEFAULT)
+
+
+def _satcom_window_error(freqs):
+    """ולידציה מקבילה ל-_window_error/_vdl2_window_error, אך ללוויין ולא לחלון
+    דגימה: /api/mode הגנרי מצפה לפונקציה בחתימה (freqs) -> error|None, כדי
+    ש-satcom ישתלב באותו זנב גנרי כמו acars/vdl2 (ר' api_mode)."""
+    vals = [str(f).strip().upper() for f in (freqs or [])]
+    if not vals:
+        return "לא נבחר לוויין"
+    if len(vals) > 1:
+        return "ניתן לבחור לוויין אחד בלבד (geostationary — לא בנק ערוצים)"
+    if vals[0] not in SATCOM_SATELLITES:
+        return "לוויין לא מוכר: %s (אפשרויות: %s)" % (vals[0], ", ".join(sorted(SATCOM_SATELLITES)))
+    return None
+
+
 def write_acars_env(freqs, gain=ACARS_GAIN_DEFAULT, ratemult=ACARS_RATEMULT_DEFAULT):
     """כותב /etc/airam/acars.env בפורמט EnvironmentFile של systemd. הערך של
     ACARS_FREQS *לא* מצוטט: systemd לוקח את שארית השורה (כולל רווחים) כערך,
@@ -1597,11 +1813,36 @@ def write_vdl2_env(freqs, ifgr=None, rfgr=None):
     _atomic_write(VDL2_ENV_PATH, text)
 
 
+def write_satcom_env(freqs, gain=None, bias_tee=True):
+    """כותב /etc/airam/satcom.env בפורמט EnvironmentFile של systemd.
+    ‏freqs כאן הוא רשימה בת-איבר-יחיד עם דגל הלוויין (למשל ["AF1"]) — geostationary
+    => אין "ערוצים"/בנק לבחור כמו ACARS/VDL2 (ר' הערה ליד SATCOM_FREQS_DEFAULT).
+    ‏SATCOM_GAIN מכיל את דגל הרווח *כולו* (או ריק) — כמו VDL2_GAIN. ⚠ המפענח
+    ‏inmarsat-sniffer בדרייבר ה-SDRplay הנייטיבי (‎-i sdrplay) קורא את הרווח מ-
+    ‎--sdrplay-gain (gRdB — *הפחתה*, קטן=רווח גדול, כמו IFGR), *לא* מ---soapy-gain
+    (שהוא לדרייבר ה-SoapySDR הגנרי בלבד — אומת מ-sdrplay.c/options.c במקור). ריק
+    => AGC של הדרייבר (ברירת המחדל, כמו ACARS/VDL2). ‏SATCOM_BIAS_TEE מכיל את הדגל
+    ‎-B (או ריק): ‏$SATCOM_BIAS_TEE לא-מצוטט ב-ExecStart נעלם כשריק => bias-T כבוי.
+    ⚠ bias-T חייב להיות דולק *רק* במצב satcom (מזין את ה-LNA שצמוד לאנטנת ה-L-band,
+    לא לאנטנת ה-airband) — satcom.env לא נטען כלל במצבי VHF אחרים, מובטח מבנית."""
+    sats = _sanitize_satellite(freqs)
+    gain_flag = "--sdrplay-gain=%d" % int(gain) if gain is not None else ""
+    text = "\n".join([
+        "# נכתב אוטומטית ע\"י AIR-AM web tuner (מצב SATCOM). שינויים ידניים נדרסים.",
+        f"SATCOM_SATELLITE={sats[0]}",
+        f"SATCOM_GAIN={gain_flag}",
+        "SATCOM_BIAS_TEE=" + ("-B" if bias_tee else ""),
+        f"SATCOM_UDP={ACARS_UDP_HOST}:{SATCOM_UDP_PORT}",
+        "",
+    ])
+    _atomic_write(SATCOM_ENV_PATH, text)
+
+
 def _enter_vdl2(freqs):
     """עוצר את שני צרכני ה-SDR האחרים ומריץ dumpvdl2. מחזיר (error, detail).
     Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות תחילה כדי לשחרר את
     ה-SDR לפני ש-dumpvdl2 פותח אותו (מונע מרוץ על המכשיר)."""
-    for svc in ("rtl_airband", ACARS_SERVICE):
+    for svc in ("rtl_airband", ACARS_SERVICE, SATCOM_SERVICE):
         try:
             _sysctl("stop", svc, timeout=30)
         except Exception:
@@ -1625,7 +1866,7 @@ def _enter_acars(freqs):
     """עוצר את שאר צרכני ה-SDR ומריץ acarsdec. מחזיר (error, detail).
     Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות תחילה כדי לשחרר את
     ה-SDR לפני ש-acarsdec פותח אותו (מונע מרוץ על המכשיר)."""
-    for svc in ("rtl_airband", VDL2_SERVICE):
+    for svc in ("rtl_airband", VDL2_SERVICE, SATCOM_SERVICE):
         try:
             _sysctl("stop", svc, timeout=30)
         except Exception:
@@ -1645,13 +1886,42 @@ def _enter_acars(freqs):
     return None, None
 
 
+def _enter_satcom(freqs):
+    """עוצר את שלושת צרכני ה-SDR האחרים ומריץ inmarsat-sniffer. מחזיר
+    (error, detail). Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות
+    תחילה כדי לשחרר את ה-SDR לפני ש-inmarsat-sniffer פותח אותו (מונע מרוץ על
+    המכשיר) — כמו _enter_acars/_enter_vdl2. ⚠ הכניסה למצב הזה *לא* מחליפה את
+    האנטנה הפיזית (VHF airband <-> L-band) — זו פעולה ידנית של המשתמש; ה-UI
+    מציג באנר-הוראה בכניסה/יציאה (ר' docs/satcom-feasibility.md §3)."""
+    for svc in ("rtl_airband", ACARS_SERVICE, VDL2_SERVICE):
+        try:
+            _sysctl("stop", svc, timeout=30)
+        except Exception:
+            pass
+    write_satcom_env(freqs)
+    try:
+        r = _sysctl("restart", SATCOM_SERVICE, timeout=45)
+    except subprocess.TimeoutExpired:
+        return "הפעלת SATCOM נתקעה — בדוק שה-SDR מחובר", None
+    if r.returncode != 0:
+        return (r.stderr or "inmarsat-sniffer failed").strip(), _journal_tail(SATCOM_SERVICE)
+    # כמו ב-acarsdec/dumpvdl2: השירות יכול לעלות ואז לקרוס => פולינג ולא בדיקה בודדת
+    for _ in range(7):
+        time.sleep(0.5)
+        if not _is_active(SATCOM_SERVICE):
+            return ("inmarsat-sniffer נכשל לעלות — בדוק journalctl -u airam-satcom",
+                    _journal_tail(SATCOM_SERVICE))
+    return None, None
+
+
 def _enter_standby():
-    """מצב כיבוי (standby): עוצר את *שלושת* צרכני ה-SDR (rtl_airband + acarsdec +
-    dumpvdl2) => משחרר את ה-RSP1B ליישום SDR אחר, בעוד airam-web/הדף נשארים פעילים.
-    את sdrplay.service משאירים חי בכוונה: ה-API daemon הוא המתווך שמאפשר לאפליקציית
-    SDRplay אחרת להתחבר מיד — וגם ה-sudoers ממילא אינו מתיר לעצור אותו.
-    מחזיר (error, detail). serialized תחת TUNE_LOCK ע"י הקורא."""
-    consumers = (ACARS_SERVICE, VDL2_SERVICE, "rtl_airband")
+    """מצב כיבוי (standby): עוצר את *ארבעת* צרכני ה-SDR (rtl_airband + acarsdec +
+    dumpvdl2 + inmarsat-sniffer) => משחרר את ה-RSP1B ליישום SDR אחר, בעוד
+    airam-web/הדף נשארים פעילים. את sdrplay.service משאירים חי בכוונה: ה-API
+    daemon הוא המתווך שמאפשר לאפליקציית SDRplay אחרת להתחבר מיד — וגם ה-sudoers
+    ממילא אינו מתיר לעצור אותו. מחזיר (error, detail). serialized תחת TUNE_LOCK
+    ע"י הקורא."""
+    consumers = (ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE, "rtl_airband")
     for svc in consumers:
         try:
             _sysctl("stop", svc, timeout=30)
@@ -1664,30 +1934,32 @@ def _enter_standby():
     return "כיבוי המקלט נכשל — שירות עדיין פעיל", _journal_tail("rtl_airband")
 
 
-# --- רגיסטרי מצבים: קול/ACARS/VDL2 שווי-מעמד, off ניטרלי --------------------
-# תפיסת ההפעלה: ה-SDR הוא משאב, שלושת המצבים הם "אפליקציות" שוות-מעמד שמתחרות
+# --- רגיסטרי מצבים: קול/ACARS/VDL2/SATCOM שווי-מעמד, off ניטרלי -------------
+# תפיסת ההפעלה: ה-SDR הוא משאב, ארבעת המצבים הם "אפליקציות" שוות-מעמד שמתחרות
 # עליו, ו-airam-web הוא המתזמר. אין "מצב ראשי" ואין fallback לקול — כישלון
 # כניסה למצב נופל ל-off (standby) עם שגיאה ברורה.
-MODE_SERVICE = {"voice": "rtl_airband", "acars": ACARS_SERVICE, "vdl2": VDL2_SERVICE}
+MODE_SERVICE = {"voice": "rtl_airband", "acars": ACARS_SERVICE, "vdl2": VDL2_SERVICE,
+                "satcom": SATCOM_SERVICE}
 
 
 def _live_mode():
     """המצב שרץ בפועל (לפי השירותים), או None כשאף צרכן לא פעיל.
     קול נבדק ראשון: Conflicts ב-systemd מבטיח בלעדיות הדדית, אז אם rtl_airband
     פעיל אין טעם לבדוק את השאר — חוסך קריאות systemctl במצב הנפוץ."""
-    for m in ("voice", "vdl2", "acars"):
+    for m in ("voice", "vdl2", "acars", "satcom"):
         if _is_active(MODE_SERVICE[m]):
             return m
     return None
 
 
 def _enter_voice(params):
-    """כניסה סימטרית לקול (peer של _enter_acars/_enter_vdl2): עוצר את שני צרכני
-    הדאטה, כותב את קונפיג rtl_airband ומרים עם אימות.
+    """כניסה סימטרית לקול (peer של _enter_acars/_enter_vdl2/_enter_satcom): עוצר
+    את צרכני הדאטה, כותב את קונפיג rtl_airband ומרים עם אימות.
     מחזיר (error, detail, sdr_down) — כמו _restart_and_verify."""
-    # אם acarsdec/dumpvdl2 רץ הוא מחזיק את ה-SDR => עוצרים מפורשות לפני שמרימים
-    # את rtl_airband (Conflicts גיבוי, אבל זה משחרר את המכשיר מיד).
-    for svc in (ACARS_SERVICE, VDL2_SERVICE):
+    # אם acarsdec/dumpvdl2/inmarsat-sniffer רץ הוא מחזיק את ה-SDR => עוצרים
+    # מפורשות לפני שמרימים את rtl_airband (Conflicts גיבוי, אבל זה משחרר את
+    # המכשיר מיד).
+    for svc in (ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE):
         if _is_active(svc):
             try:
                 _sysctl("stop", svc, timeout=30)
@@ -2036,7 +2308,7 @@ def api_state():
         # מערכת / _boot_restore עוד בדרך). True גם ב-off — standby מכוון אינו תקלה.
         st["mode_ok"] = (live is not None) or (saved == "off")
     st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT, version=VERSION,
-              acars_banks=ACARS_BANKS, vdl2_banks=VDL2_BANKS)
+              acars_banks=ACARS_BANKS, vdl2_banks=VDL2_BANKS, satcom_banks=SATCOM_BANKS)
     return jsonify(st)
 
 
@@ -2058,7 +2330,7 @@ def api_presets():
 def api_health():
     """סטטוס המערכת — מאפשר ל-UI להבדיל בין "אין שידור" ל"משהו נפל"."""
     services = {}
-    for svc in ("rtl_airband", "icecast2", "sdrplay", "airam-acars", "airam-vdl2"):
+    for svc in ("rtl_airband", "icecast2", "sdrplay", "airam-acars", "airam-vdl2", "airam-satcom"):
         try:
             r = subprocess.run(["systemctl", "is-active", svc],
                                capture_output=True, text=True, timeout=5)
@@ -2070,10 +2342,12 @@ def api_health():
     except OSError:
         stats_age = None     # עוד לא נכתב (rtl_airband לא עלה / זה עתה הופעל)
     # תקין בכל המצבים: קול (rtl_airband+icecast) / ACARS (airam-acars) / VDL2
-    # (airam-vdl2) — אחרת מצב דאטה (שבו rtl_airband מכובה מבחירה) היה נראה כתקלה.
+    # (airam-vdl2) / SATCOM (airam-satcom) — אחרת מצב דאטה (שבו rtl_airband
+    # מכובה מבחירה) היה נראה כתקלה.
     voice_ok = services["rtl_airband"] == "active" and services["icecast2"] == "active"
     acars_ok = services["airam-acars"] == "active"
     vdl2_ok = services["airam-vdl2"] == "active"
+    satcom_ok = services["airam-satcom"] == "active"
     # standby מכוון: כל הצרכנים כבויים ו-state מסומן off => תקין, *לא* תקלה (אחרת
     # מצב הכיבוי שביקש המשתמש היה נראה כקריסה). sdrplay נשאר active במפה.
     saved_state = load_state()
@@ -2081,12 +2355,14 @@ def api_health():
     off_ok = (saved == "off"
               and services["rtl_airband"] != "active"
               and services["airam-acars"] != "active"
-              and services["airam-vdl2"] != "active")
+              and services["airam-vdl2"] != "active"
+              and services["airam-satcom"] != "active")
     # המצב נגזר מהשירות הפעיל, ובאין פעיל — מהכוונה השמורה (אין ברירת-מחדל לקול).
     # ok = בריאות המצב הנגזר בלבד: מצב שמור שלא רץ => ok=False (תקלה מדווחת),
     # למשל אחרי קריסת שירות או בזמן ש-_boot_restore עוד מחזיר את המצב.
     active = ("vdl2" if services["airam-vdl2"] == "active"
               else "acars" if services["airam-acars"] == "active"
+              else "satcom" if services["airam-satcom"] == "active"
               else "voice" if services["rtl_airband"] == "active" else None)
     if saved == "scan":
         # סריקה: תקין כל עוד הרגל הנוכחית (איזשהו צרכן) פועלת, *או* שאף רגל לא
@@ -2097,7 +2373,7 @@ def api_health():
     else:
         mode = active or saved
         ok = (voice_ok if mode == "voice" else acars_ok if mode == "acars"
-              else vdl2_ok if mode == "vdl2" else off_ok)
+              else vdl2_ok if mode == "vdl2" else satcom_ok if mode == "satcom" else off_ok)
     return jsonify(ok=ok, app_mode=mode,
                    services=services, sdr_present=_sdr_present(), stats_age=stats_age)
 
@@ -2664,12 +2940,54 @@ def api_vdl2_export():
     return _export_response(_read_vdl2_log(), VDL2_EXPORT_COLS, "airam-vdl2")
 
 
+def _read_satcom_log():
+    return _read_jsonl_log(SATCOM_LOG_PATH)
+
+
+SATCOM_EXPORT_COLS = ACARS_EXPORT_COLS   # אותה סכמת כרטיס בדיוק (בלי icao — ר' _normalize_satcom)
+
+
+@app.route("/api/satcom")
+def api_satcom():
+    """הודעות SATCOM (Inmarsat, inmarsat-sniffer) אחרונות. ?since=<id> => רק
+    חדשות מאותו cursor. כברירת מחדל רק הודעות *היום*; ?all=1 => כל מה שבזיכרון
+    (כמו /api/acars). ?day=YYYY-MM-DD => ארכיון מהדיסק (satcom.jsonl)."""
+    day = request.args.get("day")
+    if day:
+        bounds = _day_bounds(day)
+        if bounds is None:
+            return jsonify(ok=False, error="תאריך לא תקין (פורמט: YYYY-MM-DD)"), 400
+        start, end = bounds
+        msgs = [r for r in _read_satcom_log() if start <= (r.get("t") or 0) < end]
+        return jsonify(ok=True, day=day, messages=msgs)
+    try:
+        since = int(request.args.get("since", 0))
+    except (TypeError, ValueError):
+        since = 0
+    show_all = request.args.get("all") in ("1", "true", "yes")
+    floor = 0 if show_all else _today_start()
+    with _satcom_lock:
+        msgs = [dict(m) for m in _satcom_msgs
+                if m["id"] > since and (m.get("t") or 0) >= floor]
+        cursor = _satcom_seq
+    return jsonify(ok=True, active=_is_active(SATCOM_SERVICE),
+                   freqs=load_state().get("satcom_freqs", SATCOM_FREQS_DEFAULT),
+                   cursor=cursor, messages=msgs)
+
+
+@app.route("/api/satcom/export")
+def api_satcom_export():
+    """ייצוא כל הודעות ה-SATCOM השמורות (satcom.jsonl). ?format=csv | json."""
+    return _export_response(_read_satcom_log(), SATCOM_EXPORT_COLS, "airam-satcom")
+
+
 ROSTER_MAX = 200   # תקרת גודל תגובה — הישנים ביותר נגזמים
 
 
 def _aircraft_identity(m):
-    """מפתח זהות מטוס מהודעה מנורמלת (ACARS/VDL2): רישום מנורמל קודם (חוצה
-    ACARS↔VDL2↔ADS-B), אחרת icao (פריימי VDL2 בלי tail), אחרת מספר טיסה."""
+    """מפתח זהות מטוס מהודעה מנורמלת (ACARS/VDL2/SATCOM): רישום מנורמל קודם
+    (חוצה ACARS↔VDL2↔SATCOM↔ADS-B), אחרת icao (פריימי VDL2 בלי tail), אחרת
+    מספר טיסה."""
     reg = adsb.norm_reg(m.get("tail"))
     if reg:
         return ("reg", reg)
@@ -2681,15 +2999,18 @@ def _aircraft_identity(m):
 
 
 def _build_roster():
-    """רוסטר מטוסים מאוחד: היתוך הודעות ACARS+VDL2 (בזיכרון) + ADS-B חי, לפי
-    זהות משותפת (רישום/icao/טיסה) — עצמאי לגמרי ממצב ה-SDR הפעיל, כי שני
+    """רוסטר מטוסים מאוחד: היתוך הודעות ACARS+VDL2+SATCOM (בזיכרון) + ADS-B חי,
+    לפי זהות משותפת (רישום/icao/טיסה) — עצמאי לגמרי ממצב ה-SDR הפעיל, כי כל
     ה-listeners וה-thread של adsb.py רצים תמיד ברקע (ר' §12 ב-CLAUDE.md)."""
     craft = {}
     with _acars_lock:
         acars_snapshot = list(_acars_msgs)
     with _vdl2_lock:
         vdl2_snapshot = list(_vdl2_msgs)
-    for source, msgs in (("acars", acars_snapshot), ("vdl2", vdl2_snapshot)):
+    with _satcom_lock:
+        satcom_snapshot = list(_satcom_msgs)
+    for source, msgs in (("acars", acars_snapshot), ("vdl2", vdl2_snapshot),
+                         ("satcom", satcom_snapshot)):
         for m in msgs:
             key = _aircraft_identity(m)
             if key is None:
@@ -2739,13 +3060,14 @@ def api_aircraft():
 @app.route("/api/mode", methods=["POST"])
 def api_mode():
     """מעבר בין המצבים: קול (rtl_airband) / ACARS (acarsdec) / VDL2 (dumpvdl2) /
-    off (standby) / scan (סבב אוטומטי בין המצבים). SDR אחד בהחלפה — צרכן אחד
-    בכל רגע. המצבים שווי-מעמד: כישלון כניסה לכל אחד מהם נופל ל-off (בלי
-    fallback לקול). POST => עובר דרך _guard (Origin + PIN אופציונלי), כמו /api/tune."""
+    SATCOM (inmarsat-sniffer) / off (standby) / scan (סבב אוטומטי בין המצבים).
+    SDR אחד בהחלפה — צרכן אחד בכל רגע. המצבים שווי-מעמד: כישלון כניסה לכל אחד
+    מהם נופל ל-off (בלי fallback לקול). POST => עובר דרך _guard (Origin + PIN
+    אופציונלי), כמו /api/tune."""
     data = request.get_json(silent=True) or {}
     mode = str(data.get("mode", "")).lower()
-    if mode not in ("voice", "acars", "vdl2", "off", "scan"):
-        return jsonify(ok=False, error="mode לא תקין (voice/acars/vdl2/off/scan)"), 400
+    if mode not in ("voice", "acars", "vdl2", "satcom", "off", "scan"):
+        return jsonify(ok=False, error="mode לא תקין (voice/acars/vdl2/satcom/off/scan)"), 400
 
     # קודם ולידציה סטטית (לא תלוית-נעילה: פענוח פרמטרים/לוח/תדרים) — בקשה עם
     # פרמטרים לא-תקינים (400) לא נוגעת בסבב סריקה פעיל בכלל (אחרת סבב תקין
@@ -2774,13 +3096,19 @@ def api_mode():
         if plan is None:
             return jsonify(ok=False, error="לוח סריקה לא תקין (1-8 רגלים, "
                            "כל רגל מצב+זמן שהייה תקין)", state=st), 400
-    elif mode in ("acars", "vdl2"):
-        key, default, wcheck, enter = (
-            ("acars_freqs", ACARS_FREQS_DEFAULT, _acars_window_error, _enter_acars)
-            if mode == "acars" else
-            ("vdl2_freqs", VDL2_FREQS_DEFAULT, _vdl2_window_error, _enter_vdl2))
-        freqs = _sanitize_freqs(data.get("freqs") or st.get(key), default)
-        werr = wcheck(freqs)                     # חייב להיכנס בחלון דגימה אחד
+    elif mode in ("acars", "vdl2", "satcom"):
+        # satcom משתלב באותו זנב גנרי: "freqs" הוא כאן דגל לוויין בן-איבר-יחיד
+        # (geostationary, לא בנק ערוצים) — ר' _sanitize_satellite/_satcom_window_error.
+        key, default, sanitize, wcheck, enter = {
+            "acars": ("acars_freqs", ACARS_FREQS_DEFAULT, _sanitize_freqs,
+                      _acars_window_error, _enter_acars),
+            "vdl2": ("vdl2_freqs", VDL2_FREQS_DEFAULT, _sanitize_freqs,
+                     _vdl2_window_error, _enter_vdl2),
+            "satcom": ("satcom_freqs", SATCOM_FREQS_DEFAULT, _sanitize_satellite,
+                       _satcom_window_error, _enter_satcom),
+        }[mode]
+        freqs = sanitize(data.get("freqs") or st.get(key), default)
+        werr = wcheck(freqs)                     # חייב להיכנס בחלון דגימה אחד (satcom: לוויין תקין)
         if werr:
             return jsonify(ok=False, error=werr, state=st), 400
 
@@ -2814,7 +3142,7 @@ def api_mode():
             save_state(new_state)
             return jsonify(ok=True, app_mode="scan", scan_plan=plan)
 
-        # acars / vdl2 — מסלול דאטה סימטרי
+        # acars / vdl2 / satcom — מסלול דאטה סימטרי
         log.info("mode -> %s freqs=%s (from %s)", mode, freqs, request.remote_addr)
         err, detail = enter(freqs)
         if err:
@@ -2904,6 +3232,8 @@ def _boot_restore():
                 err, _detail = _enter_acars(st.get("acars_freqs"))
             elif mode == "vdl2":
                 err, _detail = _enter_vdl2(st.get("vdl2_freqs"))
+            elif mode == "satcom":
+                err, _detail = _enter_satcom(st.get("satcom_freqs"))
             else:   # scan
                 plan = _validate_scan_plan(st.get("scan_plan"))
                 if plan is None:
@@ -2933,6 +3263,8 @@ if __name__ == "__main__":
     threading.Thread(target=_acars_listener, daemon=True).start()   # פיד UDP מ-acarsdec (שקט במצב קול)
     _load_vdl2_history()                                            # היסטוריית VDL2 (לפני ה-listener, אין מרוץ)
     threading.Thread(target=_vdl2_listener, daemon=True).start()    # פיד UDP מ-dumpvdl2 (שקט בשאר המצבים)
+    _load_satcom_history()                                          # היסטוריית SATCOM (לפני ה-listener, אין מרוץ)
+    threading.Thread(target=_satcom_listener, daemon=True).start()  # פיד UDP מ-inmarsat-sniffer (שקט בשאר המצבים)
     if TRANSCRIBE:   # תמלול ATC אופציונלי - דמון נפרד (לא חוסם את היומן/retention)
         threading.Thread(target=_transcribe_worker, daemon=True).start()
     adsb.start()   # רק כשרצים כשרת (לא בזמן import) - דמון, לא מעכב עלייה

@@ -259,6 +259,50 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+# 4d. inmarsat-sniffer  (מצב SATCOM: ACARS דרך לוויין Inmarsat, SoapySDR/SDRplay)
+# ----------------------------------------------------------------------------
+# מצב ה-SATCOM בממשק מריץ inmarsat-sniffer על אותו RSP1B (בהחלפה עם שאר
+# המצבים). בינארי CLI עצמאי (*בלי* Qt/GUI, בניגוד ל-JAERO המקורי) שמבוסס על
+# ליבת ה-DSP של JAERO (jontio/JAERO, MIT) — נעוץ ל-commit ידוע-טוב (לפרויקט
+# אין releases/tags רשמיים, ר' docs/satcom-feasibility.md §2, שם גם אומתה
+# הבנייה בפועל). SDRplay מזוהה אוטומטית ע"י cmake דרך libsdrplay_api שהותקן
+# בשלב 2 (find_package(SDRplay) מחפש sdrplay_api.h/libsdrplay_api תחת
+# /usr/local); libacars-2 כבר בנוי בשלב 4b — אין צורך בבנייה נוספת שלו.
+SATCOM_SNIFFER_COMMIT="2827b3a0c7cd349783aeee4621096db14f43264a"
+SATCOM_BUILD_SIG="$(printf '%s' "$SATCOM_SNIFFER_COMMIT" | sha256sum | awk '{print $1}')"
+AIRAM_SATCOM_MARK="/usr/local/share/airam/inmarsat-sniffer.build-sig"
+if command -v inmarsat-sniffer >/dev/null 2>&1 && [[ "$(cat "$AIRAM_SATCOM_MARK" 2>/dev/null)" == "$SATCOM_BUILD_SIG" ]]; then
+  log "inmarsat-sniffer כבר מותקן - מדלג."
+else
+  log "בונה inmarsat-sniffer (SATCOM)..."
+  cd "$BUILD_DIR"
+  # עץ קיים שאינו על ה-commit הנעוץ (העלאת גרסה) => משכפלים מחדש (כמו dumpvdl2)
+  if [[ -d inmarsat-sniffer ]] && \
+     [[ "$(git -C inmarsat-sniffer rev-parse HEAD 2>/dev/null)" != "$SATCOM_SNIFFER_COMMIT" ]]; then
+    rm -rf inmarsat-sniffer
+  fi
+  if [[ ! -d inmarsat-sniffer ]]; then
+    git clone https://github.com/alphafox02/inmarsat-sniffer.git
+    git -C inmarsat-sniffer checkout "$SATCOM_SNIFFER_COMMIT"
+  fi
+  cd inmarsat-sniffer && rm -rf build && mkdir build && cd build
+  # PKG_CONFIG_PATH => כדי ש-cmake ימצא את libacars-2 שהותקן ל-/usr/local (שלב 4b).
+  # קונפיג ה-cmake נשמר ללוג זמני: תקציר "SDRplay: enabled/not found" הוא מקור-
+  # האמת היחיד לתמיכת SDRplay בפועל (בניגוד ל---help, שמפרט sdrplay[-SERIAL]
+  # תמיד בסטטי גם בבנייה בלי הדרייבר — אומת ישירות, לא הנחה).
+  CMAKE_LOG="$(mktemp)"
+  PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
+    cmake .. 2>&1 | tee "$CMAKE_LOG"
+  make -j"$(nproc)" && make install && ldconfig
+  command -v inmarsat-sniffer >/dev/null 2>&1 || die "בניית inmarsat-sniffer נכשלה (בדוק SDRplay API/libacars)."
+  grep -q "SDRplay: enabled" "$CMAKE_LOG" \
+    || warn "inmarsat-sniffer נבנה בלי תמיכת SDRplay - מצב SATCOM לא יעבוד. ודא שה-SDRplay API מותקן (שלב 2) והרץ שוב."
+  rm -f "$CMAKE_LOG"
+  mkdir -p "$(dirname "$AIRAM_SATCOM_MARK")"
+  printf '%s' "$SATCOM_BUILD_SIG" > "$AIRAM_SATCOM_MARK"
+fi
+
+# ----------------------------------------------------------------------------
 # 5. Icecast2  -  ללא סיסמה למאזין (סיסמת source פנימית קבועה)
 # ----------------------------------------------------------------------------
 log "מגדיר Icecast2 (מאזינים ללא סיסמה, latency נמוך)..."
@@ -318,7 +362,7 @@ for grp in systemd-journal video; do
   getent group "$grp" >/dev/null 2>&1 && usermod -aG "$grp" airam || true
 done
 # sudoers: מתיר ל-airam *רק* את פקודות ה-systemctl המדויקות הדרושות (NOPASSWD), לא יותר.
-# מצב משולב: restart/stop לכל אחד משלושת צרכני ה-SDR => מעבר קול/ACARS/VDL2 על SDR אחד.
+# מצב משולב: restart/stop לכל אחד מארבעת צרכני ה-SDR => מעבר קול/ACARS/VDL2/SATCOM על SDR אחד.
 cat > /etc/sudoers.d/airam <<'EOF'
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart rtl_airband
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop rtl_airband
@@ -326,6 +370,8 @@ airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-acars
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-acars
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-vdl2
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-vdl2
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-satcom
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-satcom
 EOF
 chmod 440 /etc/sudoers.d/airam
 visudo -cf /etc/sudoers.d/airam >/dev/null || die "קובץ sudoers לא תקין (/etc/sudoers.d/airam)."
@@ -338,9 +384,10 @@ if [[ ! -f /etc/airam/airam.env ]]; then
 # AIRAM_PIN=1234
 EOF
 fi
-# הגדרות ACARS/VDL2 (ברירת מחדל; airam-web דורס בכל מעבר מצב). בבעלות airam => airam-web יכול לכתוב.
+# הגדרות ACARS/VDL2/SATCOM (ברירת מחדל; airam-web דורס בכל מעבר מצב). בבעלות airam => airam-web יכול לכתוב.
 [[ -f /etc/airam/acars.env ]] || cp "$REPO_DIR/config/acars.env" /etc/airam/acars.env
 [[ -f /etc/airam/vdl2.env ]] || cp "$REPO_DIR/config/vdl2.env" /etc/airam/vdl2.env
+[[ -f /etc/airam/satcom.env ]] || cp "$REPO_DIR/config/satcom.env" /etc/airam/satcom.env
 chown -R airam:airam /etc/airam
 
 # ----------------------------------------------------------------------------
@@ -391,10 +438,12 @@ cp "$REPO_DIR/systemd/rtl_airband.service"  /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-web.service"    /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-acars.service"  /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-vdl2.service"   /etc/systemd/system/
+cp "$REPO_DIR/systemd/airam-satcom.service" /etc/systemd/system/
 systemctl daemon-reload
-# אף צרכן SDR (rtl_airband / airam-acars / airam-vdl2) אינו enabled בכוונה:
-# אין "מצב ראשי" — airam-web (המתזמר, enabled) קורא את state.json באתחול ומשחזר
-# את המצב השמור האחרון, כולל off. Conflicts ב-units מבטיח שלא ירוצו יחד.
+# אף צרכן SDR (rtl_airband / airam-acars / airam-vdl2 / airam-satcom) אינו
+# enabled בכוונה: אין "מצב ראשי" — airam-web (המתזמר, enabled) קורא את
+# state.json באתחול ומשחזר את המצב השמור האחרון, כולל off. Conflicts ב-units
+# מבטיח שלא ירוצו יחד.
 systemctl enable sdrplay.service airam-web.service
 # שדרוג מגרסה ישנה (rtl_airband היה enabled ועלה תמיד באתחול) — אידמפוטנטי.
 systemctl disable rtl_airband.service >/dev/null 2>&1 || true
