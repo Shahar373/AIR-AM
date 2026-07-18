@@ -121,7 +121,7 @@ SATCOM_SNIFFER_COMMIT = 2827b3a0c7cd349783aeee4621096db14f43264a  (2026-06-03)
   `SATCOM_UDP_PORT=5558` (יציאה חדשה), `SATCOM_LOG_PATH`, `SATCOM_FREQS_DEFAULT`, gain default.
 - `write_satcom_env(freqs, ...)` — מודל על `write_vdl2_env` (`app.py:1578-1597`), כתיבה אטומית
   ל-`/etc/airam/satcom.env` דרך `_atomic_write`. מפתחות: `SATCOM_UDP=127.0.0.1:5558`,
-  `SATCOM_BIAS_TEE=1` (מתורגם ל-`-B` ב-`ExecStart`), `SATCOM_GAIN` (`--soapy-gain`).
+  `SATCOM_BIAS_TEE` (‎`-B` ב-`ExecStart`), `SATCOM_GAIN` (‎`--sdrplay-gain`, לא `--soapy-gain` — הדרייבר הנייטיבי).
 - `_enter_satcom(freqs)` — מודל **מדויק** על `_enter_vdl2` (`app.py:1600-1621`): עצירת
   `("rtl_airband", ACARS_SERVICE, VDL2_SERVICE)` → `write_satcom_env` → `_sysctl("restart",
   SATCOM_SERVICE)` → בדיקת returncode → 7×poll ל-`_is_active`. מחזיר `(error, detail)`.
@@ -164,7 +164,8 @@ SATCOM_SNIFFER_COMMIT = 2827b3a0c7cd349783aeee4621096db14f43264a  (2026-06-03)
 
 ### 4.3 config — `config/satcom.env` (חדש)
 פורמט EnvironmentFile (לא shell). מפתחות: `SATCOM_UDP=127.0.0.1:5558`, `SATCOM_BIAS_TEE`,
-`SATCOM_GAIN` (`--soapy-gain`).
+`SATCOM_GAIN` (‎`--sdrplay-gain` — הדגל הנייטיבי; ‎`--soapy-gain` נקרא רק ע"י דרייבר
+ה-SoapySDR הגנרי, לא ע"י ‎`-i sdrplay`).
 
 ### 4.4 UI — `webtune/static/index.html`
 מופע רביעי של אותו פקטורי `createDataView` — **אפס CSS כפול**:

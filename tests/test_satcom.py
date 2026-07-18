@@ -98,6 +98,7 @@ def test_normalize_satcom_never_fabricates_level_or_snr():
     }))
     assert n["level"] is None and n["snr"] is None
     assert n["freq"] is None                       # גם freq לא נחשף (ר' feed.c)
+    assert n["msgno"] is None                      # isu.refno הוא רצף-לוויין, לא MSN — לא ממופה
 
 
 def test_normalize_satcom_arinc622_adsc_nested():
@@ -146,8 +147,14 @@ def test_write_satcom_env_format(paths):
     app.write_satcom_env(["AF1"])
     txt = app.SATCOM_ENV_PATH.read_text()
     assert "SATCOM_SATELLITE=AF1" in txt
-    assert f"SATCOM_GAIN={app.SATCOM_GAIN_DEFAULT}" in txt
+    assert "SATCOM_GAIN=\n" in txt                  # ריק => AGC (כמו VDL2), הדגל נעלם ב-ExecStart
     assert "SATCOM_BIAS_TEE=-B" in txt              # ברירת מחדל: bias-T דולק
+
+
+def test_write_satcom_env_manual_gain(paths):
+    # רווח ידני => --sdrplay-gain (gRdB), *לא* --soapy-gain (שמתעלמים ממנו בדרייבר הנייטיבי)
+    app.write_satcom_env(["AF1"], gain=40)
+    assert "SATCOM_GAIN=--sdrplay-gain=40" in app.SATCOM_ENV_PATH.read_text()
 
 
 def test_write_satcom_env_bias_tee_off(paths):

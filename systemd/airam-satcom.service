@@ -25,12 +25,13 @@ EnvironmentFile=-/etc/airam/satcom.env
 # שער מוכנות: מחכה שה-SDRplay API באמת יענה לפני הרצת inmarsat-sniffer (כמו rtl_airband)
 ExecStartPre=/usr/local/bin/airam-wait-sdrplay
 # ⚠ החלפת אנטנה (VHF airband <-> L-band + LNA) היא פעולה *ידנית* של המשתמש —
-# ר' docs/satcom-feasibility.md §3. ‏$SATCOM_BIAS_TEE *ללא* סוגריים => נעלם
-# לגמרי כשריק (bias-T כבוי); כשמלא ("-B") מדליק את ה-bias-T של ה-RSP1B שמזין
-# את ה-LNA הצמוד לאנטנת ה-L-band. ‏--satellite=AF1 (Alphasat, +25.0E) הוא
-# ברירת המחדל ל-EMEA/ישראל — ר' SATCOM_SATELLITES/SATCOM_FREQS_DEFAULT ב-app.py.
+# ר' docs/satcom-feasibility.md §3. ‏$SATCOM_BIAS_TEE ו-$SATCOM_GAIN *ללא*
+# סוגריים => נעלמים לגמרי כשריקים. SATCOM_BIAS_TEE="-B" מדליק את ה-bias-T של
+# ה-RSP1B שמזין את ה-LNA; SATCOM_GAIN מכיל את דגל הרווח כולו (--sdrplay-gain=N,
+# הדגל הנייטיבי של ה-SDRplay — *לא* --soapy-gain) או ריק => AGC. ‏--satellite=AF1
+# (Alphasat, +25.0E) ברירת המחדל ל-EMEA/ישראל — ר' SATCOM_BANKS ב-app.py.
 # הפורט (5558) חייב להתאים ל-SATCOM_UDP_PORT ב-webtune/app.py.
-ExecStart=/usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero --soapy-gain=${SATCOM_GAIN} $SATCOM_BIAS_TEE --udp=127.0.0.1:5558 --station-id=airam
+ExecStart=/usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero $SATCOM_GAIN $SATCOM_BIAS_TEE --udp=127.0.0.1:5558 --station-id=airam
 # גישת חומרה (SDR) => כמו rtl_airband, רץ כ-root
 User=root
 Restart=always

@@ -202,7 +202,8 @@ SATCOM_BANKS = [
 ]
 SATCOM_SATELLITES = {b["id"] for b in SATCOM_BANKS}  # דגלי --satellite= תקינים
 SATCOM_FREQS_DEFAULT = SATCOM_BANKS[0]["freqs"]      # ["AF1"] — Alphasat, ל-EMEA/ישראל
-SATCOM_GAIN_DEFAULT = 40              # dB, ‎--soapy-gain (ברירת המחדל של הכלי עצמו)
+# רווח ברירת מחדל = AGC (ריק, כמו ACARS/VDL2). לרווח ידני מעבירים gRdB ל-
+# write_satcom_env => --sdrplay-gain (הפחתה, קטן=רווח גדול). לא --soapy-gain (ר' שם).
 SATCOM_BUF_MAX = 500                  # הודעות אחרונות בזיכרון (כמו ACARS/VDL2)
 SATCOM_LOG_PATH = Path("/var/lib/airam/satcom.jsonl")
 SATCOM_LOG_KEEP = 5000                # retention על הדיסק (זנב נשמר; ייצוא לניתוח)
@@ -1578,7 +1579,9 @@ def _normalize_satcom(m):
         "label": acars.get("label"),
         "tail": acars.get("reg"),
         "flight": acars.get("flight"),
-        "msgno": isu.get("refno"),
+        # msgno (MSN של ACARS) לא נחשף ע"י inmarsat-sniffer: isu.refno/qno הם
+        # מספרי-רצף של שכבת הלוויין (uint8), *לא* ה-MSN הקלאסי — לא ממפים אותם
+        # ל-msgno כדי לא להטעות (ר' §12 ב-CLAUDE.md: לא מזייפים/ממפים-שגוי ערך).
         "text": acars.get("msg_text"),
         "error": 0,   # רק הודעות שעברו פענוח/CRC מגיעות ל-feed_aero_message מלכתחילה
     }
@@ -1810,19 +1813,24 @@ def write_vdl2_env(freqs, ifgr=None, rfgr=None):
     _atomic_write(VDL2_ENV_PATH, text)
 
 
-def write_satcom_env(freqs, gain=SATCOM_GAIN_DEFAULT, bias_tee=True):
+def write_satcom_env(freqs, gain=None, bias_tee=True):
     """כותב /etc/airam/satcom.env בפורמט EnvironmentFile של systemd.
     ‏freqs כאן הוא רשימה בת-איבר-יחיד עם דגל הלוויין (למשל ["AF1"]) — geostationary
     => אין "ערוצים"/בנק לבחור כמו ACARS/VDL2 (ר' הערה ליד SATCOM_FREQS_DEFAULT).
-    ‏SATCOM_BIAS_TEE מכיל את הדגל *כולו* (או ריק) — כמו VDL2_GAIN: ‏$SATCOM_BIAS_TEE
-    לא-מצוטט ב-ExecStart נעלם כשריק => bias-T כבוי. ⚠ bias-T חייב להיות דולק
-    *רק* במצב satcom (מזין את ה-LNA שצמוד לאנטנת ה-L-band, לא לאנטנת ה-airband)
-    — satcom.env לא נטען כלל במצבי VHF אחרים, אז זה מובטח מבנית, לא רק במוסכמה."""
+    ‏SATCOM_GAIN מכיל את דגל הרווח *כולו* (או ריק) — כמו VDL2_GAIN. ⚠ המפענח
+    ‏inmarsat-sniffer בדרייבר ה-SDRplay הנייטיבי (‎-i sdrplay) קורא את הרווח מ-
+    ‎--sdrplay-gain (gRdB — *הפחתה*, קטן=רווח גדול, כמו IFGR), *לא* מ---soapy-gain
+    (שהוא לדרייבר ה-SoapySDR הגנרי בלבד — אומת מ-sdrplay.c/options.c במקור). ריק
+    => AGC של הדרייבר (ברירת המחדל, כמו ACARS/VDL2). ‏SATCOM_BIAS_TEE מכיל את הדגל
+    ‎-B (או ריק): ‏$SATCOM_BIAS_TEE לא-מצוטט ב-ExecStart נעלם כשריק => bias-T כבוי.
+    ⚠ bias-T חייב להיות דולק *רק* במצב satcom (מזין את ה-LNA שצמוד לאנטנת ה-L-band,
+    לא לאנטנת ה-airband) — satcom.env לא נטען כלל במצבי VHF אחרים, מובטח מבנית."""
     sats = _sanitize_satellite(freqs)
+    gain_flag = "--sdrplay-gain=%d" % int(gain) if gain is not None else ""
     text = "\n".join([
         "# נכתב אוטומטית ע\"י AIR-AM web tuner (מצב SATCOM). שינויים ידניים נדרסים.",
         f"SATCOM_SATELLITE={sats[0]}",
-        f"SATCOM_GAIN={int(gain)}",
+        f"SATCOM_GAIN={gain_flag}",
         "SATCOM_BIAS_TEE=" + ("-B" if bias_tee else ""),
         f"SATCOM_UDP={ACARS_UDP_HOST}:{SATCOM_UDP_PORT}",
         "",
