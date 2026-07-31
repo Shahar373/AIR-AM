@@ -197,14 +197,20 @@
     .statusbar .pwr { margin: 0; }
 
     @media (max-width: 560px) {
-      /* מובייל: מפנים מקום למתג-המצב — מסתירים את טקסט-המותג (הלוגו נשאר)
-         וכפתור המרכז מצטמצם לאייקון 🏠 (ארבעה כפתורים במתג) */
+      /* מובייל: מפנים מקום למתג-המצב (חמישה כפתורים כולל SATCOM, מאז שנוסף
+         ב-§ SATCOM לא היה עוד מקום ל-5 תוויות טקסט מלאות) — מסתירים את
+         טקסט-המותג (הלוגו ✈️ נשאר), וכל חמשת כפתורי המתג מצטמצמים לאייקון
+         בלבד (mode-lbl מוסתר, title נשאר לנגישות), וכפתור הכיבוי/הפעלה גם
+         מצטמצם לאייקון בלבד (⏻/▶, pwr-lbl מוסתר) — בלי זה "▶ הפעלה" (המחרוזת
+         הארוכה, ב-standby) דוחקת את SATCOM ומחפפת אותו חזותית (אין overflow
+         מוגדר על .seg-modes, אז חפיפה חזותית ולא גלישה מסודרת). */
       .brand-txt { display: none; }
-      .seg-modes .home-lbl { display: none; }
+      .seg-modes .mode-lbl { display: none; }
       .seg-modes.seg { max-width: none; }
       .seg-modes.seg button { padding: .5rem .3rem; font-size: .8rem; }
       .appbar { gap: var(--sp-2); padding: .45rem .6rem; }
       .power-btn { padding: .5rem .6rem; }
+      .power-btn .pwr-lbl { display: none; }
       .statusbar { padding-inline: .7rem; }
     }
     @media (min-width: 700px) { :root { --topbar-h: 92px; } }
@@ -973,17 +979,17 @@
         <span class="logo">✈️</span>
         <div class="brand-txt"><h1>AIR-AM</h1><span class="tag" id="verTag">SDRplay RSP1B</span></div>
       </div>
-      <!-- מתג תצוגה: מרכז (בית/standby) + שלושת המצבים שווי-המעמד — SDR אחד בהחלפה -->
+      <!-- מתג תצוגה: מרכז (בית/standby) + ארבעת המצבים שווי-המעמד — SDR אחד בהחלפה -->
       <div class="seg seg-modes" id="modeSeg">
-        <button type="button" data-v="home" class="on" title="מרכז הבקרה">🏠<span class="home-lbl"> מרכז</span></button>
-        <button type="button" data-v="voice"><span class="live-pip"></span>📻 קול</button>
-        <button type="button" data-v="acars"><span class="live-pip"></span>📡 ACARS</button>
-        <button type="button" data-v="vdl2"><span class="live-pip"></span>🛰️ VDL2</button>
-        <button type="button" data-v="satcom"><span class="live-pip"></span>📶 SATCOM</button>
+        <button type="button" data-v="home" class="on" title="מרכז הבקרה">🏠<span class="mode-lbl"> מרכז</span></button>
+        <button type="button" data-v="voice" title="קול"><span class="live-pip"></span>📻<span class="mode-lbl"> קול</span></button>
+        <button type="button" data-v="acars" title="ACARS"><span class="live-pip"></span>📡<span class="mode-lbl"> ACARS</span></button>
+        <button type="button" data-v="vdl2" title="VDL2"><span class="live-pip"></span>🛰️<span class="mode-lbl"> VDL2</span></button>
+        <button type="button" data-v="satcom" title="SATCOM"><span class="live-pip"></span>📶<span class="mode-lbl"> SATCOM</span></button>
       </div>
       <div class="appbar-end">
         <!-- כיבוי/הפעלת המקלט (standby): עוצר את ה-SDR ומשחרר אותו ליישום אחר; הדף נשאר חי -->
-        <button type="button" id="powerBtn" class="power-btn" title="כיבוי/הפעלת המקלט — משחרר את ה-SDR ליישום אחר">⏻ כיבוי</button>
+        <button type="button" id="powerBtn" class="power-btn" title="כיבוי/הפעלת המקלט — משחרר את ה-SDR ליישום אחר"><span id="powerBtnIcon">⏻</span><span class="pwr-lbl" id="powerBtnLbl"> כיבוי</span></button>
       </div>
     </header>
     <!-- רצועת סטטוס: נורות חיווי חיות ברמת-מערכת (סטטוס שירות / מתח Pi / שיבוש GPS) -->
@@ -2657,10 +2663,12 @@
       if (row) row.classList.toggle("hidden", show || sdrOff);
     }
     function renderPower() {
-      // כפתור כיבוי/הפעלה משקף את מצב ה-SDR (standby או פעיל)
-      const btn = $("powerBtn");
-      btn.textContent = sdrOff ? "▶ הפעלה" : "⏻ כיבוי";
-      btn.classList.toggle("on", sdrOff);
+      // כפתור כיבוי/הפעלה משקף את מצב ה-SDR (standby או פעיל). אייקון+תווית
+      // בשני span נפרדים (כמו mode-lbl בכפתורי המתג) כדי שאפשר יהיה להסתיר
+      // רק את התווית במובייל בלי לאבד את האייקון — ר' .pwr-lbl ב-CSS.
+      $("powerBtnIcon").textContent = sdrOff ? "▶" : "⏻";
+      $("powerBtnLbl").textContent = sdrOff ? " הפעלה" : " כיבוי";
+      $("powerBtn").classList.toggle("on", sdrOff);
       renderVoiceAcarsBanner();
     }
 
