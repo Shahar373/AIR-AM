@@ -144,6 +144,47 @@ def test_normalize_satcom_arinc622_unwrap_falls_back_on_unexpected_shape():
     assert abs(n["lat"] - 32.1234) < 1e-4 and abs(n["lon"] - 34.5678) < 1e-4
 
 
+def test_normalize_satcom_error_unknown_without_arinc622():
+    """אין isu.acars.arinc622 (הודעת טקסט רגילה, רוב תעבורת ה-SATCOM) => אין
+    שום איתות CRC בשום שכבה (אומת מהמקור: feed_aero_message לא פולט err/
+    crc_ok ברמה החיצונית) — error נשאר 0 (לא מומצא, פשוט לא ידוע), כמו היום."""
+    n = app._normalize_satcom(_satcom({
+        "mode": "2", "label": "H1", "reg": ".4X-EKF", "msg_text": "hello",
+    }))
+    assert n["error"] == 0
+
+
+def test_normalize_satcom_error_reflects_real_crc_when_arinc622_present():
+    """כשיש יישום ARINC-622/ADS-C מקונן, המעטפת הפנימית הכפולה (ר' באג עטיפה
+    כפולה) כן נושאת err/crc_ok אמיתיים (הסריאליזציה הגנרית של libacars) —
+    error חייב לשקף אותם, לא תמיד 0."""
+    n_bad = app._normalize_satcom(_satcom({
+        "mode": "2", "label": "H1", "reg": ".4X-EDA", "flight": "LY0027",
+        "msg_text": "#DFB...",
+        "arinc622": {"acars": {
+            "err": False, "crc_ok": False, "more": False,   # CRC כושל
+            "mode": "2", "label": "H1", "reg": ".4X-EDA", "flight": "LY0027",
+            "msg_text": "#DFB...",
+            "arinc622": {"msg_type": "adsc_msg", "adsc": {
+                "tags": [{"basic_report": {"lat": 32.1234, "lon": 34.5678, "alt": 35000}}]}},
+        }},
+    }))
+    assert n_bad["error"] == 1
+
+    n_ok = app._normalize_satcom(_satcom({
+        "mode": "2", "label": "H1", "reg": ".4X-EDA", "flight": "LY0027",
+        "msg_text": "#DFB...",
+        "arinc622": {"acars": {
+            "err": False, "crc_ok": True, "more": False,
+            "mode": "2", "label": "H1", "reg": ".4X-EDA", "flight": "LY0027",
+            "msg_text": "#DFB...",
+            "arinc622": {"msg_type": "adsc_msg", "adsc": {
+                "tags": [{"basic_report": {"lat": 32.1234, "lon": 34.5678, "alt": 35000}}]}},
+        }},
+    }))
+    assert n_ok["error"] == 0
+
+
 def test_normalize_satcom_uplink_structural():
     """dst=Aircraft Earth Station => uplink (קרקע->מטוס), עובדה מבנית של הכלי —
     לא heuristic, דורסת את _acars_direction (כמו VDL2)."""
@@ -403,6 +444,31 @@ def test_api_mode_acars_stops_satcom(client, paths, no_sleep, monkeypatch):
     assert ("stop", app.SATCOM_SERVICE) in calls      # כניסת ACARS עוצרת SATCOM
 
 
+def test_api_mode_vdl2_stops_satcom(client, paths, no_sleep, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app, "_sysctl",
+                        lambda action, svc, timeout=45: calls.append((action, svc)) or _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "vdl2"})
+    assert r.status_code == 200
+    assert ("stop", app.SATCOM_SERVICE) in calls      # כניסת VDL2 עוצרת SATCOM
+
+
+def test_api_mode_voice_stops_satcom(client, paths, no_sleep, monkeypatch):
+    """בטיחות bias-T: _enter_voice חייב לעצור satcom כמו כל צרכן אחר — זה
+    בדיוק ה-invariant שעליו נשענת הטענה "bias-T כבוי בכל מצב VHF, מובטח
+    מבנית" (§12 ב-CLAUDE.md). _restart_and_verify עצמו לא עובר דרך _sysctl
+    (subprocess.run ישיר) — ממוקף בנפרד, כמו ב-test_boot.py."""
+    calls = []
+    monkeypatch.setattr(app, "_sysctl",
+                        lambda action, svc, timeout=45: calls.append((action, svc)) or _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    monkeypatch.setattr(app, "_restart_and_verify", lambda: (None, None, False))
+    r = client.post("/api/mode", json={"mode": "voice"})
+    assert r.status_code == 200
+    assert ("stop", app.SATCOM_SERVICE) in calls      # כניסת קול עוצרת SATCOM
+
+
 # --- רוסטר מאוחד --------------------------------------------------------------
 
 def test_satcom_joins_unified_roster(paths):
@@ -474,3 +540,76 @@ def test_satcom_export_json_keeps_all_history(client, paths):
     recs = json.loads(r.get_data(as_text=True))
     assert len(recs) == 2
     assert recs[0]["text"] == "אתמול"
+
+
+# --- GET /api/satcom/health (proxy ל---web dashboard של inmarsat-sniffer) ------
+
+class _FakeWebResp:
+    """מדמה את אובייקט התגובה של urllib.request.urlopen (context manager + .read())."""
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_satcom_health_unavailable_when_not_active(client, paths, monkeypatch):
+    """satcom כבוי => אין אפילו ניסיון HTTP (connection-refused מיותר בכל poll)."""
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)
+    called = []
+    monkeypatch.setattr(app.urllib.request, "urlopen",
+                        lambda *a, **k: called.append(1) or _FakeWebResp(b"{}"))
+    r = client.get("/api/satcom/health")
+    j = r.get_json()
+    assert r.status_code == 200 and j["ok"] is True and j["available"] is False
+    assert called == []
+
+
+def test_satcom_health_returns_channel_summary_when_available(client, paths, monkeypatch):
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    payload = json.dumps({
+        "total_acars": 42, "feed_drops": 1,
+        "channels": [
+            {"ch": 0, "baud": 600, "msgs": 10, "age": 3.0, "mse": 0.02, "ebno": 12.5, "lock": 1},
+            {"ch": 1, "baud": 1200, "msgs": 0, "age": -1, "mse": 0.0, "ebno": 0.0, "lock": 0},
+        ],
+    }).encode()
+    monkeypatch.setattr(app.urllib.request, "urlopen", lambda url, timeout=None: _FakeWebResp(payload))
+    r = client.get("/api/satcom/health")
+    j = r.get_json()
+    assert j["ok"] and j["available"] is True
+    assert j["total_acars"] == 42 and j["feed_drops"] == 1
+    assert j["channels_total"] == 2 and j["channels_locked"] == 1
+    assert j["channels"][0]["lock"] is True and j["channels"][1]["lock"] is False
+
+
+def test_satcom_health_unavailable_on_connection_failure(client, paths, monkeypatch):
+    """dashboard לא עלה עדיין / קרס — נפילה חיננית, לא 500."""
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+
+    def boom(url, timeout=None):
+        raise ConnectionRefusedError("no one home")
+    monkeypatch.setattr(app.urllib.request, "urlopen", boom)
+    r = client.get("/api/satcom/health")
+    j = r.get_json()
+    assert r.status_code == 200 and j["ok"] is True and j["available"] is False
+
+
+def test_satcom_health_unavailable_on_malformed_response(client, paths, monkeypatch):
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    monkeypatch.setattr(app.urllib.request, "urlopen",
+                        lambda url, timeout=None: _FakeWebResp(b"not json at all"))
+    r = client.get("/api/satcom/health")
+    assert r.get_json()["available"] is False
+
+    # מבנה תקין אך לא dict (למשל מערך) - גם זה "לא זמין", לא קריסה
+    monkeypatch.setattr(app.urllib.request, "urlopen",
+                        lambda url, timeout=None: _FakeWebResp(b"[1,2,3]"))
+    r = client.get("/api/satcom/health")
+    assert r.get_json()["available"] is False

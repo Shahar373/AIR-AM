@@ -1535,6 +1535,10 @@
               <button id="satcomStopBtn">⏹ עצור (Standby)</button>
             </div>
             <p class="sdr-hint">SATCOM פעיל — ה-SDR מפענח הודעות לוויין. השמע אינו זמין. ⚠ להאזנה חוזרת לתעופה — החזר את אנטנת ה-airband.</p>
+            <!-- אבחון נעילה (GET /api/satcom/health, proxy ל---web dashboard של
+                 inmarsat-sniffer) — ההבדל בין "אין אנטנה"/"לא מכוון" ל"תקין, שקט
+                 כרגע": ריק/מוסתר כש-available:false, לא רק "0 ערוצים". -->
+            <p class="sdr-hint" id="satcomLockHint"></p>
           </div>
         </div>
       </div>
@@ -2058,6 +2062,21 @@
     // (לכיוון אנטנה בזמן אמת), רק כשהדף גלוי ובתצוגת קול (המדדים הם של rtl_airband)
     setInterval(() => { if (!document.hidden && appMode === "voice") pollMetrics(); }, 1000);
     pollMetrics();
+
+    /* ---------- אבחון SATCOM: נעילת דמודולטור (GET /api/satcom/health) ----------
+       proxy מקומי ל---web dashboard המובנה של inmarsat-sniffer — lock=נעילת
+       דמודולטור *גם* באפס הודעות מפוענחות, ההבדל בין "אין אנטנה"/"לא מכוון"
+       ל"תקין, שקט כרגע". ריק/מוסתר כש-available:false — לא ממציאים "0 ערוצים". */
+    async function pollSatcomHealth() {
+      const el = $("satcomLockHint");
+      try {
+        const h = await (await fetch("/api/satcom/health")).json();
+        if (!h.ok || !h.available || !h.channels_total) { el.textContent = ""; return; }
+        el.textContent = "מפענח: נעולים " + h.channels_locked + "/" + h.channels_total + " ערוצים" +
+          (h.total_acars != null ? " · " + h.total_acars + " הודעות סה\"כ" : "");
+      } catch (e) { el.textContent = ""; }
+    }
+    setInterval(() => { if (!document.hidden && appMode === "satcom") pollSatcomHealth(); }, 5000);
 
     /* ---------- חיווי מתח ל-Pi ---------- */
     // המתח משתנה לאט => פולינג כל 5 שניות. החיווי החשוב ביותר לסוללה ניידת הוא

@@ -189,6 +189,17 @@ VDL2_MSG_FILTER = "all,-avlc_s,-acars_nodata,-gsif,-x25_control,-idrp_keepalive,
 SATCOM_SERVICE = "airam-satcom"
 SATCOM_ENV_PATH = Path("/etc/airam/satcom.env")
 SATCOM_UDP_PORT = 5558                # חייב להתאים ל-SATCOM_UDP ב-satcom.env
+# דגל --web[=PORT] המובנה של inmarsat-sniffer (options.c/web.c, אומת מהמקור)
+# מרים dashboard HTTP עצמאי עם GET /api/state: total_acars/feed_drops/channels
+# [{ch,baud,msgs,age,mse,ebno,lock}] — lock=נעילת דמודולטור *גם* באפס הודעות
+# מפוענחות. זו האבחנה שחסרה בין "אין אנטנה"/"לא מכוון"/"תקין, שקט כרגע".
+# ⚠ web.c קושר ל-INADDR_ANY (לא ניתן להגבלה ל-loopback דרך הכלי עצמו — נבדק
+# במקור) => הפורט עצמו נגיש ברשת המקומית, לא רק מ-127.0.0.1. GET /api/satcom/
+# health עושה proxy מקומי (כמו /stream) כדי ש-_guard/PIN יישארו שער אחיד
+# לממשק, אבל זה *לא* מבטל את חשיפת הפורט הגולמי ברשת — אותה קטגוריית סיכון
+# כמו Icecast (8000, גם הוא בלי אימות, מיועד לרשת פרטית מהימנה בלבד — §9).
+SATCOM_WEB_PORT = 8888
+SATCOM_HEALTH_TIMEOUT = 2.0           # שניות — נקרא ב-polling, חייב להיות מהיר
 # "בנקים" של satcom = לוויינים (geostationary), לא צבירי-תדרים כמו ACARS/VDL2 —
 # כל "בנק" הוא לוויין יחיד (freqs בן-איבר-יחיד עם דגל ה---satellite=). זה מאפשר
 # ל-UI לעשות שימוש חוזר במנגנון בורר-הבנקים הקיים כבורר-לוויין, בלי קוד מיוחד.
@@ -1570,8 +1581,12 @@ def _normalize_satcom(m):
     "מוצאים" את msg_text המשוכפל בתוך המעטפת כאילו הוא תוכן מפוענח.
     src/dst.type ("Aircraft Earth Station"/"Ground Earth Station") הם עובדה
     מבנית של הכלי (לא heuristic) => דורסים את _acars_direction, כמו ה-icao/dir
-    המבניים של VDL2 (AES/GES הם מרחב-כתובות של Inmarsat, *לא* ICAO 24-bit —
-    לכן לא ממופים ל-card["icao"], כדי לא לבלבל את זהות הרוסטר עם VDL2)."""
+    המבניים של VDL2. ⚠ בניגוד להנחה קודמת: AES **כן** מטופל ע"י inmarsat-sniffer
+    עצמו כ-hex זהה ל-ICAO (aircraft_db_lookup_by_aes מפרמט %06X ומחפש באותה
+    טבלת icao_hex/tar1090-db — אומת מהמקור, aircraft_db.c/.h). אנחנו עדיין
+    *לא* ממפים אותו ל-card["icao"] — לא כי הם "לא זהים", אלא כדי לא לבלבל את
+    זהות הרוסטר עם מרחב-הכתובות של VDL2 (icao שם מגיע מ-AVLC אמיתי, לא-לוויני;
+    ערבוב השניים תחת אותו מפתח roster היה יוצר זהויות-שווא)."""
     isu = m.get("isu")
     if not isinstance(isu, dict):
         return None
@@ -1594,14 +1609,27 @@ def _normalize_satcom(m):
         # מספרי-רצף של שכבת הלוויין (uint8), *לא* ה-MSN הקלאסי — לא ממפים אותם
         # ל-msgno כדי לא להטעות (ר' §12 ב-CLAUDE.md: לא מזייפים/ממפים-שגוי ערך).
         "text": acars.get("msg_text"),
-        "error": 0,   # רק הודעות שעברו פענוח/CRC מגיעות ל-feed_aero_message מלכתחילה
+        # ⚠ isu.acars החיצוני (feed_aero_message ב-feed.c) *לעולם* לא כולל
+        # err/crc_ok — אומת מהמקור: הפונקציה בונה את ה-JSON ידנית בלי השדות
+        # האלה בכלל. הגייט היחיד לפני feed הוא reasm_status+err (main.c:830) —
+        # לא crc_ok (שדה נפרד ב-libacars, acars.c:31-32/299) — כלומר הודעה עם
+        # CRC כושל עדיין יכולה להגיע. err/crc_ok *אמיתיים* קיימים רק במעטפת
+        # הפנימית הכפולה (isu.acars.arinc622.acars, ר' למטה) וגם זה רק כשיש
+        # יישום ARINC-622/ADS-C/CPDLC מקונן. לרוב הודעות הטקסט הרגילות (בלי
+        # arinc622) אין לנו שום איתות CRC — error נשאר 0 (לא מומצא: פשוט לא ידוע).
+        "error": 0,
     }
     apps = acars.get("arinc622")
     if isinstance(apps, dict):
-        # מפרקים את מעטפת ה-ACARS הכפולה (ר' התיעוד מעל) — inner הוא היישום
+        # מפרקים את מעטפת ה-ACARS הכפולה (ר' התיעוד למעלה) — inner הוא היישום
         # המקונן האמיתי (ADS-C/CPDLC), לא ACARS שוב. אם הצורה לא כצפוי (שינוי
         # גרסה אצל inmarsat-sniffer) נופלים חזרה ל-apps כמות שהוא ולא קורסים.
         inner = apps.get("acars")
+        if isinstance(inner, dict):
+            # רק כאן יש err/crc_ok אמיתיים (הסריאליזציה הגנרית של libacars,
+            # acars.c:299/560) — בדיוק אותה נוסחה כמו VDL2 מסלול A (app.py
+            # למעלה, ליד _VDL2_ACARS_FIELDS).
+            raw["error"] = 0 if (not inner.get("err") and inner.get("crc_ok", True)) else 1
         apps = ({k: v for k, v in inner.items()
                 if k not in _VDL2_ACARS_FIELDS and isinstance(v, (dict, list))}
                 if isinstance(inner, dict) else apps)
@@ -1844,7 +1872,9 @@ def write_satcom_env(freqs, gain=None, bias_tee=True):
     => AGC של הדרייבר (ברירת המחדל, כמו ACARS/VDL2). ‏SATCOM_BIAS_TEE מכיל את הדגל
     ‎-B (או ריק): ‏$SATCOM_BIAS_TEE לא-מצוטט ב-ExecStart נעלם כשריק => bias-T כבוי.
     ⚠ bias-T חייב להיות דולק *רק* במצב satcom (מזין את ה-LNA שצמוד לאנטנת ה-L-band,
-    לא לאנטנת ה-airband) — satcom.env לא נטען כלל במצבי VHF אחרים, מובטח מבנית."""
+    לא לאנטנת ה-airband) — satcom.env לא נטען כלל במצבי VHF אחרים, מובטח מבנית.
+    ‏SATCOM_WEB_PORT קבוע (לא תלוי-בחירת-משתמש) — משמש את ה---web= ב-ExecStart
+    ואת GET /api/satcom/health (ר' SATCOM_WEB_PORT למעלה)."""
     sats = _sanitize_satellite(freqs)
     gain_flag = "--sdrplay-gain=%d" % int(gain) if gain is not None else ""
     text = "\n".join([
@@ -1853,6 +1883,7 @@ def write_satcom_env(freqs, gain=None, bias_tee=True):
         f"SATCOM_GAIN={gain_flag}",
         "SATCOM_BIAS_TEE=" + ("-B" if bias_tee else ""),
         f"SATCOM_UDP={ACARS_UDP_HOST}:{SATCOM_UDP_PORT}",
+        f"SATCOM_WEB_PORT={SATCOM_WEB_PORT}",
         "",
     ])
     _atomic_write(SATCOM_ENV_PATH, text)
@@ -3011,6 +3042,48 @@ def api_satcom():
 def api_satcom_export():
     """ייצוא כל הודעות ה-SATCOM השמורות (satcom.jsonl). ?format=csv | json."""
     return _export_response(_read_satcom_log(), SATCOM_EXPORT_COLS, "airam-satcom")
+
+
+def _fetch_satcom_web_state():
+    """קורא GET /api/state מה-dashboard האבחוני המובנה של inmarsat-sniffer
+    (‎--web=SATCOM_WEB_PORT, אומת מהמקור: options.c/web.c). מחזיר dict או None
+    בכל כשל — satcom לא active, ה---web dashboard לא זמין/עוד לא עלה, timeout,
+    או JSON לא תקין. לעולם לא מפיל את הקורא. לא מנסה HTTP כלל כש-satcom לא
+    active (המקרה הנפוץ) — נמנע מ-connection-refused מיותר בכל poll."""
+    if not _is_active(SATCOM_SERVICE):
+        return None
+    url = f"http://127.0.0.1:{SATCOM_WEB_PORT}/api/state"
+    try:
+        with urllib.request.urlopen(url, timeout=SATCOM_HEALTH_TIMEOUT) as r:   # noqa: S310 (לוקאלהוסט בלבד)
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+@app.route("/api/satcom/health")
+def api_satcom_health():
+    """אבחון SATCOM: proxy מקומי ל-dashboard האבחוני המובנה של inmarsat-sniffer
+    (‎--web). חושף נעילת דמודולטור לכל ערוץ (lock) גם באפס הודעות מפוענחות —
+    ההבדל בין "אין אנטנה"/"לא מכוון" ל"תקין, שקט כרגע" שחסר ב-/api/satcom
+    הרגיל (זה בודק רק שהתהליך *רץ*, לא שהוא קולט). ‏available=False (לא
+    שגיאה — ok תמיד True) כש-satcom כבוי, ה---web dashboard לא זמין, או
+    התשובה לא תקינה — לעולם לא ממציאים ערך במקום זה (ר' §12 ב-CLAUDE.md)."""
+    state = _fetch_satcom_web_state()
+    if state is None:
+        return jsonify(ok=True, available=False)
+    channels = []
+    for ch in (state.get("channels") or []):
+        if not isinstance(ch, dict):
+            continue
+        channels.append({"ch": ch.get("ch"), "baud": ch.get("baud"),
+                         "msgs": ch.get("msgs"), "age": ch.get("age"),
+                         "mse": ch.get("mse"), "ebno": ch.get("ebno"),
+                         "lock": bool(ch.get("lock"))})
+    return jsonify(ok=True, available=True,
+                   total_acars=state.get("total_acars"), feed_drops=state.get("feed_drops"),
+                   channels=channels, channels_locked=sum(1 for c in channels if c["lock"]),
+                   channels_total=len(channels))
 
 
 ROSTER_MAX = 200   # תקרת גודל תגובה — הישנים ביותר נגזמים
