@@ -68,15 +68,27 @@ def test_boot_restore_vdl2_enters_vdl2(paths, no_sleep, sysctl_calls, monkeypatc
     assert app.load_state()["app_mode"] == "vdl2"
 
 
-def test_boot_restore_satcom_enters_satcom(paths, no_sleep, sysctl_calls, monkeypatch):
+def test_boot_restore_satcom_does_not_auto_enter(paths, no_sleep, sysctl_calls, monkeypatch):
+    """בטיחות: satcom *לא* משוחזר אוטומטית באתחול — write_satcom_env מדליק
+    bias-T (‎+4.7V על מחבר האנטנה) כברירת מחדל, ואחרי reboot אין בן-אדם
+    בסביבה שיוודא איזו אנטנה מחוברת. נופל ל-off עם prev_mode=satcom (כפתור
+    ⏻/כרטיס הבית יציעו כניסה ידנית עם אישור אנטנה) — בלי לקרוא ל-_enter_satcom
+    בכלל. גם מוודא שלא נפלנו בטעות לענף ה-scan הגנרי (שהיה "מצליח" להגיע
+    ל-off באותה תוצאה שטחית, אבל מהסיבה הלא-נכונה): _validate_scan_plan לא
+    נקרא כלל עבור מצב satcom."""
     app.save_state({**app.DEFAULT_STATE, "app_mode": "satcom", "satcom_freqs": ["AF1"]})
     monkeypatch.setattr(app, "_is_active", lambda svc: ("restart", svc) in sysctl_calls)
+    entered = []
+    monkeypatch.setattr(app, "_enter_satcom", lambda freqs: entered.append(freqs) or (None, None))
+    scan_validated = []
+    monkeypatch.setattr(app, "_validate_scan_plan", lambda raw: scan_validated.append(raw) or None)
     app._boot_restore()
-    assert ("restart", app.SATCOM_SERVICE) in sysctl_calls
-    assert "SATCOM_SATELLITE=AF1" in app.SATCOM_ENV_PATH.read_text()
-    # קריטי: satcom חייב לעבור בענף ה-elif המפורש שלו ב-_boot_restore ולא ליפול
-    # ל-else הגנרי (scan) — לוח סריקה לא תקין (None) שם היה מפיל ל-off.
-    assert app.load_state()["app_mode"] == "satcom"
+    assert entered == []
+    assert scan_validated == []
+    assert ("restart", app.SATCOM_SERVICE) not in sysctl_calls
+    st = app.load_state()
+    assert st["app_mode"] == "off"
+    assert st["prev_mode"] == "satcom"
 
 
 def test_boot_restore_off_is_noop(paths, no_sleep, sysctl_calls):

@@ -9,6 +9,7 @@
 # ============================================================================
 import json
 import socket
+import subprocess
 import threading
 import time
 import types
@@ -102,8 +103,36 @@ def test_normalize_satcom_never_fabricates_level_or_snr():
 
 
 def test_normalize_satcom_arinc622_adsc_nested():
-    """יישום מפוענח (ADS-C) מקונן *בתוך* isu.acars.arinc622 (בדיוק כמו VDL2
-    מסלול A) => מוזרם כ-libacars ל-_normalize_acars: מיקום מ-_scan_latlon."""
+    """יישום מפוענח (ADS-C) מקונן בתוך isu.acars.arinc622 — אך בשונה מ-VDL2
+    מסלול A, inmarsat-sniffer עוטף שם מחדש את *כל* עץ ה-ACARS (אומת מהמקור:
+    main.c:889-897 מפעיל la_proto_tree_format_json על ה-tree המושרש בצומת
+    ה-ACARS עצמו). הפיקסצ'ר הזה בונה את המבנה הכפול *האמיתי* — לא גרסה "נקייה"
+    לפי הנחת המימוש — כדי לתפוס רגרסיה בפירוק המעטפת: בלי _VDL2_ACARS_FIELDS
+    (ר' _normalize_satcom), decoded היה מציג את msg_text המשוכפל מתוך המעטפת
+    כאילו הוא תוכן מפוענח."""
+    n = app._normalize_satcom(_satcom({
+        "mode": "2", "label": "H1", "blk_id": "3", "ack": "!",
+        "reg": ".4X-EDA", "flight": "LY0027", "msg_text": "#DFB...",
+        "arinc622": {"acars": {                      # מעטפת ACARS כפולה (אמיתית)
+            "err": False, "crc_ok": True, "more": False,
+            "mode": "2", "label": "H1", "blk_id": "3", "ack": "!",
+            "reg": ".4X-EDA", "flight": "LY0027", "msg_text": "#DFB...",
+            "arinc622": {"msg_type": "adsc_msg", "adsc": {
+                "tags": [{"basic_report": {"lat": 32.1234, "lon": 34.5678, "alt": 35000}}]}},
+        }},
+    }))
+    assert n["category"] == "ADS-C"
+    assert n["pos_src"] == "adsc" and n["group"] == "position"
+    assert abs(n["lat"] - 32.1234) < 1e-4 and abs(n["lon"] - 34.5678) < 1e-4
+    # הממצא המרכזי: decoded לא יזלוג את msg_text הגולמי מהמעטפת המשוכפלת
+    assert n["decoded"] != "#DFB..."
+    assert not (n["decoded"] and "#DFB" in n["decoded"])
+
+
+def test_normalize_satcom_arinc622_unwrap_falls_back_on_unexpected_shape():
+    """הגנתי לשינויי סכמה (כמו _scan_latlon/_libacars_decode): אם arinc622 אי-פעם
+    *לא* עטוף ב-"acars" (למשל גרסה עתידית של inmarsat-sniffer, או --jaero-format
+    שונה) — לא קורסים, פשוט נופלים חזרה להתייחסות ל-arinc622 כמות שהוא."""
     n = app._normalize_satcom(_satcom({
         "mode": "2", "label": "H1", "reg": ".4X-EDA", "flight": "LY0027",
         "msg_text": "#DFB...",
@@ -279,6 +308,33 @@ def test_api_mode_enter_satcom(client, paths, no_sleep, monkeypatch):
     assert "SATCOM_SATELLITE=AF1" in app.SATCOM_ENV_PATH.read_text()
 
 
+def test_enter_satcom_resets_failed_before_restart(paths, no_sleep, monkeypatch):
+    """airam-satcom.service מוגדר עם StartLimitBurst סופי (בניגוד לשלושת
+    הצרכנים האחרים) כדי לעצור קריסה חוזרת שהייתה מדליקה bias-T ללא פיקוח —
+    לכן _enter_satcom חייב לנקות תקרה קודמת (reset-failed) *לפני* ה-restart,
+    אחרת כניסה ידנית מחדש אחרי כמה קריסות הייתה נכשלת בשקט."""
+    calls = []
+    monkeypatch.setattr(app, "_sysctl",
+                        lambda action, svc, timeout=45: calls.append((action, svc)) or _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    err, detail = app._enter_satcom(["AF1"])
+    assert err is None
+    assert ("reset-failed", app.SATCOM_SERVICE) in calls
+    assert calls.index(("reset-failed", app.SATCOM_SERVICE)) < calls.index(("restart", app.SATCOM_SERVICE))
+
+
+def test_enter_satcom_reset_failed_is_best_effort(paths, no_sleep, monkeypatch):
+    """reset-failed לא אמור להפיל את הכניסה אם הוא עצמו נכשל (למשל אין מה לאפס)."""
+    def flaky(action, svc, timeout=45):
+        if action == "reset-failed":
+            raise subprocess.TimeoutExpired(cmd="systemctl", timeout=timeout)
+        return _ok()
+    monkeypatch.setattr(app, "_sysctl", flaky)
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    err, detail = app._enter_satcom(["AF1"])
+    assert err is None
+
+
 def test_api_mode_enter_satcom_failure_falls_to_off(client, paths, no_sleep, monkeypatch):
     # אין fallback לקול: כישלון כניסה למצב נופל ל-off (standby) — המצבים שווי-מעמד
     app.save_state({**app.DEFAULT_STATE, "app_mode": "vdl2"})
@@ -322,6 +378,19 @@ def test_api_mode_off_stops_satcom_too(client, paths, no_sleep, monkeypatch):
     assert r.status_code == 200 and r.get_json()["app_mode"] == "off"
     for svc in (app.ACARS_SERVICE, app.VDL2_SERVICE, app.SATCOM_SERVICE, "rtl_airband"):
         assert ("stop", svc) in calls                # standby עוצר ארבעה צרכנים
+
+
+def test_enter_standby_reports_stuck_service_journal(paths, no_sleep, monkeypatch):
+    """כשל בעצירת standby חייב לדווח journal של השירות שבאמת עדיין פעיל — לא
+    rtl_airband קשיח. קריטי כש-satcom הוא התקוע: זה בדיוק הרגע שבו bias-T
+    עדיין דלוק והאבחון הנכון הכי חשוב."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: svc == app.SATCOM_SERVICE)
+    tailed = []
+    monkeypatch.setattr(app, "_journal_tail", lambda svc, lines=8: tailed.append(svc) or "")
+    err, detail = app._enter_standby()
+    assert err is not None
+    assert tailed == [app.SATCOM_SERVICE]
 
 
 def test_api_mode_acars_stops_satcom(client, paths, no_sleep, monkeypatch):

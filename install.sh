@@ -295,11 +295,17 @@ else
     cmake .. 2>&1 | tee "$CMAKE_LOG"
   make -j"$(nproc)" && make install && ldconfig
   command -v inmarsat-sniffer >/dev/null 2>&1 || die "בניית inmarsat-sniffer נכשלה (בדוק SDRplay API/libacars)."
-  grep -q "SDRplay: enabled" "$CMAKE_LOG" \
-    || warn "inmarsat-sniffer נבנה בלי תמיכת SDRplay - מצב SATCOM לא יעבוד. ודא שה-SDRplay API מותקן (שלב 2) והרץ שוב."
+  # ⚠ סימן-הבנייה נכתב *רק* כשתמיכת SDRplay אושרה בפועל. אחרת הרצה חוזרת של
+  # install.sh (אחרי שהמשתמש מתקין את SDRplay API בשלב 2) הייתה רואה
+  # "inmarsat-sniffer כבר מותקן" ומדלגת על בנייה מחדש — למרות שהבינארי הקיים
+  # עדיין בלי SDRplay בפועל. בלי סימן, הרצה חוזרת תמיד תבנה מחדש עד שהתמיכה תאושר.
+  if grep -q "SDRplay: enabled" "$CMAKE_LOG"; then
+    mkdir -p "$(dirname "$AIRAM_SATCOM_MARK")"
+    printf '%s' "$SATCOM_BUILD_SIG" > "$AIRAM_SATCOM_MARK"
+  else
+    warn "inmarsat-sniffer נבנה בלי תמיכת SDRplay - מצב SATCOM לא יעבוד. ודא שה-SDRplay API מותקן (שלב 2) והרץ שוב את install.sh (יבנה מחדש אוטומטית - לא נשמר סימן-בנייה בלי תמיכת SDRplay)."
+  fi
   rm -f "$CMAKE_LOG"
-  mkdir -p "$(dirname "$AIRAM_SATCOM_MARK")"
-  printf '%s' "$SATCOM_BUILD_SIG" > "$AIRAM_SATCOM_MARK"
 fi
 
 # ----------------------------------------------------------------------------
@@ -363,6 +369,9 @@ for grp in systemd-journal video; do
 done
 # sudoers: מתיר ל-airam *רק* את פקודות ה-systemctl המדויקות הדרושות (NOPASSWD), לא יותר.
 # מצב משולב: restart/stop לכל אחד מארבעת צרכני ה-SDR => מעבר קול/ACARS/VDL2/SATCOM על SDR אחד.
+# reset-failed ל-airam-satcom בלבד: היחידה היחידה עם StartLimitBurst סופי (בטיחות
+# bias-T, ר' systemd/airam-satcom.service) — _enter_satcom צריך לאפס תקרה קודמת
+# כדי שכניסה ידנית מחדש מה-UI תמיד תעבוד גם אחרי כמה קריסות רצופות.
 cat > /etc/sudoers.d/airam <<'EOF'
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart rtl_airband
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop rtl_airband
@@ -372,6 +381,7 @@ airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-vdl2
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-vdl2
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-satcom
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-satcom
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed airam-satcom
 EOF
 chmod 440 /etc/sudoers.d/airam
 visudo -cf /etc/sudoers.d/airam >/dev/null || die "קובץ sudoers לא תקין (/etc/sudoers.d/airam)."

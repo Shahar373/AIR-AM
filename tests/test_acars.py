@@ -367,9 +367,23 @@ def test_normalize_cpdlc_decoded_and_group():
     assert n["decoded"] == "CLIMB TO FL350"
 
 
+def test_normalize_cpdlc_does_not_leak_embedded_latlon_as_position():
+    """מיקום מיוחס *רק* מ-ADS-C: CPDLC (clearance) עלול לשאת נ"צ מוטבע (waypoint
+    ב-route, למשל 'PROCEED DIRECT') שאינו מיקום המטוס עצמו — לא מייחסים אותו
+    כמיקום כדי לא להטעות במפה. אותה הגנה בדיוק כבר קיימת ב-_normalize_vdl2
+    מסלול B (is_adsc); זה הפער המקביל ב-_normalize_acars המשותף (גם ל-ACARS/
+    VDL2-A "רגילים" עם arinc622, וגם ל-SATCOM דרכו)."""
+    n = app._normalize_acars({"timestamp": 1.0, "libacars": {
+        "cpdlc": {"msg": "PROCEED DIRECT", "route": {"lat": 32.1, "lon": 34.9}}}})
+    assert n["category"] == "CPDLC" and n["group"] == "clearance"
+    assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
+
+
 def test_normalize_rejects_bad_latlon():
-    assert app._normalize_acars({"timestamp": 1.0, "libacars": {"x": {"lat": 0, "lon": 0}}})["lat"] is None
-    assert app._normalize_acars({"timestamp": 1.0, "libacars": {"x": {"lat": 999, "lon": 34}}})["lat"] is None
+    # "adsc" במפתח => kind="ADS-C" (כמו label15/-16 אמיתיים), כדי שהבדיקה תעבור
+    # בפועל דרך _scan_latlon (ולא תדלג עליו בגלל הגידור ל-ADS-C בלבד, ר' #7).
+    assert app._normalize_acars({"timestamp": 1.0, "libacars": {"adsc": {"lat": 0, "lon": 0}}})["lat"] is None
+    assert app._normalize_acars({"timestamp": 1.0, "libacars": {"adsc": {"lat": 999, "lon": 34}}})["lat"] is None
 
 
 def test_normalize_position_from_text():

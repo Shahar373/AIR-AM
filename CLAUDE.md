@@ -136,6 +136,7 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_scan.py             # מצב סריקה: validate_scan_plan, _scan_loop, /api/mode, /api/scan, boot restore.
   test_roster.py           # רוסטר מטוסים מאוחד: היתוך זהות ACARS/VDL2/ADS-B, מיון, /api/aircraft.
   test_archive.py          # ארכיון חיפוש רב-יומי: _day_bounds, ?day= ב-/api/acars ו-/api/vdl2.
+  test_adsb_enrich.py      # היתוך ADS-B↔ACARS: העשרת /api/acars מ-snapshot של adsb.py (בלי רשת).
   test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
 
 .github/workflows/ci.yml   # pytest + `bash -n` על install.sh ו-airam-wait-sdrplay.
@@ -405,13 +406,19 @@ renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitAr
 1. תלויות מערכת (Python/Flask, `libglib2.0-dev` ל-dumpvdl2 וכו'). 2. **SDRplay API**
 (הורדת `.run`, חילוץ והתקנה ללא אישור רישיון ידני — `SDRPLAY_VER` בראש הקובץ).
 3. בניית `SoapySDRPlay3`. 4. בניית `rtl_airband` (4b: `libacars` ≥2.1.0 + `acarsdec`
-ל-ACARS; **4c: `dumpvdl2` ל-VDL2, נעוץ ל-`DUMPVDL2_VER=v2.6.0`, חתימת בנייה**).
-5. `Icecast2` (מאזין בלי סיסמה). 6. קונפיג התחלתי + state (6b: יצירת משתמש `airam` +
-sudoers ממוקד — **6 פקודות systemctl**: restart/stop × rtl_airband/airam-acars/airam-vdl2;
-seeding של `acars.env`+`vdl2.env`). 7. שרת הווב (7b: תמלול whisper אופציונלי,
-`INSTALL_WHISPER=1`). 8. שירותי systemd — **enabled רק `sdrplay`+`airam-web`**; אף צרכן
-SDR (כולל rtl_airband) לא enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב
-משוחזר באתחול ע"י `_boot_restore` של airam-web.
+ל-ACARS; 4c: `dumpvdl2` ל-VDL2, נעוץ ל-`DUMPVDL2_VER=v2.6.0`, חתימת בנייה; **4d:
+`inmarsat-sniffer` ל-SATCOM, נעוץ ל-commit (`SATCOM_SNIFFER_COMMIT`) — אין
+releases רשמיים לפרויקט — חתימת בנייה נכתבת *רק* כשתמיכת SDRplay אושרה בפועל
+מלוג ה-cmake, אחרת הרצה חוזרת תמיד תבנה מחדש**). 5. `Icecast2` (מאזין בלי
+סיסמה). 6. קונפיג התחלתי + state (6b: יצירת משתמש `airam` + sudoers ממוקד —
+**9 פקודות systemctl**: restart/stop × rtl_airband/airam-acars/airam-vdl2/
+airam-satcom, ועוד `reset-failed` ל-airam-satcom בלבד (מנקה תקרת-הפעלות אחרי
+קריסה — ר' §12); seeding של `acars.env`+`vdl2.env`+`satcom.env`). 7. שרת הווב
+(7b: תמלול whisper אופציונלי, `INSTALL_WHISPER=1`). 8. שירותי systemd —
+**enabled רק `sdrplay`+`airam-web`**; אף צרכן SDR (כולל rtl_airband) לא
+enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב משוחזר באתחול ע"י
+`_boot_restore` של airam-web — **חוץ מ-satcom**, שלא משוחזר אוטומטית מסיבות
+בטיחות (ר' §12).
 
 הסקריפט **בונה מחדש רק כשצריך** (חתימת בנייה פר-רכיב) ובסוף מרים את `sdrplay`
 (שמרים דרך PartOf את הצרכן *הפעיל*) ואת `airam-web` → אין reboot ואין העפה של
@@ -445,7 +452,11 @@ SDR (כולל rtl_airband) לא enabled, ובשדרוג `disable rtl_airband` א
   **אין "מצב ראשי"**: כל המצבים (כולל `off`/`scan`) **שורדים reboot** — אף צרכן לא
   enabled, `_boot_restore` של airam-web משחזר את המצב השמור באתחול (עבור `scan`:
   מוצא מחדש את הרגל הראשונה שבחלון השעות שלה — לא ממשיך מהאינדקס שבו נעצר, פשטות
-  מכוונת). **כישלון כניסה למצב ⇒ נפילה ל-`off`** (`_fail_to_off`), לעולם לא fallback
+  מכוונת). **חריג יחיד: `satcom` לא משוחזר אוטומטית** — `write_satcom_env` מדליק
+  bias-T (‎+4.7V על מחבר האנטנה) כברירת מחדל, ואחרי reboot אין בן-אדם בסביבה
+  שיוודא איזו אנטנה מחוברת כרגע; `_boot_restore` נופל בכוונה ל-`off` עם
+  `prev_mode="satcom"` (כפתור ⏻/כרטיס הבית מציעים כניסה ידנית — עם אישור אנטנה
+  מפורש, ר' `confirmSatcomAntenna` ב-`index.html`). **כישלון כניסה למצב ⇒ נפילה ל-`off`** (`_fail_to_off`), לעולם לא fallback
   לקול; חריגים: (1) רולבק *בתוך* כיוונון קול לקונפיג האחרון שעבד (retry, לא
   עליונות-מצב), וגם הוא מאומת; (2) כשל ברגל *בודדת* בסריקה מדלג לרגל הבאה — רק
   כשל של *כל* הרגלים ברצף נופל ל-off; (3) רגל מחוץ לחלון השעות שלה (`active_from`/
@@ -462,6 +473,15 @@ SDR (כולל rtl_airband) לא enabled, ובשדרוג `disable rtl_airband` א
   עצמה; ה-`satcom_freqs` ב-state הוא רשימה בת-איבר-יחיד עם דגל לוויין (geostationary,
   למשל `["AF1"]`) ולא בנק ערוצים כמו ACARS/VDL2 — `_sanitize_satellite`/
   `_satcom_window_error` מחליפים את `_sanitize_freqs`/`_window_error` עבורו.
+  **בטיחות bias-T (סיכון חומרה ייחודי ל-satcom — אין מקביל בשלושת המצבים
+  האחרים):** (1) `_boot_restore` לא נכנס אוטומטית ל-satcom (ר' למעלה); (2)
+  כל נקודת כניסה ידנית מה-UI (כרטיס הבית, כפתור ⏻, כפתור ההפעלה בתצוגת SATCOM)
+  עוברת דרך `confirmSatcomAntenna()` — דיאלוג חוסם *לפני* השליחה ל-`/api/mode`,
+  לא רק הבאנר הקבוע בתצוגה; (3) `airam-satcom.service` הוא היחיד מבין ארבעת
+  צרכני ה-SDR עם `StartLimitBurst` סופי (בניגוד ל"מתאושש לנצח" של השאר) — עוצר
+  קריסה חוזרת שהייתה מדליקה bias-T ללא פיקוח; `_enter_satcom` קורא
+  `systemctl reset-failed` (best-effort, sudoers ממוקד) לפני כל restart כדי
+  שכניסה ידנית תמיד תעבוד גם אחרי שהתקרה הופעלה.
 - **מדדי איכות קליטה — לעולם לא ממציאים ערך:** `level` (dBFS) הוא **תמיד** הערך הגולמי
   מהמפענח, בלי עיבוד. `snr` מחושב **רק** כשיש רצפת רעש אמינה בקלט (VDL2 — `dumpvdl2`
   מספק `sig_level`+`noise_level` לכל פריים); **ACARS לעולם לא מקבל SNR** כי `acarsdec`

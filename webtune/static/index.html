@@ -3658,11 +3658,27 @@
 
     // מתג התצוגות (מרכז/קול/ACARS/VDL2) — רק מחליף תצוגה; ה-SDR לא מוחלף כאן
     segInit("modeSeg", (v) => showView(v));
+    // אישור מפורש לפני הדלקת bias-T: הכניסה ל-satcom מדליקה ‎+4.7V על מחבר
+    // האנטנה מיד (write_satcom_env בברירת מחדל) — דיאלוג חוסם, לא רק הבאנר
+    // הקבוע בתצוגה, כדי לוודא שהאזהרה נראתה *לפני* הבקשה ולא רק אחריה. חל על
+    // כל נקודות הכניסה (כרטיס הבית, כפתור ⏻ בחזרה מ-standby, וכפתור ההפעלה
+    // בתוך תצוגת SATCOM עצמה) — לא רק הראשונה שנלחצת.
+    function confirmSatcomAntenna() {
+      return confirm(
+        "מצב SATCOM ידליק את ה-bias-T (+4.7V) על מחבר האנטנה.\n\n" +
+        "ודא שאנטנת ה-L-band + LNA מחוברת במקום אנטנת ה-airband (לא שתיהן יחד!) " +
+        "ומכוונת ל-Alphasat (‎~50° מעל האופק, דרום-דרום-מערב) לפני שתמשיך."
+      );
+    }
+    function enterSatcom() {
+      if (!confirmSatcomAntenna()) return;
+      applyMode("satcom", satcom.selFreqs ? { freqs: satcom.selFreqs } : undefined);
+    }
     // כרטיסי ההפעלה במסך הבית — שלושת המצבים שווי-מעמד, נקודת הכניסה הראשית
     $("homeGoVoice").onclick = () => applyMode("voice");
     $("homeGoAcars").onclick = () => applyMode("acars", acars.selFreqs ? { freqs: acars.selFreqs } : undefined);
     $("homeGoVdl2").onclick = () => applyMode("vdl2", vdl2.selFreqs ? { freqs: vdl2.selFreqs } : undefined);
-    $("homeGoSatcom").onclick = () => applyMode("satcom", satcom.selFreqs ? { freqs: satcom.selFreqs } : undefined);
+    $("homeGoSatcom").onclick = enterSatcom;
     $("homeStopBtn").onclick = () => applyMode("off");
     $("homeScanAddLeg").onclick = () => {
       if (scanLegs.length >= 8) return;
@@ -3694,6 +3710,7 @@
       else if (back === "vdl2") applyMode("vdl2", vdl2.selFreqs ? { freqs: vdl2.selFreqs } : undefined);
       else if (back === "voice") applyMode("voice");
       else if (back === "scan") applyMode("scan");   // הפלאן נשלף מהשרת (scan_plan שמור)
+      else if (back === "satcom") enterSatcom();      // כולל אישור אנטנה — ר' confirmSatcomAntenna
       else showView("home");
     };
     // כפתורי "הפעל קול" בתוך תצוגת הקול — פעולת קול מפורשת (המשתמש בטאב קול)
@@ -3711,7 +3728,7 @@
     $("vdl2StopBtn").onclick = () => applyMode("off");    // עצירה = standby, לא "חזרה לקול"
     $("vdl2TowerBtn").onclick = towerTune;
     // כפתורי בקרת SDR בסרגל SATCOM (בלי "מגדל" — צריך אנטנת airband אחרת)
-    $("satcomActivateBtn").onclick = () => applyMode("satcom", satcom.selFreqs ? { freqs: satcom.selFreqs } : undefined);
+    $("satcomActivateBtn").onclick = enterSatcom;
     $("satcomStopBtn").onclick = () => applyMode("off");    // עצירה = standby
 
     $("agc").onchange = () => { renderGainUI(); retune(); };
