@@ -7,7 +7,7 @@
 מוסכמה: כל PR מעדכן את `VERSION` ומוסיף שורות תחת `[Unreleased]`; בעת מיזוג ל-main
 מקדמים לכותרת גרסה ומתייגים את ה-commit.
 
-## [Unreleased]
+## [2.5.0] - 2026-07-31
 ### נוסף
 - **מצב `satcom` — קליטת ACARS דרך לוויין Inmarsat (L-band)**, צרכן SDR רביעי
   שווה-מעמד לצד voice/acars/vdl2. מפענח: `inmarsat-sniffer` (alphafox02) —
