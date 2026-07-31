@@ -691,6 +691,43 @@
       padding: .48rem .7rem; min-height: 36px; line-height: 1.2; }
     .acars-sdr-bar .sdr-hint { margin: .45rem 0 0; font-size: .78rem; color: var(--dim); }
 
+    /* ---------- הצעת הזנה חיצונית (מופיעה רק בבעיית אספקה) ---------- */
+    .pwr-advice { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
+      margin: .5rem 0; padding: .5rem .65rem; border-radius: var(--r-sm);
+      background: rgba(var(--amber-rgb),.12); border: 1px solid rgba(var(--amber-rgb),.4);
+      color: var(--amber-fg); font-size: .8rem; line-height: 1.45; }
+    .pwr-advice span { flex: 1; min-width: 190px; }
+    .pwr-advice button { flex: none; font-size: .78rem; padding: .35rem .6rem; min-height: 32px; }
+
+    /* ---------- מכשיר כיוון האנטנה (SATCOM) ---------- */
+    /* מדד ראשי גדול + sparkline לצידו: בכיוון אנטנה מה שחשוב הוא *המגמה*
+       (עולה/יורד תוך כדי סיבוב), לא הערך הרגעי. */
+    .aim-headline { display: flex; align-items: center; gap: var(--sp-3); }
+    /* עמודה בעלת רוחב קבוע => ה-sparkline מקבל את כל שאר הרוחב ונשאר קריא
+       כמגמה. בלי הרוחב הקבוע, תווית ה-width:100% הייתה מנפחת את העמודה. */
+    .aim-metric { flex: none; width: 5.6rem; display: flex; flex-direction: column; gap: .15rem; }
+    .aim-metric .aim-lbl { font-size: .72rem; color: var(--text-faint); letter-spacing: .04em;
+      white-space: nowrap; }
+    .aim-metric b { font-size: 1.85rem; font-variant-numeric: tabular-nums; line-height: 1;
+      color: var(--dim); transition: color .2s ease; }
+    .aim-metric.locked b { color: var(--green-fg); }
+    .aim-metric .aim-unit { font-size: .8rem; color: var(--text-faint); }
+    .aim-spark { flex: 1; min-width: 0; height: 52px; display: block; }
+    #satcomAimPanel .sdr-hint { margin: .5rem 0 0; font-size: .78rem; color: var(--dim); }
+    /* רשימת ערוצים: מונו + tabular כדי שהמספרים לא ירקדו בין רענונים (1 שנייה) */
+    .aim-chans { margin-top: .55rem; display: flex; flex-direction: column; gap: .2rem; }
+    .aim-chan { display: flex; align-items: center; gap: .5rem; direction: ltr;
+      font-size: .76rem; font-variant-numeric: tabular-nums; color: var(--dim);
+      padding: .15rem 0; }
+    .aim-chan.locked { color: var(--text); }
+    .aim-chan .ac-dot { flex: none; width: .5rem; height: .5rem; border-radius: 50%;
+      background: var(--text-faint); }
+    .aim-chan.locked .ac-dot { background: var(--green); }
+    .aim-chan .ac-id { flex: none; min-width: 2.6rem; }
+    .aim-chan .ac-baud { flex: 1; min-width: 0; color: var(--text-faint); }
+    .aim-chan .ac-eb { flex: none; min-width: 3.8rem; text-align: right; }
+    .aim-chan .ac-msgs { flex: none; min-width: 2.6rem; text-align: right; color: var(--text-faint); }
+
     /* ---------- ACARS / VDL2 — פריסת "חדר בקרה" ---------- */
     /* תצוגת דאטה = ערימת פאנלים (בקרה → רצועת סטטיסטיקה → מפה+פיד) */
     .view { display: flex; flex-direction: column; gap: var(--sp-3); }
@@ -1546,6 +1583,12 @@
           ל-100mA). דלוק: אתה מזין את ה-LNA ממקור נפרד (USB power bank + DC
           injector) — ה-RSP1B לא ידליק bias-T בכלל. ⚠ לעולם לא שני מקורות בו-זמנית.
         </p>
+        <!-- הצעה לא-חוסמת: מופיעה רק כשזוהתה בעיית אספקה *וגם* ההזנה החיצונית
+             לא מסומנת. מציעה — לא כופה (ר' renderPowerAdvice). -->
+        <div class="pwr-advice hidden" id="satcomPowerAdvice">
+          <span id="satcomPowerAdviceTxt"></span>
+          <button type="button" class="ghost" id="satcomPowerAdviceBtn">סמן הזנה חיצונית</button>
+        </div>
         <!-- סרגל בקרת SDR: מתעדכן לפי satcomActive (מצב ה-SDR האמיתי, לא הכרטיסייה) -->
         <div id="satcomSdrBar" class="acars-sdr-bar">
           <div id="satcomInactive">
@@ -1557,12 +1600,34 @@
               <button id="satcomStopBtn">⏹ עצור (Standby)</button>
             </div>
             <p class="sdr-hint">SATCOM פעיל — ה-SDR מפענח הודעות לוויין. השמע אינו זמין. ⚠ להאזנה חוזרת לתעופה — החזר את אנטנת ה-airband.</p>
-            <!-- אבחון נעילה (GET /api/satcom/health, proxy ל---web dashboard של
-                 inmarsat-sniffer) — ההבדל בין "אין אנטנה"/"לא מכוון" ל"תקין, שקט
-                 כרגע": ריק/מוסתר כש-available:false, לא רק "0 ערוצים". -->
-            <p class="sdr-hint" id="satcomLockHint"></p>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- ═══ מכשיר כיוון האנטנה ═══
+         הפאנל היחיד שנותן משוב רציף בזמן כיוון פיזי של אנטנת ה-L-band.
+         ⚠ *מחוץ* ל-#satcomActiveCtrl בכוונה — כך יש לו מקום קבוע במסך שהמשתמש
+         יודע להסתכל בו, עם הסבר מפורש כשאין נתונים, במקום להיעלם לגמרי.
+         המקור: GET /api/satcom/health (proxy ל---web dashboard של
+         inmarsat-sniffer). ‏lock = נעילת דמודולטור *גם באפס הודעות מפוענחות* —
+         זה מה שמכווננים לפיו, כי הודעה אמיתית עשויה להגיע רק פעם בדקות. -->
+    <section class="panel" id="satcomAimPanel">
+      <div class="panel-hd"><p class="ttl">🎯 כיוון אנטנה</p>
+        <div class="hd-end">
+          <span id="satcomAimPill" class="pill"><span class="dot"></span><span id="satcomAimStatus">—</span></span>
+        </div>
+      </div>
+      <div class="panel-bd">
+        <div class="aim-headline">
+          <div class="aim-metric">
+            <span class="aim-lbl">Eb/No מיטבי</span>
+            <b id="satcomAimEbno">—</b><span class="aim-unit">dB</span>
+          </div>
+          <canvas id="satcomAimSpark" class="aim-spark"></canvas>
+        </div>
+        <p class="sdr-hint" id="satcomAimHint">סובב את האנטנה לאט ועקוב אחרי הגרף — ככל שה-Eb/No גבוה יותר, הכיוון טוב יותר.</p>
+        <div class="aim-chans" id="satcomAimChans"></div>
       </div>
     </section>
 
@@ -1997,7 +2062,11 @@
     // בהיסטוריה (בניגוד ל-drawSpark של ה-SNR שסקאלתו קבועה 0..30dB), כי קצב הודעות
     // אין לו טווח טבעי ידוע מראש. x לפי histN הקבוע (לא hist.length) => הקו גדל
     // משמאל החוצה בתחילת הטעינה במקום להימתח על פני כל הרוחב מדגימה אחת.
-    function drawMiniSpark(cv, hist, histN, color) {
+    // fixedMax (אופציונלי): סקאלה קבועה במקום אוטומטית. חיוני לכיוון אנטנה —
+    // סקאלה אוטומטית *מטעה* שם, כי רעש זעיר סביב אפס נמתח לכל גובה הגרף ונראה
+    // כמו אות חזק. הקוראים הקיימים (rate-spark של ACARS/VDL2) לא מעבירים אותו
+    // ומקבלים את ההתנהגות האוטומטית כמקודם — לקצב הודעות אין טווח טבעי ידוע.
+    function drawMiniSpark(cv, hist, histN, color, fixedMax) {
       if (!cv) return;
       const dpr = window.devicePixelRatio || 1;
       const w = cv.clientWidth, h = cv.clientHeight;
@@ -2007,9 +2076,10 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
       if (hist.length < 2) return;
-      const max = Math.max(1, ...hist);   // לפחות 1 => לא מתחלקים ב-0 כשהכול שקט
+      const max = fixedMax || Math.max(1, ...hist);   // לפחות 1 => לא מתחלקים ב-0 כשהכול שקט
       const col = color || "#4da3ff";
-      const pts = hist.map((v, i) => [(i / (histN - 1)) * w, h - (v / max) * (h - 3) - 1.5]);
+      const pts = hist.map((v, i) => [(i / (histN - 1)) * w,
+        h - Math.max(0, Math.min(max, v)) / max * (h - 3) - 1.5]);
       // אותו מילוי-שטח עדין כמו ב-drawSpark (עקביות ויזואלית בין הגרפים)
       const grad = ctx.createLinearGradient(0, 0, 0, h);
       grad.addColorStop(0, col + "3d");   // ‎~24% שקיפות (hex 8 ספרות)
@@ -2089,32 +2159,107 @@
        proxy מקומי ל---web dashboard המובנה של inmarsat-sniffer — lock=נעילת
        דמודולטור *גם* באפס הודעות מפוענחות, ההבדל בין "אין אנטנה"/"לא מכוון"
        ל"תקין, שקט כרגע". ריק/מוסתר כש-available:false — לא ממציאים "0 ערוצים". */
+    // ── מכשיר כיוון האנטנה ──
+    // סמנטיקה מאומתת מהמקור של inmarsat-sniffer (commit 2827b3a0):
+    //   main.c:88-89  ebno — "Eb/No in dB: higher = better"; mse — "lower = better, 0-1"
+    //   main.c:104    ⚠ כשאין דמודולטור פעיל ברירות המחדל הן mse=1.0, ebno=0 —
+    //                 כלומר ebno=0 *אינו בהכרח מדידה*, זו גם חתימת "אין דמוד".
+    //   web.c:680-681 ה-UI של הכלי עצמו צובע לפי *פעילות*, לא לפי סף מספרי.
+    // => אנחנו צובעים לפי lock (עובדה בינארית מהדמוד) ולא ממציאים סף ebno,
+    //    ומציגים "—" בחתימת ה"אין דמוד" במקום "0.0 dB" (§12: לא ממציאים ערך).
+    const AIM_HIST_N = 60;          // 60 דגימות × 1 שנייה = דקה אחורה
+    const AIM_SCALE_DB = 15;        // סקאלת הגרף בלבד (תצוגה) — לא טענה על סף איכות
+    const aimHist = [];
+    let satcomHealthInFlight = false;   // כמו metricsInFlight — לא לערום בקשות בקצב 1s
+
+    function fmtBaud(b) {   // אותו פורמט כמו ה-dashboard של הכלי (web.c:682)
+      return b >= 8400 ? (b / 1000) + "k OQPSK" : b + " MSK";
+    }
+    // חתימת "אין דמודולטור פעיל" (main.c:104) — לא ניתנת להבחנה ממדידה אמיתית
+    const aimNoDemod = (c) => !c.lock && c.ebno === 0 && c.mse >= 1.0;
+
+    function renderAimIdle(txt) {
+      $("satcomAimPill").className = "pill";
+      $("satcomAimStatus").textContent = "לא זמין";
+      $("satcomAimEbno").textContent = "—";
+      $("satcomAimChans").innerHTML = "";
+      $("satcomAimHint").textContent = txt;
+      $("satcomAimEbno").parentElement.classList.remove("locked");
+      aimHist.length = 0;
+      drawMiniSpark($("satcomAimSpark"), aimHist, AIM_HIST_N, "#5fce85", AIM_SCALE_DB);
+    }
+
     async function pollSatcomHealth() {
-      const el = $("satcomLockHint");
+      if (satcomHealthInFlight) return;
+      satcomHealthInFlight = true;
       try {
         const h = await (await fetch("/api/satcom/health")).json();
-        if (!h.ok || !h.available || !h.channels_total) { el.textContent = ""; return; }
-        el.textContent = "מפענח: נעולים " + h.channels_locked + "/" + h.channels_total + " ערוצים" +
-          (h.total_acars != null ? " · " + h.total_acars + " הודעות סה\"כ" : "");
-      } catch (e) { el.textContent = ""; }
+        if (!h.ok || !h.available) {
+          renderAimIdle(satcom && satcom.active
+            ? "לוח האבחון של המפענח לא זמין — בדוק ‎journalctl -u airam-satcom"
+            : "הפעל את SATCOM כדי לראות נעילת מפענח ועוצמת אות.");
+          return;
+        }
+        const chans = h.channels || [];
+        if (!chans.length) { renderAimIdle("המפענח פעיל אך לא דיווח על ערוצים."); return; }
+
+        // האות שמכווננים לפיו: המיטב מבין הערוצים (זה מה שממקסמים בסיבוב האנטנה).
+        // מתעלמים מערוצים בחתימת "אין דמוד" כדי שלא ימשכו את המדד ל-0 באופן שקרי.
+        const real = chans.filter((c) => !aimNoDemod(c));
+        const best = real.length ? Math.max(...real.map((c) => c.ebno)) : null;
+        const locked = h.channels_locked || 0;
+
+        aimHist.push(best == null ? 0 : best);
+        if (aimHist.length > AIM_HIST_N) aimHist.shift();
+
+        $("satcomAimEbno").textContent = best == null ? "—" : best.toFixed(1);
+        $("satcomAimEbno").parentElement.classList.toggle("locked", locked > 0);
+        $("satcomAimPill").className = "pill" + (locked > 0 ? " live" : "");
+        $("satcomAimStatus").textContent = "נעולים " + locked + "/" + h.channels_total;
+        $("satcomAimHint").textContent = locked > 0
+          ? "נעילה! סובב לאט עוד קצת כדי למקסם את ה-Eb/No, ואז קבע את האנטנה."
+          : "עדיין אין נעילה — סובב את האנטנה לאט ועקוב אחרי הגרף.";
+        drawMiniSpark($("satcomAimSpark"), aimHist, AIM_HIST_N, "#5fce85", AIM_SCALE_DB);
+
+        $("satcomAimChans").innerHTML = chans.map((c) => {
+          const nd = aimNoDemod(c);
+          return '<div class="aim-chan' + (c.lock ? " locked" : "") + '">' +
+            '<span class="ac-dot"></span>' +
+            '<span class="ac-id">ch' + c.ch + '</span>' +
+            '<span class="ac-baud">' + fmtBaud(c.baud) + '</span>' +
+            '<span class="ac-eb">' + (nd ? "—" : c.ebno.toFixed(1) + " dB") + '</span>' +
+            '<span class="ac-msgs">' + (c.msgs > 0 ? c.msgs : "—") + '</span>' +
+            '</div>';
+        }).join("");
+      } catch (e) {
+        renderAimIdle("אין תשובה מה-Pi.");
+      } finally { satcomHealthInFlight = false; }
     }
-    setInterval(() => { if (!document.hidden && appMode === "satcom") pollSatcomHealth(); }, 5000);
+    // קצב 1 שנייה (ולא 5) — כיוון אנטנה דורש משוב כמעט-מיידי, כמו מדדי ה-RF
+    // של הקול. רץ רק בתצוגת satcom וכשהדף גלוי, וה-in-flight guard מונע ערימה.
+    setInterval(() => { if (!document.hidden && appMode === "satcom") pollSatcomHealth(); }, 1000);
 
     /* ---------- חיווי מתח ל-Pi ---------- */
     // המתח משתנה לאט => פולינג כל 5 שניות. החיווי החשוב ביותר לסוללה ניידת הוא
     // דגל ה-undervoltage (vcgencmd get_throttled) שעובד בכל דגם Pi; מתח 5V בפועל
     // זמין רק ב-Pi 5. כשאין vcgencmd (לא Pi) ה-API מחזיר ok:false והחיווי מוסתר.
+    // הקריאה האחרונה נשמרת כדי שנקודות אחרות (אזהרת SATCOM, שורת ההצעה) יוכלו
+    // להתייחס למתח בלי בקשה נוספת — הפולר הזה ממילא רץ בכל התצוגות.
+    let lastPower = null;
+    let powerFails = 0;
     async function pollPower() {
+      const chip = $("pwrChip");
       try {
         const p = await (await fetch("/api/power")).json();
-        const chip = $("pwrChip");
-        if (!p.ok) { chip.className = "pwr hidden"; return; }
+        powerFails = 0;
+        if (!p.ok) { lastPower = null; chip.className = "pwr hidden"; return; }
+        lastPower = p;
         const v = (p.volts_in != null) ? p.volts_in.toFixed(2) + "V" : null;
         const t = (p.temp != null) ? " · " + p.temp.toFixed(0) + "°C" : "";
         let cls, txt;
         if (p.undervolt_now || p.throttle_now) {
           cls = "bad";
-          txt = "⚠️ מתח נמוך! האספקה חלשה מדי" + (v ? " (" + v + ")" : "");
+          txt = "⚠️ מתח נמוך! האספקה חלשה מדי" + (v ? " (" + v + ")" : "") + t;
         } else if (p.undervolt_ever || p.throttle_ever) {
           cls = "warn";
           txt = "מתח צנח בעבר — בדוק אספקה" + (v ? " · כעת " + v : "") + t;
@@ -2124,7 +2269,23 @@
         }
         chip.className = "pwr " + cls;
         $("pwrText").textContent = txt;
-      } catch (e) { /* משאירים מצב קודם */ }
+        renderPowerAdvice();
+      } catch (e) {
+        // ⚠ בלי זה הצ'יפ היה נתקע על "מתח תקין" לנצח אחרי שהשרת נפל — מטעה
+        // במיוחד בשטח, שם דווקא נפילת מתח היא הסיבה הסבירה לכך שהשרת לא עונה.
+        if (++powerFails >= 2) {
+          lastPower = null;
+          chip.className = "pwr warn";
+          $("pwrText").textContent = "מצב המתח לא ידוע — אין תשובה מה-Pi";
+          renderPowerAdvice();
+        }
+      }
+    }
+    // האם זוהתה בעיית אספקה כלשהי (עכשווית או מאז האתחול)? משמש גם את דיאלוג
+    // האישור של SATCOM וגם את שורת ההצעה — מקור-אמת יחיד.
+    function powerTrouble() {
+      return !!(lastPower && (lastPower.undervolt_now || lastPower.throttle_now ||
+                              lastPower.undervolt_ever || lastPower.throttle_ever));
     }
     // צ'יפ המתח ברצועת הסטטוס גלובלי (לא של קול) => נמשך בכל תצוגה
     setInterval(() => { if (!document.hidden) pollPower(); }, 5000);
@@ -2490,6 +2651,9 @@
       if (mode === "acars") acars.show(); else acars.hide();   // תצוגת ACARS מנוהלת בפקטורי (כמו VDL2/SATCOM)
       if (mode === "vdl2") vdl2.show(); else vdl2.hide();
       if (mode === "satcom") satcom.show(); else satcom.hide();
+      // רענון מיידי של מכשיר הכיוון — בלי זה הפאנל ריק עד לטיק הבא (שנייה),
+      // ובכניסה חוזרת מוצגים נתונים ישנים לרגע. גם מיישר את שורת ההצעה.
+      if (mode === "satcom") { pollSatcomHealth(); renderPowerAdvice(); }
     }
 
     async function applyMode(mode, extra) {
@@ -2572,7 +2736,10 @@
           sdrOff = false;
           acars.setActive(false); vdl2.setActive(false);   // ה-SDR עבר ל-SATCOM
           if (data.satcom_freqs) { satcom.setSelFreqs(data.satcom_freqs); satcom.renderFreqs(data.satcom_freqs); satcom.renderBanks(); }
-          if (typeof data.satcom_bias_tee === "boolean") $("satcomExternalLna").checked = !data.satcom_bias_tee;
+          if (typeof data.satcom_bias_tee === "boolean") {
+            $("satcomExternalLna").checked = !data.satcom_bias_tee;
+            renderPowerAdvice();   // קביעה תוכניתית לא מפעילה onchange
+          }
           satcom.setActive(true);
           renderPower();
           satcom.poll();                       // רענון מיידי אחרי ש-inmarsat-sniffer עלה
@@ -3708,10 +3875,21 @@
     // כל נקודות הכניסה (כרטיס הבית, כפתור ⏻ בחזרה מ-standby, וכפתור ההפעלה
     // בתוך תצוגת SATCOM עצמה) — לא רק הראשונה שנלחצת.
     function confirmSatcomAntenna() {
+      const ext = $("satcomExternalLna").checked;
+      // אזהרת מתח: מוקדמת לטקסט כי היא הסיבה המתועדת לכיבוי מלא של ה-Pi בכניסה
+      // ל-SATCOM (bias-T + זינוק CPU של inmarsat-sniffer על ספק שולי). מוצגת רק
+      // כשבאמת נמדדה בעיה — לא אזהרה גורפת שמאבדת משמעות. אינה חוסמת.
+      let pwr = "";
+      if (powerTrouble()) {
+        pwr = "⚠️ זוהתה בעיית אספקת מתח ב-Pi.\n" +
+              "הפעלת SATCOM מעלה את הצריכה ועלולה לכבות אותו לגמרי" +
+              (ext ? ".\n\n" : " — מומלץ לסמן \"הזנת LNA חיצונית\" לפני שתמשיך.\n\n");
+      }
       // הזנת LNA חיצונית (checkbox מסומן) => bias-T של ה-RSP1B *לא* ידלק —
       // אזהרה שונה, לא "ידליק bias-T" (זה היה משקר). ר' satcomExternalLna.
-      if ($("satcomExternalLna").checked) {
+      if (ext) {
         return confirm(
+          pwr +
           "מצב SATCOM (הזנת LNA חיצונית) — ה-bias-T של ה-RSP1B יישאר כבוי.\n\n" +
           "ודא שמקור המתח החיצוני ל-LNA כבר דלוק, ושאנטנת ה-L-band + LNA מחוברת " +
           "במקום אנטנת ה-airband (לא שתיהן יחד!) ומכוונת ל-Alphasat " +
@@ -3719,11 +3897,31 @@
         );
       }
       return confirm(
+        pwr +
         "מצב SATCOM ידליק את ה-bias-T (+4.7V) על מחבר האנטנה.\n\n" +
         "ודא שאנטנת ה-L-band + LNA מחוברת במקום אנטנת ה-airband (לא שתיהן יחד!) " +
         "ומכוונת ל-Alphasat (‎~50° מעל האופק, דרום-דרום-מערב) לפני שתמשיך."
       );
     }
+    // שורת ההצעה: רק כשיש בעיית אספקה *וגם* ההזנה החיצונית לא מסומנת — ברגע
+    // שהמשתמש מסמן, ההצעה נעלמת (היא מוצתה). מציעה, לא כופה: הכפתור מסמן את
+    // ה-checkbox הקיים ותו לא, וההחלטה להפעיל נשארת של המשתמש.
+    function renderPowerAdvice() {
+      const row = $("satcomPowerAdvice");
+      if (!row) return;
+      const show = powerTrouble() && !$("satcomExternalLna").checked;
+      row.classList.toggle("hidden", !show);
+      if (show) {
+        $("satcomPowerAdviceTxt").textContent =
+          "⚠️ זוהתה בעיית אספקת מתח. ה-bias-T מוסיף עומס ועלול לכבות את ה-Pi — " +
+          "עדיף להזין את ה-LNA ממקור חיצוני.";
+      }
+    }
+    $("satcomPowerAdviceBtn").onclick = () => {
+      $("satcomExternalLna").checked = true;
+      renderPowerAdvice();
+    };
+    $("satcomExternalLna").onchange = renderPowerAdvice;
     function enterSatcom() {
       if (!confirmSatcomAntenna()) return;
       const extra = { bias_tee: !$("satcomExternalLna").checked };
@@ -3890,6 +4088,7 @@
       // מ-standby) בלי לעבור דרך התצוגה כלל. בלי זה, checkbox לא-מאותחל היה
       // שולח בשקט bias_tee=true (מדליק bias-T) גם למשתמש שבחר הזנה חיצונית.
       $("satcomExternalLna").checked = st.satcom_bias_tee === false;
+      renderPowerAdvice();         // קביעה תוכניתית לא מפעילה onchange
       // app_mode מגיע מהמציאות (השירות הפעיל), ובאין צרכן — מהכוונה השמורה
       // (mode_ok=false אומר שהמצב השמור אמור לרוץ אבל לא רץ). נוחתים בתצוגת
       // המצב הפעיל; off/תקלה נוחתים במסך הבית (התצוגה הניטרלית).

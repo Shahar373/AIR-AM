@@ -33,6 +33,25 @@ def client(paths):
     return app.app.test_client()
 
 
+@pytest.fixture(autouse=True)
+def _clean_power_cache():
+    """‏/api/power מוגש מ-cache גלובלי בן 2 שניות (מכווץ 3 תהליכי vcgencmd × כל
+    טאב). בלי איפוס, בדיקה שמחליפה את _vcgencmd הייתה מקבלת את התשובה של
+    הבדיקה הקודמת — לכן מאפסים לפני *ואחרי* כל בדיקה בקובץ."""
+    app._reset_power_cache()
+    yield
+    app._reset_power_cache()
+
+
+@pytest.fixture(autouse=True)
+def _clean_state_corrupt_flag():
+    """‏load_state מזהיר על state.json פגום פעם אחת לאירוע (flag גלובלי) —
+    בלי איפוס, בדיקה שמשאירה state פגום הייתה מדכאת בשקט את אזהרת הבדיקה הבאה."""
+    app._reset_state_corrupt_warned()
+    yield
+    app._reset_state_corrupt_warned()
+
+
 @pytest.fixture
 def no_sleep(monkeypatch):
     monkeypatch.setattr(app.time, "sleep", lambda *a, **k: None)
@@ -88,6 +107,42 @@ def test_load_state_defaults_and_merge(paths):
     assert st["mod"] == app.DEFAULT_STATE["mod"]          # מפתחות חסרים מושלמים
     app.STATE_PATH.write_text("{corrupt")
     assert app.load_state() == app.DEFAULT_STATE          # קובץ פגום => ברירת מחדל
+
+
+def test_load_state_missing_file_no_warning_logged(paths, caplog):
+    """קובץ חסר = התקנה טרייה (לא אירוע) — בניגוד ל-JSON פגום, אסור שיילוג
+    אזהרה או ייכתב עותק .corrupt."""
+    assert not app.STATE_PATH.exists()
+    with caplog.at_level("WARNING", logger="airam"):
+        assert app.load_state() == app.DEFAULT_STATE
+    assert caplog.records == []
+    assert not app.STATE_PATH.with_suffix(".json.corrupt").exists()
+
+
+def test_load_state_corrupt_warns_and_saves_copy_once_per_incident(paths, caplog):
+    """load_state נקרא מראוטים רבים כולל כאלה שב-polling תכוף (/api/metrics) —
+    בלי flag חד-פעמי, state.json פגום יחיד היה מייצר לוג-ספאם וכתיבת .corrupt
+    חוזרת *בכל קריאה*, לא רק פעם אחת לאירוע (כפי שה-docstring של load_state
+    מבטיחה)."""
+    app.STATE_PATH.write_text("{corrupt")
+    corrupt_copy = app.STATE_PATH.with_suffix(".json.corrupt")
+    with caplog.at_level("WARNING", logger="airam"):
+        for _ in range(3):
+            assert app.load_state() == app.DEFAULT_STATE
+    warnings = [r for r in caplog.records if "state.json פגום" in r.message]
+    assert len(warnings) == 1                      # לא 3 — פעם אחת לאירוע
+    assert corrupt_copy.read_text() == "{corrupt"
+
+    # התאוששות: רק *קריאה* תקינה מאפסת את ה-flag (לא עצם הכתיבה) => אירוע
+    # פגימה *עתידי* עדיין יתועד
+    app.save_state(dict(app.DEFAULT_STATE))
+    assert app.load_state() == app.DEFAULT_STATE
+    caplog.clear()
+    app.STATE_PATH.write_text("{corrupt again")
+    with caplog.at_level("WARNING", logger="airam"):
+        app.load_state()
+    warnings2 = [r for r in caplog.records if "state.json פגום" in r.message]
+    assert len(warnings2) == 1
 
 
 # --- פרסור stats (פורמט Prometheus של rtl_airband) ---------------------------
@@ -266,6 +321,75 @@ def test_atomic_write_concurrent_threads_dont_corrupt_file(paths):
     assert list(paths.glob("concurrent.json.tmp*")) == []
 
 
+def test_atomic_write_fsyncs_file_and_directory(paths, monkeypatch):
+    """‏fsync (לא רק flush+rename) הוא מה שהופך את הכתיבה לעמידה בניתוק חשמל
+    פתאומי (תרחיש אמיתי בהפעלה מסוללה) — לא רק אטומית מול קוראים מקבילים.
+    בלעדיו הנתונים יכולים לשבת ב-page cache בלבד ולהיעלם בכיבוי בלתי-צפוי."""
+    fsync_calls = []
+    real_fsync = os.fsync
+
+    def spy_fsync(fd):
+        fsync_calls.append(fd)
+        return real_fsync(fd)
+    monkeypatch.setattr(app.os, "fsync", spy_fsync)
+
+    target = paths / "durable.json"
+    app._atomic_write(target, "content")
+
+    assert target.read_text() == "content"
+    assert len(fsync_calls) == 2      # ה-tmp file וגם ה-fd של התיקייה
+    assert list(paths.glob("durable.json.tmp*")) == []
+
+
+def test_cleanup_orphan_tmp_removes_only_old_matching_files(paths):
+    """ניקוי tmp יתומים חייב להיות זהיר: ישן+תואם-תבנית נמחק, אבל קובץ טרי
+    (כתיבה חיה אפשרית) וקובץ שלא תואם את התבנית המדויקת נשארים."""
+    old = time.time() - app._TMP_ORPHAN_AGE_SEC - 10
+
+    old_orphan = paths / "state.json.tmp111-1"
+    old_orphan.write_text("x")
+    os.utime(old_orphan, (old, old))
+
+    fresh_orphan = paths / "state.json.tmp222-2"
+    fresh_orphan.write_text("x")           # לא ישן => עלול להיות כתיבה חיה
+
+    unrelated = paths / "state.json.bak"   # לא תואם את *.tmp*
+    unrelated.write_text("x")
+    os.utime(unrelated, (old, old))
+
+    removed = app._cleanup_orphan_tmp(dirs=[paths])
+
+    assert removed == 1
+    assert not old_orphan.exists()
+    assert fresh_orphan.exists()
+    assert unrelated.exists()
+
+
+def test_cleanup_orphan_tmp_default_dirs_cover_etc_airam_and_recordings(paths, monkeypatch):
+    """‏_atomic_write נכתב גם על ACARS/VDL2/SATCOM env (תחת /etc/airam) ועל
+    קבצי תמלול תחת REC_DIR (_transcript_path) — לא רק STATE_PATH/CONFIG_PATH.
+    ברירת המחדל של dirs חייבת לכסות את כל היעדים האמיתיים, אחרת tmp יתום
+    ב-/etc/airam או ב-REC_DIR לעולם לא ינוקה."""
+    etc_airam = paths / "etc_airam"
+    etc_airam.mkdir()
+    monkeypatch.setattr(app, "ACARS_ENV_PATH", etc_airam / "acars.env")
+
+    old = time.time() - app._TMP_ORPHAN_AGE_SEC - 10
+    state_orphan = app.STATE_PATH.parent / "state.json.tmp10-1"
+    env_orphan = etc_airam / "acars.env.tmp20-1"
+    rec_orphan = app.REC_DIR / "airam_x.mp3.txt.tmp30-1"
+    for p in (state_orphan, env_orphan, rec_orphan):
+        p.write_text("x")
+        os.utime(p, (old, old))
+
+    removed = app._cleanup_orphan_tmp()      # ברירת המחדל, לא dirs מפורש
+
+    assert removed == 3
+    assert not state_orphan.exists()
+    assert not env_orphan.exists()
+    assert not rec_orphan.exists()
+
+
 # --- יומן שידורים והקלטות -----------------------------------------------------
 
 def _mk_rec(paths, name, size=6000, age=60):
@@ -440,6 +564,24 @@ def test_api_power_ok_clean_flags(client, monkeypatch):
     assert not any(p[k] for k in ("undervolt_now", "undervolt_ever",
                                   "throttle_now", "throttle_ever"))
     assert p["volts_in"] is None   # אין pmic (לא Pi 5)
+
+
+def test_api_power_cache_avoids_repeat_vcgencmd_calls(client, monkeypatch):
+    """‏pollPower רץ כל 5 שניות בכל טאב פתוח; בלי cache, N טאבים = 3N תהליכי
+    vcgencmd כל 5 שניות. TTL של _POWER_TTL שניות אמור לכווץ שתי קריאות
+    רצופות (בטווח ה-TTL) לדגימת vcgencmd אחת בפועל."""
+    calls = []
+
+    def fake_vc(*args):
+        calls.append(args[0])
+        return "throttled=0x0" if args[0] == "get_throttled" else None
+    monkeypatch.setattr(app, "_vcgencmd", fake_vc)
+
+    p1 = client.get("/api/power").get_json()
+    p2 = client.get("/api/power").get_json()
+
+    assert p1 == p2 and p1["ok"] is True
+    assert calls == ["get_throttled", "pmic_read_adc", "measure_temp"]   # לא כפול
 
 
 # --- PWA root assets ----------------------------------------------------------

@@ -440,23 +440,109 @@ def _atomic_write(path, text):
     """כתיבה אטומית (tmp + rename): rtl_airband יכול לעלות בכל רגע
     (Restart=always / udev) ואסור שיקרא קובץ חצי-כתוב. tmp ייחודי לפר-thread
     (pid+ident) => שתי בקשות מקבילות (PUT /api/presets וכו') לא דורסות זו את
-    קובץ ה-tmp של זו; ה-rename האחרון פשוט מנצח (last-write-wins), בלי קובץ פגום."""
+    קובץ ה-tmp של זו; ה-rename האחרון פשוט מנצח (last-write-wins), בלי קובץ פגום.
+    ⚠ ‏fsync (על הקובץ *ועל התיקייה*) הוא מה שהופך את זה גם לעמיד-בניתוק-חשמל,
+    לא רק אטומי-מול-קוראים: בלעדיו הנתונים יכולים לשבת ב-page cache ולהיעלם
+    בכיבוי פתאומי (תרחיש אמיתי בהפעלה מסוללה — ר' README, אזהרת ספק כוח).
+    ה-fsync על התיקייה נדרש כי בלעדיו ה-rename עצמו לא בהכרח שרד."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f"{path.suffix}.tmp{os.getpid()}-{threading.get_ident()}")
-    tmp.write_text(text)
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
+    # התיקייה עצמה: best-effort — כשל כאן לא שווה הפלת הכתיבה שכבר הצליחה
+    try:
+        dfd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        pass
+
+
+# תבנית קובצי ה-tmp של _atomic_write (‎<שם>.<סיומת>.tmp<pid>-<tid>) — לניקוי
+# יתומים בעלייה. ניתוק חשמל *בין* הכתיבה ל-rename משאיר קובץ כזה מאחור.
+_TMP_GLOB = "*.tmp*"
+_TMP_ORPHAN_AGE_SEC = 3600     # שעה: זהיר בהרבה ממשך כתיבה אמיתי (מילישניות)
+
+
+def _cleanup_orphan_tmp(dirs=None):
+    """מוחק קובצי tmp יתומים שנשארו מכתיבה שנקטעה (ניתוק חשמל באמצע
+    _atomic_write). ⚠ נקרא *רק בעלייה* ורק על קבצים ישנים מ-_TMP_ORPHAN_AGE_SEC:
+    ה-pid בשם חוזר על עצמו במערכת, ולכן אי אפשר להסיק ממנו בבטחה שהתהליך מת —
+    מחיקת tmp של כתיבה *חיה* תפיל אותה. מחזיר את מספר הקבצים שנמחקו (ללוג)."""
+    removed = 0
+    now = time.time()
+    default_dirs = (STATE_PATH.parent, CONFIG_PATH.parent, ACARS_ENV_PATH.parent, REC_DIR)
+    for d in (dirs if dirs is not None else default_dirs):
+        try:
+            candidates = list(Path(d).glob(_TMP_GLOB))
+        except OSError:
+            continue
+        for p in candidates:
+            try:
+                if now - p.stat().st_mtime < _TMP_ORPHAN_AGE_SEC:
+                    continue          # יכול להיות כתיבה חיה של מופע אחר
+                p.unlink()
+                removed += 1
+            except OSError:
+                continue              # נמחק בינתיים / אין הרשאה — לא מעניין
+    return removed
 
 
 def write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT):
     _atomic_write(CONFIG_PATH, render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr))
 
 
+_state_corrupt_warned = False   # חד-פעמי לאירוע פגימה, לא לכל קריאה — ר' load_state
+
+
 def load_state():
+    """קורא את המצב השמור, ממוזג על ברירות המחדל (שדות חדשים בשדרוג נכנסים לבד).
+    ⚠ מבחין בין *קובץ חסר* (תקין לגמרי — התקנה טרייה) לבין *קובץ פגום*: פגימות
+    מתרחשת בעיקר בכיבוי פתאומי (ר' _atomic_write), ובלי לוג המשתמש היה מאבד
+    תדר/gain/בנקים/satcom_bias_tee/scan_plan בשקט מוחלט ונוחת בברירות מחדל בלי
+    להבין למה. שומרים עותק .corrupt לאבחון. ⚠ הלוג+הכתיבה חד-פעמיים לאירוע פגימה
+    (flag גלובלי, מתאפס בקריאה תקינה הבאה) ולא לכל קריאה — הפונקציה נקראת גם
+    מראוטים בתדירות גבוהה (כולל /api/metrics ב-polling), ובלי ה-flag קובץ פגום
+    יחיד היה מייצר ספאם ללוג ודריסה חוזרת של .corrupt בכל בקשה."""
+    global _state_corrupt_warned
     try:
-        st = json.loads(STATE_PATH.read_text())
-        return {**DEFAULT_STATE, **st}
-    except Exception:
+        raw = STATE_PATH.read_text()
+    except FileNotFoundError:
+        return dict(DEFAULT_STATE)         # התקנה טרייה — לא אירוע
+    except OSError as e:
+        log.warning("קריאת state נכשלה (%s) — ברירות מחדל", e)
         return dict(DEFAULT_STATE)
+    try:
+        st = json.loads(raw)
+    except ValueError as e:
+        if not _state_corrupt_warned:
+            log.warning("state.json פגום (%s) — נופלים לברירות מחדל; עותק נשמר ב-%s.corrupt",
+                        e, STATE_PATH.name)
+            try:
+                STATE_PATH.with_suffix(STATE_PATH.suffix + ".corrupt").write_text(raw)
+            except OSError:
+                pass                       # אבחון בלבד — לא שווה להיכשל בגללו
+            _state_corrupt_warned = True
+        return dict(DEFAULT_STATE)
+    if not isinstance(st, dict):           # JSON תקין אך לא אובייקט (למשל "null")
+        if not _state_corrupt_warned:
+            log.warning("state.json אינו אובייקט (%s) — ברירות מחדל", type(st).__name__)
+            _state_corrupt_warned = True
+        return dict(DEFAULT_STATE)
+    _state_corrupt_warned = False          # התאוששנו — אירוע פגימה עתידי יתועד שוב
+    return {**DEFAULT_STATE, **st}
+
+
+def _reset_state_corrupt_warned():
+    """מאפס את ה-flag. נחוץ לבדיקות (מצב גלובלי דולף בין בדיקות שמשאירות
+    state.json פגום — בלי איפוס, בדיקה הבאה שמצפה ללוג הייתה מדוכאת בשקט)."""
+    global _state_corrupt_warned
+    _state_corrupt_warned = False
 
 
 def save_state(st):
@@ -2725,17 +2811,27 @@ def _vcgencmd(*args):
         return None
 
 
-@app.route("/api/power")
-def api_power():
-    """מצב אספקת המתח ל-Pi (שימושי במיוחד עם סוללה ניידת):
-      get_throttled  -> דגלי undervoltage/throttling (כל דגמי Pi)
-      pmic_read_adc  -> מתח כניסה 5V בפועל (Pi 5 בלבד)
-      measure_temp   -> טמפ' ליבה
-    ביטים של get_throttled: 0=under-volt עכשיו · 2=throttled עכשיו ·
-    16=under-volt קרה מאז אתחול · 18=throttling קרה."""
+# cache קצר ל-/api/power: כל בקשה מריצה *שלושה* תהליכי vcgencmd, וה-UI מושך כל
+# 5 שניות **בכל טאב פתוח** => עם N טאבים, 3N תהליכים כל 5 שניות. במצב סוללה זה
+# בזבוז ממשי. TTL קצר מספיק כדי שהחיווי יישאר חי (הוא ממילא נדגם כל 5ש').
+_POWER_TTL = 2.0
+_power_cache = {"at": 0.0, "payload": None}
+_POWER_LOCK = threading.Lock()
+
+
+def _reset_power_cache():
+    """מאפס את ה-cache. נחוץ לבדיקות (מצב גלובלי דולף בין בדיקות שמחליפות את
+    _vcgencmd), ומשמש גם כנקודת-איפוס מפורשת אם יידרש בעתיד."""
+    with _POWER_LOCK:
+        _power_cache["at"], _power_cache["payload"] = 0.0, None
+
+
+def _read_power():
+    """קורא את מצב האספקה מ-vcgencmd. מחזיר dict (ה-payload של /api/power) או
+    None כשאין vcgencmd (לא Pi). מופרד מה-route כדי שיהיה ניתן ל-cache ולבדיקה."""
     out = _vcgencmd("get_throttled")
     if out is None:
-        return jsonify(ok=False)   # אין vcgencmd (לא Pi / חסר) => הממשק מסתיר את החיווי
+        return None                # אין vcgencmd (לא Pi / חסר) => הממשק מסתיר את החיווי
 
     flags = 0
     m = re.search(r"0x([0-9a-fA-F]+)", out)
@@ -2754,12 +2850,33 @@ def api_power():
     if mt:
         temp = round(float(mt.group(1)), 1)
 
-    return jsonify(ok=True, throttled=hex(flags),
-                   undervolt_now=bool(flags & 0x1),
-                   throttle_now=bool(flags & 0x4),
-                   undervolt_ever=bool(flags & 0x10000),
-                   throttle_ever=bool(flags & 0x40000),
-                   volts_in=volts_in, temp=temp)
+    return {"ok": True, "throttled": hex(flags),
+            "undervolt_now": bool(flags & 0x1),
+            "throttle_now": bool(flags & 0x4),
+            "undervolt_ever": bool(flags & 0x10000),
+            "throttle_ever": bool(flags & 0x40000),
+            "volts_in": volts_in, "temp": temp}
+
+
+@app.route("/api/power")
+def api_power():
+    """מצב אספקת המתח ל-Pi (שימושי במיוחד עם סוללה ניידת):
+      get_throttled  -> דגלי undervoltage/throttling (כל דגמי Pi)
+      pmic_read_adc  -> מתח כניסה 5V בפועל (Pi 5 בלבד)
+      measure_temp   -> טמפ' ליבה
+    ביטים של get_throttled: 0=under-volt עכשיו · 2=throttled עכשיו ·
+    16=under-volt קרה מאז אתחול · 18=throttling קרה.
+    מוגש מ-cache בן _POWER_TTL שניות (ר' שם) — מכווץ טאבים מקבילים לדגימה אחת."""
+    now = time.time()
+    with _POWER_LOCK:
+        if _power_cache["payload"] is not None and now - _power_cache["at"] < _POWER_TTL:
+            cached = _power_cache["payload"]
+        else:
+            cached = _read_power()
+            _power_cache["at"], _power_cache["payload"] = now, cached
+    if cached is None:
+        return jsonify(ok=False)
+    return jsonify(**cached)
 
 
 def _parse_tune(data):
@@ -3381,6 +3498,11 @@ def _boot_restore():
 
 
 if __name__ == "__main__":
+    # ניקוי קובצי tmp יתומים מכתיבה שנקטעה (כיבוי פתאומי) — *לפני* כל השאר,
+    # ורק כאן: בעלייה אין מופע אחר באמצע כתיבה. ר' _cleanup_orphan_tmp.
+    _orphans = _cleanup_orphan_tmp()
+    if _orphans:
+        log.warning("נוקו %d קובצי tmp יתומים (כתיבה שנקטעה — כיבוי פתאומי?)", _orphans)
     # אין צרכן SDR enabled ב-systemd => שחזור המצב השמור (voice/acars/vdl2/
     # satcom/scan/off) נעשה כאן, ברקע (satcom חריג — לא משוחזר אוטומטית,
     # ר' _boot_restore/§12 ב-CLAUDE.md). מכסה גם שדרוג קונפיג

@@ -90,11 +90,11 @@ CLAUDE.md                   # ← המסמך הזה: ארכיטקטורה + פי
 webtune/
   app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, SATCOM, סריקה,
                             #   רוסטר מאוחד, REST API, יומן, הקלטות, תמלול, METAR, מדדי RF,
-                            #   מעבר מצבים, ארכיון חיפוש. ~3000 שורות.
+                            #   מעבר מצבים, ארכיון חיפוש. ~3500 שורות.
   adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS. thread נפרד.
                             #   ניתן להרצה ידנית: `python3 adsb.py [--selftest]`.
   static/
-    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~3550 שורות). PWA. 4 תצוגות:
+    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~4150 שורות). PWA. 4 תצוגות:
                             #   🏠 מרכז (בית/standby/scan) + קול + ACARS + VDL2. ACARS ו-VDL2
                             #   שני מופעים סימטריים של אותו פקטורי createDataView (ר' §7).
     manifest.webmanifest    # PWA manifest (התקנה כאפליקציה).
@@ -309,8 +309,18 @@ ADS-B מ-`GET /api/aircraft`, כולל כשה-SDR ב-standby; כולל מקור 
 לסריקה** — `showView` מחזיק חמש תצוגות (home/voice/acars/vdl2/**satcom**) ו-`applyMode`
 שישה מצבים; `scan` תמיד ממופה ל-`"home"` (הוא "אפליקציית-על", לא תוכן-תצוגה). הדף מושך מצב מ-`/api/*`
 ב-polling; ה-pollers של airspace/power/METAR/roster רצים בכל תצוגה, metrics/activity רק
-בקול, `pollSatcomHealth` (5ש', `GET /api/satcom/health`) רק ב-satcom — מציג נעילת
-דמודולטור לכל ערוץ (proxy ל---web dashboard של inmarsat-sniffer), ריק כש-`available:false` —
+בקול. `pollSatcomHealth` (1ש' ב-satcom בלבד, `GET /api/satcom/health`, in-flight guard
+בדפוס `metricsInFlight`, קריאה מיידית ב-`showView`+אחרי כניסה מוצלחת — לא ממתינים
+למחזור polling ראשון) מזין **פאנל כיוון אנטנה ייעודי** (`#satcomAimPanel`, גלוי תמיד
+בתצוגת SATCOM — לא מוסתר ב-standby כמו `#satcomActiveCtrl`): Eb/No מיטבי (המקסימום
+בין הערוצים — האות שמכווננים לפיו תוך סיבוב האנטנה) + גרף היסטוריה (`drawMiniSpark`
+עם פרמטר חמישי אופציונלי `fixedMax` — סקאלה קבועה 0–15dB כדי שרעש זעיר לא ייראה
+כאות חזק; קוראי rate-spark הקיימים של ACARS/VDL2 לא מעבירים אותו ולא מושפעים),
+ופירוט פר-ערוץ. צביעה **לפי `lock` בלבד** (לא סף Eb/No מומצא — ר' §12); `ebno=0 &&
+!lock && mse≈1.0` (חתימת "אין דמודולטור" מהמקור) מוצג כ-"—" ולא כ-"0.0 dB" מטעה.
+`pollPower` (בכל תצוגה) מזין גם **הגנת מתח**: `confirmSatcomAntenna()` מוסיף אזהרה
+כשזוהתה צניחת מתח/throttling, ושורת הצעה לא-חוסמת בתצוגת SATCOM מציעה בנקישה אחת
+לסמן "הזנת LNA חיצונית" — אזהרה/הצעה בלבד, לעולם לא חסימה (ר' §12).
 ו-`pollGlobalState` (10ש', `/api/health` + `/api/scan` כשסורקים) מיישר את חיווי
 המצב למציאות בלי לחטוף את הטאב. כפתורי עצירה ⇒ `applyMode("off")` (גם עצירת סריקה);
 כפתור ⏻ מחזיר את `prev_mode` (יכול להיות `"scan"`). עיצוב responsive (multi-column
@@ -388,7 +398,7 @@ renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitAr
 | GET | `/recordings/<name>` | קובץ הקלטה MP3 |
 | GET | `/api/metrics` | מדדי RF (SNR/signal/noise מ-stats_filepath) |
 | GET | `/api/airspace` | מסלול פעיל + שיבוש GPS (מ-adsb.py) |
-| GET | `/api/power` | מתח/טמפ' ה-Pi (`vcgencmd`) |
+| GET | `/api/power` | מתח/טמפ' ה-Pi (`vcgencmd`), מוגש מ-cache בן ~2 שניות (`_POWER_TTL`) |
 | GET | `/api/metar` | METAR נתב"ג (LLBG) |
 | GET | `/api/health` | בריאות השירותים |
 
@@ -515,6 +525,11 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   (נדחה במכוון) — ACARS/VDL2/SATCOM רצים כברירת מחדל עם AGC (רווח משתנה, לא ידוע לנו
   לכל הודעה), כך שהמרת dBFS→dBm חסרת בסיס אמין בלי מעבר לרווח קבוע + כיול חד-פעמי.
   אם מוסיפים dBm בעתיד — ודאו שהוא נשאר אופציונלי/כבוי-כברירת-מחדל ולעולם לא מוערך.
+  **אותו עיקרון חל על צביעה, לא רק על ערכים:** פאנל הכיוון של SATCOM (`#satcomAimPanel`)
+  צובע Eb/No **לפי `lock` בלבד** — לא לפי סף מספרי בשם ("Eb/No טוב/סביר"), כי אין
+  סף כזה מתועד במעלה הזרם (`inmarsat-sniffer` עצמו צובע לפי פעילות הודעות, לא סף —
+  `web.c`). סף כזה יהיה בדיוק סוג ה-"המצאה" שהעיקרון הזה אוסר — אם תתפתה להוסיף
+  אחד, ודא קודם שיש לו מקור מוסמך.
 - **בנקי ACARS/VDL2 = חלון אחד כל אחד:** acarsdec/dumpvdl2 מפענחים ערוצים מרובים בתוך
   חלון דגימה אחד (~2MHz). צביר 131.x ו-136.x רחוקים ~5MHz ⇒ לעולם לא יחד. בנק חדש חייב
   לעבור `_acars_window_error`/`_vdl2_window_error` (שניהם wrappers מעל `_window_error`).
@@ -532,7 +547,16 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
 - **gain של SDRplay הפוך:** ערך **קטן יותר = רווח גדול יותר** (IFGR/RFGR הן *הפחתות*).
 - **בידוד מקורות חיצוניים:** כל קריאת רשת (ADS-B, METAR) חייבת לרוץ ב-thread ולהיכשל
   חיננית — **הרדיו לעולם לא תלוי באינטרנט.**
-- **כתיבה אטומית** לקבצי קונפיג/state (`_atomic_write`) — אסור להשאיר קובץ חצי-כתוב.
+- **כתיבה אטומית + עמידה בניתוק חשמל** לקבצי קונפיג/state (`_atomic_write`) — אסור
+  להשאיר קובץ חצי-כתוב. לא רק `tmp`+`rename` (אטומי מול קוראים מקבילים) אלא גם
+  `fsync` על קובץ ה-tmp *ועל תיקיית היעד* — בלעדיו הנתונים יכולים לשבת ב-page cache
+  בלבד ולהיעלם בכיבוי פתאומי (תרחיש אמיתי בהפעלה מסוללה). `_cleanup_orphan_tmp`
+  מנקה קבצי tmp יתומים מכתיבה שנקטעה — **רק בעלייה** (`__main__`), רק קבצים ישנים
+  מ-`_TMP_ORPHAN_AGE_SEC`, ובכל הספריות שנכתבות אטומית (`state.json`/קונפיג הקול/
+  `/etc/airam`/הקלטות — לא רק שתיים הראשונות). `load_state` מבחין קובץ-חסר (תקין —
+  התקנה טרייה) מקובץ-פגום (לוג אזהרה + עותק `.corrupt` לאבחון, **פעם אחת לאירוע**
+  דרך flag גלובלי שמתאפס בקריאה תקינה הבאה — לא לכל קריאה, כי הפונקציה נקראת גם
+  מראוטים ב-polling תכוף כמו `/api/metrics`).
 - **threaded=True חובה** ל-Flask (סטרים ארוך-טווח לא חוסם בקשות).
 - **שמע ברקע = MediaSession** (אין API ל"שיחת טלפון" בדפדפן). אל תחפש חלופה.
 - **עברית ב-RTL** ב-UI; CSV עם BOM ל-Excel.
