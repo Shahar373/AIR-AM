@@ -1102,9 +1102,13 @@ def _normalize_acars(m):
         kind, dtext = _libacars_decode(libacars)
         category, decoded = kind, dtext
         group = "clearance" if kind == "CPDLC" else "position" if kind == "ADS-C" else group
-        pos = _scan_latlon(libacars)
-        if pos:
-            lat, lon, pos_src = pos[0], pos[1], "adsc"
+        # מיקום *רק* מ-ADS-C: CPDLC (או ARINC-622 גנרי אחר) עלול לשאת נ"צ מוטבע
+        # (waypoint ב-clearance) שאינו מיקום המטוס עצמו — לא מייחסים אותו כמיקום
+        # כדי לא להטעות במפה (אותה הגנה בדיוק כמו VDL2 מסלול B, ר' _normalize_vdl2).
+        if kind == "ADS-C":
+            pos = _scan_latlon(libacars)
+            if pos:
+                lat, lon, pos_src = pos[0], pos[1], "adsc"
 
     # /.POS/ = תגובת REQPOS: פרוטוקול מבני (לא heuristic) => אמין גם עם error.
     # נחלץ לפני בדיקת error כי ספרה שהתהפכה ב-prefix שגרם ל-error לא פוגמת את הקואורדינטה.
@@ -1555,8 +1559,15 @@ def _normalize_satcom(m):
     ⚠ בשונה מ-acarsdec/dumpvdl2: אין level/noise/freq ברמת ההודעה (המפענח לא
     חושף אותם ב---feed/--udp) — level/snr תמיד None, בלי המצאת ערך (ר' §12
     ב-CLAUDE.md: "לעולם לא ממציאים ערך"). מיקום מגיע רק מטקסט ההודעה (כמו
-    ACARS רגיל) או מ-arinc622 (ADS-C) המקונן תחת isu.acars.arinc622 — בדיוק
-    כמו VDL2 מסלול A, כך שכל הפרסרים הקיימים (כולל ADS-C) חלים בחינם.
+    ACARS רגיל) או מ-arinc622 (ADS-C) המקונן תחת isu.acars.arinc622 — כמו VDL2
+    מסלול A, כך שכל הפרסרים הקיימים (כולל ADS-C) חלים בחינם. ⚠ בשונה מ-VDL2:
+    inmarsat-sniffer עוטף שם מחדש את *כל* עץ ה-ACARS (main.c:889-897 מפעיל
+    la_proto_tree_format_json על ה-tree המושרש בצומת ה-ACARS עצמו, לא רק
+    ביישום המקונן) — כלומר isu.acars.arinc622 הוא בפועל
+    {"acars": {mode/label/reg/msg_text/... שוב, "arinc622": {תוכן האמיתי}}},
+    לא היישום ישירות. מפרקים שכבה אחת עם _VDL2_ACARS_FIELDS (כמו מסלול A של
+    VDL2) לפני שמעבירים ל-_normalize_acars — אחרת _libacars_decode/_scan_latlon
+    "מוצאים" את msg_text המשוכפל בתוך המעטפת כאילו הוא תוכן מפוענח.
     src/dst.type ("Aircraft Earth Station"/"Ground Earth Station") הם עובדה
     מבנית של הכלי (לא heuristic) => דורסים את _acars_direction, כמו ה-icao/dir
     המבניים של VDL2 (AES/GES הם מרחב-כתובות של Inmarsat, *לא* ICAO 24-bit —
@@ -1587,7 +1598,15 @@ def _normalize_satcom(m):
     }
     apps = acars.get("arinc622")
     if isinstance(apps, dict):
-        raw["libacars"] = apps
+        # מפרקים את מעטפת ה-ACARS הכפולה (ר' התיעוד מעל) — inner הוא היישום
+        # המקונן האמיתי (ADS-C/CPDLC), לא ACARS שוב. אם הצורה לא כצפוי (שינוי
+        # גרסה אצל inmarsat-sniffer) נופלים חזרה ל-apps כמות שהוא ולא קורסים.
+        inner = apps.get("acars")
+        apps = ({k: v for k, v in inner.items()
+                if k not in _VDL2_ACARS_FIELDS and isinstance(v, (dict, list))}
+                if isinstance(inner, dict) else apps)
+        if apps:
+            raw["libacars"] = apps
     card = _normalize_acars(raw)
     src_type = str((isu.get("src") or {}).get("type") or "").lower()
     dst_type = str((isu.get("dst") or {}).get("type") or "").lower()
@@ -1705,7 +1724,8 @@ def _is_active(service):
 
 def _sysctl(action, service, timeout=45):
     """systemctl פעולה משנת-מצב => דרך SUDO (sudoers ממוקד מתיר בדיוק את
-    הפעולות האלה ל-airam: restart/stop של rtl_airband / airam-acars / airam-vdl2)."""
+    הפעולות האלה ל-airam: restart/stop של rtl_airband / airam-acars / airam-vdl2 /
+    airam-satcom, ו-reset-failed של airam-satcom בלבד — ר' _enter_satcom)."""
     return subprocess.run([*SUDO, "systemctl", action, service],
                           capture_output=True, text=True, timeout=timeout)
 
@@ -1900,6 +1920,14 @@ def _enter_satcom(freqs):
             pass
     write_satcom_env(freqs)
     try:
+        # airam-satcom.service (בשונה משאר צרכני ה-SDR) מוגדר עם StartLimitBurst
+        # סופי — הגנה מפני קריסה חוזרת שמדליקה מחדש bias-T ללא פיקוח (ר' ההערה
+        # ביחידה). אם התקרה הופעלה מקריסה קודמת, restart רגיל ייכשל עד
+        # reset-failed; best-effort, לא תלוי הצלחה (no-op תקין כשלא היה כשל).
+        _sysctl("reset-failed", SATCOM_SERVICE, timeout=10)
+    except Exception:
+        pass
+    try:
         r = _sysctl("restart", SATCOM_SERVICE, timeout=45)
     except subprocess.TimeoutExpired:
         return "הפעלת SATCOM נתקעה — בדוק שה-SDR מחובר", None
@@ -1927,11 +1955,15 @@ def _enter_standby():
             _sysctl("stop", svc, timeout=30)
         except Exception:
             pass
+    stuck = []
     for _ in range(7):
         time.sleep(0.3)
-        if not any(_is_active(svc) for svc in consumers):
+        stuck = [svc for svc in consumers if _is_active(svc)]
+        if not stuck:
             return None, None
-    return "כיבוי המקלט נכשל — שירות עדיין פעיל", _journal_tail("rtl_airband")
+    # journal של השירות שבאמת עדיין פעיל (לא rtl_airband קשיח) — קריטי כש-satcom
+    # הוא התקוע: אבחון שגוי בדיוק כשהכי חשוב לדעת מה לא נעצר (bias-T עדיין דלוק).
+    return "כיבוי המקלט נכשל — שירות עדיין פעיל", _journal_tail(stuck[0])
 
 
 # --- רגיסטרי מצבים: קול/ACARS/VDL2/SATCOM שווי-מעמד, off ניטרלי -------------
@@ -3233,7 +3265,15 @@ def _boot_restore():
             elif mode == "vdl2":
                 err, _detail = _enter_vdl2(st.get("vdl2_freqs"))
             elif mode == "satcom":
-                err, _detail = _enter_satcom(st.get("satcom_freqs"))
+                # ⚠ בטיחות: *לא* נכנסים אוטומטית ל-satcom באתחול. write_satcom_env
+                # מדליק bias-T (‎+4.7V על מחבר האנטנה) כברירת מחדל, וכאן אין בן-אדם
+                # בסביבה שיוודא איזו אנטנה מחוברת כרגע (VHF airband או L-band+LNA
+                # שהוחלפה חזרה לפני ה-reboot). נופלים ל-off *בכוונה* (לא תקלת SDR) —
+                # ה-err המלאכותי מפעיל את אותו מסלול "off + prev_mode" שלמטה, כך
+                # שכפתור ⏻/כרטיס הבית יציעו כניסה ידנית (עם אישור אנטנה מפורש)
+                # במקום לחכות ש-Restart=always יחזיר את bias-T בלי פיקוח.
+                log.warning("boot restore: satcom לא משוחזר אוטומטית (בטיחות bias-T) — נשאר off, ממתין לכניסה ידנית")
+                err, _detail = "satcom דורש כניסה ידנית אחרי reboot (בטיחות bias-T)", None
             else:   # scan
                 plan = _validate_scan_plan(st.get("scan_plan"))
                 if plan is None:
@@ -3253,9 +3293,10 @@ def _boot_restore():
 
 
 if __name__ == "__main__":
-    # אין צרכן SDR enabled ב-systemd => שחזור המצב השמור (voice/acars/vdl2/off)
-    # נעשה כאן, ברקע. מכסה גם שדרוג קונפיג (stats_filepath/localtime) — כניסה
-    # לקול תמיד משכתבת את הקונפיג מה-state.
+    # אין צרכן SDR enabled ב-systemd => שחזור המצב השמור (voice/acars/vdl2/
+    # satcom/scan/off) נעשה כאן, ברקע (satcom חריג — לא משוחזר אוטומטית,
+    # ר' _boot_restore/§12 ב-CLAUDE.md). מכסה גם שדרוג קונפיג
+    # (stats_filepath/localtime) — כניסה לקול תמיד משכתבת את הקונפיג מה-state.
     threading.Thread(target=_boot_restore, daemon=True).start()
     REC_DIR.mkdir(parents=True, exist_ok=True)
     threading.Thread(target=_activity_watcher, daemon=True).start()

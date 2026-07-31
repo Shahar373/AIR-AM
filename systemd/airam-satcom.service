@@ -13,8 +13,15 @@ PartOf=sdrplay.service
 # rtl_airband/acarsdec/dumpvdl2 (וההפך). ההצהרה כאן בלבד מספיקה (Conflicts
 # דו-כיווני) — אין צורך לערוך את שלוש היחידות הקיימות.
 Conflicts=rtl_airband.service airam-acars.service airam-vdl2.service
-# בלי הגבלת קצב-הפעלה => מתאושש לנצח (ניתוק/חיבור USB, מרוץ אתחול)
-StartLimitIntervalSec=0
+# ⚠ בניגוד לשלושת צרכני ה-SDR האחרים (Restart=always בלי הגבלה => "מתאושש
+# לנצח" מניתוק/חיבור USB): ל-inmarsat-sniffer יש סיכון חומרה ייחודי — כל
+# הפעלה מחדש מדליקה מחדש את ה-bias-T (‎+4.7V) על מחבר האנטנה, גם אם המשתמש
+# כבר החליף בחזרה לאנטנת ה-airband הפסיבית בלי ללחוץ "עצור" ב-UI. תקרה סופית
+# עוצרת קריסה חוזרת אחרי כמה נסיונות במקום להמשיך להדליק bias-T ללא פיקוח.
+# _enter_satcom ב-app.py קורא ל-`systemctl reset-failed` (best-effort) לפני
+# restart => כניסה ידנית מחדש מה-UI תמיד עובדת גם אחרי שהתקרה הופעלה.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -30,8 +37,10 @@ ExecStartPre=/usr/local/bin/airam-wait-sdrplay
 # ה-RSP1B שמזין את ה-LNA; SATCOM_GAIN מכיל את דגל הרווח כולו (--sdrplay-gain=N,
 # הדגל הנייטיבי של ה-SDRplay — *לא* --soapy-gain) או ריק => AGC. ‏--satellite=AF1
 # (Alphasat, +25.0E) ברירת המחדל ל-EMEA/ישראל — ר' SATCOM_BANKS ב-app.py.
-# הפורט (5558) חייב להתאים ל-SATCOM_UDP_PORT ב-webtune/app.py.
-ExecStart=/usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero $SATCOM_GAIN $SATCOM_BIAS_TEE --udp=127.0.0.1:5558 --station-id=airam
+# ‏$SATCOM_UDP נכתב ע"י write_satcom_env (127.0.0.1:5558, תואם ל-SATCOM_UDP_PORT
+# ב-webtune/app.py) — משתמשים במשתנה (לא קשיח) כדי ששינוי עתידי בפורט לא
+# ישאיר את הקונפיג הכתוב לא-בשימוש (כמו ‎-j ${ACARS_UDP} ב-airam-acars.service).
+ExecStart=/usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero $SATCOM_GAIN $SATCOM_BIAS_TEE --udp=${SATCOM_UDP} --station-id=airam
 # גישת חומרה (SDR) => כמו rtl_airband, רץ כ-root
 User=root
 Restart=always
