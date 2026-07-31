@@ -410,6 +410,47 @@ def test_api_mode_satcom_custom_satellite_saved(client, paths, no_sleep, monkeyp
     assert r.get_json()["satcom_freqs"] == ["4F3"]
 
 
+# --- bias_tee: הזנת LNA חיצונית (ר' _enter_satcom) ---------------------------
+
+def test_api_mode_satcom_default_bias_tee_is_on(client, paths, no_sleep, monkeypatch):
+    """התנהגות היסטורית (state חדש, בלי bias_tee בבקשה) => bias-T דולק, כמו לפני
+    שהתווסף המתג — לא שובר התקנות קיימות."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom"})
+    assert r.status_code == 200
+    assert r.get_json()["satcom_bias_tee"] is True
+    assert "SATCOM_BIAS_TEE=-B" in app.SATCOM_ENV_PATH.read_text()
+    assert app.load_state()["satcom_bias_tee"] is True
+
+
+def _env_lines(path):
+    return dict(ln.split("=", 1) for ln in path.read_text().splitlines() if "=" in ln and not ln.startswith("#"))
+
+
+def test_api_mode_satcom_bias_tee_false_writes_empty_flag(client, paths, no_sleep, monkeypatch):
+    """הזנת LNA חיצונית: bias_tee=False בבקשה => SATCOM_BIAS_TEE ריק (בלי -B),
+    ה-RSP1B לא מזין את ה-LNA. מונע הזרמה כפולה מול המקור החיצוני."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom", "bias_tee": False})
+    assert r.status_code == 200
+    assert r.get_json()["satcom_bias_tee"] is False
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_BIAS_TEE"] == ""
+    assert app.load_state()["satcom_bias_tee"] is False
+
+
+def test_api_mode_satcom_bias_tee_remembered_when_omitted(client, paths, no_sleep, monkeypatch):
+    """כניסה חוזרת בלי bias_tee בבקשה => משתמשת בבחירה השמורה (כמו freqs),
+    לא נופלת בחזרה ל-True בטעות."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    client.post("/api/mode", json={"mode": "satcom", "bias_tee": False})
+    r = client.post("/api/mode", json={"mode": "satcom"})   # בלי bias_tee
+    assert r.get_json()["satcom_bias_tee"] is False
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_BIAS_TEE"] == ""
+
+
 def test_api_mode_off_stops_satcom_too(client, paths, no_sleep, monkeypatch):
     calls = []
     monkeypatch.setattr(app, "_sysctl",

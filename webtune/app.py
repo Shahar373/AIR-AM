@@ -350,7 +350,10 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  "app_mode": "off",
                  "acars_freqs": ACARS_FREQS_DEFAULT,
                  "vdl2_freqs": VDL2_FREQS_DEFAULT,
-                 "satcom_freqs": SATCOM_FREQS_DEFAULT}
+                 "satcom_freqs": SATCOM_FREQS_DEFAULT,
+                 # True = bias-T של ה-RSP1B מזין את ה-LNA (ברירת המחדל ההיסטורית).
+                 # False = המשתמש מזין את ה-LNA ממקור חיצוני (ר' _enter_satcom).
+                 "satcom_bias_tee": True}
 
 
 # --- שורת ה-squelch: מקור אמת יחיד -----------------------------------------
@@ -1937,19 +1940,24 @@ def _enter_acars(freqs):
     return None, None
 
 
-def _enter_satcom(freqs):
+def _enter_satcom(freqs, bias_tee=True):
     """עוצר את שלושת צרכני ה-SDR האחרים ומריץ inmarsat-sniffer. מחזיר
     (error, detail). Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות
     תחילה כדי לשחרר את ה-SDR לפני ש-inmarsat-sniffer פותח אותו (מונע מרוץ על
     המכשיר) — כמו _enter_acars/_enter_vdl2. ⚠ הכניסה למצב הזה *לא* מחליפה את
     האנטנה הפיזית (VHF airband <-> L-band) — זו פעולה ידנית של המשתמש; ה-UI
-    מציג באנר-הוראה בכניסה/יציאה (ר' docs/satcom-feasibility.md §3)."""
+    מציג באנר-הוראה בכניסה/יציאה (ר' docs/satcom-feasibility.md §3).
+    ‏bias_tee=False למי שמזין את ה-LNA ממקור חיצוני (USB power bank + DC
+    injector) — ‏RSP1B bias-T מוגבל ל-‎100mA, ותוספת הצריכה של ה-LNA + עליית
+    ה-CPU של inmarsat-sniffer בו-זמנית עלולה לדחוף ספק שולי (למשל power bank
+    נייד) מעבר לתקרה. ⚠ אסור להזין משני מקורות בו-זמנית (הזרמה הדדית אפשרית)
+    — המשתמש אחראי לוודא שרק אחד מהם דולק בפועל."""
     for svc in ("rtl_airband", ACARS_SERVICE, VDL2_SERVICE):
         try:
             _sysctl("stop", svc, timeout=30)
         except Exception:
             pass
-    write_satcom_env(freqs)
+    write_satcom_env(freqs, bias_tee=bias_tee)
     try:
         # airam-satcom.service (בשונה משאר צרכני ה-SDR) מוגדר עם StartLimitBurst
         # סופי — הגנה מפני קריסה חוזרת שמדליקה מחדש bias-T ללא פיקוח (ר' ההערה
@@ -3195,7 +3203,7 @@ def api_mode():
         payload, status = _voice_tune(params)
         return jsonify(payload), status
 
-    plan = freqs = key = enter = None
+    plan = freqs = key = enter = bias_tee = None
     if mode == "scan":
         plan = _validate_scan_plan(data.get("plan") or st.get("scan_plan"))
         if plan is None:
@@ -3216,6 +3224,12 @@ def api_mode():
         werr = wcheck(freqs)                     # חייב להיכנס בחלון דגימה אחד (satcom: לוויין תקין)
         if werr:
             return jsonify(ok=False, error=werr, state=st), 400
+        if mode == "satcom":
+            # bias_tee=False למי שמזין את ה-LNA ממקור חיצוני (ר' _enter_satcom).
+            # בקשה מפורשת (bool) גוברת; אחרת נשמר הבחירה הקודמת מה-state (כמו
+            # freqs); state חדש/ישן-בלי-השדה => True (ההתנהגות ההיסטורית).
+            bias_tee = (data["bias_tee"] if isinstance(data.get("bias_tee"), bool)
+                       else bool(st.get("satcom_bias_tee", True)))
 
     if not TUNE_LOCK.acquire(timeout=0.5):
         return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב",
@@ -3247,15 +3261,16 @@ def api_mode():
             save_state(new_state)
             return jsonify(ok=True, app_mode="scan", scan_plan=plan)
 
-        # acars / vdl2 / satcom — מסלול דאטה סימטרי
+        # acars / vdl2 / satcom — מסלול דאטה סימטרי (satcom מקבל גם bias_tee)
         log.info("mode -> %s freqs=%s (from %s)", mode, freqs, request.remote_addr)
-        err, detail = enter(freqs)
+        err, detail = enter(freqs, bias_tee) if mode == "satcom" else enter(freqs)
         if err:
             payload, status = _fail_to_off(st, err, detail, "enter " + mode)
             return jsonify(payload), status
-        new_state = {**st, "app_mode": mode, key: freqs}
+        extra = {"satcom_bias_tee": bias_tee} if mode == "satcom" else {}
+        new_state = {**st, "app_mode": mode, key: freqs, **extra}
         save_state(new_state)
-        return jsonify(ok=True, app_mode=mode, **{key: freqs})
+        return jsonify(ok=True, app_mode=mode, **{key: freqs}, **extra)
     finally:
         TUNE_LOCK.release()
 

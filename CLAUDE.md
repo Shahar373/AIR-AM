@@ -374,7 +374,7 @@ renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitAr
 | GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `scan_plan`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`) |
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
-| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים). כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
+| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים) וגם `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית; ברירת מחדל = הבחירה השמורה, ואם אין אחת — `true`). כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
 | GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור) |
 | GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון; `?day=YYYY-MM-DD` ארכיון מהדיסק, snapshot סטטי) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט; לא ב-`?day=`). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM, עמודות `level`+`snr`) |
@@ -493,7 +493,18 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   צרכני ה-SDR עם `StartLimitBurst` סופי (בניגוד ל"מתאושש לנצח" של השאר) — עוצר
   קריסה חוזרת שהייתה מדליקה bias-T ללא פיקוח; `_enter_satcom` קורא
   `systemctl reset-failed` (best-effort, sudoers ממוקד) לפני כל restart כדי
-  שכניסה ידנית תמיד תעבוד גם אחרי שהתקרה הופעלה.
+  שכניסה ידנית תמיד תעבוד גם אחרי שהתקרה הופעלה; (4) **`bias_tee=False`
+  (הזנת LNA חיצונית)** — ה-RSP1B bias-T מוגבל ל-100mA, ותוספת הצריכה שלו +
+  עליית ה-CPU של `inmarsat-sniffer` בו-זמנית עלולה לדחוף ספק כוח שולי (נצפה
+  בפועל: power bank נייד מוגבל ל-5V/3A) מעבר לתקרה ולגרום לכיבוי מלא של ה-Pi.
+  ‏`POST /api/mode {mode:"satcom", bias_tee:false}` מכבה את bias-T של ה-RSP1B
+  (המשתמש מזין את ה-LNA ממקור נפרד) — נשמר ב-`state["satcom_bias_tee"]`
+  ונזכר בכניסות הבאות (כמו `satcom_freqs`); checkbox `satcomExternalLna`
+  ב-UI חייב להיות מאותחל מה-state **בטעינת הדף**, לא רק בביקור בתצוגת
+  SATCOM — `enterSatcom()` נקרא גם מכרטיס הבית וגם מכפתור ⏻ בלי לעבור
+  דרך התצוגה. `confirmSatcomAntenna()` מציג טקסט שונה בהתאם (bias-T ידלק /
+  ודא הזנה חיצונית ו-bias-T כבוי) — לעולם לא טוען שbias-T ידלק כשהוא לא ידלק.
+  ⚠ אחריות המשתמש: לא להזין משני מקורות (RSP1B + חיצוני) בו-זמנית.
 - **מדדי איכות קליטה — לעולם לא ממציאים ערך:** `level` (dBFS) הוא **תמיד** הערך הגולמי
   מהמפענח, בלי עיבוד. `snr` מחושב **רק** כשיש רצפת רעש אמינה בקלט (VDL2 — `dumpvdl2`
   מספק `sig_level`+`noise_level` לכל פריים); **ACARS לעולם לא מקבל SNR** כי `acarsdec`
