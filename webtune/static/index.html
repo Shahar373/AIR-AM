@@ -1530,6 +1530,22 @@
         <!-- בורר לוויין: geostationary => בחירת לוויין יחיד (לא צביר תדרים). משתמש
              חוזר במנגנון בורר-הבנקים של הפקטורי (כל "בנק" = לוויין). -->
         <div class="acars-banks" id="satcomBanks"></div>
+        <!-- הזנת LNA חיצונית: RSP1B bias-T מוגבל ל-100mA - ספק שולי (למשל power
+             bank נייד) עלול לצנוח כשמצטרפת גם עליית ה-CPU של inmarsat-sniffer
+             באותו רגע. checked=מזינים חיצונית => bias_tee=false בבקשה (ר'
+             enterSatcom) - חובה לוודא שלא שני מקורות מזינים בו-זמנית. -->
+        <div class="setting" id="satcomBiasTeeRow">
+          <span>🔌 הזנת LNA חיצונית (bias-T כבוי)</span>
+          <label class="switch">
+            <input type="checkbox" id="satcomExternalLna">
+            <span class="track"></span>
+          </label>
+        </div>
+        <p class="sdr-hint" id="satcomBiasTeeHint">
+          כבוי (ברירת מחדל): ה-bias-T של ה-RSP1B מזין את ה-LNA (‎+4.7V, מוגבל
+          ל-100mA). דלוק: אתה מזין את ה-LNA ממקור נפרד (USB power bank + DC
+          injector) — ה-RSP1B לא ידליק bias-T בכלל. ⚠ לעולם לא שני מקורות בו-זמנית.
+        </p>
         <!-- סרגל בקרת SDR: מתעדכן לפי satcomActive (מצב ה-SDR האמיתי, לא הכרטיסייה) -->
         <div id="satcomSdrBar" class="acars-sdr-bar">
           <div id="satcomInactive">
@@ -2556,6 +2572,7 @@
           sdrOff = false;
           acars.setActive(false); vdl2.setActive(false);   // ה-SDR עבר ל-SATCOM
           if (data.satcom_freqs) { satcom.setSelFreqs(data.satcom_freqs); satcom.renderFreqs(data.satcom_freqs); satcom.renderBanks(); }
+          if (typeof data.satcom_bias_tee === "boolean") $("satcomExternalLna").checked = !data.satcom_bias_tee;
           satcom.setActive(true);
           renderPower();
           satcom.poll();                       // רענון מיידי אחרי ש-inmarsat-sniffer עלה
@@ -3691,6 +3708,16 @@
     // כל נקודות הכניסה (כרטיס הבית, כפתור ⏻ בחזרה מ-standby, וכפתור ההפעלה
     // בתוך תצוגת SATCOM עצמה) — לא רק הראשונה שנלחצת.
     function confirmSatcomAntenna() {
+      // הזנת LNA חיצונית (checkbox מסומן) => bias-T של ה-RSP1B *לא* ידלק —
+      // אזהרה שונה, לא "ידליק bias-T" (זה היה משקר). ר' satcomExternalLna.
+      if ($("satcomExternalLna").checked) {
+        return confirm(
+          "מצב SATCOM (הזנת LNA חיצונית) — ה-bias-T של ה-RSP1B יישאר כבוי.\n\n" +
+          "ודא שמקור המתח החיצוני ל-LNA כבר דלוק, ושאנטנת ה-L-band + LNA מחוברת " +
+          "במקום אנטנת ה-airband (לא שתיהן יחד!) ומכוונת ל-Alphasat " +
+          "(‎~50° מעל האופק, דרום-דרום-מערב) לפני שתמשיך."
+        );
+      }
       return confirm(
         "מצב SATCOM ידליק את ה-bias-T (+4.7V) על מחבר האנטנה.\n\n" +
         "ודא שאנטנת ה-L-band + LNA מחוברת במקום אנטנת ה-airband (לא שתיהן יחד!) " +
@@ -3699,7 +3726,9 @@
     }
     function enterSatcom() {
       if (!confirmSatcomAntenna()) return;
-      applyMode("satcom", satcom.selFreqs ? { freqs: satcom.selFreqs } : undefined);
+      const extra = { bias_tee: !$("satcomExternalLna").checked };
+      if (satcom.selFreqs) extra.freqs = satcom.selFreqs;
+      applyMode("satcom", extra);
     }
     // כרטיסי ההפעלה במסך הבית — שלושת המצבים שווי-מעמד, נקודת הכניסה הראשית
     $("homeGoVoice").onclick = () => applyMode("voice");
@@ -3856,6 +3885,11 @@
       vdl2.setBanks(st.vdl2_banks || []);     // בנקי VDL2 => בורר בכותרת VDL2
       if (st.satcom_freqs) { satcom.setSelFreqs(st.satcom_freqs); satcom.renderFreqs(st.satcom_freqs); }
       satcom.setBanks(st.satcom_banks || []); // "בנקי" satcom = לוויינים => בורר לוויין
+      // ⚠ קריטי לבטיחות: חייב לקרות כאן (טעינת דף), *לא* רק כשמבקרים בתצוגת
+      // SATCOM — enterSatcom() נקרא גם מכרטיס הבית וגם מכפתור ⏻ (חזרה
+      // מ-standby) בלי לעבור דרך התצוגה כלל. בלי זה, checkbox לא-מאותחל היה
+      // שולח בשקט bias_tee=true (מדליק bias-T) גם למשתמש שבחר הזנה חיצונית.
+      $("satcomExternalLna").checked = st.satcom_bias_tee === false;
       // app_mode מגיע מהמציאות (השירות הפעיל), ובאין צרכן — מהכוונה השמורה
       // (mode_ok=false אומר שהמצב השמור אמור לרוץ אבל לא רץ). נוחתים בתצוגת
       // המצב הפעיל; off/תקלה נוחתים במסך הבית (התצוגה הניטרלית).
