@@ -80,6 +80,14 @@ def test_validate_scan_plan_rejects_bad_mode():
     assert app._validate_scan_plan([{"mode": "scan", "dwell_sec": 60}]) is None
 
 
+def test_validate_scan_plan_rejects_satcom_leg():
+    """satcom אינו scannable (MVP מכוון, ר' §12 ב-CLAUDE.md) — דחייה כאן מכסה
+    גם את מסלול ה-plan שמגיע מהמשתמש וגם את שחזור ה-scan_plan השמור באתחול/
+    ב-/api/mode בלי plan מפורש, כי שניהם עוברים דרך אותה פונקציה."""
+    assert app._validate_scan_plan([{"mode": "satcom", "dwell_sec": 60}]) is None
+    assert app._validate_scan_plan([ACARS_LEG, {"mode": "satcom", "dwell_sec": 60}]) is None
+
+
 def test_validate_scan_plan_rejects_dwell_out_of_range():
     assert app._validate_scan_plan([{"mode": "acars", "dwell_sec": app.SCAN_DWELL_MIN - 1}]) is None
     assert app._validate_scan_plan([{"mode": "acars", "dwell_sec": app.SCAN_DWELL_MAX + 1}]) is None
@@ -140,6 +148,20 @@ def test_api_mode_scan_rejects_invalid_plan(client, paths):
     r = client.post("/api/mode", json={"mode": "scan", "plan": []})
     assert r.status_code == 400
     assert app.load_state().get("app_mode") != "scan"
+
+
+def test_api_mode_scan_rejects_satcom_leg(client, paths, monkeypatch):
+    """דחייה ב-400 *לפני* כל נגיעה ב-SDR — קריטי כש-satcom הוא הרגל הנדחית,
+    כי כניסה בפועל הייתה מדליקה bias-T. אפס קריאות _sysctl מוכיח את זה, לא
+    רק את קוד ה-400."""
+    calls = []
+    monkeypatch.setattr(app, "_sysctl",
+                        lambda action, svc, timeout=45: calls.append((action, svc)) or _ok())
+    r = client.post("/api/mode", json={"mode": "scan",
+                                       "plan": [ACARS_LEG, {"mode": "satcom", "dwell_sec": 60}]})
+    assert r.status_code == 400
+    assert app.load_state().get("app_mode") != "scan"
+    assert calls == []
 
 
 def test_api_mode_scan_uses_saved_plan_when_none_supplied(client, paths, no_sleep, monkeypatch):

@@ -157,7 +157,7 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 | `/etc/rtl_airband/airband.conf` | קונפיג קול חי (תדר נבחר) | app.py בכל `/api/tune` |
 | `/etc/airam/acars.env` | תדרי ACARS חיים | app.py בכל מעבר ל-ACARS |
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
-| `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain, bias-tee (`-B`) | app.py בכל מעבר ל-SATCOM |
+| `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain, bias-tee (`-B`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
 | `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
@@ -248,10 +248,15 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   `src/dst.type` "Aircraft/Ground Earth Station" קובע `dir` מבני. **בלי `level`/`snr`/`freq`**
   — הכלי לא חושף אותם (§12), ו-`isu.refno`≠MSN ⇒ `msgno` לא ממופה), `write_satcom_env`
   (לוויין `--satellite=`, `SATCOM_GAIN`=`--sdrplay-gain` (נייטיבי, לא `--soapy-gain`) או
-  ריק=AGC, `SATCOM_BIAS_TEE`=`-B`/ריק), `_enter_satcom` (עוצר שלושת האחרים, מרים
+  ריק=AGC, `SATCOM_BIAS_TEE`=`-B`/ריק), `_enter_satcom` (עוצר שלושת האחרים, מנקה
+  תקרת-הפעלות קודמת עם `reset-failed` לפני ה-restart — ר' §12, מרים
   inmarsat-sniffer, verify), `_sanitize_satellite`/`_satcom_window_error` (לוויין יחיד
   מתוך `SATCOM_BANKS`, לא בנק תדרים), `SATCOM_BANKS` (לוויינים: AF1/4F3/3F5/F1). התמדה:
   `_append_satcom_log`/`_trim_satcom_log`/`_load_satcom_history` (clones של צמד ה-VDL2).
+  **אבחון:** `_fetch_satcom_web_state`/`api_satcom_health` — proxy מקומי (כמו
+  `/stream`) ל-dashboard האבחוני המובנה של inmarsat-sniffer (`--web=SATCOM_WEB_PORT`,
+  ברירת מחדל 8888): נעילת דמודולטור/ebno/mse לכל ערוץ, גם באפס הודעות — ההבדל
+  בין "אין אנטנה" ל"תקין, שקט כרגע" (`_is_active` בלבד לא מבחין ביניהם).
 - **רוסטר מטוסים מאוחד:** `_aircraft_identity` (מפתח זהות מהודעה מנורמלת — רישום
   מנורמל קודם, אחרת icao, אחרת מספר טיסה), `_build_roster` (מהתך `_acars_msgs`+
   `_vdl2_msgs`+`_satcom_msgs` לפי הזהות, מעשיר ב-`adsb.aircraft_snapshot`, ממוין lastT
@@ -304,7 +309,9 @@ ADS-B מ-`GET /api/aircraft`, כולל כשה-SDR ב-standby; כולל מקור 
 לסריקה** — `showView` מחזיק חמש תצוגות (home/voice/acars/vdl2/**satcom**) ו-`applyMode`
 שישה מצבים; `scan` תמיד ממופה ל-`"home"` (הוא "אפליקציית-על", לא תוכן-תצוגה). הדף מושך מצב מ-`/api/*`
 ב-polling; ה-pollers של airspace/power/METAR/roster רצים בכל תצוגה, metrics/activity רק
-בקול, ו-`pollGlobalState` (10ש', `/api/health` + `/api/scan` כשסורקים) מיישר את חיווי
+בקול, `pollSatcomHealth` (5ש', `GET /api/satcom/health`) רק ב-satcom — מציג נעילת
+דמודולטור לכל ערוץ (proxy ל---web dashboard של inmarsat-sniffer), ריק כש-`available:false` —
+ו-`pollGlobalState` (10ש', `/api/health` + `/api/scan` כשסורקים) מיישר את חיווי
 המצב למציאות בלי לחטוף את הטאב. כפתורי עצירה ⇒ `applyMode("off")` (גם עצירת סריקה);
 כפתור ⏻ מחזיר את `prev_mode` (יכול להיות `"scan"`). עיצוב responsive (multi-column
 בטאבלט/דסקטופ; `.mode-cards` הוא `auto-fit` כדי לזרום נכון גם עם 5 כרטיסים).
@@ -375,6 +382,7 @@ renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitAr
 | GET | `/api/vdl2/export?format=csv\|json` | ייצוא VDL2 (CSV עם BOM, עמודות `icao`+`level`+`snr`) |
 | GET | `/api/satcom` | הודעות SATCOM (Inmarsat, inmarsat-sniffer) אחרונות — אותם `?since=`/`?all=1`/`?day=`. אותה סכמת כרטיס כמו ACARS; **בלי** `level`/`snr`/`freq`/`adsb` (המפענח לא חושף אותם ב---feed/--udp — לעולם לא מומצאים, ראו §12) |
 | GET | `/api/satcom/export?format=csv\|json` | ייצוא SATCOM (אותן עמודות כמו ACARS export) |
+| GET | `/api/satcom/health` | אבחון SATCOM — proxy מקומי ל-dashboard האבחוני המובנה של inmarsat-sniffer (`--web`): נעילת דמודולטור/ebno/mse לכל ערוץ, גם באפס הודעות מפוענחות. `available:false` (לא שגיאה) כש-satcom כבוי/dashboard לא זמין |
 | GET | `/api/aircraft` | רוסטר מטוסים מאוחד — היתוך ACARS+VDL2+SATCOM+ADS-B לפי זהות (רישום/icao/טיסה). חי בכל מצב |
 | GET | `/api/activity` | יומן שידורים |
 | GET | `/recordings/<name>` | קובץ הקלטה MP3 |
@@ -397,7 +405,11 @@ renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitAr
 - **מאזינים בלי סיסמה;** סיסמת ה-source ל-Icecast פנימית קבועה (`airam`).
 - **PIN אופציונלי** דרך `AIRAM_PIN` ב-`/etc/airam/airam.env` (כבוי כברירת מחדל).
 - **הגנת CSRF/DNS-rebind:** `_guard` דוחה בקשות משנות-מצב כש-`Origin != Host`.
-- מיועד **לרשת פרטית בלבד**. אל תחשוף 8080/8000 לאינטרנט; לגישה מרחוק — VPN/Tailscale.
+- **פורט אבחון SATCOM (`SATCOM_WEB_PORT`, ברירת מחדל 8888) נקשר ל-INADDR_ANY** —
+  ‏`inmarsat-sniffer --web` לא ניתן להגבלה ל-loopback דרך הכלי עצמו (נבדק
+  במקור). נגיש ברשת המקומית גם בלי `GET /api/satcom/health` (ה-proxy של
+  airam-web) — אותה קטגוריית סיכון בדיוק כמו Icecast (גם הוא בלי אימות).
+- מיועד **לרשת פרטית בלבד**. אל תחשוף 8080/8000/8888 לאינטרנט; לגישה מרחוק — VPN/Tailscale.
 
 ---
 

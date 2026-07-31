@@ -14,6 +14,7 @@ import app
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "ACARS_LOG_PATH", tmp_path / "acars.jsonl")
     monkeypatch.setattr(app, "VDL2_LOG_PATH", tmp_path / "vdl2.jsonl")
+    monkeypatch.setattr(app, "SATCOM_LOG_PATH", tmp_path / "satcom.jsonl")
     return tmp_path
 
 
@@ -115,6 +116,21 @@ def test_api_vdl2_day_returns_only_that_day(client, paths):
 
 def test_api_vdl2_day_rejects_bad_format(client, paths):
     r = client.get("/api/vdl2?day=2026-13-40")
+    assert r.status_code == 400
+
+
+def test_api_satcom_day_returns_only_that_day(client, paths):
+    app._append_satcom_log({"t": _day_epoch("2026-07-01"), "tail": "4X-OLD"})
+    app._append_satcom_log({"t": _day_epoch("2026-07-02"), "tail": "4X-TODAY"})
+    r = client.get("/api/satcom?day=2026-07-01")
+    j = r.get_json()
+    assert r.status_code == 200 and j["ok"] and j["day"] == "2026-07-01"
+    tails = [m["tail"] for m in j["messages"]]
+    assert tails == ["4X-OLD"]
+
+
+def test_api_satcom_day_rejects_bad_format(client, paths):
+    r = client.get("/api/satcom?day=2026-13-40")
     assert r.status_code == 400
 
 

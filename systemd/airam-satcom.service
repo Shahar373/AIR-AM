@@ -40,7 +40,12 @@ ExecStartPre=/usr/local/bin/airam-wait-sdrplay
 # ‏$SATCOM_UDP נכתב ע"י write_satcom_env (127.0.0.1:5558, תואם ל-SATCOM_UDP_PORT
 # ב-webtune/app.py) — משתמשים במשתנה (לא קשיח) כדי ששינוי עתידי בפורט לא
 # ישאיר את הקונפיג הכתוב לא-בשימוש (כמו ‎-j ${ACARS_UDP} ב-airam-acars.service).
-ExecStart=/usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero $SATCOM_GAIN $SATCOM_BIAS_TEE --udp=${SATCOM_UDP} --station-id=airam
+# ‏--web=${SATCOM_WEB_PORT}: dashboard אבחון מובנה (options.c/web.c, אומת
+# מהמקור) — GET /api/state חושף נעילת דמודולטור/ebno/mse לכל ערוץ, גם באפס
+# הודעות מפוענחות. airam-web עושה proxy מקומי (GET /api/satcom/health) —
+# ⚠ הפורט עצמו נקשר ל-INADDR_ANY (לא ניתן להגבלה ל-loopback דרך הכלי), כך
+# שהוא נגיש ברשת המקומית גם בלי ה-proxy — ר' ההערה ב-SATCOM_WEB_PORT ב-app.py.
+ExecStart=/usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero $SATCOM_GAIN $SATCOM_BIAS_TEE --udp=${SATCOM_UDP} --web=${SATCOM_WEB_PORT} --station-id=airam
 # גישת חומרה (SDR) => כמו rtl_airband, רץ כ-root
 User=root
 Restart=always
