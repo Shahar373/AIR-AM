@@ -353,7 +353,10 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  "satcom_freqs": SATCOM_FREQS_DEFAULT,
                  # True = bias-T של ה-RSP1B מזין את ה-LNA (ברירת המחדל ההיסטורית).
                  # False = המשתמש מזין את ה-LNA ממקור חיצוני (ר' _enter_satcom).
-                 "satcom_bias_tee": True}
+                 "satcom_bias_tee": True,
+                 # True (ברירת מחדל) = מדלגים על דמודולטורי ה-C-channel — חוסך
+                 # ~50% CPU ובקושי עולה במידע (ר' §12 ב-CLAUDE.md ו-write_satcom_env).
+                 "satcom_skip_c": True}
 
 
 # --- שורת ה-squelch: מקור אמת יחיד -----------------------------------------
@@ -1950,7 +1953,7 @@ def write_vdl2_env(freqs, ifgr=None, rfgr=None):
     _atomic_write(VDL2_ENV_PATH, text)
 
 
-def write_satcom_env(freqs, gain=None, bias_tee=True):
+def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True):
     """כותב /etc/airam/satcom.env בפורמט EnvironmentFile של systemd.
     ‏freqs כאן הוא רשימה בת-איבר-יחיד עם דגל הלוויין (למשל ["AF1"]) — geostationary
     => אין "ערוצים"/בנק לבחור כמו ACARS/VDL2 (ר' הערה ליד SATCOM_FREQS_DEFAULT).
@@ -1963,7 +1966,11 @@ def write_satcom_env(freqs, gain=None, bias_tee=True):
     ⚠ bias-T חייב להיות דולק *רק* במצב satcom (מזין את ה-LNA שצמוד לאנטנת ה-L-band,
     לא לאנטנת ה-airband) — satcom.env לא נטען כלל במצבי VHF אחרים, מובטח מבנית.
     ‏SATCOM_WEB_PORT קבוע (לא תלוי-בחירת-משתמש) — משמש את ה---web= ב-ExecStart
-    ואת GET /api/satcom/health (ר' SATCOM_WEB_PORT למעלה)."""
+    ואת GET /api/satcom/health (ר' SATCOM_WEB_PORT למעלה).
+    ‏SATCOM_SKIP_C מכיל את הדגל ‎--skip-c-channel (או ריק) — ר' §12: מדלג על
+    ששת דמודולטורי ה-OQPSK 8400 (C-channels) מתוך 12 הערוצים של Alphasat.
+    ברירת המחדל **דולקת** כי AIR-AM צורך ACARS בלבד וה-C-channels כמעט לא
+    נושאים אותו, בעוד שהם הדמודולטורים היקרים ביותר (‎~50% CPU לפי המקור)."""
     sats = _sanitize_satellite(freqs)
     gain_flag = "--sdrplay-gain=%d" % int(gain) if gain is not None else ""
     text = "\n".join([
@@ -1971,6 +1978,7 @@ def write_satcom_env(freqs, gain=None, bias_tee=True):
         f"SATCOM_SATELLITE={sats[0]}",
         f"SATCOM_GAIN={gain_flag}",
         "SATCOM_BIAS_TEE=" + ("-B" if bias_tee else ""),
+        "SATCOM_SKIP_C=" + ("--skip-c-channel" if skip_c else ""),
         f"SATCOM_UDP={ACARS_UDP_HOST}:{SATCOM_UDP_PORT}",
         f"SATCOM_WEB_PORT={SATCOM_WEB_PORT}",
         "",
@@ -2026,7 +2034,7 @@ def _enter_acars(freqs):
     return None, None
 
 
-def _enter_satcom(freqs, bias_tee=True):
+def _enter_satcom(freqs, bias_tee=True, skip_c=True):
     """עוצר את שלושת צרכני ה-SDR האחרים ומריץ inmarsat-sniffer. מחזיר
     (error, detail). Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות
     תחילה כדי לשחרר את ה-SDR לפני ש-inmarsat-sniffer פותח אותו (מונע מרוץ על
@@ -2037,13 +2045,15 @@ def _enter_satcom(freqs, bias_tee=True):
     injector) — ‏RSP1B bias-T מוגבל ל-‎100mA, ותוספת הצריכה של ה-LNA + עליית
     ה-CPU של inmarsat-sniffer בו-זמנית עלולה לדחוף ספק שולי (למשל power bank
     נייד) מעבר לתקרה. ⚠ אסור להזין משני מקורות בו-זמנית (הזרמה הדדית אפשרית)
-    — המשתמש אחראי לוודא שרק אחד מהם דולק בפועל."""
+    — המשתמש אחראי לוודא שרק אחד מהם דולק בפועל.
+    ‏skip_c=True (ברירת מחדל) מוריד את דמודולטורי ה-C-channel — הצד השני של
+    אותו תקציב חשמל, אבל דרך ה-CPU במקום דרך ה-bias-T (ר' §12/write_satcom_env)."""
     for svc in ("rtl_airband", ACARS_SERVICE, VDL2_SERVICE):
         try:
             _sysctl("stop", svc, timeout=30)
         except Exception:
             pass
-    write_satcom_env(freqs, bias_tee=bias_tee)
+    write_satcom_env(freqs, bias_tee=bias_tee, skip_c=skip_c)
     try:
         # airam-satcom.service (בשונה משאר צרכני ה-SDR) מוגדר עם StartLimitBurst
         # סופי — הגנה מפני קריסה חוזרת שמדליקה מחדש bias-T ללא פיקוח (ר' ההערה
@@ -3347,6 +3357,10 @@ def api_mode():
             # freqs); state חדש/ישן-בלי-השדה => True (ההתנהגות ההיסטורית).
             bias_tee = (data["bias_tee"] if isinstance(data.get("bias_tee"), bool)
                        else bool(st.get("satcom_bias_tee", True)))
+            # skip_c: אותו דפוס "מפורש גובר, אחרת הזכור, אחרת ברירת מחדל" —
+            # אבל כאן ברירת המחדל היא True (חיסכון), ר' write_satcom_env.
+            skip_c = (data["skip_c"] if isinstance(data.get("skip_c"), bool)
+                      else bool(st.get("satcom_skip_c", True)))
 
     if not TUNE_LOCK.acquire(timeout=0.5):
         return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב",
@@ -3378,13 +3392,15 @@ def api_mode():
             save_state(new_state)
             return jsonify(ok=True, app_mode="scan", scan_plan=plan)
 
-        # acars / vdl2 / satcom — מסלול דאטה סימטרי (satcom מקבל גם bias_tee)
+        # acars / vdl2 / satcom — מסלול דאטה סימטרי (satcom מקבל גם bias_tee/skip_c)
         log.info("mode -> %s freqs=%s (from %s)", mode, freqs, request.remote_addr)
-        err, detail = enter(freqs, bias_tee) if mode == "satcom" else enter(freqs)
+        err, detail = (enter(freqs, bias_tee, skip_c) if mode == "satcom"
+                       else enter(freqs))
         if err:
             payload, status = _fail_to_off(st, err, detail, "enter " + mode)
             return jsonify(payload), status
-        extra = {"satcom_bias_tee": bias_tee} if mode == "satcom" else {}
+        extra = ({"satcom_bias_tee": bias_tee, "satcom_skip_c": skip_c}
+                 if mode == "satcom" else {})
         new_state = {**st, "app_mode": mode, key: freqs, **extra}
         save_state(new_state)
         return jsonify(ok=True, app_mode=mode, **{key: freqs}, **extra)
