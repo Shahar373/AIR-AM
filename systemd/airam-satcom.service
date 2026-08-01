@@ -45,7 +45,13 @@ ExecStartPre=/usr/local/bin/airam-wait-sdrplay
 # הודעות מפוענחות. airam-web עושה proxy מקומי (GET /api/satcom/health) —
 # ⚠ הפורט עצמו נקשר ל-INADDR_ANY (לא ניתן להגבלה ל-loopback דרך הכלי), כך
 # שהוא נגיש ברשת המקומית גם בלי ה-proxy — ר' ההערה ב-SATCOM_WEB_PORT ב-app.py.
-ExecStart=/usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero $SATCOM_GAIN $SATCOM_BIAS_TEE --udp=${SATCOM_UDP} --web=${SATCOM_WEB_PORT} --station-id=airam
+# ‏$SATCOM_SKIP_C (‎--skip-c-channel או ריק): מדלג על ששת דמודולטורי ה-OQPSK
+# 8400 (C-channels) מתוך 12 הערוצים של Alphasat. לפי המקור (options.c) הם
+# "rarely carry ACARS" וחוסכים "~50% CPU on low-power hosts" — ו-AIR-AM צורך
+# ACARS בלבד. דולק כברירת מחדל: הפחתת ה-CPU היא קו ההגנה העיקרי על תקציב
+# החשמל בהפעלה מסוללה (ר' §12 ב-CLAUDE.md). ⚠ ה-auto-enable שבמקור חל רק על
+# RTL-SDR (‎#ifdef HAVE_RTLSDR ב-main.c) => ב-SDRplay חייבים להעביר במפורש.
+ExecStart=/usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero $SATCOM_GAIN $SATCOM_BIAS_TEE $SATCOM_SKIP_C --udp=${SATCOM_UDP} --web=${SATCOM_WEB_PORT} --station-id=airam
 # גישת חומרה (SDR) => כמו rtl_airband, רץ כ-root
 User=root
 Restart=always

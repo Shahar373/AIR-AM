@@ -1589,6 +1589,20 @@
           <span id="satcomPowerAdviceTxt"></span>
           <button type="button" class="ghost" id="satcomPowerAdviceBtn">סמן הזנה חיצונית</button>
         </div>
+        <!-- מצב חסכון CPU: הצד השני של אותו תקציב חשמל (ה-bias-T למעלה הוא הצד
+             של הזרם; זה הצד של ה-CPU). checked => skip_c=true בבקשה. -->
+        <div class="setting" id="satcomSkipCRow">
+          <span>⚡ מצב חסכון CPU (דילוג ערוצי C)</span>
+          <label class="switch">
+            <input type="checkbox" id="satcomSkipC" checked>
+            <span class="track"></span>
+          </label>
+        </div>
+        <p class="sdr-hint" id="satcomSkipCHint">
+          דלוק (ברירת מחדל): מדלגים על ששת דמודולטורי ה-C-channel (OQPSK 8400)
+          מתוך 12 הערוצים — לפי המקור הם כמעט לא נושאים ACARS וחוסכים ‎~50% CPU.
+          כבוי: מפענחים את כל 12 הערוצים (עוד עומס, כמעט בלי רווח ב-ACARS).
+        </p>
         <!-- סרגל בקרת SDR: מתעדכן לפי satcomActive (מצב ה-SDR האמיתי, לא הכרטיסייה) -->
         <div id="satcomSdrBar" class="acars-sdr-bar">
           <div id="satcomInactive">
@@ -2237,7 +2251,13 @@
     }
     // קצב 1 שנייה (ולא 5) — כיוון אנטנה דורש משוב כמעט-מיידי, כמו מדדי ה-RF
     // של הקול. רץ רק בתצוגת satcom וכשהדף גלוי, וה-in-flight guard מונע ערימה.
-    setInterval(() => { if (!document.hidden && appMode === "satcom") pollSatcomHealth(); }, 1000);
+    // ⚠ וגם רק כשהמקלט *באמת* פעיל: כל בקשה גורמת ל-_is_active בשרת, שהוא
+    // subprocess של systemctl — פולינג בקצב 1s בזמן עיון בהיסטוריה (SATCOM כבוי)
+    // היה שורף fork בשנייה על ה-Pi בלי שום תמורה. זה בדיוק תקציב החשמל שאנחנו
+    // מנסים לשמור עליו. הדלקה ממקום אחר נתפסת ב-pollGlobalState (ר' שם).
+    setInterval(() => {
+      if (!document.hidden && appMode === "satcom" && satcom && satcom.active) pollSatcomHealth();
+    }, 1000);
 
     /* ---------- חיווי מתח ל-Pi ---------- */
     // המתח משתנה לאט => פולינג כל 5 שניות. החיווי החשוב ביותר לסוללה ניידת הוא
@@ -2615,7 +2635,12 @@
         scanning = (h.app_mode === "scan");
         if ((live === "acars") !== acars.active) acars.setActive(live === "acars");
         if (vdl2 && (live === "vdl2") !== vdl2.active) vdl2.setActive(live === "vdl2");
-        if (satcom && (live === "satcom") !== satcom.active) satcom.setActive(live === "satcom");
+        if (satcom && (live === "satcom") !== satcom.active) {
+          satcom.setActive(live === "satcom");
+          // המקלט נדלק ממקום אחר (טלפון שני/⏻) — פאנל הכיוון לא מפולל כשהמקלט
+          // כבוי (ר' ה-interval), אז מתניעים אותו כאן במקום לחכות לגילוי.
+          if (live === "satcom" && appMode === "satcom") pollSatcomHealth();
+        }
         updateSdrPip(); renderPower();
         if (scanning) {
           try {
@@ -2740,6 +2765,7 @@
             $("satcomExternalLna").checked = !data.satcom_bias_tee;
             renderPowerAdvice();   // קביעה תוכניתית לא מפעילה onchange
           }
+          if (typeof data.satcom_skip_c === "boolean") $("satcomSkipC").checked = data.satcom_skip_c;
           satcom.setActive(true);
           renderPower();
           satcom.poll();                       // רענון מיידי אחרי ש-inmarsat-sniffer עלה
@@ -3924,7 +3950,8 @@
     $("satcomExternalLna").onchange = renderPowerAdvice;
     function enterSatcom() {
       if (!confirmSatcomAntenna()) return;
-      const extra = { bias_tee: !$("satcomExternalLna").checked };
+      const extra = { bias_tee: !$("satcomExternalLna").checked,
+                      skip_c: $("satcomSkipC").checked };
       if (satcom.selFreqs) extra.freqs = satcom.selFreqs;
       applyMode("satcom", extra);
     }
@@ -4089,6 +4116,9 @@
       // שולח בשקט bias_tee=true (מדליק bias-T) גם למשתמש שבחר הזנה חיצונית.
       $("satcomExternalLna").checked = st.satcom_bias_tee === false;
       renderPowerAdvice();         // קביעה תוכניתית לא מפעילה onchange
+      // אותו נימוק (enterSatcom נקרא גם מחוץ לתצוגה), רק בלי סיכון החומרה:
+      // ‏state ישן בלי השדה => ברירת המחדל החסכונית, כמו בשרת.
+      $("satcomSkipC").checked = st.satcom_skip_c !== false;
       // app_mode מגיע מהמציאות (השירות הפעיל), ובאין צרכן — מהכוונה השמורה
       // (mode_ok=false אומר שהמצב השמור אמור לרוץ אבל לא רץ). נוחתים בתצוגת
       // המצב הפעיל; off/תקלה נוחתים במסך הבית (התצוגה הניטרלית).

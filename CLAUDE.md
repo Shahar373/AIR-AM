@@ -157,7 +157,7 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 | `/etc/rtl_airband/airband.conf` | קונפיג קול חי (תדר נבחר) | app.py בכל `/api/tune` |
 | `/etc/airam/acars.env` | תדרי ACARS חיים | app.py בכל מעבר ל-ACARS |
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
-| `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain, bias-tee (`-B`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
+| `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain, bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
 | `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
@@ -248,7 +248,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   `src/dst.type` "Aircraft/Ground Earth Station" קובע `dir` מבני. **בלי `level`/`snr`/`freq`**
   — הכלי לא חושף אותם (§12), ו-`isu.refno`≠MSN ⇒ `msgno` לא ממופה), `write_satcom_env`
   (לוויין `--satellite=`, `SATCOM_GAIN`=`--sdrplay-gain` (נייטיבי, לא `--soapy-gain`) או
-  ריק=AGC, `SATCOM_BIAS_TEE`=`-B`/ריק), `_enter_satcom` (עוצר שלושת האחרים, מנקה
+  ריק=AGC, `SATCOM_BIAS_TEE`=`-B`/ריק, `SATCOM_SKIP_C`=`--skip-c-channel`/ריק — ר' §12),
+  `_enter_satcom` (עוצר שלושת האחרים, מנקה
   תקרת-הפעלות קודמת עם `reset-failed` לפני ה-restart — ר' §12, מרים
   inmarsat-sniffer, verify), `_sanitize_satellite`/`_satcom_window_error` (לוויין יחיד
   מתוך `SATCOM_BANKS`, לא בנק תדרים), `SATCOM_BANKS` (לוויינים: AF1/4F3/3F5/F1). התמדה:
@@ -384,7 +385,7 @@ renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitAr
 | GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `scan_plan`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`) |
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
-| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים) וגם `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית; ברירת מחדל = הבחירה השמורה, ואם אין אחת — `true`). כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
+| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית) ו-`skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12). לשניהם: ברירת מחדל = הבחירה השמורה, ואם אין אחת — `true`. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
 | GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור) |
 | GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון; `?day=YYYY-MM-DD` ארכיון מהדיסק, snapshot סטטי) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט; לא ב-`?day=`). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM, עמודות `level`+`snr`) |
@@ -515,6 +516,21 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   דרך התצוגה. `confirmSatcomAntenna()` מציג טקסט שונה בהתאם (bias-T ידלק /
   ודא הזנה חיצונית ו-bias-T כבוי) — לעולם לא טוען שbias-T ידלק כשהוא לא ידלק.
   ⚠ אחריות המשתמש: לא להזין משני מקורות (RSP1B + חיצוני) בו-זמנית.
+  (5) **`skip_c` — הצד השני של אותו תקציב חשמל (CPU במקום זרם).** ‏Alphasat
+  מגדיר 12 ערוצים, מהם **6 הם C-channels (OQPSK 8400)**. לפי המקור
+  (`options.c`) הם *"rarely carry ACARS"* וחוסכים *"~50% CPU on low-power
+  hosts"* — ו-AIR-AM צורך **ACARS בלבד** (`_normalize_satcom` קורא רק
+  `isu.acars.*`), כך שהוויתור עליהם כמעט חינם. **ברירת המחדל: דולק**
+  (`state["satcom_skip_c"]=True`), כי הפחתת ה-CPU היא קו ההגנה היחיד שעובד
+  כשספק הכוח קוטע *לפני* שה-Pi מספיק לרשום undervoltage (ר' להלן).
+  ‏`POST /api/mode {mode:"satcom", skip_c:false}` מחזיר את כל 12 הערוצים.
+  ⚠ ה-auto-enable של הדגל במקור עטוף ב-`#ifdef HAVE_RTLSDR` ⇒ **ב-SDRplay
+  הוא לא נדלק לבד** — חייבים להעביר אותו במפורש, וזה מה ש-`SATCOM_SKIP_C` עושה.
+  **⚠ מגבלת הזיהוי — למה מניעה גוברת על ניטור:** כשספק הכוח (למשל power bank
+  עם OCP) קוטע את המתח, הוא עושה זאת *מיידית* ולעיתים נועל עד ניתוק פיזי —
+  ‏`vcgencmd` לעולם לא רואה את זה, ודגלי ה-`_ever` מתאפסים בהדלקה הבאה. לכן
+  אזהרות המתח ב-UI הן **רשת ביטחון בלבד**, ולא ניתן להסתמך עליהן; מה שבאמת
+  מגן זה להוריד את הצריכה מראש (`skip_c`, `bias_tee=False`).
 - **מדדי איכות קליטה — לעולם לא ממציאים ערך:** `level` (dBFS) הוא **תמיד** הערך הגולמי
   מהמפענח, בלי עיבוד. `snr` מחושב **רק** כשיש רצפת רעש אמינה בקלט (VDL2 — `dumpvdl2`
   מספק `sig_level`+`noise_level` לכל פריים); **ACARS לעולם לא מקבל SNR** כי `acarsdec`

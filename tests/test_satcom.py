@@ -451,6 +451,65 @@ def test_api_mode_satcom_bias_tee_remembered_when_omitted(client, paths, no_slee
     assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_BIAS_TEE"] == ""
 
 
+# --- skip_c: דילוג דמודולטורי C-channel (חיסכון CPU, ר' §12) ------------------
+
+def test_write_satcom_env_skip_c_default_on(paths):
+    """ברירת המחדל חוסכת: --skip-c-channel נכתב בלי שביקשו. ‏AIR-AM צורך ACARS
+    בלבד וה-C-channels כמעט לא נושאים אותו, בעוד שהם ~50% מה-CPU (options.c)."""
+    app.write_satcom_env(["AF1"])
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SKIP_C"] == "--skip-c-channel"
+
+
+def test_write_satcom_env_skip_c_off_writes_empty_flag(paths):
+    """כבוי => הערך ריק לגמרי (ולא המחרוזת "false"/"0"): ‏$SATCOM_SKIP_C
+    לא-מצוטט ב-ExecStart נעלם כשריק, בדיוק כמו SATCOM_GAIN/SATCOM_BIAS_TEE."""
+    app.write_satcom_env(["AF1"], skip_c=False)
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SKIP_C"] == ""
+
+
+def test_api_mode_satcom_default_skip_c_is_on(client, paths, no_sleep, monkeypatch):
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom"})
+    assert r.status_code == 200
+    assert r.get_json()["satcom_skip_c"] is True
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SKIP_C"] == "--skip-c-channel"
+    assert app.load_state()["satcom_skip_c"] is True
+
+
+def test_api_mode_satcom_skip_c_false_decodes_all_channels(client, paths, no_sleep, monkeypatch):
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom", "skip_c": False})
+    assert r.status_code == 200
+    assert r.get_json()["satcom_skip_c"] is False
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SKIP_C"] == ""
+    assert app.load_state()["satcom_skip_c"] is False
+
+
+def test_api_mode_satcom_skip_c_remembered_when_omitted(client, paths, no_sleep, monkeypatch):
+    """כמו bias_tee/freqs: כניסה חוזרת בלי skip_c משתמשת בבחירה השמורה ולא
+    חוזרת בשקט לברירת המחדל."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    client.post("/api/mode", json={"mode": "satcom", "skip_c": False})
+    r = client.post("/api/mode", json={"mode": "satcom"})    # בלי skip_c
+    assert r.get_json()["satcom_skip_c"] is False
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SKIP_C"] == ""
+
+
+def test_api_mode_satcom_skip_c_and_bias_tee_are_independent(client, paths, no_sleep, monkeypatch):
+    """שני המתגים נוגעים באותו תקציב חשמל אבל דרך מנגנונים שונים (זרם מול CPU)
+    — בקשה אחת עם שניהם חייבת לכבד את שניהם, בלי שאחד ידרוס את השני."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom", "bias_tee": False, "skip_c": True})
+    body = r.get_json()
+    assert body["satcom_bias_tee"] is False and body["satcom_skip_c"] is True
+    env = _env_lines(app.SATCOM_ENV_PATH)
+    assert env["SATCOM_BIAS_TEE"] == "" and env["SATCOM_SKIP_C"] == "--skip-c-channel"
+
+
 def test_api_mode_off_stops_satcom_too(client, paths, no_sleep, monkeypatch):
     calls = []
     monkeypatch.setattr(app, "_sysctl",
