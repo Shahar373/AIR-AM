@@ -385,6 +385,32 @@
       text-align: end; color: var(--text); }
     .rf.stale { opacity: .45; }
     .rf .nodata { font-size: .72rem; color: var(--text-faint); margin: .2rem 0 0; display: none; }
+
+    /* --- מד שדה: בסיס כיול + פסק דין (משותף לקול/ACARS/VDL2 — ר' createFieldMeter) --- */
+    .fm-row { display: flex; align-items: center; gap: .5rem; font-size: .74rem;
+      color: var(--dim); margin-top: .5rem; flex-wrap: wrap; }
+    .fm-verdict { font-weight: 700; }
+    .fm-verdict.good { color: var(--green-fg); }
+    .fm-verdict.bad { color: var(--red-fg); }
+    .fm-btns { display: flex; gap: .5rem; margin-top: .5rem; }
+    .fm-btns button { flex: 1; font-size: .74rem; padding: .4rem .5rem; }
+    /* פאנל מד השדה העצמאי ל-ACARS/VDL2 (בקול הוא נספח ל-#rfPanel הקיים) */
+    .field-meter { margin-top: .7rem; padding: .65rem .75rem; text-align: start;
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; }
+    .field-meter .fm-main { display: flex; align-items: baseline; justify-content: space-between; gap: .6rem; }
+    .field-meter .fm-main b { font-size: 1.1rem; font-variant-numeric: tabular-nums;
+      direction: ltr; display: inline-block; }
+    .field-meter.stale .fm-main b { opacity: .5; }
+    .field-meter .fm-hint { font-size: .72rem; color: var(--text-faint); margin: .35rem 0 0; }
+
+    /* --- דוח סשן: "מה קרה בזמן שלא הסתכלת" --- */
+    .session-stats { font-size: .85rem; color: var(--text); margin: 0 0 .5rem; }
+    .session-highlights { display: flex; flex-direction: column; gap: .35rem; max-height: 14rem; overflow-y: auto; }
+    .sh-item { display: flex; align-items: baseline; gap: .5rem; font-size: .78rem;
+      padding: .35rem .5rem; background: var(--panel-2); border-radius: 8px; }
+    .sh-item .sh-time { color: var(--text-faint); direction: ltr; white-space: nowrap; }
+    .sh-item .sh-tail { font-weight: 700; white-space: nowrap; }
+    .sh-item .sh-txt { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .rf.stale .nodata { display: block; }
 
     /* ---------- מסלולים פעילים (ADS-B) ---------- */
@@ -1033,6 +1059,10 @@
     <div class="statusbar">
       <span class="sb-label">מערכת</span>
       <span id="pill" class="pill"><span class="dot"></span><span id="status">טוען…</span></span>
+      <!-- חיווי ניתוק גלובלי: לא תלוי בתצוגה/מצב — "אין תשובה מהשרת" עצמו,
+           לא "המצב לא רץ". מוסתר כברירת מחדל; ר' fetchTimeout/_updateConnChip. -->
+      <span id="connChip" class="pill err hidden" title="לא התקבלה תשובה מהשרת בזמן סביר — הנתונים המוצגים עשויים להיות ישנים">
+        <span class="dot"></span><span>אין קשר לשרת</span></span>
       <!-- חיווי מתח ל-Raspberry Pi (מוסתר עד /api/power) -->
       <div class="pwr hidden" id="pwrChip" title="מתח האספקה ל-Raspberry Pi">
         <span class="pdot"></span><span id="pwrText">בודק מתח…</span>
@@ -1103,6 +1133,23 @@
         </div>
       </div>
     </div><!-- /panel-bd -->
+  </section>
+
+  <!-- דוח סשן: "מה קרה בזמן שלא הסתכלת" (ר' docs/field-station-roadmap.md).
+       מוסתר כברירת מחדל — pollSession מציג רק כשיש חלון משמעותי + תוכן.
+       "הבנתי" מקדם את הסמן (POST /api/session/ack) כדי שלא יוצג שוב עד להיעדרות הבאה. -->
+  <section class="panel p-session hidden" id="sessionCard">
+    <div class="panel-hd"><p class="ttl">מה קרה בזמן שלא הסתכלת</p>
+      <div class="hd-end"><span class="hint" id="sessionDur"></span></div>
+    </div>
+    <div class="panel-bd">
+      <p class="session-stats" id="sessionStats"></p>
+      <div class="session-highlights" id="sessionHighlights"></div>
+      <div class="fm-btns">
+        <button type="button" class="ghost" id="sessionAckBtn">✓ הבנתי</button>
+        <button type="button" class="ghost" id="sessionNotifyBtn" title="התראה מקומית (כל עוד הטאב/PWA פתוחים ברקע) כשמגיעה הודעה בולטת">🔕 הפעל התראות</button>
+      </div>
+    </div>
   </section>
 
   <!-- פאנל מסלולים פעילים (מוסק מ-ADS-B, ראה /api/airspace); GPS ברצועת הסטטוס.
@@ -1228,6 +1275,15 @@
         <span class="val" id="rfNoiseVal">— dBFS</span>
       </div>
       <p class="nodata">אין נתוני RF — ממתין למקלט…</p>
+      <!-- בסיס כיול + פסק דין: השוואה לרצפת רעש שנמדדה בעצמה (לעולם לא סף מומצא — §12) -->
+      <div class="fm-row">
+        <span id="voiceFmBaseline">אין בסיס מכויל</span>
+        <span id="voiceFmVerdict" class="fm-verdict"></span>
+      </div>
+      <div class="fm-btns">
+        <button type="button" class="ghost" id="voiceFmCalBtn">📏 כייל בסיס עכשיו</button>
+      </div>
+      <p class="fm-hint" id="voiceFmHint"></p>
     </div>
     </div><!-- /panel-bd -->
   </section>
@@ -1381,6 +1437,23 @@
             <p class="sdr-hint">ACARS פעיל — ה-SDR מפענח נתונים. השמע אינו זמין.</p>
           </div>
         </div>
+        <!-- מד שדה: acarsdec לא חושף רצפת רעש רציפה (רק פר-הודעה) — לכן "הודעה
+             אחרונה" בלבד, ובדיקת אנטנה יזומה (מעבר זמני לקול) לפסק דין אמיתי -->
+        <div class="field-meter stale" id="acarsFm">
+          <div class="fm-main">
+            <span>הודעה אחרונה: <b id="acarsFmSig">—</b> <span id="acarsFmSnr"></span></span>
+            <span id="acarsFmAge"></span>
+          </div>
+          <div class="fm-row">
+            <span id="acarsFmBaseline">אין בסיס מכויל</span>
+            <span id="acarsFmVerdict" class="fm-verdict"></span>
+          </div>
+          <div class="fm-btns">
+            <button type="button" class="ghost" id="acarsFmCheckBtn">🔍 בדוק אנטנה</button>
+            <button type="button" class="ghost" id="acarsFmCalBtn">📏 כייל בסיס</button>
+          </div>
+          <p class="fm-hint" id="acarsFmHint">acarsdec לא מדווח אות בין הודעות — "בדוק אנטנה" עובר לרגע לקול ומודד ישירות.</p>
+        </div>
       </div>
     </section>
 
@@ -1479,6 +1552,23 @@
             </div>
             <p class="sdr-hint">VDL2 פעיל — ה-SDR מפענח נתונים. השמע אינו זמין.</p>
           </div>
+        </div>
+        <!-- מד שדה: dumpvdl2 חושף sig_level/noise_level *רק בתוך פריים* — לכן
+             "הודעה אחרונה" בלבד, ובדיקת אנטנה יזומה (מעבר זמני לקול) לפסק דין אמיתי -->
+        <div class="field-meter stale" id="vdl2Fm">
+          <div class="fm-main">
+            <span>הודעה אחרונה: <b id="vdl2FmSig">—</b> <span id="vdl2FmSnr"></span></span>
+            <span id="vdl2FmAge"></span>
+          </div>
+          <div class="fm-row">
+            <span id="vdl2FmBaseline">אין בסיס מכויל</span>
+            <span id="vdl2FmVerdict" class="fm-verdict"></span>
+          </div>
+          <div class="fm-btns">
+            <button type="button" class="ghost" id="vdl2FmCheckBtn">🔍 בדוק אנטנה</button>
+            <button type="button" class="ghost" id="vdl2FmCalBtn">📏 כייל בסיס</button>
+          </div>
+          <p class="fm-hint" id="vdl2FmHint">dumpvdl2 לא מדווח אות בין הודעות — "בדוק אנטנה" עובר לרגע לקול ומודד ישירות.</p>
         </div>
       </div>
     </section>
@@ -1740,14 +1830,51 @@
       if (pin) h["X-AIRAM-PIN"] = pin;
       return h;
     }
+    /* ---------- שכבת רשת: timeout + חיווי ניתוק גלובלי ----------
+       בלי זה, בקשה תקועה (Wi-Fi בקצה טווח, Pi שנתקע) מקפיאה פיד/כפתור בלי שום
+       הגבלת זמן ובלי חיווי — בדיוק המצב שנראה בשטח "תקין" כשהוא לא (ר'
+       docs/field-station-roadmap.md §2). כל בקשה — GET לקריאה או POST/PUT
+       דרך apiSend — עוברת AbortController עם timeout. הצלחה של *כל* בקשה
+       (גם תשובת שגיאה 4xx/5xx — יש קשר, גם אם הפעולה נכשלה) מרעננת
+       lastNetOkAt; interval נפרד קובע "מנותק" רק אחרי שקט ארוך מכולן יחד —
+       תקלה חד-פעמית של endpoint נדיר לא מהבהבת את החיווי. */
+    const NET_TIMEOUT_GET = 8000;        // בקשות קריאה: in-memory בשרת, אמורות לחזור מיד
+    const NET_TIMEOUT_POST = 45000;      // /api/mode/tune יכולים לחסום עד ~45ש' (restart+verify/רולבק בשרת)
+    const NET_DISCONNECT_AFTER = 12000;  // בלי שום הצלחה מעל זה => "מנותק" (heartbeat רץ כל 10ש' בכל תצוגה)
+    let lastNetOkAt = Date.now();
+    let netDisconnected = false;
+
+    function _updateConnChip() {
+      const down = Date.now() - lastNetOkAt > NET_DISCONNECT_AFTER;
+      if (down === netDisconnected) return;
+      netDisconnected = down;
+      $("connChip").classList.toggle("hidden", !down);
+    }
+    setInterval(_updateConnChip, 3000);
+
+    async function fetchTimeout(url, opts = {}) {
+      const timeoutMs = opts.timeoutMs || (opts.method && opts.method !== "GET" ? NET_TIMEOUT_POST : NET_TIMEOUT_GET);
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { ...opts, signal: ac.signal });
+        lastNetOkAt = Date.now();   // תשובה כלשהי מהשרת => יש קשר, גם אם 4xx/5xx
+        _updateConnChip();
+        return res;
+      } finally { clearTimeout(t); }
+    }
+    // עוזר קצר לבקשות GET שמפענחות JSON ישירות — התבנית החוזרת ביותר בקובץ.
+    async function fetchJSON(url, opts) { return (await fetchTimeout(url, opts)).json(); }
+
     async function apiSend(method, url, body) {
-      let res = await fetch(url, { method, headers: apiHeaders(), body: JSON.stringify(body) });
+      const opts = { method, headers: apiHeaders(), body: JSON.stringify(body) };
+      let res = await fetchTimeout(url, opts);
       if (res.status === 401) {                 // השרת דורש PIN => בקש פעם אחת ונסה שוב
         const entered = prompt("נדרש PIN לשינוי הגדרות:");
         if (entered) {
           pin = entered.trim();
           localStorage.setItem("airam_pin", pin);
-          res = await fetch(url, { method, headers: apiHeaders(), body: JSON.stringify(body) });
+          res = await fetchTimeout(url, { ...opts, headers: apiHeaders() });
         }
       }
       return res;
@@ -2115,7 +2242,7 @@
       if (Date.now() - lastHealthAt < 15000) return;
       lastHealthAt = Date.now();
       try {
-        const h = await (await fetch("/api/health")).json();
+        const h = await fetchJSON("/api/health");
         const el = document.querySelector("#rfPanel .nodata");
         if (sdrOff || h.app_mode === "off")
           el.textContent = "המקלט בכיבוי (Standby) — לחץ ▶ הפעלה";
@@ -2134,7 +2261,7 @@
       if (metricsInFlight) return;   // בקשה קודמת עדיין פתוחה (רשת איטית) => מדלגים על המחזור
       metricsInFlight = true;
       try {
-        const m = await (await fetch("/api/metrics")).json();
+        const m = await fetchJSON("/api/metrics");
         const panel = $("rfPanel");
         if (!m.ok || !m.fresh || m.snr == null) {
           panel.classList.add("stale");
@@ -2168,6 +2295,100 @@
     // (לכיוון אנטנה בזמן אמת), רק כשהדף גלוי ובתצוגת קול (המדדים הם של rtl_airband)
     setInterval(() => { if (!document.hidden && appMode === "voice") pollMetrics(); }, 1000);
     pollMetrics();
+
+    /* ---------- מד שדה מאוחד: קול / ACARS / VDL2 (ל-SATCOM יש כלי משלו: #satcomAimPanel) ----------
+       פקטורי אחד, שלושה מופעים — שינוי שנוגע לכולם נעשה כאן (כמו createDataView
+       לפידי הדאטה, ר' §7 ב-CLAUDE.md). קורא GET /api/signal (המדד הטוב ביותר
+       הזמין למצב שרץ *בפועל* כרגע) ומפעיל POST /api/antenna/check ("🔍 בדוק
+       אנטנה"/"📏 כייל בסיס") — הלב של ACARS/VDL2, ששם אין מד רציף: acarsdec/
+       dumpvdl2 לא חושפים רצפת רעש כששקט, רק בתוך הודעה מפוענחת. פסק הדין תמיד
+       מול בסיס שהמשתמש כייל בעצמו, לעולם לא סף מומצא (§12). */
+    function createFieldMeter(mode, prefix, opts) {
+      opts = opts || {};
+      const E = (suf) => $(prefix + suf);
+      let polling = false, checking = false;
+
+      function verdictInfo(v) {
+        if (v === "ok") return ["✓ תואם לבסיס", "good"];
+        if (v === "below_baseline") return ["⚠ מתחת לבסיס — בדוק חיבור אנטנה", "bad"];
+        if (v === "no_baseline") return ["אין בסיס — לחץ “כייל בסיס”", ""];
+        return ["", ""];
+      }
+
+      function render(d) {
+        if (!opts.compact) {
+          const box = E("");
+          if (box) box.classList.toggle("stale", !d.fresh);
+          E("Sig").textContent = d.signal != null ? d.signal.toFixed(1) + " dBFS" : "—";
+          E("Snr").textContent = d.snr != null ? d.snr.toFixed(1) + " dB SNR" : "";
+          E("Age").textContent = (d.kind === "last-message" && d.age != null)
+            ? "לפני " + Math.round(d.age) + " שנ׳" : "";
+        }
+        E("Baseline").textContent = d.baseline
+          ? "בסיס: " + d.baseline.noise.toFixed(1) + " dBFS"
+          : "אין בסיס מכויל";
+        const [txt, cls] = verdictInfo(d.verdict);
+        const vEl = E("Verdict");
+        vEl.textContent = txt;
+        vEl.className = "fm-verdict" + (cls ? " " + cls : "");
+      }
+
+      async function poll() {
+        if (polling) return;
+        polling = true;
+        try {
+          const d = await fetchJSON("/api/signal");
+          if (d.ok && d.mode === mode) render(d);
+        } catch (e) { /* המחזור הבא ינסה שוב */ }
+        finally { polling = false; }
+      }
+
+      function currentFreq() {
+        if (mode === "voice") return current;
+        const view = mode === "acars" ? acars : vdl2;
+        const f = (view && view.selFreqs && view.selFreqs.length) ? parseFloat(view.selFreqs[0]) : NaN;
+        return Number.isFinite(f) ? f : current;
+      }
+
+      async function check(calibrate) {
+        if (checking) return;
+        checking = true;
+        const checkBtn = E("CheckBtn"), calBtn = E("CalBtn"), hint = E("Hint");
+        if (checkBtn) checkBtn.disabled = true;
+        if (calBtn) calBtn.disabled = true;
+        if (hint) hint.textContent = calibrate ? "מכייל…" : "בודק אנטנה (כ-3 שניות)…";
+        try {
+          const res = await apiSend("POST", "/api/antenna/check", { freq: currentFreq(), calibrate: !!calibrate });
+          const d = await res.json();
+          if (!d.ok) {
+            if (hint) hint.textContent = "הבדיקה נכשלה: " + (d.error || "שגיאה");
+            return;
+          }
+          render({ ...d, kind: "probe", fresh: true });
+          if (hint) hint.textContent = calibrate ? "הבסיס נשמר." : "הבדיקה הושלמה.";
+        } catch (e) {
+          if (hint) hint.textContent = "שגיאת רשת — נסה שוב.";
+        } finally {
+          checking = false;
+          if (checkBtn) checkBtn.disabled = false;
+          if (calBtn) calBtn.disabled = false;
+        }
+      }
+
+      if (E("CheckBtn")) E("CheckBtn").onclick = () => check(false);
+      if (E("CalBtn")) E("CalBtn").onclick = () => check(true);
+      return { poll };
+    }
+    const voiceFm = createFieldMeter("voice", "voiceFm", { compact: true });
+    const acarsFm = createFieldMeter("acars", "acarsFm");
+    const vdl2Fm = createFieldMeter("vdl2", "vdl2Fm");
+    // בסיס/פסק-דין משתנים לאט — 3ש' מספיק (לא צריך את קצב ה-1ש' של pollMetrics/pollSatcomHealth)
+    setInterval(() => {
+      if (document.hidden) return;
+      if (appMode === "voice") voiceFm.poll();
+      else if (appMode === "acars") acarsFm.poll();
+      else if (appMode === "vdl2") vdl2Fm.poll();
+    }, 3000);
 
     /* ---------- אבחון SATCOM: נעילת דמודולטור (GET /api/satcom/health) ----------
        proxy מקומי ל---web dashboard המובנה של inmarsat-sniffer — lock=נעילת
@@ -2207,7 +2428,7 @@
       if (satcomHealthInFlight) return;
       satcomHealthInFlight = true;
       try {
-        const h = await (await fetch("/api/satcom/health")).json();
+        const h = await fetchJSON("/api/satcom/health");
         if (!h.ok || !h.available) {
           renderAimIdle(satcom && satcom.active
             ? "לוח האבחון של המפענח לא זמין — בדוק ‎journalctl -u airam-satcom"
@@ -2270,7 +2491,7 @@
     async function pollPower() {
       const chip = $("pwrChip");
       try {
-        const p = await (await fetch("/api/power")).json();
+        const p = await fetchJSON("/api/power");
         powerFails = 0;
         if (!p.ok) { lastPower = null; chip.className = "pwr hidden"; return; }
         lastPower = p;
@@ -2442,7 +2663,7 @@
     async function pollAirspace() {
       const body = $("awBody");
       try {
-        const a = await (await fetch("/api/airspace")).json();
+        const a = await fetchJSON("/api/airspace");
         // ה-pill של ה-GPS מתעדכן תמיד (גם unknown), הכרטיס דוהה כשאין נתונים
         const g = a.gps && GPS_PILL[a.gps.status];
         $("gpsPill").className = "pill" + (g ? " " + g[0] : "");
@@ -2479,6 +2700,109 @@
     // ה-backend מושך מ-adsb.lol פעם בדקה => דגימה כל 30 שניות מספיקה, רק כשהדף
     // גלוי. בכל תצוגה: פאנל המסלולים במסך הבית + ה-GPS pill ברצועת הסטטוס גלובליים.
     setInterval(() => { if (!document.hidden) pollAirspace(); }, 30000);
+
+    /* ---------- דוח סשן: "מה קרה בזמן שלא הסתכלת" (ר' /api/session) ----------
+       התשתית (_boot_restore/scan/שרידות reboot) מריצה את התחנה לבד לאורך זמן;
+       בלי הדוח הזה המוצר היחיד שלה הוא פיד שדורש נוכחות רציפה (ר'
+       docs/field-station-roadmap.md). idempotent בצד השרת — כאן רק מציגים;
+       "✓ הבנתי" הוא הפעולה היחידה שמקדמת את הסמן (POST /api/session/ack). */
+    const SESSION_MIN_DUR_SEC = 600;   // מתחת לזה — פשוט חזרת להסתכל, לא מציגים כרטיס ריק
+
+    function fmtSessionDur(sec) {
+      const m = Math.round(sec / 60);
+      if (m < 60) return m + " דק׳";
+      const h = Math.floor(m / 60), rm = m % 60;
+      return h + "ש׳" + (rm ? " " + rm + "ד׳" : "");
+    }
+
+    function renderSession(d) {
+      const card = $("sessionCard");
+      if (!d || !d.ok || d.duration_sec < SESSION_MIN_DUR_SEC || d.total === 0) {
+        card.classList.add("hidden");
+        return;
+      }
+      card.classList.remove("hidden");
+      $("sessionDur").textContent = "מאז לפני " + fmtSessionDur(d.duration_sec);
+      let stats = d.total + " הודעות · " + d.aircraft_count + " מטוסים";
+      if (d.new_aircraft_count > 0) stats += " (" + d.new_aircraft_count + " חדשים)";
+      const air = d.airspace_series;
+      if (air && air.length) {
+        const first = air[0], last = air[air.length - 1];
+        if (first.runway && last.runway && first.runway !== last.runway)
+          stats += " · המסלול הפעיל התחלף מ-" + first.runway + " ל-" + last.runway;
+        else if (last.runway) stats += " · מסלול פעיל: " + last.runway;
+        if (last.gps_bad_ratio != null)
+          stats += " · שיבוש GPS: " + Math.round(last.gps_bad_ratio * 100) + "%";
+      }
+      $("sessionStats").textContent = stats;
+      $("sessionHighlights").innerHTML = d.highlights.length
+        ? d.highlights.map((h) => {
+            const who = h.tail || h.flight || "—";
+            const txt = h.decoded || h.category || "";
+            return '<div class="sh-item"><span class="sh-time">' + fmtTime(h.t) + '</span>' +
+              '<span class="sh-tail">' + who + '</span><span class="sh-txt">' + txt + '</span></div>';
+          }).join("")
+        : '<p class="hint">אין הודעות בולטות בחלון הזה.</p>';
+    }
+
+    async function pollSession() {
+      try { renderSession(await fetchJSON("/api/session")); }
+      catch (e) { /* לא קריטי — המחזור הבא ינסה שוב */ }
+    }
+    // דוח סשן משתנה לאט — פולינג קל, רק במסך הבית (שם הוא מוצג)
+    setInterval(() => { if (!document.hidden && appMode === "home") pollSession(); }, 20000);
+    $("sessionAckBtn").onclick = async () => {
+      try { await apiSend("POST", "/api/session/ack", {}); } catch (e) { /* ינסה שוב בפעם הבאה */ }
+      $("sessionCard").classList.add("hidden");
+    };
+
+    /* ---------- התראות: הודעות בולטות (Notification API, מקומי) ----------
+       לא Web Push — עובד כל עוד הטאב/ה-PWA המותקן פתוחים ברקע (גם מסך כבוי
+       באנדרואיד; iOS Safari מוגבל יותר, ר' docs/field-station-roadmap.md).
+       הרחבה עתידית ל-Push אמיתי (VAPID) אפשרית בלי לשנות את מנוע הניקוד
+       (m.notable מגיע כבר מוכן מהשרת, ר' _interest_score ב-app.py). */
+    const NOTIFY_KEY = "airam_notify";
+    const NOTIFY_MIN_GAP_MS = 4000;      // לא יותר מהתראה אחת כל כמה שניות — סבב הודעות לא מציף
+    const NOTIFY_MODE_LABEL = { acars: "ACARS", vdl2: "VDL2", satcom: "SATCOM" };
+    let notifyOn = localStorage.getItem(NOTIFY_KEY) === "1";
+    let lastNotifyAt = 0;
+
+    function updateNotifyBtn() {
+      const btn = $("sessionNotifyBtn");
+      if (!btn) return;
+      const supported = "Notification" in window;
+      btn.textContent = !supported ? "🔕 התראות לא נתמכות" : notifyOn ? "🔔 התראות פעילות" : "🔕 הפעל התראות";
+      btn.disabled = !supported;
+    }
+
+    async function toggleNotify() {
+      if (!("Notification" in window)) return;
+      if (!notifyOn) {
+        const perm = await Notification.requestPermission();
+        if (perm !== "granted") { updateNotifyBtn(); return; }
+        notifyOn = true;
+      } else {
+        notifyOn = false;
+      }
+      localStorage.setItem(NOTIFY_KEY, notifyOn ? "1" : "0");
+      updateNotifyBtn();
+    }
+
+    function notifyMessage(mode, m) {
+      if (!notifyOn || !m || !m.notable) return;
+      if (!("Notification" in window) || Notification.permission !== "granted") return;
+      const now = Date.now();
+      if (now - lastNotifyAt < NOTIFY_MIN_GAP_MS) return;
+      lastNotifyAt = now;
+      const who = m.tail || m.flight || "—";
+      const body = m.decoded || m.category || "";
+      try {
+        new Notification("AIR-AM · " + (NOTIFY_MODE_LABEL[mode] || mode) + " · " + who,
+          { body, tag: "airam-notable" });
+      } catch (e) { /* חלק מהדפדפנים חוסמים new Notification() בלי Service Worker — שקט */ }
+    }
+    if ($("sessionNotifyBtn")) $("sessionNotifyBtn").onclick = toggleNotify;
+    updateNotifyBtn();
     pollAirspace();
 
     /* ---------- יומן שידורים ---------- */
@@ -2570,7 +2894,7 @@
 
     async function pollActivity() {
       try {
-        const a = await (await fetch("/api/activity")).json();
+        const a = await fetchJSON("/api/activity");
         if (!a.ok) return;
         actEvents = a.events;
         renderActivity();
@@ -2598,7 +2922,7 @@
 
     async function pollMetar() {
       try {
-        const d = await (await fetch("/api/metar")).json();
+        const d = await fetchJSON("/api/metar");
         // בלי METAR בכלל, או ישן מ-3 שעות => מסתירים (עדיף כלום ממידע מטעה)
         if (!d.metar || d.age > 3 * 3600) { $("metarCard").classList.add("hidden"); return; }
         $("metarRaw").textContent = d.metar;
@@ -2623,7 +2947,7 @@
     async function pollGlobalState() {
       if (document.hidden || applyModeInFlight) return;
       try {
-        const h = await (await fetch("/api/health")).json();
+        const h = await fetchJSON("/api/health");
         // הדגלים משקפים את השירות שרץ *בפועל* (לא את הכוונה השמורה) — מצב שקרס
         // לא מוצג כ"מאזין"; h.app_mode (מציאות-או-כוונה) משמש רק להודעת התקלה.
         const s = h.services || {};
@@ -2644,7 +2968,7 @@
         updateSdrPip(); renderPower();
         if (scanning) {
           try {
-            const sc = await (await fetch("/api/scan")).json();
+            const sc = await fetchJSON("/api/scan");
             if (sc.ok) scanStatus = sc;
           } catch (e) { /* לא קריטי — התצוגה תישאר עם הערך הקודם */ }
         }
@@ -2671,8 +2995,10 @@
       $("satcomView").classList.toggle("hidden", mode !== "satcom");
       segSet("modeSeg", mode);
       renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acars/vdl2/satcom.active — עדכן בכל מעבר
-      if (mode === "home") renderHome();
-      if (mode === "voice") pollActivity();   // רענון מיידי — לא לחכות עד 15ש' ל-poll הבא
+      if (mode === "home") { renderHome(); pollSession(); }
+      if (mode === "voice") { pollActivity(); voiceFm.poll(); }   // רענון מיידי — לא לחכות עד 15ש'/3ש' ל-poll הבא
+      if (mode === "acars") acarsFm.poll();
+      if (mode === "vdl2") vdl2Fm.poll();
       if (mode === "acars") acars.show(); else acars.hide();   // תצוגת ACARS מנוהלת בפקטורי (כמו VDL2/SATCOM)
       if (mode === "vdl2") vdl2.show(); else vdl2.hide();
       if (mode === "satcom") satcom.show(); else satcom.hide();
@@ -2731,7 +3057,7 @@
           // שאף רגל לא נכנסה אם אף אחת לא בחלון כרגע ("ממתין"). מביאים סטטוס
           // אמיתי מיד במקום לנחש, בלי לחכות ל-pollGlobalState הבא (עד 10ש').
           try {
-            const sc = await (await fetch("/api/scan")).json();
+            const sc = await fetchJSON("/api/scan");
             if (sc.ok) {
               scanStatus = sc;
               acars.setActive(!!(sc.leg && sc.leg.mode === "acars"));
@@ -2757,6 +3083,7 @@
           vdl2.setActive(true);
           renderPower();
           vdl2.poll();                        // רענון מיידי אחרי ש-dumpvdl2 עלה
+          vdl2Fm.poll();
         } else if (mode === "satcom") {
           sdrOff = false;
           acars.setActive(false); vdl2.setActive(false);   // ה-SDR עבר ל-SATCOM
@@ -2777,6 +3104,7 @@
           acars.setActive(true);
           renderPower();
           acars.poll();                        // רענון מיידי אחרי ש-acarsdec עלה
+          acarsFm.poll();
         }
         return true;
       } catch (e) {
@@ -3663,7 +3991,7 @@
         renderMapSelection();
       }
       async function enterArchiveDay(day) {
-        const data = await (await fetch("/api/" + opts.prefix + "?day=" + day)).json();
+        const data = await fetchJSON("/api/" + opts.prefix + "?day=" + day);
         if (!data.ok) throw new Error(data.error || "שגיאה בטעינת הארכיון");
         if (!liveSnapshot) {
           liveSnapshot = { msgs: msgs.slice(), lastId, feedMax,
@@ -3696,7 +4024,7 @@
         if (inFlight) return;
         inFlight = true;
         try {
-          const data = await (await fetch("/api/" + opts.prefix + "?since=" + lastId)).json();
+          const data = await fetchJSON("/api/" + opts.prefix + "?since=" + lastId);
           if (!data.ok) return;
           setActive(data.active);
           if (data.freqs) renderFreqs(data.freqs);
@@ -3799,12 +4127,14 @@
     // var: hoisted (לא TDZ) — מגן על הפניות מוקדמות ב-updateSdrPip/renderVoiceAcarsBanner/reloadStream
     var acars = createDataView({
       prefix: "acars", mode: "acars", label: "ACARS",
-      onMessage: (m) => { if (m.label === "A9" && m.decoded) updateAtisPanel(m); },
+      onMessage: (m) => { if (m.label === "A9" && m.decoded) updateAtisPanel(m); notifyMessage("acars", m); },
       onReset: () => { $("acarsAtis").classList.add("hidden"); atisTimestamp = null; },
     });
     var vdl2 = createDataView({ prefix: "vdl2", mode: "vdl2", label: "VDL2",
+      onMessage: (m) => notifyMessage("vdl2", m),
       emptyHint: "ממתין להודעות… רוב התעבורה באזורנו על 136.975." });
     var satcom = createDataView({ prefix: "satcom", mode: "satcom", label: "SATCOM",
+      onMessage: (m) => notifyMessage("satcom", m),
       emptyHint: "ממתין להודעות… ‏SATCOM דורש אנטנת L-band מכוונת ל-Alphasat (25°E)." });
 
     /* ---------- רוסטר מטוסים מאוחד (ACARS+VDL2+ADS-B), מסך הבית ---------- */
@@ -3865,7 +4195,7 @@
     }
     async function pollRoster() {
       try {
-        const r = await (await fetch("/api/aircraft")).json();
+        const r = await fetchJSON("/api/aircraft");
         if (r.ok) renderRoster(r.aircraft || []);
       } catch (e) { /* offline — הרשימה נשארת עם הערכים הקודמים */ }
     }
@@ -4085,7 +4415,7 @@
     });
 
     /* ---------- אתחול ---------- */
-    fetch("/api/state").then((r) => r.json()).then((st) => {
+    fetchJSON("/api/state").then((st) => {
       document.body.classList.remove("loading");   // הצלחה => מבטלים את שלד הטעינה
       cfg = st;
       if (st.version) $("verTag").textContent = "v" + st.version + " · SDRplay RSP1B";

@@ -89,14 +89,15 @@ CLAUDE.md                   # ← המסמך הזה: ארכיטקטורה + פי
 
 webtune/
   app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, SATCOM, סריקה,
-                            #   רוסטר מאוחד, REST API, יומן, הקלטות, תמלול, METAR, מדדי RF,
-                            #   מעבר מצבים, ארכיון חיפוש. ~3500 שורות.
-  adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS. thread נפרד.
+                            #   רוסטר מאוחד, מד שדה + בדיקת אנטנה, דוח סשן, REST API, יומן,
+                            #   הקלטות, תמלול, METAR, מדדי RF, מעבר מצבים, ארכיון חיפוש. ~3850 שורות.
+  adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS + סדרת סשן. thread נפרד.
                             #   ניתן להרצה ידנית: `python3 adsb.py [--selftest]`.
   static/
-    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~4150 שורות). PWA. 4 תצוגות:
-                            #   🏠 מרכז (בית/standby/scan) + קול + ACARS + VDL2. ACARS ו-VDL2
-                            #   שני מופעים סימטריים של אותו פקטורי createDataView (ר' §7).
+    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~4500 שורות). PWA. 5 תצוגות:
+                            #   🏠 מרכז (בית/standby/scan, כולל דוח סשן+התראות) + קול + ACARS +
+                            #   VDL2 + SATCOM. ACARS/VDL2/SATCOM שלושה מופעים סימטריים של אותו
+                            #   פקטורי createDataView (ר' §7); מד השדה — פקטורי מקביל, שני.
     manifest.webmanifest    # PWA manifest (התקנה כאפליקציה).
     sw.js                   # Service Worker (נדרש HTTPS).
     icon-*.png, apple-touch-icon.png
@@ -138,6 +139,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_archive.py          # ארכיון חיפוש רב-יומי: _day_bounds, ?day= ב-/api/acars ו-/api/vdl2.
   test_adsb_enrich.py      # היתוך ADS-B↔ACARS: העשרת /api/acars מ-snapshot של adsb.py (בלי רשת).
   test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
+  test_signal.py           # מד שדה: _signal_verdict, /api/signal (voice/acars/vdl2/satcom/off), /api/antenna/check.
+  test_session.py          # דוח סשן: _interest_score, /api/session, /api/session/ack, adsb.session_series.
 
 .github/workflows/ci.yml   # pytest + `bash -n` על install.sh ו-airam-wait-sdrplay.
 ```
@@ -159,7 +162,7 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
 | `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain, bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `signal_baseline`, `last_session_view_at`) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
 | `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
@@ -262,6 +265,18 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   מנורמל קודם, אחרת icao, אחרת מספר טיסה), `_build_roster` (מהתך `_acars_msgs`+
   `_vdl2_msgs`+`_satcom_msgs` לפי הזהות, מעשיר ב-`adsb.aircraft_snapshot`, ממוין lastT
   יורד, גזור ל-`ROSTER_MAX`) — **חי בכל מצב** (לא תלוי SDR הפעיל, ר' §12), `GET /api/aircraft`.
+- **ציון מעניינוּת + דוח סשן** (ר' docs/field-station-roadmap.md): `_interest_score`
+  (קריטריונים בינאריים על כרטיס מנורמל — קטגוריה לא-גנרית/decoded/pos_src=adsc/
+  label עשיר — לא ציון מומצא; מוזרם לשדה `notable` בכל תוצאה של `_normalize_acars`,
+  כלומר גם ל-ACARS/VDL2/SATCOM כאחד). `GET /api/session`/`POST /api/session/ack`
+  ("מה קרה בזמן שלא הסתכלת" — קורא jsonl מהדיסק, `?since=` דורס את `state
+  ["last_session_view_at"]`; idempotent, ה-ack הוא הפעולה היחידה שמקדם אותו).
+- **מד שדה מאוחד + בדיקת אנטנה** (ר' docs/field-station-roadmap.md): `_read_voice_metrics`
+  (חולץ מ-`api_metrics`, משותף גם ל-`GET /api/signal` במצב voice), `_signal_verdict`
+  (פסק דין *רק* מול `state["signal_baseline"]` — `DISCONNECT_DROP_DB`=10dB הוא
+  תצפית פיזיקלית על ניתוק אנטנה, לא סף "איכות" מומצא, ר' §12), `_sample_probe_stats`+
+  `_restore_after_probe` (הלב של `POST /api/antenna/check`: מעבר זמני לקול,
+  מדידה, שחזור המצב הקודם — best-effort גם בכישלון, לא נוגע ב-`state["app_mode"]`).
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_transcribe_worker` (thread whisper אופציונלי), `_sweep_recordings` (retention).
 - **`__main__`:** מרים את thread השחזור `_boot_restore` (מחזיר את המצב השמור, כולל
@@ -289,6 +304,11 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   `AC_KEEP_SEC`=10 דק'). `aircraft_snapshot(regs)` מגיש עותקים (עם `age`) ל-`/api/acars`
   להעשרת ה-roster/מפה. עמידות שיבוש: `nic<SPOOF_NIC` ⇒ נ"צ מדוכא (`spoofed=True`),
   גובה/track/מהירות נשמרים.
+- **סדרת מסלול/GPS לדוח הסשן:** `session_series(since=None)` — בניגוד ל-`gps_hist`
+  (15 דק' להחלקת היחס הרגעי בלבד), `_S["session_series"]` שומר דגימה אחת לכל
+  poll (~60 שנייה) עד `SESSION_SERIES_MAX`=360 (6 שעות). **בזיכרון בלבד, לא
+  נכתב לדיסק** — עקבי עם עקרון הבידוד (§12): נועד להישכח בין הפעלות, "מה קרה
+  בסשן הנוכחי" ולא ארכיון קבוע. משמש את `GET /api/session` ב-`app.py`.
 
 החלפת מיקום השדה: ערוך `ARP_LAT/ARP_LON/RUNWAYS` בראש הקובץ.
 
@@ -343,9 +363,11 @@ cursor/filters משלו — כלום לא משותף בזיכרון בין הש�
 `#vdl2View`/`#satcomView` משתמש חוזר במחלקות ה-CSS `.acars-*`/`.dl-*`, אפס CSS כפול). `opts.prefix`
 קובע גם את ה-endpoint (`/api/`+prefix) וגם את פענוח ה-DOM ids (`E(suf) => $(prefix+suf)`);
 `opts.label` קובע את טקסט הסטטוס ("ACARS כבוי"/"מאזין · VDL2" וכו'). שני hooks
-אופציונליים (no-op כברירת מחדל, VDL2 לא מעביר אותם): `opts.onMessage(m)` — נקרא
-לכל הודעה חדשה ב-`poll()` (ACARS: מזין את לוח ה-ATIS sticky ב-label A9); `opts.onReset()`
-— נקרא כשה-cursor מתאפס (ACARS: מנקה את לוח ה-ATIS מהסשן הקודם). `opts.emptyHint`
+אופציונליים (no-op כברירת מחדל): `opts.onMessage(m)` — נקרא לכל הודעה חדשה
+ב-`poll()`; שלושת המופעים מעבירים אותו כדי להזין `notifyMessage` (התראות על
+`m.notable`, ר' למטה), ו-ACARS בלבד גם מזין את לוח ה-ATIS sticky ב-label A9.
+`opts.onReset()` — נקרא כשה-cursor מתאפס (ACARS: מנקה את לוח ה-ATIS מהסשן
+הקודם; VDL2/SATCOM לא מעבירים). `opts.emptyHint`
 — טקסט מותאם למצב "אין הודעות עדיין" (VDL2: הפניה לתדר 136.975; SATCOM: הפניה
 לאנטנת L-band/Alphasat; ACARS מקבל ברירת מחדל גנרית). הפקטורי עושה שימוש חוזר
 בעוזרים ה*טהורים* הגלובליים בלבד (`fmtTime`/`mkSpan`/`dirBadge`/`normReg`/`trackColor`/
@@ -372,6 +394,36 @@ renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitAr
 > המופעים יורשים); שינוי ACARS-only/VDL2-only/SATCOM-only בלבד — דרך `opts`
 > (label/prefix/emptyHint) או hook חדש (`onMessage`/`onReset`), לא קוד מיוחד מחוץ לפקטורי.
 
+**שכבת רשת: `fetchTimeout`/`fetchJSON` + חיווי ניתוק גלובלי.** כל בקשת רשת בקליינט
+(כל 16 אתרי ה-`fetch` המקוריים, כולל `apiSend` ל-POST) עוברת `AbortController` עם
+timeout (`NET_TIMEOUT_GET`=8s / `NET_TIMEOUT_POST`=45s — תואם את חסם ה-45s בצד
+השרת ל-restart/rollback). הצלחה (**כל** תשובה מהשרת, כולל 4xx/5xx — יש קשר, גם אם
+הפעולה עצמה נכשלה) מרעננת `lastNetOkAt`; `setInterval` נפרד (3s) בודק אם עבר
+`NET_DISCONNECT_AFTER`=12s בלי שום הצלחה, ומציג צ'יפ `#connChip` ("אין קשר לשרת")
+ברצועת הסטטוס — **גלובלי, לא תלוי תצוגה/מצב**, בניגוד לחיווי התקלה של
+`pollGlobalState` שמוצג רק במסך הבית. בלי השכבה הזאת, בקשה תקועה (Wi-Fi בקצה
+טווח, Pi שנתקע) הייתה מקפיאה פיד/כפתור בלי הגבלת זמן ובלי שום חיווי — בדיוק המצב
+שבו הדף נראה "תקין" בשטח כשהוא לא.
+
+**מד שדה מאוחד: `createFieldMeter(mode, prefix, opts)`.** פקטורי שני (לצד
+`createDataView`) לשלושה מופעים — `voiceFm` (`{compact:true}`, נספח ל-`#rfPanel`
+הקיים: רק בסיס/פסק-דין/כפתור כיול, כי המדדים הרציפים כבר שם), `acarsFm`, `vdl2Fm`
+(פאנל `.field-meter` עצמאי: level/snr אחרונים + age, בסיס, פסק-דין, וכפתורי
+"🔍 בדוק אנטנה"/"📏 כייל בסיס"). קורא `GET /api/signal` (פולינג 3s, רק בתצוגה
+הרלוונטית + מיד ב-`showView`/אחרי כניסה מוצלחת ב-`applyMode` — כמו `pollSatcomHealth`)
+ומפעיל `POST /api/antenna/check`. ‏SATCOM **לא** מקבל מופע — יש לו `#satcomAimPanel`
+משלו, ואין בו צורך (יש `/api/satcom/health` ייעודי). כל שינוי שנוגע לשלושת
+המופעים — בפקטורי, לא בקוד ACARS/VDL2/voice נפרד.
+
+**דוח סשן + התראות (`#sessionCard`, מסך הבית בלבד).** `pollSession()` (20s, רק
+במצב home + מיד ב-`showView("home")`) קורא `GET /api/session` ומציג כרטיס רק
+כשיש היעדרות משמעותית (`SESSION_MIN_DUR_SEC`=600) ותוכן ממשי; "✓ הבנתי" קורא
+`POST /api/session/ack`. "🔔 הפעל התראות" מבקש `Notification.requestPermission()`
+(מצב נשמר ב-`localStorage["airam_notify"]`, כמו ה-PIN); `notifyMessage(mode, m)`
+— מוזרם דרך `opts.onMessage` של שלושת מופעי `createDataView` — מציג התראה מקומית
+לכל הודעה עם `m.notable` (בקצב מוגבל, `NOTIFY_MIN_GAP_MS`=4s). מקומי (Notification
+API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ברקע.
+
 ---
 
 ## 8. REST API (כל ה-routes)
@@ -395,6 +447,10 @@ renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitAr
 | GET | `/api/satcom/export?format=csv\|json` | ייצוא SATCOM (אותן עמודות כמו ACARS export) |
 | GET | `/api/satcom/health` | אבחון SATCOM — proxy מקומי ל-dashboard האבחוני המובנה של inmarsat-sniffer (`--web`): נעילת דמודולטור/ebno/mse לכל ערוץ, גם באפס הודעות מפוענחות. `available:false` (לא שגיאה) כש-satcom כבוי/dashboard לא זמין |
 | GET | `/api/aircraft` | רוסטר מטוסים מאוחד — היתוך ACARS+VDL2+SATCOM+ADS-B לפי זהות (רישום/icao/טיסה). חי בכל מצב |
+| GET | `/api/session` | דוח סשן ("מה קרה בזמן שלא הסתכלת"): כמות הודעות/מטוסים (וחדשים), עד `SESSION_HIGHLIGHTS_MAX` הודעות `notable` (ר' `_interest_score`), ומסלול פעיל/שיבוש GPS מתוך `adsb.session_series`. קורא מהדיסק (jsonl), לא מהזיכרון — עקבי עם `?day=`. `?since=<epoch>` דורס את הסמן השמור; `GET` idempotent — לא מקדם אותו |
+| POST | `/api/session/ack` | מקדם את הסמן (`state["last_session_view_at"]`) ל"עכשיו" — הפעולה המפורשת היחידה שמקדמת אותו. דרך `_guard` |
+| GET | `/api/signal` | מד שדה מאוחד למצב שרץ *בפועל* כרגע: רציף בקול (`_read_voice_metrics`), "הודעה אחרונה בלבד" ב-ACARS/VDL2 (`level`+`snr` — ACARS לעולם בלי `snr`, ר' §12), הפניה ל-`/api/satcom/health` ב-SATCOM. `verdict` (`ok`/`below_baseline`/`no_baseline`/`unknown`) תמיד מול `state["signal_baseline"]` בלבד — לעולם לא סף מומצא |
+| POST | `/api/antenna/check` | בדיקת אנטנה בת ~3 שניות: מעבר זמני לקול (AGC, סקוולץ' פתוח) בתדר המבוקש, מדידת רצפת רעש אמיתית (`_sample_probe_stats`), וחזרה למצב הקודם (`_restore_after_probe`, גם בכישלון). `calibrate:true` שומר את התוצאה כ-`signal_baseline`. לא נוגע ב-`state["app_mode"]` — פעולת אבחון, לא מעבר-מצב. סריאלי תחת `TUNE_LOCK`; 409 כשתפוס |
 | GET | `/api/activity` | יומן שידורים |
 | GET | `/recordings/<name>` | קובץ הקלטה MP3 |
 | GET | `/api/metrics` | מדדי RF (SNR/signal/noise מ-stats_filepath) |
@@ -545,7 +601,14 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   צובע Eb/No **לפי `lock` בלבד** — לא לפי סף מספרי בשם ("Eb/No טוב/סביר"), כי אין
   סף כזה מתועד במעלה הזרם (`inmarsat-sniffer` עצמו צובע לפי פעילות הודעות, לא סף —
   `web.c`). סף כזה יהיה בדיוק סוג ה-"המצאה" שהעיקרון הזה אוסר — אם תתפתה להוסיף
-  אחד, ודא קודם שיש לו מקור מוסמך.
+  אחד, ודא קודם שיש לו מקור מוסמך. **מד השדה המאוחד (§5/§7, `/api/signal`) מיישם
+  את אותו עיקרון על פסק-דין, לא רק על ערך:** `_signal_verdict` משווה **רק** מול
+  `state["signal_baseline"]` — מדידה שהמשתמש עצמו ביצע (`POST /api/antenna/check
+  {calibrate:true}`) — ולעולם לא מול סף dBFS מוחלט שניחשנו. בלי כיול מפורש,
+  התוצאה היא `"no_baseline"`, לא ניחוש. `DISCONNECT_DROP_DB`=10dB (הפער מהבסיס
+  שנחשב חריג) אינו יוצא-דופן לכלל — הוא לא סף "איכות" אלא תצפית פיזיקלית
+  (ניתוק אנטנה מנתק מרעש-סביבה ומשאיר רעש-פנים נמוך בהרבה), בדיוק כמו
+  ‏`OVERLOAD_DBFS`.
 - **בנקי ACARS/VDL2 = חלון אחד כל אחד:** acarsdec/dumpvdl2 מפענחים ערוצים מרובים בתוך
   חלון דגימה אחד (~2MHz). צביר 131.x ו-136.x רחוקים ~5MHz ⇒ לעולם לא יחד. בנק חדש חייב
   לעבור `_acars_window_error`/`_vdl2_window_error` (שניהם wrappers מעל `_window_error`).
