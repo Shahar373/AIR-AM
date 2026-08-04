@@ -68,6 +68,14 @@ def _avlc_downlink(extra):
             **extra}
 
 
+def _avlc_uplink(extra):
+    """שלד AVLC של uplink (תחנת קרקע => מטוס) + התוכן שב-extra."""
+    return {"src": {"addr": "10917A", "type": "Ground station"},
+            "dst": {"addr": "738065", "type": "Aircraft", "status": "Airborne"},
+            "cr": "Command", "frame_type": "I", "rseq": 0, "sseq": 2, "poll": False,
+            **extra}
+
+
 # --- _normalize_vdl2: מסלול A (ACARS-over-VDL2) ------------------------------
 
 def test_normalize_vdl2_acars_label15_position():
@@ -195,6 +203,23 @@ def test_normalize_vdl2_adsc_decode_failed_never_yields_position():
     assert n["decoded"] and "לא פוענח" in n["decoded"]
     assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
     assert n["group"] != "position"   # לא מסונן תחת "📍 מיקום" בלי מיקום אמיתי
+
+
+def test_normalize_vdl2_uplink_adsc_never_yields_position_even_without_err():
+    """אותה תבנית בדיוק כמו SATCOM (ר' test_acars.py
+    test_normalize_acars_adsc_uplink_never_yields_position_even_without_err):
+    tag ADS-C 7 פירושו הפוך לגמרי בין uplink/downlink ב-libacars (מאומת
+    מ-adsc.c). כאן ‏err=False בכל מקום (הפענוח "מצליח" מבנית) — ה-guard חייב
+    לחסום בכל זאת מכיוון בלבד (`direction` נגזר מבנית מ-AVLC src/dst.type,
+    לא heuristic)."""
+    n = app._normalize_vdl2(_vdl2(_avlc_uplink({
+        "x25": {"err": False, "pkt_type_name": "Data",
+                "clnp": {"cotp": {"adsc": {
+                    "err": False, "basic_report": {"lat": 18.34167, "lon": 2.11006}}}}}})))
+    assert n["dir"] == "uplink"
+    assert n["category"] == "ADS-C (VDL2)"
+    assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
+    assert n["group"] != "position"
 
 
 def test_normalize_vdl2_xid_generic_card():

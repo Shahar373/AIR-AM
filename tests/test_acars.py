@@ -980,8 +980,12 @@ def test_normalize_acars_adsc_decode_failed_never_yields_position():
 
 def test_normalize_acars_adsc_decode_success_still_yields_position():
     """regression-נגד: ה-guard על decode_failed לא צריך לשבור את מסלול ההצלחה —
-    כשהמפענח *כן* מדווח הצלחה (err=false בכל מקום), מיקום ADS-C תקין ממשיך
-    להתפרסם כרגיל (בדיוק כמו לפני התיקון, לא רגרסיה חדשה)."""
+    כשהמפענח *כן* מדווח הצלחה (err=false בכל מקום) ואין רמז כיוון מבני
+    (`_structural_dir` לא קיים בקלט — כמו ACARS-over-VHF רגיל, שבו per §12
+    ב-CLAUDE.md ADS-C כמעט ולא נצפה בפועל), ה-guard לא חוסם: ברירת המחדל
+    היא permissive כשאין מידע כיוון (בניגוד ל-SATCOM/VDL2 שתמיד מספקים אותו —
+    ר' test_normalize_acars_adsc_uplink_never_yields_position_even_without_err
+    לחסימה המפורשת כש-`_structural_dir="uplink"` כן מסופק)."""
     n = app._normalize_acars({
         "timestamp": 1.0, "label": "A6", "tail": "A7-BBB", "error": 0,
         "text": "/RECOEYA.ADS.A7-BBB070D0B000C010D010E0110010F01150523D57F",
@@ -991,6 +995,27 @@ def test_normalize_acars_adsc_decode_success_still_yields_position():
     assert n["category"] == "ADS-C" and n["group"] == "position"
     assert n["pos_src"] == "adsc"
     assert abs(n["lat"] - 18.34167) < 0.001 and abs(n["lon"] - 2.11006) < 0.001
+
+
+def test_normalize_acars_adsc_uplink_never_yields_position_even_without_err():
+    """הליבה של תיקון-הכיוון: אותו tag ADS-C מספרי (7) פירושו הפוך לגמרי בין
+    uplink/downlink ב-libacars (מאומת מ-adsc.c במקור: la_adsc_uplink_tag_
+    descriptor_table מול la_adsc_downlink_tag_descriptor_table — "Periodic
+    contract request" מול "Basic report"). לכן `_structural_dir="uplink"`
+    חוסם מיקום **גם** כש-decode_failed=False (אין שום `err` שמתגלה — הפענוח
+    "מצליח" מבנית, רק שולף בייטים שהם בכלל פרמטרי-בקשה, לא מיקום). זו בדיוק
+    התבנית שנצפתה בשדה: A7-BBB ו-C-GHKX (שניהם uplink) "קיבלו" מיקומים
+    שגויים באלפי ק"מ, על אף שהדיקוד עצמו לא הראה סימן לתקלה."""
+    n = app._normalize_acars({
+        "timestamp": 1.0, "label": "A6", "tail": "A7-BBB", "error": 0,
+        "text": "/RECOEYA.ADS.A7-BBB070D0B000C010D010E0110010F01150523D57F",
+        "libacars": {"arinc622": {"msg_type": "adsc_msg", "crc_ok": True,
+                                  "adsc": {"err": False, "basic_report": {"lat": 18.34167, "lon": 2.11006}}}},
+        "_structural_dir": "uplink",
+    })
+    assert n["category"] == "ADS-C"
+    assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
+    assert n["group"] != "position"
 
 
 # --- פרסרים נוספים שנבנו מקליטה אמיתית (C1 loadsheet, 16, 1L, A3 PDC) ----------

@@ -1351,18 +1351,33 @@ def _normalize_acars(m):
         # ADS-C-שנכשל-פענוח היה מסונן תחת "📍 מיקום" ב-UI בלי שום מיקום אמיתי.
         # CPDLC נשאר "clearance" גם בלי decoded — סוג ההודעה ידוע מהמעטפת עצמה,
         # רק התוכן נכשל (בניגוד למיקום, שם "position" *הוא* טענת-תוכן).
+        # ⚠ ADS-C: אותו tag מספרי פירושו *הפוך* לגמרי לפי כיוון ההודעה (מאומת
+        # ישירות מ-libacars/adsc.c במקור: la_adsc_uplink_tag_descriptor_table
+        # מול la_adsc_downlink_tag_descriptor_table — tag 7 = "Periodic contract
+        # request" ב-uplink (קרקע→מטוס, בקשה — *אין* בה מיקום מטוס) מול "Basic
+        # report" ב-downlink (מטוס→קרקע, דיווח מיקום אמיתי). אם המפענח (או
+        # קריאה שגויה אליו) יישם את טבלת-הכיוון הלא-נכונה, הפענוח "מצליח" מבחינה
+        # מבנית (בלי err) אבל שולף נ"צ מבייטים שהם בכלל פרמטרי-בקשה, לא מיקום —
+        # ‏decode_failed=False לא עוזר כאן, כי אין שום שגיאה שהתגלתה. נצפה בפועל:
+        # A7-BBB (dir=uplink!) "קיבל" 18.34/2.11 באותה קליטה בדיוק שבה C-GHKX
+        # (גם uplink) קיבל 5.69/2.11 — שני "מיקומים" ממסרים-בקשה, לא ממטוסים.
+        # ‏structural_dir מגיע מ-`_structural_dir` שהקורא (SATCOM/VDL2) ממלא
+        # *לפני* הקריאה הזו מתוך src/dst.type המבני (לא heuristic) — key חסר
+        # (ACARS רגיל, שלא צפוי להפיק ADS-C בכלל — ר' §12) לא חוסם, כדי לא
+        # לשנות התנהגות קיימת שם; אבל "uplink" מפורש כן חוסם תמיד.
+        structural_dir = m.get("_structural_dir")
+        adsc_dir_ok = structural_dir != "uplink"
         group = ("clearance" if kind == "CPDLC"
-                 else "position" if (kind == "ADS-C" and not decode_failed) else group)
-        # מיקום *רק* מ-ADS-C: CPDLC (או ARINC-622 גנרי אחר) עלול לשאת נ"צ מוטבע
-        # (waypoint ב-clearance) שאינו מיקום המטוס עצמו — לא מייחסים אותו כמיקום
-        # כדי לא להטעות במפה (אותה הגנה בדיוק כמו VDL2 מסלול B, ר' _normalize_vdl2).
-        # ⚠ regression (קליטת שדה אמיתית): decode_failed=True לא מנע בעבר מ-_scan_latlon
-        # לרוץ בכל זאת — סריקה רקורסיבית על מבנה שה-מפענח עצמו סימן כ"נכשל" עלולה
-        # לתפוס שדה מספרי שרירותי/שריד-מפענוח-חלקי בשם lat/lon שאינו מיקום אמיתי
-        # (נצפה בפועל: C-GHKX קיבל 5.69,2.11 — אלפי ק"מ מהמיקום האמיתי לפי ADS-B
-        # חיצוני — על הודעה שה-decoded שלה עצמו אומר "לא פוענח"). מיקום נאמן
-        # *רק* לפענוח שהמפענח עצמו מדווח שהצליח.
-        if kind == "ADS-C" and not decode_failed:
+                 else "position" if (kind == "ADS-C" and not decode_failed and adsc_dir_ok)
+                 else group)
+        # מיקום *רק* מ-ADS-C דו-הגנתי: (1) decode_failed=True לא מנע בעבר
+        # מ-_scan_latlon לרוץ בכל זאת — סריקה רקורסיבית על מבנה שהמפענח סימן
+        # כ"נכשל" עלולה לתפוס שריד-מפענוח-חלקי בשם lat/lon (נצפה: C-GHKX קיבל
+        # 5.69,2.11 באלפי ק"מ מהאמיתי, על הודעה עם decoded="לא פוענח"). (2)
+        # כיוון שגוי (למעלה) — CPDLC (או ARINC-622 גנרי אחר) עלול גם הוא לשאת
+        # נ"צ מוטבע (waypoint ב-clearance) שאינו מיקום המטוס — לכן גם kind
+        # מסונן ל-ADS-C בלבד, לא כל libacars (אותה הגנה כמו VDL2 מסלול B).
+        if kind == "ADS-C" and not decode_failed and adsc_dir_ok:
             pos = _scan_latlon(libacars)
             if pos:
                 lat, lon, pos_src = pos[0], pos[1], "adsc"
@@ -1688,19 +1703,27 @@ def _normalize_vdl2(m):
             _, dtext, decode_failed = _libacars_decode(x25)
             decoded = dtext if dtext else (
                 "לא פוענח — המפענח החזיר שגיאה (כנראה איתות שולי)" if decode_failed else None)
+            # ⚠ tag ADS-C מספרי פירושו הפוך לגמרי בין uplink/downlink ב-libacars
+            # (מאומת מ-adsc.c: la_adsc_uplink_tag_descriptor_table מול
+            # ...downlink...; tag 7 = "בקשה" ב-uplink מול "דיווח מיקום אמיתי"
+            # ב-downlink — ר' ההערה המלאה ב-_normalize_acars ליד adsc_dir_ok).
+            # ‏direction כאן כבר חושב למעלה (AVLC src/dst.type, עובדה מבנית) —
+            # לא heuristic, ולא תלוי ב-decode_failed (שם אין שום err שמתגלה).
+            adsc_dir_ok = direction != "uplink"
             if "cpdlc" in blob:
                 category, group = "CPDLC (VDL2)", "clearance"
             elif is_adsc:
                 category = "ADS-C (VDL2)"
-                group = "position" if not decode_failed else group
+                group = "position" if (not decode_failed and adsc_dir_ok) else group
             else:
                 category = "VDL2 · X.25"
             # מיקום *רק* מ-ADS-C: CPDLC עלול לשאת נ"צ מוטבע (waypoint ב-clearance)
             # שאינו מיקום המטוס עצמו — לא מייחסים אותו כמיקום כדי לא להטעות במפה.
             # ⚠ אותה הגנה כמו SATCOM (ר' ההערה המקבילה ב-_normalize_acars): CRC
-            # תקין ב-AVLC ≠ פענוח-יישום מוצלח — decode_failed=True חוסם גם כאן.
-            if is_adsc and not decode_failed:
-                pos = _scan_latlon(x25)          # מוגן-CRC בשכבת AVLC + decode_failed
+            # תקין ב-AVLC ≠ פענוח-יישום מוצלח — decode_failed=True חוסם גם כאן,
+            # וכיוון שגוי (adsc_dir_ok) חוסם גם כשאין שום err (ר' ההערה למעלה).
+            if is_adsc and not decode_failed and adsc_dir_ok:
+                pos = _scan_latlon(x25)          # מוגן-CRC בשכבת AVLC + decode_failed + כיוון
                 if pos:
                     lat, lon, pos_src, group = pos[0], pos[1], "adsc", "position"
         elif isinstance(xid, dict):
@@ -1858,12 +1881,21 @@ def _normalize_satcom(m):
     except (TypeError, ValueError):
         t = 0
     t = t or time.time()
+    # ⚠ מחושב *לפני* הקריאה ל-_normalize_acars (לא רק אחריה, כמו בעבר) — הכיוון
+    # המבני חייב להיות ידוע ל-_normalize_acars *לפני* חילוץ מיקום מ-ADS-C, כי
+    # tag 7 פירושו הפוך לגמרי בין uplink/downlink ב-libacars (ר' ההערה המלאה
+    # ליד adsc_dir_ok ב-_normalize_acars). src/dst.type הם עובדה מבנית של הכלי.
+    src_type = str((isu.get("src") or {}).get("type") or "").lower()
+    dst_type = str((isu.get("dst") or {}).get("type") or "").lower()
+    structural_dir = ("downlink" if "aircraft" in src_type
+                      else "uplink" if "aircraft" in dst_type else None)
     raw = {
         "timestamp": t,
         "mode": acars.get("mode"),
         "label": acars.get("label"),
         "tail": acars.get("reg"),
         "flight": acars.get("flight"),
+        "_structural_dir": structural_dir,   # ר' adsc_dir_ok ב-_normalize_acars
         # msgno (MSN של ACARS) לא נחשף ע"י inmarsat-sniffer: isu.refno/qno הם
         # מספרי-רצף של שכבת הלוויין (uint8), *לא* ה-MSN הקלאסי — לא ממפים אותם
         # ל-msgno כדי לא להטעות (ר' §12 ב-CLAUDE.md: לא מזייפים/ממפים-שגוי ערך).
@@ -1895,12 +1927,8 @@ def _normalize_satcom(m):
         if apps:
             raw["libacars"] = apps
     card = _normalize_acars(raw)
-    src_type = str((isu.get("src") or {}).get("type") or "").lower()
-    dst_type = str((isu.get("dst") or {}).get("type") or "").lower()
-    if "aircraft" in src_type:
-        card["dir"] = "downlink"
-    elif "aircraft" in dst_type:
-        card["dir"] = "uplink"
+    if structural_dir:      # כבר חושב למעלה, לפני הקריאה (ר' ההערה שם) — לא כפול
+        card["dir"] = structural_dir
     return card
 
 
