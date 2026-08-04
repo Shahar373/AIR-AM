@@ -180,6 +180,23 @@ def test_normalize_vdl2_adsc_x25_position():
     assert abs(n["lat"] - 31.9) < 1e-6 and abs(n["lon"] - 35.1) < 1e-6
 
 
+def test_normalize_vdl2_adsc_decode_failed_never_yields_position():
+    """regression (אותה משפחת באג כמו SATCOM, ר' test_acars.py
+    test_normalize_acars_adsc_decode_failed_never_yields_position): לפני התיקון,
+    _scan_latlon רץ על x25 *ללא תלות* ב-decode_failed — אם המפענח עצמו סימן
+    err:true על יישום ה-ADS-C המקונן, שדה lat/lon שרירותי/שריד-מפענוח-חלקי
+    עדיין היה מתפרסם כאילו הוא מיקום אמיתי. תיקון: מיקום מ-ADS-C (VDL2 מסלול B)
+    נאמן רק כש-decode_failed=False."""
+    n = app._normalize_vdl2(_vdl2(_avlc_downlink({
+        "x25": {"err": False, "pkt_type_name": "Data",
+                "clnp": {"cotp": {"adsc": {
+                    "err": True, "basic_report": {"lat": 5.69, "lon": 2.11}}}}}})))
+    assert n["category"] == "ADS-C (VDL2)"
+    assert n["decoded"] and "לא פוענח" in n["decoded"]
+    assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
+    assert n["group"] != "position"   # לא מסונן תחת "📍 מיקום" בלי מיקום אמיתי
+
+
 def test_normalize_vdl2_xid_generic_card():
     n = app._normalize_vdl2(_vdl2(_avlc_downlink({
         "frame_type": "U", "cmd": "XID",
