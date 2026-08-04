@@ -954,6 +954,45 @@ def test_libacars_decode_success_is_not_mislabeled_as_failure():
     assert failed is False and text is None   # שדה מיקום, לא טקסט — decoded נשאר None, לא "נכשל"
 
 
+def test_normalize_acars_adsc_decode_failed_never_yields_position():
+    """regression (קליטת שדה אמיתית): C-GHKX קיבל מיקום 5.69,2.11 — אלפי ק"מ
+    מהמיקום האמיתי (אומת מול ADS-B חיצוני, ~45.85N/-29.6W מעל האוקיינוס
+    האטלנטי) — על הודעת A6 שה-decoded שלה עצמו הצהיר 'לא פוענח'. הבאג: לפני
+    התיקון, _scan_latlon רץ *ללא תלות* ב-decode_failed וסרק רקורסיבית כל שדה
+    numeric בשם lat/lon — כולל שדה שרירותי/שריד-מפענוח-חלקי במבנה שהמפענח
+    עצמו סימן כנכשל. תיקון: מיקום מ-ADS-C נאמן *רק* לפענוח שהמפענח מדווח
+    שהצליח (decode_failed=False). ⚠ 5.69/2.11 כאן הם שחזור-לפי-תסמין (אין לנו
+    לכידת --feed -v גולמית של ההודעה הזו בדיוק) — המהות הנבדקת היא שהשילוב
+    err=true + שדה lat/lon איפשהו במבנה לא מייצר עוד מיקום, לא הערכים המדויקים."""
+    n = app._normalize_acars({
+        "timestamp": 1.0, "label": "A6", "tail": "C-GHKX", "error": 0,
+        "text": "/PIKCPYA.ADS.C-GHKX07040B000C000D010E0110000978/",
+        "libacars": {"arinc622": {"msg_type": "adsc_msg", "crc_ok": True,
+                                  "adsc": {"err": True, "lat": 5.69, "lon": 2.11}}},
+    })
+    assert n["category"] == "ADS-C"
+    assert n["decoded"] and "לא פוענח" in n["decoded"]
+    assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
+    # ⚠ group="position" בלי מיקום אמיתי היה מסנן את הכרטיס תחת "📍 מיקום" ב-UI
+    # בטעות (group משמש לסינון, לא רק לצביעה) — regression נוסף מאותו תיקון.
+    assert n["group"] != "position"
+
+
+def test_normalize_acars_adsc_decode_success_still_yields_position():
+    """regression-נגד: ה-guard על decode_failed לא צריך לשבור את מסלול ההצלחה —
+    כשהמפענח *כן* מדווח הצלחה (err=false בכל מקום), מיקום ADS-C תקין ממשיך
+    להתפרסם כרגיל (בדיוק כמו לפני התיקון, לא רגרסיה חדשה)."""
+    n = app._normalize_acars({
+        "timestamp": 1.0, "label": "A6", "tail": "A7-BBB", "error": 0,
+        "text": "/RECOEYA.ADS.A7-BBB070D0B000C010D010E0110010F01150523D57F",
+        "libacars": {"arinc622": {"msg_type": "adsc_msg", "crc_ok": True,
+                                  "adsc": {"err": False, "basic_report": {"lat": 18.34167, "lon": 2.11006}}}},
+    })
+    assert n["category"] == "ADS-C" and n["group"] == "position"
+    assert n["pos_src"] == "adsc"
+    assert abs(n["lat"] - 18.34167) < 0.001 and abs(n["lon"] - 2.11006) < 0.001
+
+
 # --- פרסרים נוספים שנבנו מקליטה אמיתית (C1 loadsheet, 16, 1L, A3 PDC) ----------
 # כל הווקטורים הבאים הם טקסטים מדויקים מתוך קליטה אמיתית ב-131.725/131.825 MHz
 # (LLBG, יוני 2026) — לא סינתטיים.

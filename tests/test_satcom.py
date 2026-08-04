@@ -1103,3 +1103,26 @@ def test_normalize_satcom_real_adsc_capture_with_position():
     assert n["pos_src"] == "adsc"
     assert abs(n["lat"] - 18.34167) < 0.001 and abs(n["lon"] - 2.11006) < 0.001
     assert n["decoded"] is None   # אין שדה טקסט אמיתי, ולא "נכשל" — decode הצליח
+
+
+def test_normalize_satcom_adsc_decode_failed_never_yields_position():
+    """regression (קליטת שדה אמיתית, C-GHKX — ר' test_acars.py למקבילה המלאה):
+    מיקום מ-ADS-C דרך SATCOM נאמן רק כש-decode_failed=False. לפני התיקון,
+    _scan_latlon התעלם מ-err:true בתוך isu.acars.arinc622.acars.arinc622.adsc
+    והציג מיקום שגוי (5.69,2.11 — אלפי ק"מ מהמיקום האמיתי לפי ADS-B חיצוני,
+    על הודעה שה-decoded שלה עצמו הצהיר 'לא פוענח')."""
+    m = _satcom({
+        "mode": "2", "label": "A6", "reg": "C-GHKX",
+        "msg_text": "/PIKCPYA.ADS.C-GHKX07040B000C000D010E0110000978/",
+        "arinc622": {"acars": {
+            "err": False, "crc_ok": True, "reg": ".C-GHKX", "mode": "2", "label": "A6",
+            "msg_text": "/PIKCPYA.ADS.C-GHKX07040B000C000D010E0110000978/",
+            "arinc622": {"msg_type": "adsc_msg", "crc_ok": True,
+                        "adsc": {"err": True, "lat": 5.69, "lon": 2.11}},
+        }},
+    }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
+    n = app._normalize_satcom(m)
+    assert n["category"] == "ADS-C"
+    assert n["decoded"] and "לא פוענח" in n["decoded"]
+    assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
+    assert n["group"] != "position"

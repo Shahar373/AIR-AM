@@ -1347,11 +1347,22 @@ def _normalize_acars(m):
         # לא ממציאים תוכן, אבל *כן* אומרים למשתמש שהיה ניסיון — עדיף מ-"—" סתמי.
         decoded = dtext if dtext else (
             "לא פוענח — המפענח החזיר שגיאה (כנראה איתות שולי)" if decode_failed else None)
-        group = "clearance" if kind == "CPDLC" else "position" if kind == "ADS-C" else group
+        # ⚠ "position" רק כשיהיה בפועל lat/lon (ר' ההערה למטה) — אחרת כרטיס
+        # ADS-C-שנכשל-פענוח היה מסונן תחת "📍 מיקום" ב-UI בלי שום מיקום אמיתי.
+        # CPDLC נשאר "clearance" גם בלי decoded — סוג ההודעה ידוע מהמעטפת עצמה,
+        # רק התוכן נכשל (בניגוד למיקום, שם "position" *הוא* טענת-תוכן).
+        group = ("clearance" if kind == "CPDLC"
+                 else "position" if (kind == "ADS-C" and not decode_failed) else group)
         # מיקום *רק* מ-ADS-C: CPDLC (או ARINC-622 גנרי אחר) עלול לשאת נ"צ מוטבע
         # (waypoint ב-clearance) שאינו מיקום המטוס עצמו — לא מייחסים אותו כמיקום
         # כדי לא להטעות במפה (אותה הגנה בדיוק כמו VDL2 מסלול B, ר' _normalize_vdl2).
-        if kind == "ADS-C":
+        # ⚠ regression (קליטת שדה אמיתית): decode_failed=True לא מנע בעבר מ-_scan_latlon
+        # לרוץ בכל זאת — סריקה רקורסיבית על מבנה שה-מפענח עצמו סימן כ"נכשל" עלולה
+        # לתפוס שדה מספרי שרירותי/שריד-מפענוח-חלקי בשם lat/lon שאינו מיקום אמיתי
+        # (נצפה בפועל: C-GHKX קיבל 5.69,2.11 — אלפי ק"מ מהמיקום האמיתי לפי ADS-B
+        # חיצוני — על הודעה שה-decoded שלה עצמו אומר "לא פוענח"). מיקום נאמן
+        # *רק* לפענוח שהמפענח עצמו מדווח שהצליח.
+        if kind == "ADS-C" and not decode_failed:
             pos = _scan_latlon(libacars)
             if pos:
                 lat, lon, pos_src = pos[0], pos[1], "adsc"
@@ -1669,21 +1680,27 @@ def _normalize_vdl2(m):
         if isinstance(x25, dict):
             blob = json.dumps(x25, ensure_ascii=False).lower()
             is_adsc = "adsc" in blob or "ads-c" in blob
-            if "cpdlc" in blob:
-                category, group = "CPDLC (VDL2)", "clearance"
-            elif is_adsc:
-                category, group = "ADS-C (VDL2)", "position"
-            else:
-                category = "VDL2 · X.25"
             # תקציר טקסט קריא אם קיים במבנה; decode_failed => אותה הבחנה כמו ב-SATCOM
-            # (ר' _libacars_decode) — "ניסינו ונכשלנו" מול "אין נתון" בכלל.
+            # (ר' _libacars_decode) — "ניסינו ונכשלנו" מול "אין נתון" בכלל. מחושב
+            # *לפני* קביעת group כדי ש-"position" יינתן רק כשיהיה בפועל lat/lon
+            # (ר' ההערה למטה + המקבילה ב-_normalize_acars) — אחרת כרטיס ADS-C
+            # שנכשל פענוח היה מסונן תחת "📍 מיקום" בלי שום מיקום אמיתי.
             _, dtext, decode_failed = _libacars_decode(x25)
             decoded = dtext if dtext else (
                 "לא פוענח — המפענח החזיר שגיאה (כנראה איתות שולי)" if decode_failed else None)
+            if "cpdlc" in blob:
+                category, group = "CPDLC (VDL2)", "clearance"
+            elif is_adsc:
+                category = "ADS-C (VDL2)"
+                group = "position" if not decode_failed else group
+            else:
+                category = "VDL2 · X.25"
             # מיקום *רק* מ-ADS-C: CPDLC עלול לשאת נ"צ מוטבע (waypoint ב-clearance)
             # שאינו מיקום המטוס עצמו — לא מייחסים אותו כמיקום כדי לא להטעות במפה.
-            if is_adsc:
-                pos = _scan_latlon(x25)          # מוגן-CRC בשכבת AVLC
+            # ⚠ אותה הגנה כמו SATCOM (ר' ההערה המקבילה ב-_normalize_acars): CRC
+            # תקין ב-AVLC ≠ פענוח-יישום מוצלח — decode_failed=True חוסם גם כאן.
+            if is_adsc and not decode_failed:
+                pos = _scan_latlon(x25)          # מוגן-CRC בשכבת AVLC + decode_failed
                 if pos:
                     lat, lon, pos_src, group = pos[0], pos[1], "adsc", "position"
         elif isinstance(xid, dict):
