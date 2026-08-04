@@ -1822,6 +1822,14 @@
         <div class="acars-stat"><b id="satcomStCraft">0</b><span>מטוסים</span></div>
         <div class="acars-stat"><b id="satcomStPos">0</b><span>עם מיקום</span></div>
         <div class="acars-stat"><b id="satcomStAdsb">0</b><span>🛰 ADS‑B</span></div>
+        <!-- ⚠ SATCOM-only (guard בשם ה-DOM ב-renderStats, לא קוד מיוחד בפקטורי):
+             P channel (קרקע→מטוס, שידור-שידור גלובלי מה-GES) הרבה יותר קל
+             לנעול מ-R channel (מטוס→קרקע, חלש ותלוי-כיוון האנטנה שבמטוס).
+             נצפה בשטח: קליטה ראשונה מוצלחת הייתה 100% uplink (206/206 הודעות,
+             54 מטוסים שונים) — סימן ל"נועלים P בלבד", לא לתקלה. הפירוט הזה
+             הופך את זה לגלוי במקום נסתר בתוך הפיד. -->
+        <div class="acars-stat" title="מהקרקע אל המטוס (P channel, בד״כ הראשון שנועל)"><b id="satcomStUp">0</b><span>⬆ מקרקע</span></div>
+        <div class="acars-stat" title="מהמטוס אל הקרקע (R/C channel, נדרש קישור טוב יותר)"><b id="satcomStDown">0</b><span>⬇ ממטוס</span></div>
       </div>
       <div class="rate-spark" title="קצב הודעות · 2 הדקות האחרונות">
         <span>📈</span><canvas id="satcomRateSpark"></canvas>
@@ -4049,6 +4057,11 @@
         let rate = 0;
         if (ts.length >= 2) { const span = (Math.max(...ts) - Math.min(...ts)) / 60; rate = span > 0.1 ? ts.length / span : 0; }
         E("StRate").textContent = rate ? rate.toFixed(1) : "0";
+        // ⬆/⬇ קיימים רק ב-satcom (ר' ההערה ליד satcomStUp ב-HTML) — E() מחזיר
+        // null בתצוגות אחרות, לכן מוגן ולא מחושב לחינם כשלא מוצג.
+        const stUp = E("StUp"), stDown = E("StDown");
+        if (stUp) stUp.textContent = msgs.filter((m) => m.dir === "uplink").length;
+        if (stDown) stDown.textContent = msgs.filter((m) => m.dir === "downlink").length;
       }
       function renderFilters() {
         const box = E("Filters");

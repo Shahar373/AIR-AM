@@ -179,7 +179,9 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 הקובץ מאורגן בבלוקים מסומנים `# --- ... ---`. נקודות עיקריות:
 
 - **קבועים (ל~145):** נתיבים, gain של SDRplay (IFGR 20–59 / RFGR 0–9, **קטן=רווח גדול**),
-  ספי squelch, קבועי ACARS, מילוני `ACARS_LABELS` ו-`_ACARS_DIR_BY_LABEL`, הקלטות, whisper.
+  ספי squelch, קבועי ACARS, מילוני `ACARS_LABELS` ו-`_ACARS_DIR_BY_LABEL` (חלקם
+  התווספו רק מקליטת שטח אמיתית — למשל `A0`/`1B`/`4P`/`2F`, לייבלים שנצפו
+  בקליטת SATCOM ראשונה מוצלחת ולא היו מתועדים קודם; ר' §12), הקלטות, whisper.
 - **`_guard` (before_request):** אכיפת אבטחה לכל בקשה משנת-מצב — בדיקת `Origin==Host`
   (CSRF/DNS-rebind) + PIN אופציונלי. **כל route שמשנה מצב חייב לעבור דרכו.**
 - **בניית קונפיג קול:** `render_config` → `write_config` (כתיבה אטומית), `_squelch_line`
@@ -384,7 +386,18 @@ cursor/filters משלו — כלום לא משותף בזיכרון בין הש�
 `opts.onReset()` — נקרא כשה-cursor מתאפס (ACARS: מנקה את לוח ה-ATIS מהסשן
 הקודם; VDL2/SATCOM לא מעבירים). `opts.emptyHint`
 — טקסט מותאם למצב "אין הודעות עדיין" (VDL2: הפניה לתדר 136.975; SATCOM: הפניה
-לאנטנת L-band/Alphasat; ACARS מקבל ברירת מחדל גנרית). הפקטורי עושה שימוש חוזר
+לאנטנת L-band/Alphasat; ACARS מקבל ברירת מחדל גנרית). `renderStats()` (משותף)
+מכיל שתי שורות מוגנות-DOM (`E("StUp")`/`E("StDown")`, `null` בתצוגות בלי
+האלמנטים) שממלאות שני תגי סטטיסטיקה **SATCOM-only** (`satcomStUp`/
+`satcomStDown` — לא קיימים ב-`#acarsView`/`#vdl2View`) לספירת `dir===
+"uplink"/"downlink"`. זה לא קוד-מיוחד-מחוץ-לפקטורי (העיקרון בפסקה הבאה) —
+זו התאמה דרך *נוכחות ה-DOM* בהתאם ל-HTML של כל תצוגה, בדיוק כמו `opts.emptyHint`.
+**הסיבה שזה קיים רק ב-SATCOM:** קליטת שטח ראשונה שהצליחה (16 דק', 206 הודעות,
+54 מטוסים) הייתה **100% uplink** — ה-P channel (קרקע→מטוס, שידור-שידור גלובלי
+חזק מה-GES) נועל ראשון וקל; ה-R/C channels (מטוס→קרקע, מקור התוכן ה"אמיתי" —
+OOOI/דיווחי מיקום/הודעות טייס) חלשים משמעותית ותלויי-כיוון אנטנת המטוס. בלי
+פירוט כיווני, "P channel בלבד" ו"קליטה דו-כיוונית מלאה" נראים זהים בפיד —
+זו לא תקלה, אלא סימן ברור למה עוד לכוון/לחזק. הפקטורי עושה שימוש חוזר
 בעוזרים ה*טהורים* הגלובליים בלבד (`fmtTime`/`mkSpan`/`dirBadge`/`normReg`/`trackColor`/
 `CAT_GROUPS`/`DIR_INFO`/`MULTIBLOCK_RE`/`RETRANS_WINDOW_S`/`msgSig`/`patchMsgTime`/
 `reconcileFeed`/`segSet`/`qualityCls` — מיון dBFS/SNR לשלוש רמות צבע). `showView`

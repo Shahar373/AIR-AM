@@ -988,3 +988,45 @@ def test_api_state_exposes_satcom_gain(client, paths, monkeypatch):
     monkeypatch.setattr(app, "_is_active", lambda svc: False)
     j = client.get("/api/state").get_json()
     assert "satcom_gain" in j and j["satcom_gain"] is None
+
+
+# --- labels שנצפו בקליטת שטח אמיתית (Alphasat, 16 דק', 206 הודעות, 54 מטוסים) --
+# ⚠ המכשיר נעל P channel בלבד (100% מההודעות uplink — ר' ניתוח) — הלייבלים
+# האלה (A0/1B/4P/2F) נראו בפועל בתעבורת ה-P channel ונפלו קודם ל-fallback
+# הגנרי "Label X" כי לא היו ב-ACARS_LABELS. ר' _real_uplink_only_capture
+# להסבר המלא למה 100% uplink בקליטה תקינה, לא תקלה.
+
+def test_acars_labels_covers_real_p_channel_traffic():
+    for lbl in ("A0", "1B", "4P", "2F"):
+        assert lbl in app.ACARS_LABELS, "label %s נצפה בקליטה אמיתית וצריך מיפוי" % lbl
+        desc, group = app.ACARS_LABELS[lbl]
+        assert desc and group
+
+
+def test_normalize_satcom_afn_label_a0_gets_real_description():
+    """A0 (AFN logon) — ראה תוכן אמיתי: '/SMACAYA.AFN/FMHKLM706,.PH-BKD,...'."""
+    n = app._normalize_satcom(_satcom({
+        "mode": "2", "label": "A0", "reg": ".PH-BKD",
+        "msg_text": "/SMACAYA.AFN/FMHKLM706,.PH-BKD,485B44,092914/FCAPIKCPYA,0FE53",
+    }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station"))
+    assert n["category"] == "AFN · רישום רשת (A0)"
+    assert n["dir"] == "uplink"                     # dst=Aircraft (מבני) — לא fallback גנרי
+
+
+def test_normalize_satcom_uplink_only_reception_is_a_real_pattern_not_a_bug():
+    """⚠ תיעוד רגרסיה: קליטת שטח ראשונה שהצליחה (16 דק', 206 הודעות, 54 מטוסים
+    שונים) הייתה 100% uplink — 0 הודעות downlink, 0 lat/lon מפוענח, 0 decoded.
+    זה תואם לפיזיקה של Inmarsat Classic Aero: ה-P channel (קרקע→מטוס) הוא
+    שידור-שידור גלובלי וחזק מה-GES, נועל ראשון וקל; ה-R/C channels (מטוס→קרקע)
+    חלשים משמעותית ותלויי-כיוון אנטנת המטוס. **התפלגות ה-uplink/downlink היא
+    אינדיקציה אמיתית לאיזה ערוצים נעולים בפועל — לא רק Eb/No.** הבדיקה הזו
+    מוודאת שההבחנה dir=uplink/downlink נשארת עקבית ל-src/dst.type המבני
+    (לא נסחפת ל-heuristic), כי היא הבסיס לתצוגת ⬆/⬇ ב-UI (satcomStUp/Down)."""
+    ground_to_air = app._normalize_satcom(_satcom({
+        "mode": "2", "label": "_d", "reg": "30599A",
+    }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station"))
+    assert ground_to_air["dir"] == "uplink"
+    air_to_ground = app._normalize_satcom(_satcom({
+        "mode": "2", "label": "15", "reg": ".4X-EKF", "msg_text": "(2N32016E034538ELY315",
+    }))   # ברירת המחדל של הפיקסצ'ר: downlink (AES->GES)
+    assert air_to_ground["dir"] == "downlink"
