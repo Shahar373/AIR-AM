@@ -224,6 +224,29 @@ SATCOM_HEALTH_TIMEOUT = 2.0           # שניות — נקרא ב-polling, חי
 # העבודה מתרחשת רק כשה-UI מבקש. ⚠ המחיר האמיתי הוא אבטחתי: הדגל מוסיף גם
 # GET /api/tune?ch=N&hz=X (משנה-מצב!) לאותו פורט לא-מאומת שנקשר ל-INADDR_ANY
 # (ר' SATCOM_WEB_PORT למעלה ו-§9) — לכן זה משתנה-מצב שניתן לכבות, ולא קבוע.
+# רווח ידני: ‏inmarsat-sniffer מקבל ‎--sdrplay-gain=N ומטפל בו כך (sdrplay.c,
+# אומת מהמקור — הציטוט חשוב כי ההתנהגות **לא** מקבילה לזו של הקול):
+#     if (sdrplay_gain_val >= 0) {
+#         int grdb = sdrplay_gain_val;
+#         if (grdb < 20) grdb = 20;  if (grdb > 59) grdb = 59;
+#         chp->tunerParams.gain.gRdB = grdb;
+#         chp->tunerParams.gain.LNAstate = 0;          /* ← לא ניתן לשליטה */
+#         chp->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
+#     } else {
+#         chp->ctrlParams.agc.enable  = sdrplay_api_AGC_5HZ;
+#         chp->ctrlParams.agc.setPoint_dBfs = -30;
+#     }
+# שתי מסקנות מעשיות:
+# (1) **הטווח 20–59 זהה ל-IFGR של הקול** (IFGR_MIN/IFGR_MAX) — אותה סמנטיקה
+#     הפוכה בדיוק: הערך הוא *הפחתה*, קטן=רווח גדול. לכן משתמשים באותם קבועים.
+# (2) **אין שליטה ב-RFGR/LNAstate כמו בקול** — במצב ידני הכלי מקבע LNAstate=0,
+#     כלומר **רווח RF מקסימלי**. זה לא חיסרון ל-SATCOM אלא בדיוק מה שרוצים
+#     לאות לוויין חלש, וזו הסיבה שרווח ידני יכול לעזור דווקא כשה-AGC לא:
+#     ה-AGC מכוון ל-setpoint של ‎-30dBfs על *כל* מה שבחלון, כך שאנרגיה חזקה
+#     מחוץ לפס (סלולר סמוך ל-L-band — בדיוק מה שה-SAW של ה-LNA נועד לחתוך)
+#     יכולה לגרום לו להוריד רווח ולהחניק את הנשא של הלוויין. לכן זו אופציה,
+#     לא ברירת מחדל: AGC נשאר ברירת המחדל (None), והידני הוא כלי לשטח.
+SATCOM_GAIN_DEFAULT = None            # None = AGC של הדרייבר (‎5Hz, setpoint ‎-30dBfs)
 SATCOM_SPECTRUM_BINS = 256            # ברירת מחדל לבקשת ספקטרום (web.c: 32..1024)
 SATCOM_SPECTRUM_TIMEOUT = 3.0         # מעט יותר מ-health: מערך גדול יותר
 SATCOM_LOG_TAIL_LINES = 40            # GET /api/satcom/log — מספיק לשורות הפתיחה
@@ -390,6 +413,9 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  # ערך ממילא, ועלות ה-CPU היא אפס; ניתן לכיבוי מי שמעדיף לא לחשוף
                  # את GET /api/tune של הכלי ברשת המקומית (§9).
                  "satcom_spectrum": True,
+                 # None = AGC (ברירת המחדל); int 20..59 = gRdB ידני (*הפחתה*,
+                 # קטן=רווח גדול — כמו if_gain של הקול). ר' SATCOM_GAIN_DEFAULT.
+                 "satcom_gain": SATCOM_GAIN_DEFAULT,
                  # בסיס כיול למד השדה: {"noise": dBFS, "freq": MHz, "ts": epoch} או None.
                  # נמדד תמיד תחת אותם תנאים קבועים (AGC, /api/antenna/check) => בר-השוואה
                  # לעצמו לאורך זמן, בלי תלות באיזה מצב פעיל עכשיו. לעולם לא ממציאים
@@ -1966,6 +1992,26 @@ def _sanitize_satellite(freqs, default=None):
     return out[:1] or list(default if default is not None else SATCOM_FREQS_DEFAULT)
 
 
+def _sanitize_satcom_gain(value, default=None):
+    """מנרמל את בחירת הרווח ל-`None` (AGC) או ל-int בתחום IFGR_MIN..IFGR_MAX.
+
+    שלוש כניסות שונות, שלוש משמעויות (חשוב לא לבלבל ביניהן):
+      • `None`/`""`/`"agc"` => AGC מפורש (הבחירה המכוונת "תן לדרייבר לנהל").
+      • מספר => gRdB ידני, נחתך לתחום. **חותכים ולא דוחים** כי הכלי עצמו
+        חותך בדיוק לאותו תחום (sdrplay.c) — 400 כאן היה מציג למשתמש שגיאה
+        על ערך שהחומרה מקבלת בשקט, וזו הבחנה בלי הבדל.
+      • ג'אנק (מחרוזת לא-מספרית, dict) => `default` — אותו דפוס בדיוק כמו
+        `_sanitize_freqs`/`_sanitize_satellite`: פורמט לא-תקין לא מפיל בקשה,
+        הוא נופל לבחירה השמורה.
+    """
+    if value is None or (isinstance(value, str) and value.strip().lower() in ("", "agc", "auto")):
+        return None
+    try:
+        return max(IFGR_MIN, min(IFGR_MAX, int(float(value))))
+    except (TypeError, ValueError):
+        return default
+
+
 def _satcom_window_error(freqs):
     """ולידציה מקבילה ל-_window_error/_vdl2_window_error, אך ללוויין ולא לחלון
     דגימה: /api/mode הגנרי מצפה לפונקציה בחתימה (freqs) -> error|None, כדי
@@ -2103,7 +2149,7 @@ def _enter_acars(freqs):
     return None, None
 
 
-def _enter_satcom(freqs, bias_tee=True, skip_c=True, spectrum=True):
+def _enter_satcom(freqs, bias_tee=True, skip_c=True, spectrum=True, gain=None):
     """עוצר את שלושת צרכני ה-SDR האחרים ומריץ inmarsat-sniffer. מחזיר
     (error, detail). Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות
     תחילה כדי לשחרר את ה-SDR לפני ש-inmarsat-sniffer פותח אותו (מונע מרוץ על
@@ -2118,13 +2164,16 @@ def _enter_satcom(freqs, bias_tee=True, skip_c=True, spectrum=True):
     ‏skip_c=True (ברירת מחדל) מוריד את דמודולטורי ה-C-channel — הצד השני של
     אותו תקציב חשמל, אבל דרך ה-CPU במקום דרך ה-bias-T (ר' §12/write_satcom_env).
     ‏spectrum=True (ברירת מחדל) מפעיל את ‎--spectrum => GET /api/satcom/spectrum
-    זמין (אבחון "יש RF בכלל?" — ר' SATCOM_SPECTRUM_BINS)."""
+    זמין (אבחון "יש RF בכלל?" — ר' SATCOM_SPECTRUM_BINS).
+    ‏gain=None (ברירת מחדל) => AGC של הדרייבר; int 20..59 => gRdB ידני עם
+    LNAstate מקובע ל-0 (רווח RF מקסימלי) — ר' SATCOM_GAIN_DEFAULT למה זה
+    דווקא *עוזר* לאות לוויין חלש כשה-AGC נחנק מאנרגיה מחוץ לפס."""
     for svc in ("rtl_airband", ACARS_SERVICE, VDL2_SERVICE):
         try:
             _sysctl("stop", svc, timeout=30)
         except Exception:
             pass
-    write_satcom_env(freqs, bias_tee=bias_tee, skip_c=skip_c, spectrum=spectrum)
+    write_satcom_env(freqs, gain=gain, bias_tee=bias_tee, skip_c=skip_c, spectrum=spectrum)
     try:
         # airam-satcom.service (בשונה משאר צרכני ה-SDR) מוגדר עם StartLimitBurst
         # סופי — הגנה מפני קריסה חוזרת שמדליקה מחדש bias-T ללא פיקוח (ר' ההערה
@@ -2981,7 +3030,8 @@ def _restore_after_probe(prev_state, prev_live):
             _enter_satcom(prev_state.get("satcom_freqs", SATCOM_FREQS_DEFAULT),
                           bias_tee=prev_state.get("satcom_bias_tee", True),
                           skip_c=prev_state.get("satcom_skip_c", True),
-                          spectrum=prev_state.get("satcom_spectrum", True))
+                          spectrum=prev_state.get("satcom_spectrum", True),
+                          gain=_sanitize_satcom_gain(prev_state.get("satcom_gain")))
         elif prev_live == "voice":
             _enter_voice({"freq": prev_state["freq"], "mod": prev_state["mod"],
                          "agc": prev_state["agc"], "if_gain": prev_state["if_gain"],
@@ -3722,7 +3772,7 @@ def api_mode():
         payload, status = _voice_tune(params)
         return jsonify(payload), status
 
-    plan = freqs = key = enter = bias_tee = skip_c = spectrum = None
+    plan = freqs = key = enter = bias_tee = skip_c = spectrum = gain = None
     if mode == "scan":
         plan = _validate_scan_plan(data.get("plan") or st.get("scan_plan"))
         if plan is None:
@@ -3757,6 +3807,11 @@ def api_mode():
             # שמבחין "אין RF" מ"יש RF בלי נעילה" (ר' SATCOM_SPECTRUM_BINS).
             spectrum = (data["spectrum"] if isinstance(data.get("spectrum"), bool)
                         else bool(st.get("satcom_spectrum", True)))
+            # gain: כאן *לא* אפשר להשתמש ב-data.get() כדי לזהות "לא נשלח" —
+            # ‏null הוא ערך משמעותי (AGC מפורש) ולא היעדר. לכן בדיקת מפתח.
+            gain = (_sanitize_satcom_gain(data["gain"], st.get("satcom_gain"))
+                    if "gain" in data
+                    else _sanitize_satcom_gain(st.get("satcom_gain")))
 
     if not TUNE_LOCK.acquire(timeout=0.5):
         return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב",
@@ -3790,13 +3845,13 @@ def api_mode():
 
         # acars / vdl2 / satcom — מסלול דאטה סימטרי (satcom מקבל גם bias_tee/skip_c/spectrum)
         log.info("mode -> %s freqs=%s (from %s)", mode, freqs, request.remote_addr)
-        err, detail = (enter(freqs, bias_tee, skip_c, spectrum) if mode == "satcom"
+        err, detail = (enter(freqs, bias_tee, skip_c, spectrum, gain) if mode == "satcom"
                        else enter(freqs))
         if err:
             payload, status = _fail_to_off(st, err, detail, "enter " + mode)
             return jsonify(payload), status
         extra = ({"satcom_bias_tee": bias_tee, "satcom_skip_c": skip_c,
-                  "satcom_spectrum": spectrum}
+                  "satcom_spectrum": spectrum, "satcom_gain": gain}
                  if mode == "satcom" else {})
         new_state = {**st, "app_mode": mode, key: freqs, **extra}
         save_state(new_state)

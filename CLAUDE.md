@@ -161,9 +161,9 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 | `/etc/rtl_airband/airband.conf` | קונפיג קול חי (תדר נבחר) | app.py בכל `/api/tune` |
 | `/etc/airam/acars.env` | תדרי ACARS חיים | app.py בכל מעבר ל-ACARS |
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
-| `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain, bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
+| `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain (`--sdrplay-gain=N` או ריק=AGC), bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `signal_baseline`, `last_session_view_at`) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline`, `last_session_view_at`) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
 | `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
@@ -252,7 +252,7 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   `src/dst.type` "Aircraft/Ground Earth Station" קובע `dir` מבני. **בלי `level`/`snr`/`freq`**
   — הכלי לא חושף אותם (§12), ו-`isu.refno`≠MSN ⇒ `msgno` לא ממופה), `write_satcom_env`
   (לוויין `--satellite=`, `SATCOM_GAIN`=`--sdrplay-gain` (נייטיבי, לא `--soapy-gain`) או
-  ריק=AGC, `SATCOM_BIAS_TEE`=`-B`/ריק, `SATCOM_SKIP_C`=`--skip-c-channel`/ריק — ר' §12),
+  ריק=AGC — נבחר מה-UI דרך `_sanitize_satcom_gain` (`None`=AGC / int 20–59, ר' §12), `SATCOM_BIAS_TEE`=`-B`/ריק, `SATCOM_SKIP_C`=`--skip-c-channel`/ריק — ר' §12),
   `_enter_satcom` (עוצר שלושת האחרים, מנקה
   תקרת-הפעלות קודמת עם `reset-failed` לפני ה-restart — ר' §12, מרים
   inmarsat-sniffer, verify), `_sanitize_satellite`/`_satcom_window_error` (לוויין יחיד
@@ -452,7 +452,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `scan_plan`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`) |
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
-| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית) ו-`skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12). לשניהם: ברירת מחדל = הבחירה השמורה, ואם אין אחת — `true`. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
+| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית), `skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12), `spectrum` (bool אופציונלי — `false` לכיבוי האבחון, ר' §9/§12) ו-`gain` (‏`null`=AGC (ברירת מחדל) או מספר=gRdB ידני 20–59, נחתך; ר' §12). לכולם: ברירת מחדל = הבחירה השמורה. ⚠ ב-`gain` בלבד `null` הוא **ערך משמעותי** (AGC מפורש) ולא היעדר — הזיהוי הוא לפי נוכחות המפתח בגוף הבקשה. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
 | GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור) |
 | GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון; `?day=YYYY-MM-DD` ארכיון מהדיסק, snapshot סטטי) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט; לא ב-`?day=`). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM, עמודות `level`+`snr`) |
@@ -622,6 +622,21 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   ⚠ **חומרה: `bias_tee` של ה-RSP1B נותן 100mA ו-SAWbird+ iO צורך ~180mA
   נומינלית** (מפרט היצרן) — הוא לא נכנס בתקציב. LNA תת-מוזן לא נכשל בצורה
   ברורה, והתסמין זהה ל"לא מכוון"; זה החשוד מספר 1 ל"מעולם לא הייתה נעילה".
+  (7) **`gain` — AGC מול gRdB ידני, ו*למה* זה לא מקביל לרווח של הקול.**
+  ‏`SATCOM_GAIN` ריק (ברירת מחדל) => `sdrplay_api_AGC_5HZ` עם setpoint
+  ‎`-30dBfs`; `--sdrplay-gain=N` => `gRdB=N` (נחתך 20..59), **`LNAstate=0`
+  מקובע**, ו-`AGC_DISABLE` (הכול מצוטט מ-`sdrplay.c` ליד `SATCOM_GAIN_DEFAULT`).
+  שתי מסקנות: (א) הטווח **זהה ל-IFGR של הקול** (`IFGR_MIN`/`IFGR_MAX`) ובעל
+  אותה סמנטיקה הפוכה — לכן משתמשים באותם קבועים ובאותו היפוך-סליידר;
+  (ב) **אין `RFGR`/`LNAstate` לשלוט בו כמו בקול** — הכלי מקבע רווח RF מקסימלי,
+  ולכן ב-UI יש **סליידר אחד** ולא שניים. זו לא השמטה אלא מה שהכלי חושף.
+  **למה זה שימושי דווקא כשאין נעילה:** ה-AGC מכוון ל-setpoint על *כל* האנרגיה
+  בחלון, כך שסלולר חזק ליד ה-L-band (בדיוק מה שה-SAW של ה-LNA נועד לחתוך)
+  יכול לגרום לו להוריד רווח ולהחניק את נשא הלוויין; רווח ידני עוקף את זה.
+  לכן זו **אופציה, לא ברירת מחדל** — AGC נשאר `None`.
+  ⚠ `null` ב-`POST /api/mode` הוא **AGC מפורש**, לא "לא נשלח": הזיהוי חייב
+  להיות `"gain" in data` ולא `data.get("gain")`, אחרת אין דרך לחזור מרווח
+  ידני ל-AGC והמשתמש נתקע בו לנצח.
   **⚠ מגבלת הזיהוי — למה מניעה גוברת על ניטור:** כשספק הכוח (למשל power bank
   עם OCP) קוטע את המתח, הוא עושה זאת *מיידית* ולעיתים נועל עד ניתוק פיזי —
   ‏`vcgencmd` לעולם לא רואה את זה, ודגלי ה-`_ever` מתאפסים בהדלקה הבאה. לכן

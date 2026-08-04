@@ -873,3 +873,118 @@ def test_satcom_log_failure_is_graceful(client, paths, monkeypatch):
     monkeypatch.setattr(app.subprocess, "run", boom)
     r = client.get("/api/satcom/log")
     assert r.status_code == 500 and r.get_json()["ok"] is False and r.get_json()["log"] == ""
+
+
+# --- gain: AGC מול gRdB ידני -------------------------------------------------
+# ‏sdrplay.c: ‏gain>=0 => gRdB נחתך ל-20..59 + LNAstate=0 + AGC_DISABLE;
+# אחרת AGC_5HZ עם setpoint -30dBfs. ר' SATCOM_GAIN_DEFAULT ב-app.py.
+
+def test_sanitize_satcom_gain_agc_forms():
+    """‏None ו"agc"/"auto"/"" הם כולם AGC מפורש — לא ג'אנק, לא ברירת מחדל."""
+    for v in (None, "", "  ", "agc", "AGC", "auto"):
+        assert app._sanitize_satcom_gain(v, default=35) is None
+
+
+def test_sanitize_satcom_gain_clamps_to_tool_range():
+    """חותכים בדיוק כמו הכלי (20..59) ולא דוחים: 400 על ערך שהחומרה מקבלת
+    בשקט הוא הבחנה בלי הבדל."""
+    assert app._sanitize_satcom_gain(0) == app.IFGR_MIN
+    assert app._sanitize_satcom_gain(19) == app.IFGR_MIN
+    assert app._sanitize_satcom_gain(999) == app.IFGR_MAX
+    assert app._sanitize_satcom_gain(40) == 40
+    assert app._sanitize_satcom_gain("35") == 35      # מחרוזת מספרית — תקינה
+    assert app._sanitize_satcom_gain(40.7) == 40      # float נחתך ל-int
+
+
+def test_sanitize_satcom_gain_junk_falls_to_default():
+    """ג'אנק => הבחירה השמורה, כמו _sanitize_freqs/_sanitize_satellite —
+    לא מפיל בקשה ולא קופץ ל-AGC בשקט."""
+    for junk in ("$(reboot)", "abc", {}, [], object()):
+        assert app._sanitize_satcom_gain(junk, default=35) == 35
+    assert app._sanitize_satcom_gain("abc") is None   # בלי default => AGC
+
+
+def test_write_satcom_env_gain_none_is_agc(paths):
+    app.write_satcom_env(["AF1"], gain=None)
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == ""
+
+
+def test_api_mode_satcom_default_gain_is_agc(client, paths, no_sleep, monkeypatch):
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom"})
+    assert r.status_code == 200 and r.get_json()["satcom_gain"] is None
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == ""
+    assert app.load_state()["satcom_gain"] is None
+
+
+def test_api_mode_satcom_manual_gain_writes_sdrplay_flag(client, paths, no_sleep, monkeypatch):
+    """הדגל הוא --sdrplay-gain (הדרייבר הנייטיבי), *לא* --soapy-gain."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom", "gain": 35})
+    assert r.status_code == 200 and r.get_json()["satcom_gain"] == 35
+    env = _env_lines(app.SATCOM_ENV_PATH)
+    assert env["SATCOM_GAIN"] == "--sdrplay-gain=35"
+    assert "soapy" not in env["SATCOM_GAIN"]
+    assert app.load_state()["satcom_gain"] == 35
+
+
+def test_api_mode_satcom_gain_out_of_range_is_clamped(client, paths, no_sleep, monkeypatch):
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom", "gain": 5})
+    assert r.get_json()["satcom_gain"] == app.IFGR_MIN
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == "--sdrplay-gain=%d" % app.IFGR_MIN
+
+
+def test_api_mode_satcom_gain_remembered_when_omitted(client, paths, no_sleep, monkeypatch):
+    """כניסה חוזרת בלי gain => הבחירה השמורה, כמו bias_tee/skip_c/freqs."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    client.post("/api/mode", json={"mode": "satcom", "gain": 30})
+    r = client.post("/api/mode", json={"mode": "satcom"})       # בלי gain
+    assert r.get_json()["satcom_gain"] == 30
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == "--sdrplay-gain=30"
+
+
+def test_api_mode_satcom_explicit_null_gain_returns_to_agc(client, paths, no_sleep, monkeypatch):
+    """⚠ ההבחנה הקריטית: `gain:null` הוא **חזרה מפורשת ל-AGC**, לא "לא נשלח".
+    בלי בדיקת-מפתח (`"gain" in data`) המשתמש היה נתקע ברווח הידני לנצח."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    client.post("/api/mode", json={"mode": "satcom", "gain": 30})
+    assert app.load_state()["satcom_gain"] == 30
+    r = client.post("/api/mode", json={"mode": "satcom", "gain": None})
+    assert r.get_json()["satcom_gain"] is None
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == ""
+    assert app.load_state()["satcom_gain"] is None
+
+
+def test_api_mode_satcom_junk_gain_keeps_saved_choice(client, paths, no_sleep, monkeypatch):
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    client.post("/api/mode", json={"mode": "satcom", "gain": 30})
+    r = client.post("/api/mode", json={"mode": "satcom", "gain": "$(reboot)"})
+    assert r.status_code == 200 and r.get_json()["satcom_gain"] == 30
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == "--sdrplay-gain=30"
+
+
+def test_api_mode_satcom_gain_independent_of_other_switches(client, paths, no_sleep, monkeypatch):
+    """ארבעת המתגים בבקשה אחת — אף אחד לא דורס את האחרים."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom", "gain": 25,
+                                       "bias_tee": False, "skip_c": False, "spectrum": False})
+    b = r.get_json()
+    assert (b["satcom_gain"], b["satcom_bias_tee"], b["satcom_skip_c"], b["satcom_spectrum"]) \
+        == (25, False, False, False)
+    env = _env_lines(app.SATCOM_ENV_PATH)
+    assert env["SATCOM_GAIN"] == "--sdrplay-gain=25"
+    assert env["SATCOM_BIAS_TEE"] == "" and env["SATCOM_SKIP_C"] == "" and env["SATCOM_SPECTRUM"] == ""
+
+
+def test_api_state_exposes_satcom_gain(client, paths, monkeypatch):
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)
+    j = client.get("/api/state").get_json()
+    assert "satcom_gain" in j and j["satcom_gain"] is None

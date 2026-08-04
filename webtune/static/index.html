@@ -1716,6 +1716,32 @@
           מתוך 12 הערוצים — לפי המקור הם כמעט לא נושאים ACARS וחוסכים ‎~50% CPU.
           כבוי: מפענחים את כל 12 הערוצים (עוד עומס, כמעט בלי רווח ב-ACARS).
         </p>
+        <!-- ═══ רווח: AGC מול ידני ═══
+             ⚠ בניגוד לקול, כאן יש **סליידר אחד בלבד**: במצב ידני הכלי מקבע
+             LNAstate=0 (רווח RF מקסימלי) ולא חושף אותו כפרמטר (sdrplay.c) —
+             אז אין "RF Gain" להציג, וזה גם בדיוק מה שרוצים לאות לוויין חלש.
+             אותה סמנטיקה הפוכה כמו ב-IF Gain של הקול: הסליידר מציג *רווח*
+             (0–39dB) וממופה ל-gRdB = 59 − ערך. -->
+        <div class="setting" id="satcomAgcRow">
+          <span>🎚 AGC אוטומטי</span>
+          <label class="switch">
+            <input type="checkbox" id="satcomAgc" checked>
+            <span class="track"></span>
+          </label>
+        </div>
+        <div class="gain-slider" id="satcomGainWrap">
+          <span>רווח ידני</span>
+          <input type="range" id="satcomGain" min="0" max="39" step="1" value="24" />
+          <span class="val"><span id="satcomGainVal">24</span> dB</span>
+        </div>
+        <p class="sdr-hint" id="satcomAgcHint">
+          דלוק (ברירת מחדל): ה-AGC של הדרייבר מכוון ל-‎-30dBfs. כבוי: רווח ידני
+          (‎gRdB 20–59, קטן=רווח גדול) והמפענח מקבע את ה-LNA לרווח מקסימלי.
+          ⚠ שווה לנסות ידני כשה-AGC לא נועל: הוא מגיב לכל האנרגיה בחלון, כך
+          שסלולר חזק ליד ה-L-band עלול לגרום לו להוריד רווח ולהחניק את הלוויין.
+          שינוי מפעיל מחדש את המפענח (‎~3 שניות).
+        </p>
+
         <!-- סרגל בקרת SDR: מתעדכן לפי satcomActive (מצב ה-SDR האמיתי, לא הכרטיסייה) -->
         <div id="satcomSdrBar" class="acars-sdr-bar">
           <div id="satcomInactive">
@@ -3256,6 +3282,11 @@
             renderPowerAdvice();   // קביעה תוכניתית לא מפעילה onchange
           }
           if (typeof data.satcom_skip_c === "boolean") $("satcomSkipC").checked = data.satcom_skip_c;
+          if ("satcom_gain" in data) {
+            $("satcomAgc").checked = !(typeof data.satcom_gain === "number");
+            if (typeof data.satcom_gain === "number") $("satcomGain").value = 59 - data.satcom_gain;
+            renderSatcomGainUI();
+          }
           satcom.setActive(true);
           renderPower();
           satcom.poll();                       // רענון מיידי אחרי ש-inmarsat-sniffer עלה
@@ -4441,10 +4472,25 @@
       renderPowerAdvice();
     };
     $("satcomExternalLna").onchange = renderPowerAdvice;
+    // gRdB לשליחה: null = AGC. הסליידר מציג *רווח* (0-39dB) וה-gRdB הוא
+    // ההפחתה המשלימה — אותה היפוך בדיוק כמו sliderToIFGR של הקול.
+    const satcomGainVal = () =>
+      $("satcomAgc").checked ? null : 59 - parseInt($("satcomGain").value, 10);
+
+    function renderSatcomGainUI() {
+      const auto = $("satcomAgc").checked;
+      $("satcomGainVal").textContent = $("satcomGain").value;
+      $("satcomGainWrap").classList.toggle("dim", auto);
+      $("satcomGain").disabled = auto;
+    }
+    $("satcomAgc").onchange = renderSatcomGainUI;
+    $("satcomGain").oninput = renderSatcomGainUI;
+
     function enterSatcom() {
       if (!confirmSatcomAntenna()) return;
       const extra = { bias_tee: !$("satcomExternalLna").checked,
-                      skip_c: $("satcomSkipC").checked };
+                      skip_c: $("satcomSkipC").checked,
+                      gain: satcomGainVal() };
       if (satcom.selFreqs) extra.freqs = satcom.selFreqs;
       applyMode("satcom", extra);
     }
@@ -4612,6 +4658,11 @@
       // אותו נימוק (enterSatcom נקרא גם מחוץ לתצוגה), רק בלי סיכון החומרה:
       // ‏state ישן בלי השדה => ברירת המחדל החסכונית, כמו בשרת.
       $("satcomSkipC").checked = st.satcom_skip_c !== false;
+      // רווח: null/חסר => AGC. מספר => ידני, והסליידר מציג את הרווח (59 − gRdB).
+      var sg = st.satcom_gain;
+      $("satcomAgc").checked = !(typeof sg === "number");
+      if (typeof sg === "number") $("satcomGain").value = 59 - sg;
+      renderSatcomGainUI();
       // app_mode מגיע מהמציאות (השירות הפעיל), ובאין צרכן — מהכוונה השמורה
       // (mode_ok=false אומר שהמצב השמור אמור לרוץ אבל לא רץ). נוחתים בתצוגת
       // המצב הפעיל; off/תקלה נוחתים במסך הבית (התצוגה הניטרלית).
