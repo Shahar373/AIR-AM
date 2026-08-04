@@ -3655,6 +3655,12 @@
       let focus = null, filter = "all", active = false;
       let lastId = 0, banks = [], selFreqs = null;
       let feedMax = 0;                                // ה-id הגבוה שרונדר — לסימון "חדש"
+      // ⚠ totalMsgs נספר *בנפרד* מ-msgs.length: msgs הוא חלון-נגלל בגודל MAX
+      // (500) לטובת הפיד/מפה/חיפוש — ברגע שסשן חוצה 500 הודעות, msgs.length
+      // נתקע על 500 לנצח (ישן מוחלף בחדש, לא נוסף) בעוד totalMsgs ממשיך לגדול.
+      // בלי ההפרדה הזו "הודעות" בסטטיסטיקה נראה כאילו "הפסיק לרשום" מעל 500 —
+      // בפועל הפיד ממשיך לזרום, רק המונה שהוצג היה שקוף-לחלון בטעות.
+      let totalMsgs = 0;
       const rateHist = [];                            // מגמת קצב ההודעות (rate-spark, כמו ACARS)
       const feedCache = new Map();                    // key => { sig, el } — reconcileFeed (רינדור אינקרמנטלי, כמו ACARS)
       let timer = null, staleTimer = null, inFlight = false, resizeT = null;
@@ -4049,19 +4055,27 @@
           .filter(Boolean).join(" ").toLowerCase().includes(q);
       }
       function renderStats() {
-        E("StTotal").textContent = msgs.length;
-        E("StCraft").textContent = new Set(msgs.map(aircraftId).filter(Boolean)).size;
-        E("StPos").textContent = msgs.filter((m) => m.lat != null).length;
+        // ⚠ msgs הוא חלון-נגלל (MAX=500, לטובת פיד/מפה/חיפוש בלבד) — לא מקור
+        // אמין ל"כמה קרה בסה"כ הסשן". totalMsgs/craft הם המקורות שלא נגזמים
+        // (ר' ההערה ליד totalMsgs). בלעדי זה, כל הסטטיסטיקות האלה "נתקעות"
+        // ברגע שהסשן חוצה 500 הודעות, גם כשהפיד עצמו ממשיך לזרום כרגיל.
+        E("StTotal").textContent = totalMsgs;
+        E("StCraft").textContent = Object.keys(craft).length;
+        E("StPos").textContent = Object.values(craft).filter((c) => c.hasPos).length;
         E("StAdsb").textContent = Object.keys(craft).filter((id) => adsbFor(id)).length;
+        // הקצב לעומת זאת *צריך* להיות מבוסס-חלון (מגמה עדכנית, לא ממוצע-כל-הסשן) —
+        // msgs נשאר המקור הנכון כאן, בכוונה.
         const ts = msgs.map((m) => m.t).filter((t) => typeof t === "number");
         let rate = 0;
         if (ts.length >= 2) { const span = (Math.max(...ts) - Math.min(...ts)) / 60; rate = span > 0.1 ? ts.length / span : 0; }
         E("StRate").textContent = rate ? rate.toFixed(1) : "0";
         // ⬆/⬇ קיימים רק ב-satcom (ר' ההערה ליד satcomStUp ב-HTML) — E() מחזיר
-        // null בתצוגות אחרות, לכן מוגן ולא מחושב לחינם כשלא מוצג.
+        // null בתצוגות אחרות, לכן מוגן ולא מחושב לחינם כשלא מוצג. מסוכם מתוך
+        // craft[id].up/down (נצבר לכל מטוס בלי הגבלה ב-updateCraft) ולא מ-msgs,
+        // מאותה סיבה בדיוק — אחרת גם הפילוח הזה "קופא" מעל 500 הודעות.
         const stUp = E("StUp"), stDown = E("StDown");
-        if (stUp) stUp.textContent = msgs.filter((m) => m.dir === "uplink").length;
-        if (stDown) stDown.textContent = msgs.filter((m) => m.dir === "downlink").length;
+        if (stUp) stUp.textContent = Object.values(craft).reduce((s, c) => s + (c.up || 0), 0);
+        if (stDown) stDown.textContent = Object.values(craft).reduce((s, c) => s + (c.down || 0), 0);
       }
       function renderFilters() {
         const box = E("Filters");
@@ -4201,7 +4215,7 @@
         const data = await fetchJSON("/api/" + opts.prefix + "?day=" + day);
         if (!data.ok) throw new Error(data.error || "שגיאה בטעינת הארכיון");
         if (!liveSnapshot) {
-          liveSnapshot = { msgs: msgs.slice(), lastId, feedMax,
+          liveSnapshot = { msgs: msgs.slice(), lastId, feedMax, totalMsgs,
                           feedCacheEntries: Array.from(feedCache.entries()) };
         }
         stopPolling();
@@ -4210,6 +4224,9 @@
         (data.messages || []).forEach((m, i) => { m.id = i + 1; msgs.push(m); });
         feedCache.clear();
         feedMax = msgs.length ? Math.max(...msgs.map((m) => m.id)) : 0;   // בלי אנימציית "חדש" בארכיון
+        // הארכיון מגיש את *כל* הודעות היום (לא חלון-500 כמו msgs החי) — totalMsgs
+        // עוקב, לא נשאר תקוע על מספר הסשן החי (ר' ההערה ליד ההגדרה שלו).
+        totalMsgs = msgs.length;
         ensureMap();
         _rebuildFromMsgs();
       }
@@ -4218,7 +4235,7 @@
         archiveDay = null;
         msgs.length = 0;
         liveSnapshot.msgs.forEach((m) => msgs.push(m));
-        lastId = liveSnapshot.lastId; feedMax = liveSnapshot.feedMax;
+        lastId = liveSnapshot.lastId; feedMax = liveSnapshot.feedMax; totalMsgs = liveSnapshot.totalMsgs;
         feedCache.clear();
         liveSnapshot.feedCacheEntries.forEach(([k, v]) => feedCache.set(k, v));
         liveSnapshot = null;
@@ -4236,7 +4253,7 @@
           setActive(data.active);
           if (data.freqs) renderFreqs(data.freqs);
           if (typeof data.cursor === "number" && data.cursor < lastId) {   // השרת אותחל => איפוס
-            lastId = 0; feedMax = 0; rateHist.length = 0; feedCache.clear(); msgs.length = 0;
+            lastId = 0; feedMax = 0; totalMsgs = 0; rateHist.length = 0; feedCache.clear(); msgs.length = 0;
             for (const id in markers) { if (map) map.removeLayer(markers[id]); delete markers[id]; }
             for (const id in tracks) { if (map && tracks[id].line) map.removeLayer(tracks[id].line); delete tracks[id]; }
             for (const id in craft) delete craft[id];
@@ -4249,6 +4266,7 @@
             if (opts.onReset) opts.onReset();   // ACARS: מנקה את לוח ה-ATIS מהסשן הקודם
           }
           if (data.messages && data.messages.length) {
+            totalMsgs += data.messages.length;   // מונה-אמת, לא מוגבל לחלון msgs (ר' ההערה למעלה)
             for (const m of data.messages) {
               msgs.push(m);
               if (m.id > lastId) lastId = m.id;
