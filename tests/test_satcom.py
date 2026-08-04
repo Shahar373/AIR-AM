@@ -1079,15 +1079,16 @@ def test_normalize_satcom_real_cpdlc_capture_decode_failed():
     assert n["lat"] is None and n["lon"] is None
 
 
-def test_normalize_satcom_real_adsc_capture_with_position():
-    """regression חיובית: מסלול ההצלחה חייב להמשיך לעבוד (pos_src='adsc'), לא רק
-    מקרי הכישלון. ⚠ אין לנו לכידת --feed -v גולמית ל*הודעה המצליחה* הזו (רק
-    ל-CPDLC שנכשל, ר' הבדיקה למעלה) — מבנה ה-JSON כאן (arinc622.adsc.basic_report)
-    הוא שחזור סביר, לא שורה גולמית מאומתת. ‏18.34167/2.11006 עצמם כן אמיתיים:
-    זה בדיוק מה ש-/api/satcom/export החזיר בשדה (A7-BBB, קליטת 04.08.2026,
-    pos_src='adsc') — כלומר המנגנון המלא כבר הוכח עובד קצה-לקצה על נתון אמיתי,
-    גם בלי שראינו את ה-JSON הגולמי המדויק. ‏_scan_latlon אגנוסטי-למבנה (מחפש
-    lat/lon בכל עומק) אז הבדיקה תקפה ללא תלות בשם ה-wrapper המדויק."""
+def test_normalize_satcom_uplink_adsc_never_yields_position_even_without_err():
+    """⚠ regression מתוקן — הבדיקה הזו בעבר טענה בטעות שזו "הוכחת הצלחה": קליטת
+    שדה אמיתית (A7-BBB, 04.08.2026) הראתה `pos_src="adsc"` עם 18.34167/2.11006
+    על הודעה עם `dir="uplink"` — וזה בדיוק הבאג. אומת מול libacars/adsc.c
+    במקור: tag 7 = "Periodic contract request" ב-uplink (קרקע→מטוס, *אין* בו
+    מיקום מטוס בכלל) מול "Basic report" ב-downlink (מטוס→קרקע, מיקום אמיתי) —
+    אותו tag מספרי, טבלת-פענוח *הפוכה* לפי כיוון. משתמש שהצליב מול ADS-B חיצוני
+    מצא בדיוק את התבנית הזו: C-GHKX (uplink) "קיבל" מיקום באלפי ק"מ מהאמיתי.
+    לכן: uplink ADS-C, גם בלי שום `err:true` שמתגלה, לעולם לא צריך להניב מיקום —
+    ‏decode_failed=False לבד לא מספיק (ר' test אחרת ל-decode_failed בכלל)."""
     m = _satcom({
         "mode": "2", "label": "A6", "reg": "A7-BBB",
         "msg_text": "/RECOEYA.ADS.A7-BBB070D0B000C010D010E0110010F01150523D57F",
@@ -1097,9 +1098,37 @@ def test_normalize_satcom_real_adsc_capture_with_position():
             "arinc622": {"msg_type": "adsc_msg", "crc_ok": True,
                         "adsc": {"basic_report": {"lat": 18.34167, "lon": 2.11006}}},
         }},
-    }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
+    }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")   # uplink
     n = app._normalize_satcom(m)
+    assert n["dir"] == "uplink"
+    assert n["category"] == "ADS-C"
+    assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
+    assert n["group"] != "position"
+
+
+def test_normalize_satcom_downlink_adsc_yields_position():
+    """regression חיובית: מסלול ההצלחה האמיתי הוא **downlink** (מטוס→קרקע) —
+    כאן, ורק כאן, tag 7 ב-libacars פירושו "Basic report" (מיקום אמיתי, ר'
+    ההערה המלאה בבדיקה הקודמת). ⚠ אין לנו עדיין לכידת --feed -v גולמית של
+    הודעת ADS-C downlink אמיתית (כל מה שנקלט עד כה היה uplink בלבד — ר' §12
+    ב-CLAUDE.md, "P channel בלבד") — מבנה ה-JSON כאן שחזור-לפי-פרוטוקול, לא
+    שורה מאומתת. הבדיקה מוודאת שה-guard *לא* חוסם באגרסיביות-יתר, לא שהמספרים
+    האלה ספציפית אמיתיים."""
+    m = _satcom({
+        "mode": "2", "label": "A6", "reg": "A7-BBB",
+        "msg_text": "/RECOEYA.ADS.A7-BBB070D0B000C010D010E0110010F01150523D57F",
+        "arinc622": {"acars": {
+            "err": False, "crc_ok": True, "reg": ".A7-BBB", "mode": "2", "label": "A6",
+            "msg_text": "/RECOEYA.ADS.A7-BBB070D0B000C010D010E0110010F01150523D57F",
+            "arinc622": {"msg_type": "adsc_msg", "crc_ok": True,
+                        "adsc": {"basic_report": {"lat": 18.34167, "lon": 2.11006}}},
+        }},
+    }, src_type="Aircraft Earth Station", dst_type="Ground Earth Station")   # downlink
+    n = app._normalize_satcom(m)
+    assert n["dir"] == "downlink"
     assert n["category"] == "ADS-C" and n["group"] == "position"
+    assert n["pos_src"] == "adsc"
+    assert abs(n["lat"] - 18.34167) < 0.001 and abs(n["lon"] - 2.11006) < 0.001
     assert n["pos_src"] == "adsc"
     assert abs(n["lat"] - 18.34167) < 0.001 and abs(n["lon"] - 2.11006) < 0.001
     assert n["decoded"] is None   # אין שדה טקסט אמיתי, ולא "נכשל" — decode הצליח
