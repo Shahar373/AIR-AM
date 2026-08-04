@@ -56,6 +56,19 @@ SNR_DEFAULT = 9.0              # ≈ סף ה-auto הפנימי של rtl_airband 
 STATS_PATH = Path("/run/rtl_airband_stats.txt")   # tmpfs - בלי שחיקת SD
 STATS_MAX_AGE = 5.0            # rtl_airband כותב כל ~1 שנייה; ~5 כתיבות => סובל ג'יטר אך עדיין מזהה restart
 
+# --- מד שדה מאוחד + בדיקת אנטנה (ר' docs/field-station-roadmap.md) ---------
+# ב-ACARS/VDL2 אין מד אות רציף כמו ב-קול (rtl_airband): acarsdec/dumpvdl2 לא
+# חושפים רצפת רעש כששקט, רק בתוך הודעה מפוענחת. "בדיקת אנטנה" עוקפת את זה
+# ע"י מעבר זמני לקול (AGC, סקוולץ' פתוח) על התדר המבוקש ומדידה אמיתית.
+ANTENNA_CHECK_SAMPLE_SEC = 3.0   # פולינג עד שדגימה טרייה לתדר הזה מופיעה ב-stats
+SIGNAL_LAST_MSG_MAX_AGE = 300.0  # מעל זה "הודעה אחרונה" מסומנת לא-טרייה (5 דק') — לא נעלמת, רק מסומנת
+# ירידה (dB) ברצפת הרעש מתחת לבסיס שהמשתמש כייל, שנחשבת חריגה. *לא* סף
+# "איכות אות" מומצא (§12 ב-CLAUDE.md אוסר את זה) — תצפית פיזיקלית: ניתוק
+# אנטנה מנתק את המקלט מרעש-הסביבה שקושר אותו לעולם ומשאיר את רעש-הפנים של
+# המקלט עצמו, שבד״כ נמוך בהרבה מ-10dB. פסק הדין תמיד מול הבסיס של המשתמש
+# עצמו, לעולם לא מול ערך מוחלט שניחשנו.
+DISCONNECT_DROP_DB = 10.0
+
 # --- ACARS (מצב משולב: SDR אחד בהחלפה) ------------------------------------
 # מצב ACARS עוצר את rtl_airband (קול) ומריץ acarsdec על תדרי ה-ACARS. SDR אחד
 # => רק צרכן אחד בכל רגע (Conflicts ב-unit מבטיח זאת). acarsdec שולח כל הודעה
@@ -356,7 +369,16 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  "satcom_bias_tee": True,
                  # True (ברירת מחדל) = מדלגים על דמודולטורי ה-C-channel — חוסך
                  # ~50% CPU ובקושי עולה במידע (ר' §12 ב-CLAUDE.md ו-write_satcom_env).
-                 "satcom_skip_c": True}
+                 "satcom_skip_c": True,
+                 # בסיס כיול למד השדה: {"noise": dBFS, "freq": MHz, "ts": epoch} או None.
+                 # נמדד תמיד תחת אותם תנאים קבועים (AGC, /api/antenna/check) => בר-השוואה
+                 # לעצמו לאורך זמן, בלי תלות באיזה מצב פעיל עכשיו. לעולם לא ממציאים
+                 # אותו — בלי כיול מפורש של המשתמש, אין פסק דין (ר' §12).
+                 "signal_baseline": None,
+                 # מתי המשתמש ראה לאחרונה את דוח הסשן (epoch) — None עד /api/session/ack
+                 # הראשון. /api/session נופל ל"שעה אחורה" כשזה חסר (התקנה טרייה/שדרוג),
+                 # לא לכל ההיסטוריה.
+                 "last_session_view_at": None}
 
 
 # --- שורת ה-squelch: מקור אמת יחיד -----------------------------------------
@@ -1170,6 +1192,26 @@ def _parse_pdc(text):
     return "אישור טרום-המראה: " + " · ".join(parts) if parts else None
 
 
+_INTEREST_LABELS = {"A3", "C1", "15", "16", "1L"}   # labels שידועים כבעלי תוכן עשיר (PDC/loadsheet/מיקום/ניווט)
+
+
+def _interest_score(rec):
+    """'מעניינת' = שווה תשומת לב מעבר לרעש התפעולי (ACK ריקים/link test/squitter
+    חוזרים) — לא ציון מספרי מומצא, קריטריונים בינאריים מתוך שדות שכבר קיימים
+    בכרטיס המנורמל (ר' docs/field-station-roadmap.md, §1 "האנליסט"). כל אחד
+    מהם לבדו מספיק: קטגוריה לא-גנרית (לא comm/text), יש טקסט מפוענח, מיקום
+    מ-ADS-C (איכות המיקום הגבוהה ביותר), או label שידוע כבעל תוכן עשיר."""
+    if rec.get("group") not in (None, "comm", "text"):
+        return True
+    if rec.get("decoded"):
+        return True
+    if rec.get("pos_src") == "adsc":
+        return True
+    if rec.get("label") in _INTEREST_LABELS:
+        return True
+    return False
+
+
 def _normalize_acars(m):
     """מצמצם הודעת acarsdec JSON לשדות שה-UI מציג, בפורמט *אחיד* לכל סוגי ההודעות:
     קטגוריה קריאה (label => תיאור), קבוצה (לצבע), ומיקום (lat/lon) כשזמין. עמיד
@@ -1276,7 +1318,7 @@ def _normalize_acars(m):
         elif label == "A3":
             decoded = _parse_pdc(text)
 
-    return {
+    rec = {
         "t": g("timestamp") or time.time(),   # epoch seconds (float) מ-acarsdec (חסר => עכשיו)
         "freq": g("freq"),                    # MHz
         "level": level,                       # dBFS — מקורי מהמפענח, לא מעובד
@@ -1298,6 +1340,8 @@ def _normalize_acars(m):
         "error": m.get("error"),
         "actype": _extract_actype(label, text),  # סוג מטוס best-effort (H1/C1) או None
     }
+    rec["notable"] = _interest_score(rec)     # לדוח הסשן + סינון/התראות ב-UI (ר' §1 "האנליסט")
+    return rec
 
 
 def _append_jsonl_log(path, rec):
@@ -2782,14 +2826,16 @@ def api_metar():
     return jsonify(ok=True, metar=text, age=age)
 
 
-@app.route("/api/metrics")
-def api_metrics():
-    """מדדי RF חיים לתדר הנוכחי. rtl_airband מרענן את הקובץ כל ~1 שנייה."""
+def _read_voice_metrics():
+    """מדדי RF רציפים לתדר הנוכחי מ-rtl_airband stats. מקור אמת יחיד לפענוח
+    הקובץ — משותף ל-/api/metrics (תצוגת קול) ול-/api/signal (מד השדה המאוחד,
+    מצב voice). rtl_airband מרענן את הקובץ כל ~1 שנייה."""
     try:
         age = time.time() - STATS_PATH.stat().st_mtime
         text = STATS_PATH.read_text()
     except OSError:
-        return jsonify(ok=True, fresh=False)   # עוד לא נכתב (אחרי restart/אתחול)
+        return {"fresh": False, "age": None, "signal": None, "noise": None,
+                "snr": None, "overload": False, "squelch_opens": None}
 
     want = f"{load_state()['freq']:.3f}"       # מדדים מתויגים freq=MHz ב-3 ספרות
     vals = parse_stats(text, want)
@@ -2799,10 +2845,180 @@ def api_metrics():
     snr = round(sig - noise, 1) if (sig is not None and noise is not None) else None
     # עומס יתר: רמת האות בערוץ מתקרבת ל-full scale (0 dBFS) => ה-ADC/רווח רווי.
     overload = sig is not None and sig >= OVERLOAD_DBFS
-    return jsonify(ok=True, fresh=(age <= STATS_MAX_AGE and snr is not None),
-                   age=round(age, 1), signal=sig, noise=noise, snr=snr,
-                   overload=overload, overload_dbfs=OVERLOAD_DBFS,
-                   squelch_opens=vals.get("channel_squelch_counter"))
+    return {"fresh": (age <= STATS_MAX_AGE and snr is not None), "age": round(age, 1),
+            "signal": sig, "noise": noise, "snr": snr, "overload": overload,
+            "squelch_opens": vals.get("channel_squelch_counter")}
+
+
+@app.route("/api/metrics")
+def api_metrics():
+    """מדדי RF חיים לתדר הנוכחי. rtl_airband מרענן את הקובץ כל ~1 שנייה."""
+    return jsonify(ok=True, overload_dbfs=OVERLOAD_DBFS, **_read_voice_metrics())
+
+
+def _signal_verdict(noise, baseline):
+    """פסק דין *רק* מול בסיס שהמשתמש כייל בעצמו — לעולם לא סף איכות מומצא
+    (§12 ב-CLAUDE.md). ‏noise=None (אין מדידה נוכחית) => 'unknown'. בלי בסיס
+    כלל => 'no_baseline' — לא ניחוש. אחרת משווים מול DISCONNECT_DROP_DB."""
+    if noise is None:
+        return "unknown"
+    if not baseline or baseline.get("noise") is None:
+        return "no_baseline"
+    return "below_baseline" if (baseline["noise"] - noise) >= DISCONNECT_DROP_DB else "ok"
+
+
+@app.route("/api/signal")
+def api_signal():
+    """מד שדה מאוחד: המדד הכי-טוב שקיים למצב שרץ *בפועל* כרגע (לא לכוונה
+    השמורה — כמו _live_mode בכל מקום אחר), ופסק דין מול הבסיס שכויל
+    ב-/api/antenna/check.
+      voice  — מדידה רציפה (rtl_airband stats), verdict תקף רק תחת AGC
+               (השוואה לבסיס שנמדד גם הוא תחת AGC — ר' DEFAULT_STATE).
+      acars/vdl2 — level (+snr ב-VDL2 בלבד, לעולם לא ב-ACARS — ר' §12) *מההודעה
+               האחרונה בזיכרון בלבד*: אין כאן מדידה רציפה של שקט (המפענחים
+               לא חושפים רצפת רעש כששקט), ולכן אין verdict מול בסיס — רק
+               בדיקת אנטנה יזומה (שמשתמשת בקול) מייצרת מדידה בת-השוואה.
+      satcom — יש לו כלי ייעודי (/api/satcom/health); כאן רק מפנים אליו.
+      off/אין מצב חי — kind="none"."""
+    st = load_state()
+    mode = _live_mode()
+    baseline = st.get("signal_baseline")
+    payload = {"ok": True, "mode": mode or "off"}
+
+    if mode == "voice":
+        m = _read_voice_metrics()
+        agc_ok = bool(st.get("agc", True))   # gain ידני => לא בר-השוואה לבסיס (§12: לא משווים תפוחים לתפוזים)
+        payload.update(kind="continuous", fresh=m["fresh"], age=m["age"],
+                       signal=m["signal"], noise=m["noise"], snr=m["snr"],
+                       baseline=baseline,
+                       verdict=_signal_verdict(m["noise"] if agc_ok else None, baseline))
+    elif mode in ("acars", "vdl2"):
+        lock = _acars_lock if mode == "acars" else _vdl2_lock
+        buf = _acars_msgs if mode == "acars" else _vdl2_msgs
+        with lock:
+            last = dict(buf[-1]) if buf else None
+        if last is None:
+            payload.update(kind="last-message", fresh=False, age=None, signal=None,
+                           noise=None, snr=None, baseline=None, verdict="unknown")
+        else:
+            age = max(0.0, time.time() - (last.get("t") or time.time()))
+            payload.update(kind="last-message", fresh=(age <= SIGNAL_LAST_MSG_MAX_AGE),
+                           age=round(age, 1), signal=last.get("level"), noise=None,
+                           snr=last.get("snr"), baseline=None, verdict="unknown")
+    elif mode == "satcom":
+        payload.update(kind="satcom-panel", fresh=None, age=None, signal=None,
+                       noise=None, snr=None, baseline=None, verdict="unknown")
+    else:
+        payload.update(kind="none", fresh=False, age=None, signal=None,
+                       noise=None, snr=None, baseline=baseline, verdict="unknown")
+    return jsonify(**payload)
+
+
+def _sample_probe_stats(freq, timeout_sec):
+    """דוגם רצפת רעש לתדר נתון בפולינג קצר, עד timeout_sec. בשונה מ-
+    /api/metrics (שם קול כבר רץ ברציפות) — אחרי restart של rtl_airband לתדר
+    הזה לוקח רגע עד שהוא מתפרסם ב-stats, אז דגימה בודדת עלולה לפספס.
+    מחזיר {"signal","noise","snr"} או None אם לא הגיע דיווח טרי בזמן."""
+    want = f"{freq:.3f}"
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            age = time.time() - STATS_PATH.stat().st_mtime
+            text = STATS_PATH.read_text()
+        except OSError:
+            age, text = None, ""
+        if text:
+            vals = parse_stats(text, want)
+            noise = vals.get("channel_dbfs_noise_level")
+            if age is not None and age <= STATS_MAX_AGE and noise is not None:
+                sig = vals.get("channel_dbfs_signal_level")
+                return {"signal": sig, "noise": noise,
+                        "snr": round(sig - noise, 1) if sig is not None else None}
+        time.sleep(0.3)
+    return None
+
+
+def _restore_after_probe(prev_state, prev_live):
+    """משחזר את מה שבאמת רץ לפני בדיקת האנטנה הזמנית — בצד השרת, כדי שהבדיקה
+    תישאר עסקה סינכרונית אחת ולא תלויה בפולינג הבא של הקליינט. לא נועל
+    TUNE_LOCK (הקורא כבר מחזיק אותו, כמו כל _enter_* אחר) ולא כותב ל-state.json
+    (זו לא בקשת מעבר-מצב — הכוונה השמורה לא השתנתה בכלל). best-effort: כישלון
+    שחזור לא הופך את הבדיקה עצמה לכישלון, רק נרשם ללוג; המשתמש עדיין יכול
+    להיכנס למצב מחדש ידנית, בדיוק כמו כל _enter_* אחר שנכשל."""
+    try:
+        if prev_live == "acars":
+            _enter_acars(prev_state.get("acars_freqs", ACARS_FREQS_DEFAULT))
+        elif prev_live == "vdl2":
+            _enter_vdl2(prev_state.get("vdl2_freqs", VDL2_FREQS_DEFAULT))
+        elif prev_live == "satcom":
+            _enter_satcom(prev_state.get("satcom_freqs", SATCOM_FREQS_DEFAULT),
+                          bias_tee=prev_state.get("satcom_bias_tee", True),
+                          skip_c=prev_state.get("satcom_skip_c", True))
+        elif prev_live == "voice":
+            _enter_voice({"freq": prev_state["freq"], "mod": prev_state["mod"],
+                         "agc": prev_state["agc"], "if_gain": prev_state["if_gain"],
+                         "rf_gain": prev_state["rf_gain"],
+                         "squelch_mode": prev_state["squelch_mode"],
+                         "squelch_snr": prev_state["squelch_snr"]})
+        else:
+            _enter_standby()
+    except Exception:
+        log.warning("בדיקת אנטנה: שחזור המצב הקודם (%s) נכשל", prev_live, exc_info=True)
+
+
+@app.route("/api/antenna/check", methods=["POST"])
+def api_antenna_check():
+    """בדיקת אנטנה בת ~3 שניות: נכנס זמנית לקול (AGC, סקוולץ' פתוח) בתדר
+    המבוקש, דוגם רצפת רעש אמיתית, וחוזר למצב שהיה פעיל קודם. עוקף את המגבלה
+    ש-acarsdec/dumpvdl2 לא חושפים רצפת רעש רציפה כששקט (§12) — הדרך היחידה
+    לקבל מדידה בת-השוואה במצבים האלה. ‏calibrate=true שומר את התוצאה כבסיס
+    ההשוואה (state['signal_baseline']) לפסקי-הדין העתידיים של /api/signal.
+    serialized תחת TUNE_LOCK כמו כל שינוי חומרה אחר — אם כיוונון/מעבר מצב
+    אחר כבר רץ, מחזיר 409 במקום לתקוע את שניהם."""
+    data = request.get_json(silent=True) or {}
+    prev = load_state()
+    try:
+        freq = float(data.get("freq"))
+        if not (0.1 <= freq <= 1999.5):
+            raise ValueError
+    except (TypeError, ValueError):
+        freq = prev.get("freq", DEFAULT_STATE["freq"])
+    calibrate = bool(data.get("calibrate"))
+
+    if not TUNE_LOCK.acquire(blocking=False):
+        return jsonify(ok=False, error="פעולה אחרת מתבצעת כרגע — המתן שנייה ונסה שוב"), 409
+    try:
+        prev_live = _live_mode()
+        already_voice = (prev_live == "voice" and abs(prev.get("freq", -999.0) - freq) < 5e-4)
+        if not already_voice:
+            params = {"freq": freq, "mod": "am", "agc": True, "if_gain": IF_GAIN_DEFAULT,
+                      "rf_gain": RF_GAIN_DEFAULT, "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}
+            err, detail, _sdr_down = _enter_voice(params)
+            if err:
+                # שלב ההכנה כבר עצר את הצרכן הקודם (peer של _enter_acars/_enter_vdl2)
+                # לפני שקול עצמו נכשל לעלות => מנסים best-effort להחזיר את מה שהיה,
+                # במקום להשאיר את ה-SDR תקוע חצי-מכובה בלי הסבר. לא נוגעים ב-state.json —
+                # זו פעולת אבחון, לא בקשת מעבר-מצב.
+                _restore_after_probe(prev, prev_live)
+                return jsonify(ok=False, error="בדיקת האנטנה נכשלה: " + err, detail=detail), 500
+
+        result = _sample_probe_stats(freq, ANTENNA_CHECK_SAMPLE_SEC)
+
+        if not already_voice:
+            _restore_after_probe(prev, prev_live)
+
+        if result is None:
+            return jsonify(ok=False, error="לא התקבלו מדדים מה-SDR בזמן — נסה שוב"), 504
+
+        if calibrate:
+            baseline = {"noise": result["noise"], "freq": freq, "ts": time.time()}
+            save_state({**load_state(), "signal_baseline": baseline})
+        else:
+            baseline = prev.get("signal_baseline")
+        return jsonify(ok=True, freq=freq, calibrated=calibrate, baseline=baseline,
+                       verdict=_signal_verdict(result["noise"], baseline), **result)
+    finally:
+        TUNE_LOCK.release()
 
 
 @app.route("/api/airspace")
@@ -3295,6 +3511,84 @@ def api_aircraft():
     """רוסטר מטוסים מאוחד (ACARS+VDL2+ADS-B) — חי בכל מצב, כולל standby/סריקה
     (הנתונים כבר בזיכרון/ADS-B, לא תלוי SDR הפעיל כרגע)."""
     return jsonify(ok=True, aircraft=_build_roster())
+
+
+SESSION_FALLBACK_SEC = 3600.0   # אין סמן שמור (התקנה טרייה/שדרוג) => שעה אחורה, לא כל ההיסטוריה
+SESSION_HIGHLIGHTS_MAX = 8      # תקרת הודעות ב"בולטות" — תמצית לסריקה מהירה, לא עוד פיד
+
+
+@app.route("/api/session")
+def api_session():
+    """דוח סשן: 'מה קרה בזמן שלא הסתכלת' (ר' docs/field-station-roadmap.md).
+    התשתית (_boot_restore/scan/שרידות reboot) בנויה לתחנה שרצה לבד לאורך זמן;
+    בלי הדוח הזה המוצר היחיד שלה הוא פיד שדורש נוכחות רציפה. קורא מהדיסק
+    (jsonl דרך _read_*_log), לא מהזיכרון — עקבי עם /api/<mode>?day= וזמין גם
+    מיד אחרי restart. idempotent (לא מקדם סמן) — /api/session/ack עושה זאת
+    במפורש. ‏?since=<epoch> אופציונלי לדריסת הסמן השמור (למשל מה-UI, לצפייה
+    חוזרת)."""
+    st = load_state()
+    now = time.time()
+    since = None
+    raw_since = request.args.get("since")
+    if raw_since:
+        try:
+            since = float(raw_since)
+        except (TypeError, ValueError):
+            since = None
+    if since is None:
+        since = st.get("last_session_view_at")
+    if since is None:
+        since = now - SESSION_FALLBACK_SEC
+    since = min(since, now)   # שעון מערכת שהוזז אחורה לא ייתן חלון שלילי
+
+    readers = {"acars": _read_acars_log, "vdl2": _read_vdl2_log, "satcom": _read_satcom_log}
+    counts = {}
+    ident_window, ident_before = set(), set()
+    highlights = []
+    for mode, reader in readers.items():
+        try:
+            recs = reader()
+        except Exception:
+            recs = []
+        n_window = 0
+        for r in recs:
+            t = r.get("t") or 0
+            ident = _aircraft_identity(r)
+            if t < since:
+                if ident:
+                    ident_before.add(ident)
+                continue
+            if t >= now:   # שעון שהוזז קדימה — לא סופרים "עתיד"
+                continue
+            n_window += 1
+            if ident:
+                ident_window.add(ident)
+            if r.get("notable"):
+                highlights.append({"t": t, "mode": mode, "tail": r.get("tail"),
+                                   "flight": r.get("flight"), "category": r.get("category"),
+                                   "decoded": r.get("decoded")})
+        counts[mode] = n_window
+    highlights.sort(key=lambda h: h["t"], reverse=True)
+    highlights = highlights[:SESSION_HIGHLIGHTS_MAX]
+
+    try:
+        airspace_series = adsb.session_series(since=since)
+    except Exception:
+        airspace_series = []
+
+    return jsonify(ok=True, since=since, now=now, duration_sec=round(now - since, 1),
+                   counts=counts, total=sum(counts.values()),
+                   aircraft_count=len(ident_window), new_aircraft_count=len(ident_window - ident_before),
+                   highlights=highlights, airspace_series=airspace_series)
+
+
+@app.route("/api/session/ack", methods=["POST"])
+def api_session_ack():
+    """מסמן שהמשתמש ראה את דוח הסשן — מקדם את הסמן ל'עכשיו', כך שהדוח הבא
+    יתחיל מכאן. פעולה מפורשת (לא חלק מ-GET) כדי ש-/api/session יישאר
+    idempotent — פתיחה/רענון חוזרים של הכרטיס לא 'צורכים' אותו בטעות."""
+    save_state({**load_state(), "last_session_view_at": time.time()})
+    return jsonify(ok=True)
 
 
 @app.route("/api/mode", methods=["POST"])

@@ -57,6 +57,13 @@ GPS_ALT_MIN = 5000.0     # מתחת לזה NIC נמוך נפוץ גם בלי ש�
 
 AC_KEEP_SEC = 600.0      # snapshot פר-מטוס (היתוך ACARS↔ADS-B): גיזום אחרי 10 דק'
 
+# דוח סשן (ר' docs/field-station-roadmap.md, /api/session ב-app.py): בניגוד
+# ל-gps_hist (15 דק', להחלקת היחס הרגעי בלבד) — סדרה ארוכה יותר, בזיכרון
+# בלבד (לא נכתבת לדיסק — עקבי עם הבידוד הקיים: תקלת רשת/כתיבה לעולם לא נוגעת
+# ברדיו), שנועדה במפורש להישכח בין הפעלות: "מה קרה בזמן שלא הסתכלת" הוא על
+# הסשן הנוכחי, לא ארכיון קבוע.
+SESSION_SERIES_MAX = 360   # 360 דגימות × POLL_SEC=60 = 6 שעות אחורה — סשן שטח טיפוסי
+
 # גילוי עמיד-שיבוש: באזור נתב"ג השיבוש מתמשך - מטוסים בגישה משדרים מיקום
 # מזויף או nic=0, אבל שדות ה-baro וה-track שורדים. nic=0 הוא בעצמו אות איתור:
 # השיבוש מקומי => המטוס פיזית קרוב לשדה (מטוסים על הקרקע כלל לא מושפעים).
@@ -225,6 +232,7 @@ _S = {
     "ac_count": 0,
     "spoofed_now": 0,         # מטוסים מזויפים (nic<SPOOF_NIC) בדגימה האחרונה
     "aircraft": {},           # norm_reg(r) -> רשומת מטוס אחרונה (היתוך ACARS↔ADS-B)
+    "session_series": deque(maxlen=SESSION_SERIES_MAX),   # (t_wall, gps_ratio|None, runway|None) לדוח הסשן
 }
 
 
@@ -415,6 +423,21 @@ def snapshot():
         }
 
 
+def session_series(since=None):
+    """סדרת (t, gps_bad_ratio, runway) לדוח הסשן (/api/session ב-app.py) —
+    דגימה אחת לכל poll (~60 שנייה), בזיכרון בלבד (ר' SESSION_SERIES_MAX).
+    ‏since (epoch שניות, t_wall) מסנן דגימות ישנות ממנו; None => הכול שנשמר.
+    לעולם לא זורק — אותו חוזה כמו snapshot()/aircraft_snapshot()."""
+    try:
+        with _LOCK:
+            series = list(_S["session_series"])
+    except Exception:
+        return []
+    if since is not None:
+        series = [s for s in series if s[0] >= since]
+    return [{"t": t, "gps_bad_ratio": ratio, "runway": rwy} for t, ratio, rwy in series]
+
+
 def _poll_once():
     try:
         name, data = _fetch(_S["src_idx"])
@@ -432,6 +455,14 @@ def _poll_once():
         _S["source"] = name
         _S["error"] = None
         _S["fails"] = 0
+        # דגימה אחת לסשן: אותו חישוב בדיוק כמו snapshot() (יחס NIC מוחלק על
+        # GPS_WINDOW_MIN + מסלול נחיתה נוכחי), אבל בזמן קיר (t_wall) כדי
+        # שיהיה בר-השוואה ל-since של /api/session (שנגזר מ-jsonl, גם הוא t_wall).
+        g_bad = sum(b for _, b, _t in _S["gps_hist"])
+        g_total = sum(t for _, _b, t in _S["gps_hist"])
+        ratio = round(g_bad / g_total, 4) if g_total >= GPS_MIN_SAMPLE else None
+        rwy, _sec, _n, _age, _pos = _decide_runway("landing", time.monotonic())
+        _S["session_series"].append((time.time(), ratio, rwy))
 
 
 def _loop():
