@@ -911,18 +911,47 @@ def test_voice_go_ahead_label():
 def test_libacars_decode_filters_internal_type_tag():
     """regression: 'msg_type':'adsc_msg' (מתוך קליטה אמיתית) הוצג בעבר כ-decoded
     כאילו זה תוכן ההודעה — זהו תג-סוג snake_case פנימי, לא טקסט. תוקן: מסונן."""
-    kind, text = app._libacars_decode({"adsc": {"msg_type": "adsc_msg",
-                                                 "basic_report": {"lat": 32.1, "lon": 34.9}}})
-    assert kind == "ADS-C" and text is None
+    kind, text, failed = app._libacars_decode({"adsc": {"msg_type": "adsc_msg",
+                                                         "basic_report": {"lat": 32.1, "lon": 34.9}}})
+    assert kind == "ADS-C" and text is None and failed is False
 
 
 def test_libacars_decode_keeps_real_text():
     """תוכן אמיתי (כולל מילה בודדת כמו CPDLC WILCO) לא נפגע מהסינון — רק תגי-סוג
     snake_case (lowercase) מסוננים, לא טקסט אנושי (uppercase / עם רווחים)."""
-    kind, text = app._libacars_decode({"cpdlc": {"msg_type": "cpdlc_msg", "msg_text": "WILCO"}})
-    assert kind == "CPDLC" and text == "WILCO"
-    kind, text = app._libacars_decode({"cpdlc": {"msg_data": {"msg_text": "CLIMB TO FL350"}}})
+    kind, text, failed = app._libacars_decode({"cpdlc": {"msg_type": "cpdlc_msg", "msg_text": "WILCO"}})
+    assert kind == "CPDLC" and text == "WILCO" and failed is False
+    kind, text, failed = app._libacars_decode({"cpdlc": {"msg_data": {"msg_text": "CLIMB TO FL350"}}})
     assert text == "CLIMB TO FL350"
+
+
+def test_libacars_decode_flags_source_tool_failure():
+    """regression (קליטת שדה אמיתית, SATCOM): CPDLC עם מעטפת ACARS תקינה
+    (crc_ok=true) אבל 'cpdlc':{'err':true} בפנים — inmarsat-sniffer/libacars
+    עצמו ניסה לפענח את היישום המקונן ונכשל (כנראה איתות שולי מדי לתוכן).
+    ‏decode_failed=True במקרה הזה, כדי שנוכל להבדיל "לא ניסינו" מ-"ניסינו
+    ונכשלנו" — לעולם לא ממציאים טקסט, אבל העובדה שהיה ניסיון היא מידע אמיתי."""
+    real_arinc622 = {"msg_type": "fans1a_cpdlc_msg", "crc_ok": True,
+                     "gs_addr": "SNNCPXA", "air_addr": ".C-GEGI", "cpdlc": {"err": True}}
+    kind, text, failed = app._libacars_decode({"arinc622": real_arinc622})
+    assert kind == "CPDLC" and text is None and failed is True
+
+    n = app._normalize_acars({"timestamp": 1.0, "label": "AA", "tail": "C-GEGI",
+                              "error": 0, "text": "/SNNCPXA.AT1.C-GEGI22A9A228405FB3",
+                              "libacars": {"arinc622": real_arinc622}})
+    assert n["category"] == "CPDLC" and n["group"] == "clearance"
+    assert n["decoded"] and "לא פוענח" in n["decoded"]
+    assert n["lat"] is None and n["lon"] is None   # לא ממציאים מיקום גם כשיודעים שהיה ניסיון-שנכשל
+
+
+def test_libacars_decode_success_is_not_mislabeled_as_failure():
+    """‏decode_failed צריך להיות False כשהפענוח באמת הצליח (אין 'err':true בשום
+    מקום) — גם כשאין טקסט קריא (כמו ADS-C בסיסי עם רק lat/lon מספריים, בלי שדה
+    'text'). regression למקרה שבו החיפוש הרקורסיבי אחרי 'err' תופס false positive."""
+    kind, text, failed = app._libacars_decode(
+        {"adsc": {"msg_type": "adsc_msg", "crc_ok": True, "err": False,
+                  "basic_report": {"lat": 32.1, "lon": 34.9}}})
+    assert failed is False and text is None   # שדה מיקום, לא טקסט — decoded נשאר None, לא "נכשל"
 
 
 # --- פרסרים נוספים שנבנו מקליטה אמיתית (C1 loadsheet, 16, 1L, A3 PDC) ----------

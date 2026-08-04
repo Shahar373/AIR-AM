@@ -855,17 +855,28 @@ _LIBACARS_TAG_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def _libacars_decode(obj):
-    """(kind, text) ממבנה libacars: kind ל-badge ('CPDLC'/'ADS-C'/'ARINC-622'),
-    ו-text קצר קריא (CPDLC clearance וכו') אם נמצא. הגנתי לשינויי סכמה."""
+    """(kind, text, decode_failed) ממבנה libacars: kind ל-badge ('CPDLC'/'ADS-C'/
+    'ARINC-622'), טקסט קצר קריא (CPDLC clearance וכו') אם נמצא, ו-decode_failed
+    (bool) — האם *המפענח עצמו* (inmarsat-sniffer/libacars) ניסה לפענח את היישום
+    המקונן (CPDLC/ADS-C) והחזיר `err:true`, למרות שמעטפת ה-ACARS החיצונית עברה
+    CRC בהצלחה. אומת מקליטת שדה אמיתית: הודעת CPDLC עם `crc_ok:true` ברמת
+    המעטפת אבל `"cpdlc":{"err":true}` בפנים — כלומר יש הבדל אמיתי בין "לא ניסינו
+    לפענח" (libacars ריק/חסר) ל"ניסינו, ונכשל" (איתות שולי מדי לתוכן, לרוב
+    ב-CPDLC/ADS-C בקליטה ראשונה עם נעילה גבולית). §12: לא ממציאים טקסט-פענוח,
+    אבל *כן* חושפים את העובדה שהניסיון נכשל — זה מידע אמיתי שקיים במבנה,
+    לא ניחוש. הגנתי לשינויי סכמה."""
     blob = json.dumps(obj, ensure_ascii=False).lower()
     kind = ("CPDLC" if "cpdlc" in blob
             else "ADS-C" if ("adsc" in blob or "ads-c" in blob)
             else "ARINC-622")
     texts = []
+    failed = [False]
 
     def walk(o):
         if isinstance(o, dict):
             for k, v in o.items():
+                if str(k).lower() == "err" and v is True:
+                    failed[0] = True
                 if (isinstance(v, str) and len(v.strip()) > 3
                         and any(t in str(k).lower() for t in ("text", "msg", "message"))
                         and not _LIBACARS_TAG_RE.match(v.strip())):
@@ -878,7 +889,7 @@ def _libacars_decode(obj):
 
     walk(obj)
     text = " · ".join(dict.fromkeys(texts))[:300] or None   # dedup בשמירת סדר
-    return kind, text
+    return kind, text, failed[0]
 
 
 def _acars_direction(label, text):
@@ -1329,8 +1340,13 @@ def _normalize_acars(m):
     lat = lon = pos_src = decoded = None
     libacars = m.get("libacars")
     if libacars:
-        kind, dtext = _libacars_decode(libacars)
-        category, decoded = kind, dtext
+        kind, dtext, decode_failed = _libacars_decode(libacars)
+        category = kind
+        # ⚠ decode_failed=True ≠ "אין נתון" — יש הבדל אמיתי בין "לא ניסינו" ל"ניסינו
+        # ונכשלנו" (המפענח עצמו החזיר err:true על היישום המקונן, אימות מקליטת שדה).
+        # לא ממציאים תוכן, אבל *כן* אומרים למשתמש שהיה ניסיון — עדיף מ-"—" סתמי.
+        decoded = dtext if dtext else (
+            "לא פוענח — המפענח החזיר שגיאה (כנראה איתות שולי)" if decode_failed else None)
         group = "clearance" if kind == "CPDLC" else "position" if kind == "ADS-C" else group
         # מיקום *רק* מ-ADS-C: CPDLC (או ARINC-622 גנרי אחר) עלול לשאת נ"צ מוטבע
         # (waypoint ב-clearance) שאינו מיקום המטוס עצמו — לא מייחסים אותו כמיקום
@@ -1659,7 +1675,11 @@ def _normalize_vdl2(m):
                 category, group = "ADS-C (VDL2)", "position"
             else:
                 category = "VDL2 · X.25"
-            _, decoded = _libacars_decode(x25)   # תקציר טקסט קריא אם קיים במבנה
+            # תקציר טקסט קריא אם קיים במבנה; decode_failed => אותה הבחנה כמו ב-SATCOM
+            # (ר' _libacars_decode) — "ניסינו ונכשלנו" מול "אין נתון" בכלל.
+            _, dtext, decode_failed = _libacars_decode(x25)
+            decoded = dtext if dtext else (
+                "לא פוענח — המפענח החזיר שגיאה (כנראה איתות שולי)" if decode_failed else None)
             # מיקום *רק* מ-ADS-C: CPDLC עלול לשאת נ"צ מוטבע (waypoint ב-clearance)
             # שאינו מיקום המטוס עצמו — לא מייחסים אותו כמיקום כדי לא להטעות במפה.
             if is_adsc:

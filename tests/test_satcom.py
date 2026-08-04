@@ -1050,3 +1050,56 @@ def test_normalize_satcom_ground_station_fpn_gets_no_false_position():
     assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
     assert n["group"] != "position"
     assert n["decoded"] and "FMC 3" in n["decoded"]  # התיקון גם *מוסיף* ערך: תקציר מסלול קריא
+
+
+# --- regression: CPDLC/ADS-C decode_failed — "ניסינו ונכשלנו" מול "לא ניסינו" --
+# קליטת שדה אמיתית (33 דק', 465 הודעות) + לכידת --feed -v גולמית אחת: הודעת
+# CPDLC אמיתית (C-GEGI) עם מעטפת ACARS תקינה (crc_ok=true) אבל "cpdlc":
+# {"err":true} בפנים — inmarsat-sniffer עצמו ניסה לפענח את היישום ונכשל.
+# ר' גם test_libacars_decode_flags_source_tool_failure ב-test_acars.py.
+
+def test_normalize_satcom_real_cpdlc_capture_decode_failed():
+    """שורת JSON גולמית מ-inmarsat-sniffer --feed -v (לא מומצאת — נלכדה בפועל)."""
+    m = _satcom({
+        "mode": "2", "ack": "!", "blk_id": "J", "label": "AA", "reg": "C-GEGI",
+        "msg_text": "/SNNCPXA.AT1.C-GEGI22A9A228405FB3\r\n",
+        "arinc622": {"acars": {
+            "err": False, "crc_ok": True, "more": False,
+            "reg": ".C-GEGI", "mode": "2", "label": "AA", "blk_id": "J", "ack": "!",
+            "msg_text": "/SNNCPXA.AT1.C-GEGI22A9A228405FB3\r\n",
+            "arinc622": {"msg_type": "fans1a_cpdlc_msg", "crc_ok": True,
+                        "gs_addr": "SNNCPXA", "air_addr": ".C-GEGI",
+                        "cpdlc": {"err": True}},
+        }},
+    }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
+    n = app._normalize_satcom(m)
+    assert n["error"] == 0                          # מעטפת ה-ACARS תקינה (crc_ok=true)
+    assert n["category"] == "CPDLC" and n["group"] == "clearance"
+    assert n["decoded"] and "לא פוענח" in n["decoded"]  # לא "—" סתמי, לא ניחוש תוכן
+    assert n["lat"] is None and n["lon"] is None
+
+
+def test_normalize_satcom_real_adsc_capture_with_position():
+    """regression חיובית: מסלול ההצלחה חייב להמשיך לעבוד (pos_src='adsc'), לא רק
+    מקרי הכישלון. ⚠ אין לנו לכידת --feed -v גולמית ל*הודעה המצליחה* הזו (רק
+    ל-CPDLC שנכשל, ר' הבדיקה למעלה) — מבנה ה-JSON כאן (arinc622.adsc.basic_report)
+    הוא שחזור סביר, לא שורה גולמית מאומתת. ‏18.34167/2.11006 עצמם כן אמיתיים:
+    זה בדיוק מה ש-/api/satcom/export החזיר בשדה (A7-BBB, קליטת 04.08.2026,
+    pos_src='adsc') — כלומר המנגנון המלא כבר הוכח עובד קצה-לקצה על נתון אמיתי,
+    גם בלי שראינו את ה-JSON הגולמי המדויק. ‏_scan_latlon אגנוסטי-למבנה (מחפש
+    lat/lon בכל עומק) אז הבדיקה תקפה ללא תלות בשם ה-wrapper המדויק."""
+    m = _satcom({
+        "mode": "2", "label": "A6", "reg": "A7-BBB",
+        "msg_text": "/RECOEYA.ADS.A7-BBB070D0B000C010D010E0110010F01150523D57F",
+        "arinc622": {"acars": {
+            "err": False, "crc_ok": True, "reg": ".A7-BBB", "mode": "2", "label": "A6",
+            "msg_text": "/RECOEYA.ADS.A7-BBB070D0B000C010D010E0110010F01150523D57F",
+            "arinc622": {"msg_type": "adsc_msg", "crc_ok": True,
+                        "adsc": {"basic_report": {"lat": 18.34167, "lon": 2.11006}}},
+        }},
+    }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
+    n = app._normalize_satcom(m)
+    assert n["category"] == "ADS-C" and n["group"] == "position"
+    assert n["pos_src"] == "adsc"
+    assert abs(n["lat"] - 18.34167) < 0.001 and abs(n["lon"] - 2.11006) < 0.001
+    assert n["decoded"] is None   # אין שדה טקסט אמיתי, ולא "נכשל" — decode הצליח
