@@ -773,7 +773,14 @@ _POS_REPORT_RE = re.compile(
 
 def _text_latlon(text):
     """heuristic שמרני לחילוץ מיקום מטקסט חופשי (פורמט ARINC קומפקטי). מחזיר (lat, lon)
-    או None. מכוון לדיוק על פני כיסוי => מחזיר רק כשהתבנית מלאה וברורה."""
+    או None. מכוון לדיוק על פני כיסוי => מחזיר רק כשהתבנית מלאה וברורה.
+    ⚠ דורש בדיוק התאמה *אחת* בטקסט: נצפה בקליטת שטח אמיתית (SATCOM) שהודעת H1
+    עם תוכנית טיסה (‎#M3FPN/.../F:IVAKI,N32558E015065..LUMED,N34200E014420..)
+    מכילה *שרשרת* waypoints בפורמט קומפקטי זהה לפורמט מיקום — ואם היינו לוקחים
+    את ההתאמה הראשונה (כמו לפני התיקון), היינו מדביקים את נ"צ ה-waypoint
+    הראשון במסלול כאילו הוא מיקום המטוס בפועל (לקח נוסף על 1.7.1/_parse_sq:
+    לא רק "כתובת תחנה נראית כמו נ"צ", גם "מסלול מתוכנן נראה כמו דיווח מיקום
+    בודד"). דיווח מיקום אמיתי מכיל זוג קואורדינטות *אחד*; שרשרת = לא מיקום."""
     if not text:
         return None
 
@@ -796,13 +803,14 @@ def _text_latlon(text):
             return None
         return round(lat, 5), round(lon, 5)
 
-    m = _TEXT_POS_RE.search(text)
-    if m:
-        return _parse(m.groups())
-    m = _TEXT_POS_COMPACT_RE.search(text)
-    if m:
-        return _parse(m.groups(), compact=True)
-    return None
+    matches = list(_TEXT_POS_RE.finditer(text))
+    compact = False
+    if not matches:
+        matches = list(_TEXT_POS_COMPACT_RE.finditer(text))
+        compact = True
+    if len(matches) != 1:      # 0 = אין התאמה; 2+ = שרשרת (מסלול) — לא ניחוש איזו נכונה
+        return None
+    return _parse(matches[0].groups(), compact=compact)
 
 
 def _ddmmf(deg, mmf):
@@ -971,8 +979,13 @@ _SA_MEDIA = {"V": "VHF", "S": "SATCOM", "H": "HF", "G": "GlobalStar", "C": "Irid
              "2": "VDL-M2", "X": "Inmarsat", "I": "Iridium", "T": "טלפוני"}
 _SA_RE = re.compile(r"^0([EL])([VSHGCX2IT])([01]\d|2[0-3])([0-5]\d)([0-5]\d)([VSHGCX2IT]*)")
 
-# H1 sub-label: '#' + מזהה מקור בן 2 תווים בתחילת הטקסט (#DF = מקליט, #M1 = FMC...).
-_H1_SUB_RE = re.compile(r"^#([A-Z][A-Z0-9])")
+# H1 sub-label: '#' + מזהה מקור בן 2 תווים (#DF = מקליט, #M1 = FMC...). לא תמיד
+# ממש בתחילת הטקסט: נצפה בקליטת SATCOM אמיתית (inmarsat-sniffer) שה-'#' מגיע
+# אחרי prefix כמו "- " (‎"- #MDREQPOS037B") או אחרי שורת-הדר עם \n ("...\n- #DFREQ02")
+# — ‏^#... בלבד (בלי \s) לא תפס אף הודעת H1 אמיתית אחת בקליטה של 465 הודעות/
+# 12 H1. ‏(?:^|\s) מכסה גם את הפורמט המקורי (VHF, '#' ממש בהתחלה) וגם את זה —
+# תוספתי בלבד, לא מצמצם את מה שכבר תפס.
+_H1_SUB_RE = re.compile(r"(?:^|\s)#([A-Z][A-Z0-9])")
 _H1_SUBLABELS = {
     "DF": "מקליט נתונים (DFDAU)", "M1": "מחשב ניהול טיסה (FMC)",
     "M2": "FMC 2", "M3": "FMC 3", "CF": "מערכת תחזוקה (CFDS)",
@@ -1019,8 +1032,14 @@ def _parse_sa_media(text):
 
 
 def _parse_fpn(text):
-    """‎/FPN/ (תוכנית טיסה ב-H1): יציאה→יעד + רשימת waypoints. מחזיר string או None."""
+    """‎/FPN/ (תוכנית טיסה ב-H1): יציאה→יעד + רשימת waypoints. מחזיר string או None.
+    ⚠ VHF: "/FPN/" (עם קו נטוי משני הצדדים). SATCOM אמיתי (inmarsat-sniffer):
+    ה-'/' הפותח נבלע ע"י ה-sub-label עצמו (‎"#M3FPN/RP:DA:..." — FPN מודבק
+    ישירות ל-M3, בלי '/' לפניו) — "FPN/" בלי הקו הנטוי הפותח הוא נפילה
+    תוספתית, לא מחליפה את "/FPN/" (שנבדק ראשון, מדויק יותר)."""
     idx = text.find("/FPN/")
+    if idx < 0:
+        idx = text.find("FPN/")
     if idx < 0:
         return None
     seg = text[idx:]
@@ -1047,12 +1066,13 @@ def _parse_fpn(text):
 
 def _parse_h1(text):
     """H1: זיהוי מקור ההודעה לפי sub-label (#DF/#M1/...) + פענוח /FPN/ אם קיים.
-    מחזיר string קצר או None (H1 בלי הדר '#' => אין מה להסיק, לא מנחשים)."""
+    מחזיר string קצר או None (H1 בלי הדר '#' => אין מה להסיק, לא מנחשים).
+    ‏search (לא match): ה-'#' לא תמיד ממש בתחילת הטקסט (ר' _H1_SUB_RE)."""
     if not text:
         return None
     text = text.lstrip()
     parts = []
-    m = _H1_SUB_RE.match(text)
+    m = _H1_SUB_RE.search(text)
     if m:
         sub = m.group(1)
         desc = _H1_SUBLABELS.get(sub)
@@ -1295,6 +1315,16 @@ def _normalize_acars(m):
     desc, group = ACARS_LABELS.get(label, (None, "text")) if label else (None, "comm")
     category = desc or (f"Label {label}" if label else "הודעה")
 
+    # תג-tail שנראה כמו כתובת תחנת-קרקע (‎.TCARC/‎.CNTMM וכו', אותו דפוס בדיוק
+    # כמו _UPLINK_HEADER_RE שכבר משמש לזיהוי הדר-ניתוב בטקסט) לא יכול לקבל
+    # מיקום מ-heuristic טקסטואלי: תחנת קרקע לא "טסה", וכל נ"צ שיימצא בהודעה
+    # שלה (למשל בתוך תוכן שהיא משדרת/מעבירה) הוא לא מיקומה. מגביל *רק* את
+    # הנתיבים ה-heuristic (text_latlon/label16) — הנתיבים המבניים (/.POS/,
+    # label15, ADS-C) לא רלוונטיים לתחנת-קרקע מלכתחילה (אלה פורמטים שרק
+    # מטוס-בפועל משדר), אז אין צורך לגדר אותם.
+    tail_val = g("tail", "registration")
+    tail_is_station = bool(tail_val) and bool(_UPLINK_HEADER_RE.match(str(tail_val)))
+
     # פענוח ARINC-622 (libacars): kind => badge וקבוצה, וטקסט קריא אם יש.
     lat = lon = pos_src = decoded = None
     libacars = m.get("libacars")
@@ -1336,13 +1366,14 @@ def _normalize_acars(m):
     # נפילה: מיקום מקודד בטקסט חופשי — אבל *רק* מ-frame נקי. acarsdec error>0 = ביטים
     # שתוקנו/לא-תוקנו; ספרה אחת שהתהפכה בקואורדינטה => מטוס במקום שגוי על המפה. ADS-C
     # (libacars) לעיל מוגן-CRC ולכן נשמר גם עם error; ה-heuristic הטקסטואלי לא — לכן מגודר.
-    if lat is None and not m.get("error"):
+    # ‏tail_is_station: תחנת-קרקע (ר' למעלה) לא מקבלת מיקום מ-heuristic טקסטואלי בכלל.
+    if lat is None and not m.get("error") and not tail_is_station:
         pos = _text_latlon(text)
         if pos:
             lat, lon, pos_src = pos[0], pos[1], "text"
 
     # label 16 (דיווח מיקום עשרוני): פורמט פחות נוקשה מ-DDMM המבני => מגודר כמו heuristic.
-    if lat is None and label == "16" and text and not m.get("error"):
+    if lat is None and label == "16" and text and not m.get("error") and not tail_is_station:
         pos = _parse_label16(text)
         if pos:
             lat, lon, pos_src = pos[0], pos[1], "label16"
@@ -1381,7 +1412,7 @@ def _normalize_acars(m):
         "label": label,
         "category": category,                 # תיאור קריא אחיד (label/ARINC-622)
         "group": group,                       # קבוצה לצבע ב-UI / עמודה בייצוא
-        "tail": g("tail", "registration"),
+        "tail": tail_val,
         "flight": g("flight", "fid"),
         "mode": g("mode"),
         "msgno": g("msgno"),

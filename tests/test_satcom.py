@@ -1030,3 +1030,23 @@ def test_normalize_satcom_uplink_only_reception_is_a_real_pattern_not_a_bug():
         "mode": "2", "label": "15", "reg": ".4X-EKF", "msg_text": "(2N32016E034538ELY315",
     }))   # ברירת המחדל של הפיקסצ'ר: downlink (AES->GES)
     assert air_to_ground["dir"] == "downlink"
+
+
+# --- regression: מיקום שקרי מ-tail דמוי-תחנת-קרקע + waypoint chain -----------
+# קליטת שטח אמיתית (33 דק', 465 הודעות, 84 מטוסים) הראתה נ"צ שקרי יחיד בכל
+# הקובץ: H1 עם תוכנית טיסה, tail=".TCARC" (תחנת-קרקע, לא מטוס). ר' תיעוד מלא
+# ב-tests/test_acars.py:test_normalize_acars_ground_station_tail_gets_no_heuristic_position
+# (אותה הגנה בדיוק, כאן דרך הצינור המלא כולל _normalize_satcom).
+
+def test_normalize_satcom_ground_station_fpn_gets_no_false_position():
+    m = _satcom({
+        "mode": "2", "label": "H1", "reg": ".TCARC",
+        "msg_text": "- #M3FPN/RP:DA:HLMS:AA:LIEO:F:IVAKI,N32558E015065..LUMED,N34200E014420"
+                    "..SENTI,N37103E012330..LOPKO,N37400E012108..GERMO,N39150E011214"
+                    "..ATNET,N40459E010081:A:ATNE2R903B",
+    }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
+    n = app._normalize_satcom(m)
+    assert n["dir"] == "uplink"                    # מבני, תואם לקליטה האמיתית
+    assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
+    assert n["group"] != "position"
+    assert n["decoded"] and "FMC 3" in n["decoded"]  # התיקון גם *מוסיף* ערך: תקציר מסלול קריא

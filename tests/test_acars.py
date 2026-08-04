@@ -441,6 +441,17 @@ def test_text_latlon_compact_no_decimal():
     assert abs(lat - 39.7133) < 0.001 and abs(lon - 38.8433) < 0.001
 
 
+def test_text_latlon_rejects_waypoint_chain():
+    """regression: הודעת H1 עם תוכנית טיסה (‎#M3FPN/.../F:IVAKI,N32558E015065..
+    LUMED,N34200E014420..) מכילה *שרשרת* waypoints בפורמט מיקום קומפקטי — לא
+    דיווח מיקום בודד. לפני התיקון: ה-waypoint הראשון (IVAKI) היה מתפרש כמיקום
+    המטוס בפועל. טקסט אמיתי מקליטת SATCOM (33 דק', 465 הודעות)."""
+    text = ("- #M3FPN/RP:DA:HLMS:AA:LIEO:F:IVAKI,N32558E015065..LUMED,N34200E014420"
+            "..SENTI,N37103E012330..LOPKO,N37400E012108..GERMO,N39150E011214"
+            "..ATNET,N40459E010081:A:ATNE2R903B")
+    assert app._text_latlon(text) is None
+
+
 def test_text_latlon_login_is_not_aircraft_position():
     """regression: ה-DDMM ב-login של LLBG הוא נ"צ *השדה* (משותף לכל מטוס שמתחבר),
     לא מיקום המטוס. אסור שיחולץ — אחרת כל הודעת login מקבלת 📍 מטעה על השדה.
@@ -452,6 +463,37 @@ def test_text_latlon_login_is_not_aircraft_position():
                               "text": "02XSTLVLLBG03200N03452EV136975/"})
     assert n["lat"] is None and n["pos_src"] is None
     assert n["group"] != "position"
+
+
+def test_normalize_acars_ground_station_tail_gets_no_heuristic_position():
+    """regression (קליטת SATCOM אמיתית, 33 דק'/465 הודעות): tail=".TCARC" הוא
+    כתובת תחנת-קרקע (נקודה מובילה — אותו דפוס כמו _UPLINK_HEADER_RE), לא מטוס.
+    לפני התיקון: הודעת H1 שלה עם תוכנית טיסה קיבלה 📍 שגוי (waypoint הראשון
+    במסלול טופל כאילו הוא מיקום ה"מטוס" .TCARC בפועל). שני שכבות ההגנה
+    (guard לפי tail + guard לפי ריבוי-קואורדינטות ב-_text_latlon) עובדות גם
+    כל אחת בנפרד: כאן דווקא ה-FPN לא מפוענח מבנית (sub-label MD לא במילון)
+    אז זה test למקרה שבו ה-heuristic הטקסטואלי הוא הקו ההגנה היחיד שנשאר."""
+    n = app._normalize_acars({
+        "timestamp": 1.0, "label": "H1", "tail": ".TCARC", "mode": "2",
+        "text": "- #M3FPN/RP:DA:HLMS:AA:LIEO:F:IVAKI,N32558E015065..LUMED,N34200E014420"
+                "..SENTI,N37103E012330..LOPKO,N37400E012108..GERMO,N39150E011214"
+                "..ATNET,N40459E010081:A:ATNE2R903B",
+    })
+    assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
+    assert n["group"] != "position"
+
+
+def test_normalize_acars_ground_station_tail_guard_is_specific_not_global():
+    """ה-guard חוסם *רק* tail דמוי-תחנת-קרקע — לא הופך את text_latlon ללא-פעיל
+    בכלל. אותו טקסט עם נ"צ בודד (לא שרשרת): תחנת-קרקע לא מקבלת מיקום, מטוס
+    אמיתי (tail רגיל) כן — ‏A ו-C (ר' _text_latlon) הם שני guards עצמאיים."""
+    single_coord_text = "POSN32016E034538,VELOX,110451"
+    station = app._normalize_acars({"timestamp": 1.0, "label": "H1",
+                                    "tail": ".TCARC", "text": single_coord_text})
+    assert station["lat"] is None
+    aircraft = app._normalize_acars({"timestamp": 1.0, "label": "H1",
+                                     "tail": "4X-EKF", "text": single_coord_text})
+    assert aircraft["lat"] is not None and abs(aircraft["lat"] - 32.02667) < 0.001
 
 
 def test_text_position_skipped_on_corrupted_frame():
@@ -761,6 +803,18 @@ def test_parse_h1_sublabel():
     assert app._parse_h1(None) is None
 
 
+def test_parse_h1_sublabel_satcom_dash_prefix():
+    """regression: כל הודעות H1 שנצפו בקליטת SATCOM אמיתית (12/12 בקליטה של 33
+    דק') מגיעות עם "- #" (מקף+רווח לפני ה-#), לא "#" בתחילת הטקסט ממש —
+    ‏_H1_SUB_RE הישן (^#...) לא תפס אף אחת מהן. גם אמצע-טקסט אחרי \n (SATCOM
+    login-style header) חייב לעבוד. הפורמט המקורי (בלי prefix) נשאר תקין."""
+    assert "FMC 3" in app._parse_h1("- #M3FPN/RP:DA:HLMS:AA:LIEO:F:IVAKI,N32558E015065")
+    assert app._parse_h1("- #MDREQPOS037B") is None      # sub "MD" לא במילון => אין decoded, לא ניחוש
+    d = app._parse_h1(".HELASAY 040956\nDFD\nAN OH-LXC/FI AY1806/GL XXF/MA 963I\n- #DFREQ02")
+    assert "מקליט נתונים" in d                            # '#' אחרי \n ולא בתחילת המחרוזת
+    assert "מקליט נתונים" in app._parse_h1("#DFB737-800 REPORT DATA")   # פורמט VHF המקורי — עדיין עובד
+
+
 def test_parse_h1_pos_report():
     """#M1B + POS מיד אחרי ההדר => 'דיווח מיקום'; הנ"צ הקומפקטי נחלץ (frame נקי)."""
     text = "#M1BPOSN32016E034538,VELOX,110451"
@@ -776,6 +830,17 @@ def test_parse_fpn_route():
     d = app._parse_h1("#M1B/FPN/RI:DA:LLBG:AA:LGAV:F:PURLA..SOLIN..NIKAS")
     assert "LLBG→LGAV" in d
     assert "PURLA" in d and "SOLIN" in d and "NIKAS" in d
+
+
+def test_parse_fpn_satcom_no_leading_slash():
+    """regression: SATCOM אמיתי (inmarsat-sniffer) שולח "M3FPN/..." — ה-sub-label
+    (M3) מודבק ישירות ל-FPN בלי '/' מפריד, בניגוד לפורמט VHF "/FPN/". תוספת,
+    לא מחליפה: "/FPN/" (הפורמט המדויק יותר) עדיין נבדק ראשון."""
+    d = app._parse_fpn("- #M3FPN/RP:DA:HLMS:AA:LIEO:F:IVAKI,N32558E015065..LUMED,N34200E014420")
+    assert d is not None and "HLMS→LIEO" in d and "IVAKI" in d and "LUMED" in d
+    # ‏"/FPN/" המקורי (עם קו נטוי פותח) נשאר עובד ולא נדרס ע"י הנפילה החדשה
+    d2 = app._parse_fpn("#M1B/FPN/RI:DA:LLBG:AA:LGAV:F:PURLA..SOLIN")
+    assert d2 is not None and "LLBG→LGAV" in d2
 
 
 def test_parse_fpn_waypoint_coord_trimmed():
