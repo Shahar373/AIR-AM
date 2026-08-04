@@ -713,3 +713,393 @@ def test_satcom_health_unavailable_on_malformed_response(client, paths, monkeypa
                         lambda url, timeout=None: _FakeWebResp(b"[1,2,3]"))
     r = client.get("/api/satcom/health")
     assert r.get_json()["available"] is False
+
+
+# --- spectrum: "יש RF בכלל?" — האבחון שמפריד אנטנה מתה מכיוון שגוי ------------
+# ‏lock/ebno לבדם מציגים בדיוק אותו חיווי (אין נעילה) עבור אנטנה מנותקת, LNA
+# בלי מתח, וכיוון שגוי. רצפת הרעש מפרידה ביניהם — ר' §12 ו-api_satcom_spectrum.
+
+def test_write_satcom_env_spectrum_default_on(paths):
+    app.write_satcom_env(["AF1"])
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SPECTRUM"] == "--spectrum"
+
+
+def test_write_satcom_env_spectrum_off_writes_empty_flag(paths):
+    """כבוי => ריק לגמרי (לא "false"): $SATCOM_SPECTRUM לא-מצוטט ב-ExecStart
+    נעלם כשריק, בדיוק כמו SATCOM_GAIN/SATCOM_BIAS_TEE/SATCOM_SKIP_C."""
+    app.write_satcom_env(["AF1"], spectrum=False)
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SPECTRUM"] == ""
+
+
+def test_api_mode_satcom_default_spectrum_is_on(client, paths, no_sleep, monkeypatch):
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom"})
+    assert r.status_code == 200 and r.get_json()["satcom_spectrum"] is True
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SPECTRUM"] == "--spectrum"
+    assert app.load_state()["satcom_spectrum"] is True
+
+
+def test_api_mode_satcom_spectrum_false_and_remembered(client, paths, no_sleep, monkeypatch):
+    """מפורש גובר, ואז נזכר בכניסה הבאה — אותו דפוס כמו bias_tee/skip_c."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom", "spectrum": False})
+    assert r.get_json()["satcom_spectrum"] is False
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SPECTRUM"] == ""
+    r = client.post("/api/mode", json={"mode": "satcom"})     # בלי spectrum
+    assert r.get_json()["satcom_spectrum"] is False
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SPECTRUM"] == ""
+
+
+def test_api_mode_satcom_three_switches_are_independent(client, paths, no_sleep, monkeypatch):
+    """שלושת המתגים (זרם / CPU / אבחון) בבקשה אחת — אף אחד לא דורס את האחרים."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom", "bias_tee": False,
+                                       "skip_c": False, "spectrum": True})
+    body = r.get_json()
+    assert (body["satcom_bias_tee"], body["satcom_skip_c"], body["satcom_spectrum"]) \
+        == (False, False, True)
+    env = _env_lines(app.SATCOM_ENV_PATH)
+    assert env["SATCOM_BIAS_TEE"] == "" and env["SATCOM_SKIP_C"] == ""
+    assert env["SATCOM_SPECTRUM"] == "--spectrum"
+
+
+def test_satcom_health_reports_spectrum_flag_from_tool(client, paths, monkeypatch):
+    """‏spectrum מגיע מ-spectrum_enabled של הכלי עצמו, לא מה-state שלנו — ה-UI
+    צריך לדעת אם /api/satcom/spectrum יעבוד *עכשיו*."""
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    payload = json.dumps({"spectrum_enabled": 1, "channels": []}).encode()
+    monkeypatch.setattr(app.urllib.request, "urlopen", lambda url, timeout=None: _FakeWebResp(payload))
+    assert client.get("/api/satcom/health").get_json()["spectrum"] is True
+
+    payload = json.dumps({"spectrum_enabled": 0, "channels": []}).encode()
+    monkeypatch.setattr(app.urllib.request, "urlopen", lambda url, timeout=None: _FakeWebResp(payload))
+    assert client.get("/api/satcom/health").get_json()["spectrum"] is False
+
+
+def test_satcom_spectrum_not_active_makes_no_http_call(client, paths, monkeypatch):
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)
+    called = []
+    monkeypatch.setattr(app.urllib.request, "urlopen",
+                        lambda *a, **k: called.append(1) or _FakeWebResp(b"{}"))
+    j = client.get("/api/satcom/spectrum").get_json()
+    assert j["ok"] is True and j["available"] is False and called == []
+
+
+def test_satcom_spectrum_returns_mags(client, paths, monkeypatch):
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    urls = []
+    payload = json.dumps({"ok": True, "ch": 2, "baud": 1200, "afc": True,
+                          "mixer_hz": 12.5, "freq_center_hz": 1545e6, "fs": 12000.0,
+                          "lockingbw": 3000.0, "bins": 4,
+                          "mags_db": [-90.0, -88.5, -40.25, -91.0]}).encode()
+
+    def fake(url, timeout=None):
+        urls.append(url)
+        return _FakeWebResp(payload)
+    monkeypatch.setattr(app.urllib.request, "urlopen", fake)
+    j = client.get("/api/satcom/spectrum?ch=2&bins=64").get_json()
+    assert j["available"] is True and j["ch"] == 2 and j["baud"] == 1200
+    assert j["mags_db"] == [-90.0, -88.5, -40.25, -91.0] and j["bins"] == 4
+    assert j["afc"] is True and j["freq_center_hz"] == 1545e6
+    assert "ch=2" in urls[0] and "bins=64" in urls[0]
+
+
+def test_satcom_spectrum_clamps_bins_like_the_tool(client, paths, monkeypatch):
+    """web.c מגביל 32..1024 — אנחנו מגבילים באותם ערכים כדי שבקשה חריגה לא
+    תיפול על הכלי בשקט ותחזור כ"לא זמין"."""
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    urls = []
+
+    def fake(url, timeout=None):
+        urls.append(url)
+        return _FakeWebResp(json.dumps({"ok": True, "mags_db": [-90.0, -90.0]}).encode())
+    monkeypatch.setattr(app.urllib.request, "urlopen", fake)
+    client.get("/api/satcom/spectrum?bins=99999")
+    assert "bins=1024" in urls[-1]
+    client.get("/api/satcom/spectrum?bins=1")
+    assert "bins=32" in urls[-1]
+    client.get("/api/satcom/spectrum?ch=-5&bins=abc")           # ג'אנק => ברירות מחדל שפויות
+    assert "ch=0" in urls[-1] and ("bins=%d" % app.SATCOM_SPECTRUM_BINS) in urls[-1]
+
+
+def test_satcom_spectrum_unavailable_when_flag_off(client, paths, monkeypatch):
+    """‏--spectrum כבוי => הכלי מחזיר ok:false + reason; אנחנו מגישים את זה
+    כ-available:false (לא שגיאה) ומעבירים את ה-reason כמות שהוא."""
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    payload = json.dumps({"ok": False, "ch": 0, "reason": "channel unavailable"}).encode()
+    monkeypatch.setattr(app.urllib.request, "urlopen", lambda url, timeout=None: _FakeWebResp(payload))
+    j = client.get("/api/satcom/spectrum").get_json()
+    assert j["ok"] is True and j["available"] is False and j["reason"] == "channel unavailable"
+
+
+def test_satcom_spectrum_survives_garbage_mags(client, paths, monkeypatch):
+    """ערכים לא-מספריים במערך מסוננים במקום להפיל את הראוט (או להגיע ל-UI)."""
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    payload = json.dumps({"ok": True, "mags_db": [-90.0, None, "x", -80.5]}).encode()
+    monkeypatch.setattr(app.urllib.request, "urlopen", lambda url, timeout=None: _FakeWebResp(payload))
+    j = client.get("/api/satcom/spectrum").get_json()
+    assert j["mags_db"] == [-90.0, -80.5] and j["bins"] == 2
+
+
+def test_satcom_spectrum_unavailable_on_connection_failure(client, paths, monkeypatch):
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+
+    def boom(url, timeout=None):
+        raise ConnectionRefusedError("no one home")
+    monkeypatch.setattr(app.urllib.request, "urlopen", boom)
+    r = client.get("/api/satcom/spectrum")
+    assert r.status_code == 200 and r.get_json()["available"] is False
+
+
+def test_satcom_log_returns_journal_tail(client, paths, monkeypatch):
+    """שורות הפתיחה של המפענח הן האבחון החד-משמעי ל-bias-T; בשטח אין SSH."""
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return types.SimpleNamespace(returncode=0, stdout="sdrplay: bias tee enabled\n", stderr="")
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+    j = client.get("/api/satcom/log").get_json()
+    assert j["ok"] is True and "bias tee enabled" in j["log"]
+    assert app.SATCOM_SERVICE in seen["cmd"] and "journalctl" in seen["cmd"][0]
+
+
+def test_satcom_log_failure_is_graceful(client, paths, monkeypatch):
+    def boom(cmd, **kw):
+        raise OSError("no journalctl here")
+    monkeypatch.setattr(app.subprocess, "run", boom)
+    r = client.get("/api/satcom/log")
+    assert r.status_code == 500 and r.get_json()["ok"] is False and r.get_json()["log"] == ""
+
+
+# --- gain: AGC מול gRdB ידני -------------------------------------------------
+# ‏sdrplay.c: ‏gain>=0 => gRdB נחתך ל-20..59 + LNAstate=0 + AGC_DISABLE;
+# אחרת AGC_5HZ עם setpoint -30dBfs. ר' SATCOM_GAIN_DEFAULT ב-app.py.
+
+def test_sanitize_satcom_gain_agc_forms():
+    """‏None ו"agc"/"auto"/"" הם כולם AGC מפורש — לא ג'אנק, לא ברירת מחדל."""
+    for v in (None, "", "  ", "agc", "AGC", "auto"):
+        assert app._sanitize_satcom_gain(v, default=35) is None
+
+
+def test_sanitize_satcom_gain_clamps_to_tool_range():
+    """חותכים בדיוק כמו הכלי (20..59) ולא דוחים: 400 על ערך שהחומרה מקבלת
+    בשקט הוא הבחנה בלי הבדל."""
+    assert app._sanitize_satcom_gain(0) == app.IFGR_MIN
+    assert app._sanitize_satcom_gain(19) == app.IFGR_MIN
+    assert app._sanitize_satcom_gain(999) == app.IFGR_MAX
+    assert app._sanitize_satcom_gain(40) == 40
+    assert app._sanitize_satcom_gain("35") == 35      # מחרוזת מספרית — תקינה
+    assert app._sanitize_satcom_gain(40.7) == 40      # float נחתך ל-int
+
+
+def test_sanitize_satcom_gain_junk_falls_to_default():
+    """ג'אנק => הבחירה השמורה, כמו _sanitize_freqs/_sanitize_satellite —
+    לא מפיל בקשה ולא קופץ ל-AGC בשקט."""
+    for junk in ("$(reboot)", "abc", {}, [], object()):
+        assert app._sanitize_satcom_gain(junk, default=35) == 35
+    assert app._sanitize_satcom_gain("abc") is None   # בלי default => AGC
+
+
+def test_write_satcom_env_gain_none_is_agc(paths):
+    app.write_satcom_env(["AF1"], gain=None)
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == ""
+
+
+def test_api_mode_satcom_default_gain_is_agc(client, paths, no_sleep, monkeypatch):
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom"})
+    assert r.status_code == 200 and r.get_json()["satcom_gain"] is None
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == ""
+    assert app.load_state()["satcom_gain"] is None
+
+
+def test_api_mode_satcom_manual_gain_writes_sdrplay_flag(client, paths, no_sleep, monkeypatch):
+    """הדגל הוא --sdrplay-gain (הדרייבר הנייטיבי), *לא* --soapy-gain."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom", "gain": 35})
+    assert r.status_code == 200 and r.get_json()["satcom_gain"] == 35
+    env = _env_lines(app.SATCOM_ENV_PATH)
+    assert env["SATCOM_GAIN"] == "--sdrplay-gain=35"
+    assert "soapy" not in env["SATCOM_GAIN"]
+    assert app.load_state()["satcom_gain"] == 35
+
+
+def test_api_mode_satcom_gain_out_of_range_is_clamped(client, paths, no_sleep, monkeypatch):
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom", "gain": 5})
+    assert r.get_json()["satcom_gain"] == app.IFGR_MIN
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == "--sdrplay-gain=%d" % app.IFGR_MIN
+
+
+def test_api_mode_satcom_gain_remembered_when_omitted(client, paths, no_sleep, monkeypatch):
+    """כניסה חוזרת בלי gain => הבחירה השמורה, כמו bias_tee/skip_c/freqs."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    client.post("/api/mode", json={"mode": "satcom", "gain": 30})
+    r = client.post("/api/mode", json={"mode": "satcom"})       # בלי gain
+    assert r.get_json()["satcom_gain"] == 30
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == "--sdrplay-gain=30"
+
+
+def test_api_mode_satcom_explicit_null_gain_returns_to_agc(client, paths, no_sleep, monkeypatch):
+    """⚠ ההבחנה הקריטית: `gain:null` הוא **חזרה מפורשת ל-AGC**, לא "לא נשלח".
+    בלי בדיקת-מפתח (`"gain" in data`) המשתמש היה נתקע ברווח הידני לנצח."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    client.post("/api/mode", json={"mode": "satcom", "gain": 30})
+    assert app.load_state()["satcom_gain"] == 30
+    r = client.post("/api/mode", json={"mode": "satcom", "gain": None})
+    assert r.get_json()["satcom_gain"] is None
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == ""
+    assert app.load_state()["satcom_gain"] is None
+
+
+def test_api_mode_satcom_junk_gain_keeps_saved_choice(client, paths, no_sleep, monkeypatch):
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    client.post("/api/mode", json={"mode": "satcom", "gain": 30})
+    r = client.post("/api/mode", json={"mode": "satcom", "gain": "$(reboot)"})
+    assert r.status_code == 200 and r.get_json()["satcom_gain"] == 30
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == "--sdrplay-gain=30"
+
+
+def test_api_mode_satcom_gain_independent_of_other_switches(client, paths, no_sleep, monkeypatch):
+    """ארבעת המתגים בבקשה אחת — אף אחד לא דורס את האחרים."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom", "gain": 25,
+                                       "bias_tee": False, "skip_c": False, "spectrum": False})
+    b = r.get_json()
+    assert (b["satcom_gain"], b["satcom_bias_tee"], b["satcom_skip_c"], b["satcom_spectrum"]) \
+        == (25, False, False, False)
+    env = _env_lines(app.SATCOM_ENV_PATH)
+    assert env["SATCOM_GAIN"] == "--sdrplay-gain=25"
+    assert env["SATCOM_BIAS_TEE"] == "" and env["SATCOM_SKIP_C"] == "" and env["SATCOM_SPECTRUM"] == ""
+
+
+def test_api_state_exposes_satcom_gain(client, paths, monkeypatch):
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)
+    j = client.get("/api/state").get_json()
+    assert "satcom_gain" in j and j["satcom_gain"] is None
+
+
+# --- labels שנצפו בקליטת שטח אמיתית (Alphasat, 16 דק', 206 הודעות, 54 מטוסים) --
+# ⚠ המכשיר נעל P channel בלבד (100% מההודעות uplink — ר' ניתוח) — הלייבלים
+# האלה (A0/1B/4P/2F) נראו בפועל בתעבורת ה-P channel ונפלו קודם ל-fallback
+# הגנרי "Label X" כי לא היו ב-ACARS_LABELS. ר' _real_uplink_only_capture
+# להסבר המלא למה 100% uplink בקליטה תקינה, לא תקלה.
+
+def test_acars_labels_covers_real_p_channel_traffic():
+    for lbl in ("A0", "1B", "4P", "2F"):
+        assert lbl in app.ACARS_LABELS, "label %s נצפה בקליטה אמיתית וצריך מיפוי" % lbl
+        desc, group = app.ACARS_LABELS[lbl]
+        assert desc and group
+
+
+def test_normalize_satcom_afn_label_a0_gets_real_description():
+    """A0 (AFN logon) — ראה תוכן אמיתי: '/SMACAYA.AFN/FMHKLM706,.PH-BKD,...'."""
+    n = app._normalize_satcom(_satcom({
+        "mode": "2", "label": "A0", "reg": ".PH-BKD",
+        "msg_text": "/SMACAYA.AFN/FMHKLM706,.PH-BKD,485B44,092914/FCAPIKCPYA,0FE53",
+    }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station"))
+    assert n["category"] == "AFN · רישום רשת (A0)"
+    assert n["dir"] == "uplink"                     # dst=Aircraft (מבני) — לא fallback גנרי
+
+
+def test_normalize_satcom_uplink_only_reception_is_a_real_pattern_not_a_bug():
+    """⚠ תיעוד רגרסיה: קליטת שטח ראשונה שהצליחה (16 דק', 206 הודעות, 54 מטוסים
+    שונים) הייתה 100% uplink — 0 הודעות downlink, 0 lat/lon מפוענח, 0 decoded.
+    זה תואם לפיזיקה של Inmarsat Classic Aero: ה-P channel (קרקע→מטוס) הוא
+    שידור-שידור גלובלי וחזק מה-GES, נועל ראשון וקל; ה-R/C channels (מטוס→קרקע)
+    חלשים משמעותית ותלויי-כיוון אנטנת המטוס. **התפלגות ה-uplink/downlink היא
+    אינדיקציה אמיתית לאיזה ערוצים נעולים בפועל — לא רק Eb/No.** הבדיקה הזו
+    מוודאת שההבחנה dir=uplink/downlink נשארת עקבית ל-src/dst.type המבני
+    (לא נסחפת ל-heuristic), כי היא הבסיס לתצוגת ⬆/⬇ ב-UI (satcomStUp/Down)."""
+    ground_to_air = app._normalize_satcom(_satcom({
+        "mode": "2", "label": "_d", "reg": "30599A",
+    }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station"))
+    assert ground_to_air["dir"] == "uplink"
+    air_to_ground = app._normalize_satcom(_satcom({
+        "mode": "2", "label": "15", "reg": ".4X-EKF", "msg_text": "(2N32016E034538ELY315",
+    }))   # ברירת המחדל של הפיקסצ'ר: downlink (AES->GES)
+    assert air_to_ground["dir"] == "downlink"
+
+
+# --- regression: מיקום שקרי מ-tail דמוי-תחנת-קרקע + waypoint chain -----------
+# קליטת שטח אמיתית (33 דק', 465 הודעות, 84 מטוסים) הראתה נ"צ שקרי יחיד בכל
+# הקובץ: H1 עם תוכנית טיסה, tail=".TCARC" (תחנת-קרקע, לא מטוס). ר' תיעוד מלא
+# ב-tests/test_acars.py:test_normalize_acars_ground_station_tail_gets_no_heuristic_position
+# (אותה הגנה בדיוק, כאן דרך הצינור המלא כולל _normalize_satcom).
+
+def test_normalize_satcom_ground_station_fpn_gets_no_false_position():
+    m = _satcom({
+        "mode": "2", "label": "H1", "reg": ".TCARC",
+        "msg_text": "- #M3FPN/RP:DA:HLMS:AA:LIEO:F:IVAKI,N32558E015065..LUMED,N34200E014420"
+                    "..SENTI,N37103E012330..LOPKO,N37400E012108..GERMO,N39150E011214"
+                    "..ATNET,N40459E010081:A:ATNE2R903B",
+    }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
+    n = app._normalize_satcom(m)
+    assert n["dir"] == "uplink"                    # מבני, תואם לקליטה האמיתית
+    assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
+    assert n["group"] != "position"
+    assert n["decoded"] and "FMC 3" in n["decoded"]  # התיקון גם *מוסיף* ערך: תקציר מסלול קריא
+
+
+# --- regression: CPDLC/ADS-C decode_failed — "ניסינו ונכשלנו" מול "לא ניסינו" --
+# קליטת שדה אמיתית (33 דק', 465 הודעות) + לכידת --feed -v גולמית אחת: הודעת
+# CPDLC אמיתית (C-GEGI) עם מעטפת ACARS תקינה (crc_ok=true) אבל "cpdlc":
+# {"err":true} בפנים — inmarsat-sniffer עצמו ניסה לפענח את היישום ונכשל.
+# ר' גם test_libacars_decode_flags_source_tool_failure ב-test_acars.py.
+
+def test_normalize_satcom_real_cpdlc_capture_decode_failed():
+    """שורת JSON גולמית מ-inmarsat-sniffer --feed -v (לא מומצאת — נלכדה בפועל)."""
+    m = _satcom({
+        "mode": "2", "ack": "!", "blk_id": "J", "label": "AA", "reg": "C-GEGI",
+        "msg_text": "/SNNCPXA.AT1.C-GEGI22A9A228405FB3\r\n",
+        "arinc622": {"acars": {
+            "err": False, "crc_ok": True, "more": False,
+            "reg": ".C-GEGI", "mode": "2", "label": "AA", "blk_id": "J", "ack": "!",
+            "msg_text": "/SNNCPXA.AT1.C-GEGI22A9A228405FB3\r\n",
+            "arinc622": {"msg_type": "fans1a_cpdlc_msg", "crc_ok": True,
+                        "gs_addr": "SNNCPXA", "air_addr": ".C-GEGI",
+                        "cpdlc": {"err": True}},
+        }},
+    }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
+    n = app._normalize_satcom(m)
+    assert n["error"] == 0                          # מעטפת ה-ACARS תקינה (crc_ok=true)
+    assert n["category"] == "CPDLC" and n["group"] == "clearance"
+    assert n["decoded"] and "לא פוענח" in n["decoded"]  # לא "—" סתמי, לא ניחוש תוכן
+    assert n["lat"] is None and n["lon"] is None
+
+
+def test_normalize_satcom_real_adsc_capture_with_position():
+    """regression חיובית: מסלול ההצלחה חייב להמשיך לעבוד (pos_src='adsc'), לא רק
+    מקרי הכישלון. ⚠ אין לנו לכידת --feed -v גולמית ל*הודעה המצליחה* הזו (רק
+    ל-CPDLC שנכשל, ר' הבדיקה למעלה) — מבנה ה-JSON כאן (arinc622.adsc.basic_report)
+    הוא שחזור סביר, לא שורה גולמית מאומתת. ‏18.34167/2.11006 עצמם כן אמיתיים:
+    זה בדיוק מה ש-/api/satcom/export החזיר בשדה (A7-BBB, קליטת 04.08.2026,
+    pos_src='adsc') — כלומר המנגנון המלא כבר הוכח עובד קצה-לקצה על נתון אמיתי,
+    גם בלי שראינו את ה-JSON הגולמי המדויק. ‏_scan_latlon אגנוסטי-למבנה (מחפש
+    lat/lon בכל עומק) אז הבדיקה תקפה ללא תלות בשם ה-wrapper המדויק."""
+    m = _satcom({
+        "mode": "2", "label": "A6", "reg": "A7-BBB",
+        "msg_text": "/RECOEYA.ADS.A7-BBB070D0B000C010D010E0110010F01150523D57F",
+        "arinc622": {"acars": {
+            "err": False, "crc_ok": True, "reg": ".A7-BBB", "mode": "2", "label": "A6",
+            "msg_text": "/RECOEYA.ADS.A7-BBB070D0B000C010D010E0110010F01150523D57F",
+            "arinc622": {"msg_type": "adsc_msg", "crc_ok": True,
+                        "adsc": {"basic_report": {"lat": 18.34167, "lon": 2.11006}}},
+        }},
+    }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
+    n = app._normalize_satcom(m)
+    assert n["category"] == "ADS-C" and n["group"] == "position"
+    assert n["pos_src"] == "adsc"
+    assert abs(n["lat"] - 18.34167) < 0.001 and abs(n["lon"] - 2.11006) < 0.001
+    assert n["decoded"] is None   # אין שדה טקסט אמיתי, ולא "נכשל" — decode הצליח

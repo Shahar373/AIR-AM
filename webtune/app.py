@@ -133,6 +133,15 @@ ACARS_LABELS = {
     "A3": ("אישור טרום-המראה (PDC)", "clearance"),
     "16": ("דיווח מיקום (label 16)", "text"),
     "1L": ("דוח ניווט/דלק (1L)", "text"),
+    # ארבעת אלה נצפו בקליטת SATCOM אמיתית (Alphasat, 16 דק', 206 הודעות) —
+    # לא היו ממופים קודם ונפלו ל-fallback הגנרי "Label X". A0 מזוהה בוודאות
+    # (מכיל "AFN" בטקסט עצמו — Aircraft/Airline Network logon, ARINC 620 A0-A3).
+    # השלושה האחרים (1B/4P/2F) אינם labels אוניברסליים מתועדים — המיפוי מבוסס
+    # על תוכן ההודעה שנצפתה בפועל (כמו 16/1L למעלה), לא על מפרט רשמי.
+    "A0": ("AFN · רישום רשת (A0)", "comm"),
+    "1B": ("יזום קישור רשת (1B)", "comm"),
+    "4P": ("הודעת חברה חופשית (4P)", "text"),
+    "2F": ("בקשת מיקום (2F)", "comm"),
 }
 
 # כיוון ההודעה (best-effort, חלקי בכוונה — כמו ACARS_LABELS): downlink = מטוס→קרקע
@@ -213,6 +222,43 @@ SATCOM_UDP_PORT = 5558                # חייב להתאים ל-SATCOM_UDP ב-s
 # כמו Icecast (8000, גם הוא בלי אימות, מיועד לרשת פרטית מהימנה בלבד — §9).
 SATCOM_WEB_PORT = 8888
 SATCOM_HEALTH_TIMEOUT = 2.0           # שניות — נקרא ב-polling, חייב להיות מהיר
+# דגל --spectrum (options.c/web.c, אומת מהמקור) פותח שני endpoints נוספים ב-
+# dashboard: GET /api/spectrum?ch=N&bins=N (מערך mags_db + mixer/AFC) ו-
+# /api/constellation. **זה האבחון היחיד שמבחין בין "אין RF בכלל" ל"יש RF, לא
+# נעול"**: ebno/lock לבדם מראים "אין נעילה" גם כשהאנטנה מנותקת וגם כשהיא
+# מכוונת ב-5° שגיאה. רצפת רעש שמזנקת ~20-30dB כשה-LNA מוזן היא הראיה הישירה
+# היחידה שהשרשרת RF חיה בכלל (ר' §12 — משווים מול מדידה של המשתמש, לא מול סף
+# מומצא). המחיר: **אפס CPU רציף** — web_get_spectrum_by_channel קורא את מצב
+# הדמודולטור הקיים (jaero_pmsk_get_spectrum), אין ring buffer ואין FFT מתמשך;
+# העבודה מתרחשת רק כשה-UI מבקש. ⚠ המחיר האמיתי הוא אבטחתי: הדגל מוסיף גם
+# GET /api/tune?ch=N&hz=X (משנה-מצב!) לאותו פורט לא-מאומת שנקשר ל-INADDR_ANY
+# (ר' SATCOM_WEB_PORT למעלה ו-§9) — לכן זה משתנה-מצב שניתן לכבות, ולא קבוע.
+# רווח ידני: ‏inmarsat-sniffer מקבל ‎--sdrplay-gain=N ומטפל בו כך (sdrplay.c,
+# אומת מהמקור — הציטוט חשוב כי ההתנהגות **לא** מקבילה לזו של הקול):
+#     if (sdrplay_gain_val >= 0) {
+#         int grdb = sdrplay_gain_val;
+#         if (grdb < 20) grdb = 20;  if (grdb > 59) grdb = 59;
+#         chp->tunerParams.gain.gRdB = grdb;
+#         chp->tunerParams.gain.LNAstate = 0;          /* ← לא ניתן לשליטה */
+#         chp->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
+#     } else {
+#         chp->ctrlParams.agc.enable  = sdrplay_api_AGC_5HZ;
+#         chp->ctrlParams.agc.setPoint_dBfs = -30;
+#     }
+# שתי מסקנות מעשיות:
+# (1) **הטווח 20–59 זהה ל-IFGR של הקול** (IFGR_MIN/IFGR_MAX) — אותה סמנטיקה
+#     הפוכה בדיוק: הערך הוא *הפחתה*, קטן=רווח גדול. לכן משתמשים באותם קבועים.
+# (2) **אין שליטה ב-RFGR/LNAstate כמו בקול** — במצב ידני הכלי מקבע LNAstate=0,
+#     כלומר **רווח RF מקסימלי**. זה לא חיסרון ל-SATCOM אלא בדיוק מה שרוצים
+#     לאות לוויין חלש, וזו הסיבה שרווח ידני יכול לעזור דווקא כשה-AGC לא:
+#     ה-AGC מכוון ל-setpoint של ‎-30dBfs על *כל* מה שבחלון, כך שאנרגיה חזקה
+#     מחוץ לפס (סלולר סמוך ל-L-band — בדיוק מה שה-SAW של ה-LNA נועד לחתוך)
+#     יכולה לגרום לו להוריד רווח ולהחניק את הנשא של הלוויין. לכן זו אופציה,
+#     לא ברירת מחדל: AGC נשאר ברירת המחדל (None), והידני הוא כלי לשטח.
+SATCOM_GAIN_DEFAULT = None            # None = AGC של הדרייבר (‎5Hz, setpoint ‎-30dBfs)
+SATCOM_SPECTRUM_BINS = 256            # ברירת מחדל לבקשת ספקטרום (web.c: 32..1024)
+SATCOM_SPECTRUM_TIMEOUT = 3.0         # מעט יותר מ-health: מערך גדול יותר
+SATCOM_LOG_TAIL_LINES = 40            # GET /api/satcom/log — מספיק לשורות הפתיחה
 # "בנקים" של satcom = לוויינים (geostationary), לא צבירי-תדרים כמו ACARS/VDL2 —
 # כל "בנק" הוא לוויין יחיד (freqs בן-איבר-יחיד עם דגל ה---satellite=). זה מאפשר
 # ל-UI לעשות שימוש חוזר במנגנון בורר-הבנקים הקיים כבורר-לוויין, בלי קוד מיוחד.
@@ -370,6 +416,15 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  # True (ברירת מחדל) = מדלגים על דמודולטורי ה-C-channel — חוסך
                  # ~50% CPU ובקושי עולה במידע (ר' §12 ב-CLAUDE.md ו-write_satcom_env).
                  "satcom_skip_c": True,
+                 # True (ברירת מחדל) = --spectrum פעיל => GET /api/satcom/spectrum
+                 # עובד. זה כלי האבחון היחיד שמראה אם יש RF בכלל (ר' הערת
+                 # SATCOM_SPECTRUM_BINS). דולק כברירת מחדל כי בלי נעילה המצב חסר
+                 # ערך ממילא, ועלות ה-CPU היא אפס; ניתן לכיבוי מי שמעדיף לא לחשוף
+                 # את GET /api/tune של הכלי ברשת המקומית (§9).
+                 "satcom_spectrum": True,
+                 # None = AGC (ברירת המחדל); int 20..59 = gRdB ידני (*הפחתה*,
+                 # קטן=רווח גדול — כמו if_gain של הקול). ר' SATCOM_GAIN_DEFAULT.
+                 "satcom_gain": SATCOM_GAIN_DEFAULT,
                  # בסיס כיול למד השדה: {"noise": dBFS, "freq": MHz, "ts": epoch} או None.
                  # נמדד תמיד תחת אותם תנאים קבועים (AGC, /api/antenna/check) => בר-השוואה
                  # לעצמו לאורך זמן, בלי תלות באיזה מצב פעיל עכשיו. לעולם לא ממציאים
@@ -718,7 +773,14 @@ _POS_REPORT_RE = re.compile(
 
 def _text_latlon(text):
     """heuristic שמרני לחילוץ מיקום מטקסט חופשי (פורמט ARINC קומפקטי). מחזיר (lat, lon)
-    או None. מכוון לדיוק על פני כיסוי => מחזיר רק כשהתבנית מלאה וברורה."""
+    או None. מכוון לדיוק על פני כיסוי => מחזיר רק כשהתבנית מלאה וברורה.
+    ⚠ דורש בדיוק התאמה *אחת* בטקסט: נצפה בקליטת שטח אמיתית (SATCOM) שהודעת H1
+    עם תוכנית טיסה (‎#M3FPN/.../F:IVAKI,N32558E015065..LUMED,N34200E014420..)
+    מכילה *שרשרת* waypoints בפורמט קומפקטי זהה לפורמט מיקום — ואם היינו לוקחים
+    את ההתאמה הראשונה (כמו לפני התיקון), היינו מדביקים את נ"צ ה-waypoint
+    הראשון במסלול כאילו הוא מיקום המטוס בפועל (לקח נוסף על 1.7.1/_parse_sq:
+    לא רק "כתובת תחנה נראית כמו נ"צ", גם "מסלול מתוכנן נראה כמו דיווח מיקום
+    בודד"). דיווח מיקום אמיתי מכיל זוג קואורדינטות *אחד*; שרשרת = לא מיקום."""
     if not text:
         return None
 
@@ -741,13 +803,14 @@ def _text_latlon(text):
             return None
         return round(lat, 5), round(lon, 5)
 
-    m = _TEXT_POS_RE.search(text)
-    if m:
-        return _parse(m.groups())
-    m = _TEXT_POS_COMPACT_RE.search(text)
-    if m:
-        return _parse(m.groups(), compact=True)
-    return None
+    matches = list(_TEXT_POS_RE.finditer(text))
+    compact = False
+    if not matches:
+        matches = list(_TEXT_POS_COMPACT_RE.finditer(text))
+        compact = True
+    if len(matches) != 1:      # 0 = אין התאמה; 2+ = שרשרת (מסלול) — לא ניחוש איזו נכונה
+        return None
+    return _parse(matches[0].groups(), compact=compact)
 
 
 def _ddmmf(deg, mmf):
@@ -792,17 +855,28 @@ _LIBACARS_TAG_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def _libacars_decode(obj):
-    """(kind, text) ממבנה libacars: kind ל-badge ('CPDLC'/'ADS-C'/'ARINC-622'),
-    ו-text קצר קריא (CPDLC clearance וכו') אם נמצא. הגנתי לשינויי סכמה."""
+    """(kind, text, decode_failed) ממבנה libacars: kind ל-badge ('CPDLC'/'ADS-C'/
+    'ARINC-622'), טקסט קצר קריא (CPDLC clearance וכו') אם נמצא, ו-decode_failed
+    (bool) — האם *המפענח עצמו* (inmarsat-sniffer/libacars) ניסה לפענח את היישום
+    המקונן (CPDLC/ADS-C) והחזיר `err:true`, למרות שמעטפת ה-ACARS החיצונית עברה
+    CRC בהצלחה. אומת מקליטת שדה אמיתית: הודעת CPDLC עם `crc_ok:true` ברמת
+    המעטפת אבל `"cpdlc":{"err":true}` בפנים — כלומר יש הבדל אמיתי בין "לא ניסינו
+    לפענח" (libacars ריק/חסר) ל"ניסינו, ונכשל" (איתות שולי מדי לתוכן, לרוב
+    ב-CPDLC/ADS-C בקליטה ראשונה עם נעילה גבולית). §12: לא ממציאים טקסט-פענוח,
+    אבל *כן* חושפים את העובדה שהניסיון נכשל — זה מידע אמיתי שקיים במבנה,
+    לא ניחוש. הגנתי לשינויי סכמה."""
     blob = json.dumps(obj, ensure_ascii=False).lower()
     kind = ("CPDLC" if "cpdlc" in blob
             else "ADS-C" if ("adsc" in blob or "ads-c" in blob)
             else "ARINC-622")
     texts = []
+    failed = [False]
 
     def walk(o):
         if isinstance(o, dict):
             for k, v in o.items():
+                if str(k).lower() == "err" and v is True:
+                    failed[0] = True
                 if (isinstance(v, str) and len(v.strip()) > 3
                         and any(t in str(k).lower() for t in ("text", "msg", "message"))
                         and not _LIBACARS_TAG_RE.match(v.strip())):
@@ -815,7 +889,7 @@ def _libacars_decode(obj):
 
     walk(obj)
     text = " · ".join(dict.fromkeys(texts))[:300] or None   # dedup בשמירת סדר
-    return kind, text
+    return kind, text, failed[0]
 
 
 def _acars_direction(label, text):
@@ -916,8 +990,13 @@ _SA_MEDIA = {"V": "VHF", "S": "SATCOM", "H": "HF", "G": "GlobalStar", "C": "Irid
              "2": "VDL-M2", "X": "Inmarsat", "I": "Iridium", "T": "טלפוני"}
 _SA_RE = re.compile(r"^0([EL])([VSHGCX2IT])([01]\d|2[0-3])([0-5]\d)([0-5]\d)([VSHGCX2IT]*)")
 
-# H1 sub-label: '#' + מזהה מקור בן 2 תווים בתחילת הטקסט (#DF = מקליט, #M1 = FMC...).
-_H1_SUB_RE = re.compile(r"^#([A-Z][A-Z0-9])")
+# H1 sub-label: '#' + מזהה מקור בן 2 תווים (#DF = מקליט, #M1 = FMC...). לא תמיד
+# ממש בתחילת הטקסט: נצפה בקליטת SATCOM אמיתית (inmarsat-sniffer) שה-'#' מגיע
+# אחרי prefix כמו "- " (‎"- #MDREQPOS037B") או אחרי שורת-הדר עם \n ("...\n- #DFREQ02")
+# — ‏^#... בלבד (בלי \s) לא תפס אף הודעת H1 אמיתית אחת בקליטה של 465 הודעות/
+# 12 H1. ‏(?:^|\s) מכסה גם את הפורמט המקורי (VHF, '#' ממש בהתחלה) וגם את זה —
+# תוספתי בלבד, לא מצמצם את מה שכבר תפס.
+_H1_SUB_RE = re.compile(r"(?:^|\s)#([A-Z][A-Z0-9])")
 _H1_SUBLABELS = {
     "DF": "מקליט נתונים (DFDAU)", "M1": "מחשב ניהול טיסה (FMC)",
     "M2": "FMC 2", "M3": "FMC 3", "CF": "מערכת תחזוקה (CFDS)",
@@ -964,8 +1043,14 @@ def _parse_sa_media(text):
 
 
 def _parse_fpn(text):
-    """‎/FPN/ (תוכנית טיסה ב-H1): יציאה→יעד + רשימת waypoints. מחזיר string או None."""
+    """‎/FPN/ (תוכנית טיסה ב-H1): יציאה→יעד + רשימת waypoints. מחזיר string או None.
+    ⚠ VHF: "/FPN/" (עם קו נטוי משני הצדדים). SATCOM אמיתי (inmarsat-sniffer):
+    ה-'/' הפותח נבלע ע"י ה-sub-label עצמו (‎"#M3FPN/RP:DA:..." — FPN מודבק
+    ישירות ל-M3, בלי '/' לפניו) — "FPN/" בלי הקו הנטוי הפותח הוא נפילה
+    תוספתית, לא מחליפה את "/FPN/" (שנבדק ראשון, מדויק יותר)."""
     idx = text.find("/FPN/")
+    if idx < 0:
+        idx = text.find("FPN/")
     if idx < 0:
         return None
     seg = text[idx:]
@@ -992,12 +1077,13 @@ def _parse_fpn(text):
 
 def _parse_h1(text):
     """H1: זיהוי מקור ההודעה לפי sub-label (#DF/#M1/...) + פענוח /FPN/ אם קיים.
-    מחזיר string קצר או None (H1 בלי הדר '#' => אין מה להסיק, לא מנחשים)."""
+    מחזיר string קצר או None (H1 בלי הדר '#' => אין מה להסיק, לא מנחשים).
+    ‏search (לא match): ה-'#' לא תמיד ממש בתחילת הטקסט (ר' _H1_SUB_RE)."""
     if not text:
         return None
     text = text.lstrip()
     parts = []
-    m = _H1_SUB_RE.match(text)
+    m = _H1_SUB_RE.search(text)
     if m:
         sub = m.group(1)
         desc = _H1_SUBLABELS.get(sub)
@@ -1240,12 +1326,27 @@ def _normalize_acars(m):
     desc, group = ACARS_LABELS.get(label, (None, "text")) if label else (None, "comm")
     category = desc or (f"Label {label}" if label else "הודעה")
 
+    # תג-tail שנראה כמו כתובת תחנת-קרקע (‎.TCARC/‎.CNTMM וכו', אותו דפוס בדיוק
+    # כמו _UPLINK_HEADER_RE שכבר משמש לזיהוי הדר-ניתוב בטקסט) לא יכול לקבל
+    # מיקום מ-heuristic טקסטואלי: תחנת קרקע לא "טסה", וכל נ"צ שיימצא בהודעה
+    # שלה (למשל בתוך תוכן שהיא משדרת/מעבירה) הוא לא מיקומה. מגביל *רק* את
+    # הנתיבים ה-heuristic (text_latlon/label16) — הנתיבים המבניים (/.POS/,
+    # label15, ADS-C) לא רלוונטיים לתחנת-קרקע מלכתחילה (אלה פורמטים שרק
+    # מטוס-בפועל משדר), אז אין צורך לגדר אותם.
+    tail_val = g("tail", "registration")
+    tail_is_station = bool(tail_val) and bool(_UPLINK_HEADER_RE.match(str(tail_val)))
+
     # פענוח ARINC-622 (libacars): kind => badge וקבוצה, וטקסט קריא אם יש.
     lat = lon = pos_src = decoded = None
     libacars = m.get("libacars")
     if libacars:
-        kind, dtext = _libacars_decode(libacars)
-        category, decoded = kind, dtext
+        kind, dtext, decode_failed = _libacars_decode(libacars)
+        category = kind
+        # ⚠ decode_failed=True ≠ "אין נתון" — יש הבדל אמיתי בין "לא ניסינו" ל"ניסינו
+        # ונכשלנו" (המפענח עצמו החזיר err:true על היישום המקונן, אימות מקליטת שדה).
+        # לא ממציאים תוכן, אבל *כן* אומרים למשתמש שהיה ניסיון — עדיף מ-"—" סתמי.
+        decoded = dtext if dtext else (
+            "לא פוענח — המפענח החזיר שגיאה (כנראה איתות שולי)" if decode_failed else None)
         group = "clearance" if kind == "CPDLC" else "position" if kind == "ADS-C" else group
         # מיקום *רק* מ-ADS-C: CPDLC (או ARINC-622 גנרי אחר) עלול לשאת נ"צ מוטבע
         # (waypoint ב-clearance) שאינו מיקום המטוס עצמו — לא מייחסים אותו כמיקום
@@ -1281,13 +1382,14 @@ def _normalize_acars(m):
     # נפילה: מיקום מקודד בטקסט חופשי — אבל *רק* מ-frame נקי. acarsdec error>0 = ביטים
     # שתוקנו/לא-תוקנו; ספרה אחת שהתהפכה בקואורדינטה => מטוס במקום שגוי על המפה. ADS-C
     # (libacars) לעיל מוגן-CRC ולכן נשמר גם עם error; ה-heuristic הטקסטואלי לא — לכן מגודר.
-    if lat is None and not m.get("error"):
+    # ‏tail_is_station: תחנת-קרקע (ר' למעלה) לא מקבלת מיקום מ-heuristic טקסטואלי בכלל.
+    if lat is None and not m.get("error") and not tail_is_station:
         pos = _text_latlon(text)
         if pos:
             lat, lon, pos_src = pos[0], pos[1], "text"
 
     # label 16 (דיווח מיקום עשרוני): פורמט פחות נוקשה מ-DDMM המבני => מגודר כמו heuristic.
-    if lat is None and label == "16" and text and not m.get("error"):
+    if lat is None and label == "16" and text and not m.get("error") and not tail_is_station:
         pos = _parse_label16(text)
         if pos:
             lat, lon, pos_src = pos[0], pos[1], "label16"
@@ -1326,7 +1428,7 @@ def _normalize_acars(m):
         "label": label,
         "category": category,                 # תיאור קריא אחיד (label/ARINC-622)
         "group": group,                       # קבוצה לצבע ב-UI / עמודה בייצוא
-        "tail": g("tail", "registration"),
+        "tail": tail_val,
         "flight": g("flight", "fid"),
         "mode": g("mode"),
         "msgno": g("msgno"),
@@ -1573,7 +1675,11 @@ def _normalize_vdl2(m):
                 category, group = "ADS-C (VDL2)", "position"
             else:
                 category = "VDL2 · X.25"
-            _, decoded = _libacars_decode(x25)   # תקציר טקסט קריא אם קיים במבנה
+            # תקציר טקסט קריא אם קיים במבנה; decode_failed => אותה הבחנה כמו ב-SATCOM
+            # (ר' _libacars_decode) — "ניסינו ונכשלנו" מול "אין נתון" בכלל.
+            _, dtext, decode_failed = _libacars_decode(x25)
+            decoded = dtext if dtext else (
+                "לא פוענח — המפענח החזיר שגיאה (כנראה איתות שולי)" if decode_failed else None)
             # מיקום *רק* מ-ADS-C: CPDLC עלול לשאת נ"צ מוטבע (waypoint ב-clearance)
             # שאינו מיקום המטוס עצמו — לא מייחסים אותו כמיקום כדי לא להטעות במפה.
             if is_adsc:
@@ -1946,6 +2052,26 @@ def _sanitize_satellite(freqs, default=None):
     return out[:1] or list(default if default is not None else SATCOM_FREQS_DEFAULT)
 
 
+def _sanitize_satcom_gain(value, default=None):
+    """מנרמל את בחירת הרווח ל-`None` (AGC) או ל-int בתחום IFGR_MIN..IFGR_MAX.
+
+    שלוש כניסות שונות, שלוש משמעויות (חשוב לא לבלבל ביניהן):
+      • `None`/`""`/`"agc"` => AGC מפורש (הבחירה המכוונת "תן לדרייבר לנהל").
+      • מספר => gRdB ידני, נחתך לתחום. **חותכים ולא דוחים** כי הכלי עצמו
+        חותך בדיוק לאותו תחום (sdrplay.c) — 400 כאן היה מציג למשתמש שגיאה
+        על ערך שהחומרה מקבלת בשקט, וזו הבחנה בלי הבדל.
+      • ג'אנק (מחרוזת לא-מספרית, dict) => `default` — אותו דפוס בדיוק כמו
+        `_sanitize_freqs`/`_sanitize_satellite`: פורמט לא-תקין לא מפיל בקשה,
+        הוא נופל לבחירה השמורה.
+    """
+    if value is None or (isinstance(value, str) and value.strip().lower() in ("", "agc", "auto")):
+        return None
+    try:
+        return max(IFGR_MIN, min(IFGR_MAX, int(float(value))))
+    except (TypeError, ValueError):
+        return default
+
+
 def _satcom_window_error(freqs):
     """ולידציה מקבילה ל-_window_error/_vdl2_window_error, אך ללוויין ולא לחלון
     דגימה: /api/mode הגנרי מצפה לפונקציה בחתימה (freqs) -> error|None, כדי
@@ -1997,7 +2123,7 @@ def write_vdl2_env(freqs, ifgr=None, rfgr=None):
     _atomic_write(VDL2_ENV_PATH, text)
 
 
-def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True):
+def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True, spectrum=True):
     """כותב /etc/airam/satcom.env בפורמט EnvironmentFile של systemd.
     ‏freqs כאן הוא רשימה בת-איבר-יחיד עם דגל הלוויין (למשל ["AF1"]) — geostationary
     => אין "ערוצים"/בנק לבחור כמו ACARS/VDL2 (ר' הערה ליד SATCOM_FREQS_DEFAULT).
@@ -2014,7 +2140,11 @@ def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True):
     ‏SATCOM_SKIP_C מכיל את הדגל ‎--skip-c-channel (או ריק) — ר' §12: מדלג על
     ששת דמודולטורי ה-OQPSK 8400 (C-channels) מתוך 12 הערוצים של Alphasat.
     ברירת המחדל **דולקת** כי AIR-AM צורך ACARS בלבד וה-C-channels כמעט לא
-    נושאים אותו, בעוד שהם הדמודולטורים היקרים ביותר (‎~50% CPU לפי המקור)."""
+    נושאים אותו, בעוד שהם הדמודולטורים היקרים ביותר (‎~50% CPU לפי המקור).
+    ‏SATCOM_SPECTRUM מכיל את הדגל ‎--spectrum (או ריק) — פותח את
+    GET /api/spectrum בלוח האבחון של הכלי, שממנו GET /api/satcom/spectrum
+    שואב. **האבחון היחיד שמבחין "אין RF" מ"יש RF בלי נעילה"** (ר' ההערה ליד
+    SATCOM_SPECTRUM_BINS). דולק כברירת מחדל; עלות CPU רציפה אפס."""
     sats = _sanitize_satellite(freqs)
     gain_flag = "--sdrplay-gain=%d" % int(gain) if gain is not None else ""
     text = "\n".join([
@@ -2023,6 +2153,7 @@ def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True):
         f"SATCOM_GAIN={gain_flag}",
         "SATCOM_BIAS_TEE=" + ("-B" if bias_tee else ""),
         "SATCOM_SKIP_C=" + ("--skip-c-channel" if skip_c else ""),
+        "SATCOM_SPECTRUM=" + ("--spectrum" if spectrum else ""),
         f"SATCOM_UDP={ACARS_UDP_HOST}:{SATCOM_UDP_PORT}",
         f"SATCOM_WEB_PORT={SATCOM_WEB_PORT}",
         "",
@@ -2078,7 +2209,7 @@ def _enter_acars(freqs):
     return None, None
 
 
-def _enter_satcom(freqs, bias_tee=True, skip_c=True):
+def _enter_satcom(freqs, bias_tee=True, skip_c=True, spectrum=True, gain=None):
     """עוצר את שלושת צרכני ה-SDR האחרים ומריץ inmarsat-sniffer. מחזיר
     (error, detail). Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות
     תחילה כדי לשחרר את ה-SDR לפני ש-inmarsat-sniffer פותח אותו (מונע מרוץ על
@@ -2091,13 +2222,18 @@ def _enter_satcom(freqs, bias_tee=True, skip_c=True):
     נייד) מעבר לתקרה. ⚠ אסור להזין משני מקורות בו-זמנית (הזרמה הדדית אפשרית)
     — המשתמש אחראי לוודא שרק אחד מהם דולק בפועל.
     ‏skip_c=True (ברירת מחדל) מוריד את דמודולטורי ה-C-channel — הצד השני של
-    אותו תקציב חשמל, אבל דרך ה-CPU במקום דרך ה-bias-T (ר' §12/write_satcom_env)."""
+    אותו תקציב חשמל, אבל דרך ה-CPU במקום דרך ה-bias-T (ר' §12/write_satcom_env).
+    ‏spectrum=True (ברירת מחדל) מפעיל את ‎--spectrum => GET /api/satcom/spectrum
+    זמין (אבחון "יש RF בכלל?" — ר' SATCOM_SPECTRUM_BINS).
+    ‏gain=None (ברירת מחדל) => AGC של הדרייבר; int 20..59 => gRdB ידני עם
+    LNAstate מקובע ל-0 (רווח RF מקסימלי) — ר' SATCOM_GAIN_DEFAULT למה זה
+    דווקא *עוזר* לאות לוויין חלש כשה-AGC נחנק מאנרגיה מחוץ לפס."""
     for svc in ("rtl_airband", ACARS_SERVICE, VDL2_SERVICE):
         try:
             _sysctl("stop", svc, timeout=30)
         except Exception:
             pass
-    write_satcom_env(freqs, bias_tee=bias_tee, skip_c=skip_c)
+    write_satcom_env(freqs, gain=gain, bias_tee=bias_tee, skip_c=skip_c, spectrum=spectrum)
     try:
         # airam-satcom.service (בשונה משאר צרכני ה-SDR) מוגדר עם StartLimitBurst
         # סופי — הגנה מפני קריסה חוזרת שמדליקה מחדש bias-T ללא פיקוח (ר' ההערה
@@ -2953,7 +3089,9 @@ def _restore_after_probe(prev_state, prev_live):
         elif prev_live == "satcom":
             _enter_satcom(prev_state.get("satcom_freqs", SATCOM_FREQS_DEFAULT),
                           bias_tee=prev_state.get("satcom_bias_tee", True),
-                          skip_c=prev_state.get("satcom_skip_c", True))
+                          skip_c=prev_state.get("satcom_skip_c", True),
+                          spectrum=prev_state.get("satcom_spectrum", True),
+                          gain=_sanitize_satcom_gain(prev_state.get("satcom_gain")))
         elif prev_live == "voice":
             _enter_voice({"freq": prev_state["freq"], "mod": prev_state["mod"],
                          "agc": prev_state["agc"], "if_gain": prev_state["if_gain"],
@@ -3401,11 +3539,18 @@ def _fetch_satcom_web_state():
     בכל כשל — satcom לא active, ה---web dashboard לא זמין/עוד לא עלה, timeout,
     או JSON לא תקין. לעולם לא מפיל את הקורא. לא מנסה HTTP כלל כש-satcom לא
     active (המקרה הנפוץ) — נמנע מ-connection-refused מיותר בכל poll."""
+    return _fetch_satcom_web("/api/state", SATCOM_HEALTH_TIMEOUT)
+
+
+def _fetch_satcom_web(path, timeout):
+    """קורא נתיב שרירותי מלוח האבחון של inmarsat-sniffer (‎--web) ומחזיר dict או
+    None בכל כשל. מנוע משותף ל-/api/state (health) ול-/api/spectrum — אותה
+    התניה בדיוק: לא מנסים HTTP כלל כשהשירות לא active."""
     if not _is_active(SATCOM_SERVICE):
         return None
-    url = f"http://127.0.0.1:{SATCOM_WEB_PORT}/api/state"
+    url = f"http://127.0.0.1:{SATCOM_WEB_PORT}{path}"
     try:
-        with urllib.request.urlopen(url, timeout=SATCOM_HEALTH_TIMEOUT) as r:   # noqa: S310 (לוקאלהוסט בלבד)
+        with urllib.request.urlopen(url, timeout=timeout) as r:   # noqa: S310 (לוקאלהוסט בלבד)
             data = json.loads(r.read().decode("utf-8", "replace"))
     except Exception:
         return None
@@ -3431,10 +3576,73 @@ def api_satcom_health():
                          "msgs": ch.get("msgs"), "age": ch.get("age"),
                          "mse": ch.get("mse"), "ebno": ch.get("ebno"),
                          "lock": bool(ch.get("lock"))})
+    # spectrum_enabled מגיע מהכלי עצמו (web.c) ולא מה-state שלנו — כך ה-UI יודע
+    # אם /api/satcom/spectrum באמת יעבוד *עכשיו*, ולא רק מה ביקשנו בכניסה
+    # האחרונה (למשל אחרי שדרוג שהחליף את ה-unit בלי מעבר-מצב חדש).
     return jsonify(ok=True, available=True,
                    total_acars=state.get("total_acars"), feed_drops=state.get("feed_drops"),
+                   spectrum=bool(state.get("spectrum_enabled")),
                    channels=channels, channels_locked=sum(1 for c in channels if c["lock"]),
                    channels_total=len(channels))
+
+
+@app.route("/api/satcom/log")
+def api_satcom_log():
+    """זנב היומן של inmarsat-sniffer (‎journalctl -u airam-satcom).
+
+    **למה זה route ולא שדה ב-/api/satcom/health:** שורות הפתיחה של המפענח הן
+    האבחון החד-משמעי ביותר שיש — ‎"sdrplay: bias tee enabled" מול
+    ‎"bias tee not supported on this model" (sdrplay.c, אומת מהמקור) עונה
+    בוודאות אם ה-LNA בכלל מקבל מתח, ו-"Auto center freq"/"Active channels"
+    מאשרות שהתוכנית שנטענה היא זו שציפינו לה. בשטח, מהטלפון, אין SSH — בלי
+    זה אי אפשר לראות את זה בכלל. אבל זה **לא** נתון פולינג: כל קריאה היא
+    fork ל-journalctl, וה-health כבר רץ בקצב 1s (ר' ההערה ב-pollSatcomHealth
+    ב-index.html) — לכן על דרישה בלבד, בלחיצת כפתור."""
+    try:
+        r = subprocess.run(["journalctl", "-u", SATCOM_SERVICE, "-n",
+                            str(SATCOM_LOG_TAIL_LINES), "--no-pager"],
+                           capture_output=True, text=True, timeout=5)
+        return jsonify(ok=True, log=r.stdout or "")
+    except Exception as e:
+        return jsonify(ok=False, error=str(e), log=""), 500
+
+
+@app.route("/api/satcom/spectrum")
+def api_satcom_spectrum():
+    """ספקטרום baseband של ערוץ בודד מהדמודולטור של inmarsat-sniffer (proxy ל-
+    GET /api/spectrum?ch=N&bins=N בלוח האבחון שלו, דורש ‎--spectrum).
+
+    **למה זה קיים:** ‏ebno/lock ב-/api/satcom/health עונים "אין נעילה" באותה
+    צורה בדיוק כשהאנטנה מנותקת, כשה-LNA לא מוזן, וכשהכיוון שגוי ב-5° — שלוש
+    תקלות שונות לגמרי עם אותו חיווי. הספקטרום הוא הראיה הישירה היחידה שיש RF
+    בכלל: רצפת רעש שמזנקת ~20-30dB ברגע שה-LNA מקבל מתח, וגבנון נראה לעין
+    כשהאנטנה מכוונת. אנחנו מגישים את ‎mags_db **כמות שהוא** מהכלי ולא ממציאים
+    ממנו סף/ציון (§12) — ההשוואה שהמשתמש עושה (LNA מחובר מול מנותק) היא
+    המדידה, לא איזה מספר קסם שלנו.
+
+    ‏available=False (לא שגיאה) כש-satcom כבוי, ‎--spectrum לא פעיל, או הערוץ
+    לא קיים — בדיוק כמו api_satcom_health."""
+    try:
+        ch = int(request.args.get("ch", 0))
+    except (TypeError, ValueError):
+        ch = 0
+    try:
+        bins = int(request.args.get("bins", SATCOM_SPECTRUM_BINS))
+    except (TypeError, ValueError):
+        bins = SATCOM_SPECTRUM_BINS
+    ch = max(0, ch)
+    bins = min(1024, max(32, bins))          # אותם גבולות כמו web.c
+    data = _fetch_satcom_web(f"/api/spectrum?ch={ch}&bins={bins}", SATCOM_SPECTRUM_TIMEOUT)
+    if not data or not data.get("ok"):
+        # reason מגיע מהכלי ("channel unavailable") — גם כש---spectrum כבוי.
+        return jsonify(ok=True, available=False, ch=ch,
+                       reason=(data or {}).get("reason"))
+    mags = [m for m in (data.get("mags_db") or []) if isinstance(m, (int, float))]
+    return jsonify(ok=True, available=True, ch=data.get("ch", ch),
+                   baud=data.get("baud"), afc=bool(data.get("afc")),
+                   mixer_hz=data.get("mixer_hz"), freq_center_hz=data.get("freq_center_hz"),
+                   fs=data.get("fs"), lockingbw=data.get("lockingbw"),
+                   mags_db=mags, bins=len(mags))
 
 
 ROSTER_MAX = 200   # תקרת גודל תגובה — הישנים ביותר נגזמים
@@ -3624,7 +3832,7 @@ def api_mode():
         payload, status = _voice_tune(params)
         return jsonify(payload), status
 
-    plan = freqs = key = enter = bias_tee = None
+    plan = freqs = key = enter = bias_tee = skip_c = spectrum = gain = None
     if mode == "scan":
         plan = _validate_scan_plan(data.get("plan") or st.get("scan_plan"))
         if plan is None:
@@ -3655,6 +3863,15 @@ def api_mode():
             # אבל כאן ברירת המחדל היא True (חיסכון), ר' write_satcom_env.
             skip_c = (data["skip_c"] if isinstance(data.get("skip_c"), bool)
                       else bool(st.get("satcom_skip_c", True)))
+            # spectrum: אותו דפוס בדיוק. ברירת מחדל True — כלי האבחון היחיד
+            # שמבחין "אין RF" מ"יש RF בלי נעילה" (ר' SATCOM_SPECTRUM_BINS).
+            spectrum = (data["spectrum"] if isinstance(data.get("spectrum"), bool)
+                        else bool(st.get("satcom_spectrum", True)))
+            # gain: כאן *לא* אפשר להשתמש ב-data.get() כדי לזהות "לא נשלח" —
+            # ‏null הוא ערך משמעותי (AGC מפורש) ולא היעדר. לכן בדיקת מפתח.
+            gain = (_sanitize_satcom_gain(data["gain"], st.get("satcom_gain"))
+                    if "gain" in data
+                    else _sanitize_satcom_gain(st.get("satcom_gain")))
 
     if not TUNE_LOCK.acquire(timeout=0.5):
         return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב",
@@ -3686,14 +3903,15 @@ def api_mode():
             save_state(new_state)
             return jsonify(ok=True, app_mode="scan", scan_plan=plan)
 
-        # acars / vdl2 / satcom — מסלול דאטה סימטרי (satcom מקבל גם bias_tee/skip_c)
+        # acars / vdl2 / satcom — מסלול דאטה סימטרי (satcom מקבל גם bias_tee/skip_c/spectrum)
         log.info("mode -> %s freqs=%s (from %s)", mode, freqs, request.remote_addr)
-        err, detail = (enter(freqs, bias_tee, skip_c) if mode == "satcom"
+        err, detail = (enter(freqs, bias_tee, skip_c, spectrum, gain) if mode == "satcom"
                        else enter(freqs))
         if err:
             payload, status = _fail_to_off(st, err, detail, "enter " + mode)
             return jsonify(payload), status
-        extra = ({"satcom_bias_tee": bias_tee, "satcom_skip_c": skip_c}
+        extra = ({"satcom_bias_tee": bias_tee, "satcom_skip_c": skip_c,
+                  "satcom_spectrum": spectrum, "satcom_gain": gain}
                  if mode == "satcom" else {})
         new_state = {**st, "app_mode": mode, key: freqs, **extra}
         save_state(new_state)

@@ -753,6 +753,29 @@
     .aim-chan .ac-baud { flex: 1; min-width: 0; color: var(--text-faint); }
     .aim-chan .ac-eb { flex: none; min-width: 3.8rem; text-align: right; }
     .aim-chan .ac-msgs { flex: none; min-width: 2.6rem; text-align: right; color: var(--text-faint); }
+    /* ספקטרום הערוץ: הראיה הישירה ל"יש RF בכלל" (ר' ההערה ב-#satcomSpecBox) */
+    .aim-spec { margin-top: var(--sp-3); padding-top: var(--sp-3);
+      border-top: 1px solid var(--border); }
+    .aim-spec-hd { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+    .aim-spec-sel { background: var(--panel-2); color: var(--text); font-size: .76rem;
+      border: 1px solid var(--border); border-radius: var(--r-sm); padding: .2rem .35rem;
+      min-height: 28px; }
+    .aim-spec-nums { margin-inline-start: auto; font-size: .76rem; color: var(--text-faint);
+      font-variant-numeric: tabular-nums; }
+    /* isolate + ltr: בלי זה ה-bidi מזיז את הסימן ומציג "dB 91.5-" במקום
+       "‎-91.5 dB" — ערכי dB שליליים בתוך מחרוזת עברית (כמו ב-.aim-chan) */
+    .aim-spec-nums b { color: var(--dim); font-weight: 600;
+      direction: ltr; unicode-bidi: isolate; }
+    .aim-spec-cv { width: 100%; height: 76px; display: block; margin-top: .4rem; }
+    /* לוג המפענח (על דרישה) — LTR ומונו, זה פלט גולמי של journalctl */
+    .aim-log-bar { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
+      margin-top: var(--sp-3); }
+    .aim-log-bar button { flex: none; font-size: .78rem; padding: .38rem .7rem; min-height: 32px; }
+    .aim-log-bar .sdr-hint { flex: 1; min-width: 170px; margin: 0 !important; }
+    .aim-log { direction: ltr; text-align: left; margin: .5rem 0 0; padding: .55rem .65rem;
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+      font-size: .7rem; line-height: 1.45; color: var(--dim); white-space: pre-wrap;
+      word-break: break-word; max-height: 220px; overflow: auto; }
 
     /* ---------- ACARS / VDL2 — פריסת "חדר בקרה" ---------- */
     /* תצוגת דאטה = ערימת פאנלים (בקרה → רצועת סטטיסטיקה → מפה+פיד) */
@@ -1693,6 +1716,32 @@
           מתוך 12 הערוצים — לפי המקור הם כמעט לא נושאים ACARS וחוסכים ‎~50% CPU.
           כבוי: מפענחים את כל 12 הערוצים (עוד עומס, כמעט בלי רווח ב-ACARS).
         </p>
+        <!-- ═══ רווח: AGC מול ידני ═══
+             ⚠ בניגוד לקול, כאן יש **סליידר אחד בלבד**: במצב ידני הכלי מקבע
+             LNAstate=0 (רווח RF מקסימלי) ולא חושף אותו כפרמטר (sdrplay.c) —
+             אז אין "RF Gain" להציג, וזה גם בדיוק מה שרוצים לאות לוויין חלש.
+             אותה סמנטיקה הפוכה כמו ב-IF Gain של הקול: הסליידר מציג *רווח*
+             (0–39dB) וממופה ל-gRdB = 59 − ערך. -->
+        <div class="setting" id="satcomAgcRow">
+          <span>🎚 AGC אוטומטי</span>
+          <label class="switch">
+            <input type="checkbox" id="satcomAgc" checked>
+            <span class="track"></span>
+          </label>
+        </div>
+        <div class="gain-slider" id="satcomGainWrap">
+          <span>רווח ידני</span>
+          <input type="range" id="satcomGain" min="0" max="39" step="1" value="24" />
+          <span class="val"><span id="satcomGainVal">24</span> dB</span>
+        </div>
+        <p class="sdr-hint" id="satcomAgcHint">
+          דלוק (ברירת מחדל): ה-AGC של הדרייבר מכוון ל-‎-30dBfs. כבוי: רווח ידני
+          (‎gRdB 20–59, קטן=רווח גדול) והמפענח מקבע את ה-LNA לרווח מקסימלי.
+          ⚠ שווה לנסות ידני כשה-AGC לא נועל: הוא מגיב לכל האנרגיה בחלון, כך
+          שסלולר חזק ליד ה-L-band עלול לגרום לו להוריד רווח ולהחניק את הלוויין.
+          שינוי מפעיל מחדש את המפענח (‎~3 שניות).
+        </p>
+
         <!-- סרגל בקרת SDR: מתעדכן לפי satcomActive (מצב ה-SDR האמיתי, לא הכרטיסייה) -->
         <div id="satcomSdrBar" class="acars-sdr-bar">
           <div id="satcomInactive">
@@ -1731,7 +1780,37 @@
           <canvas id="satcomAimSpark" class="aim-spark"></canvas>
         </div>
         <p class="sdr-hint" id="satcomAimHint">סובב את האנטנה לאט ועקוב אחרי הגרף — ככל שה-Eb/No גבוה יותר, הכיוון טוב יותר.</p>
+
+        <!-- ═══ ספקטרום הערוץ — "יש RF בכלל?" ═══
+             ⚠ זה החלק שעונה על השאלה ש-Eb/No *לא* יכול לענות עליה: אנטנה
+             מנותקת, LNA בלי מתח, וכיוון שגוי — כולם נראים זהים ב-lock/ebno
+             (אין נעילה). ברצפת הרעש הם נראים אחרת לגמרי: LNA מוזן מקפיץ
+             אותה בעשרות dB. המקור: GET /api/satcom/spectrum (דורש
+             ‎--spectrum במפענח). לא ממציאים סף — מציגים את המספר הגולמי
+             ומזמינים את המשתמש להשוות מול מדידה שלו עצמו (§12). -->
+        <div class="aim-spec" id="satcomSpecBox">
+          <div class="aim-spec-hd">
+            <span class="aim-lbl">ספקטרום ערוץ</span>
+            <select id="satcomSpecCh" class="aim-spec-sel" title="ערוץ המפענח"></select>
+            <span class="aim-spec-nums">
+              רצפת רעש <b id="satcomSpecFloor">—</b> · שיא <b id="satcomSpecPeak">—</b>
+            </span>
+          </div>
+          <canvas id="satcomSpecCv" class="aim-spec-cv"></canvas>
+          <p class="sdr-hint" id="satcomSpecHint">—</p>
+        </div>
+
         <div class="aim-chans" id="satcomAimChans"></div>
+
+        <!-- לוג המפענח על דרישה: שורות הפתיחה מכריעות אם ה-bias-T באמת נדלק
+             ("sdrplay: bias tee enabled" מול "bias tee not supported on this
+             model"). בשטח אין SSH מהטלפון. לא בפולינג — כל קריאה היא fork
+             ל-journalctl וה-health כבר רץ בקצב 1s. -->
+        <div class="aim-log-bar">
+          <button class="ghost" id="satcomLogBtn">📜 לוג המפענח</button>
+          <span class="sdr-hint" id="satcomLogHint">שורות הפתיחה מראות אם ה-bias-T נדלק ואיזה מקלט זוהה.</span>
+        </div>
+        <pre class="aim-log hidden" id="satcomLogBox"></pre>
       </div>
     </section>
 
@@ -1743,6 +1822,14 @@
         <div class="acars-stat"><b id="satcomStCraft">0</b><span>מטוסים</span></div>
         <div class="acars-stat"><b id="satcomStPos">0</b><span>עם מיקום</span></div>
         <div class="acars-stat"><b id="satcomStAdsb">0</b><span>🛰 ADS‑B</span></div>
+        <!-- ⚠ SATCOM-only (guard בשם ה-DOM ב-renderStats, לא קוד מיוחד בפקטורי):
+             P channel (קרקע→מטוס, שידור-שידור גלובלי מה-GES) הרבה יותר קל
+             לנעול מ-R channel (מטוס→קרקע, חלש ותלוי-כיוון האנטנה שבמטוס).
+             נצפה בשטח: קליטה ראשונה מוצלחת הייתה 100% uplink (206/206 הודעות,
+             54 מטוסים שונים) — סימן ל"נועלים P בלבד", לא לתקלה. הפירוט הזה
+             הופך את זה לגלוי במקום נסתר בתוך הפיד. -->
+        <div class="acars-stat" title="מהקרקע אל המטוס (P channel, בד״כ הראשון שנועל)"><b id="satcomStUp">0</b><span>⬆ מקרקע</span></div>
+        <div class="acars-stat" title="מהמטוס אל הקרקע (R/C channel, נדרש קישור טוב יותר)"><b id="satcomStDown">0</b><span>⬇ ממטוס</span></div>
       </div>
       <div class="rate-spark" title="קצב הודעות · 2 הדקות האחרונות">
         <span>📈</span><canvas id="satcomRateSpark"></canvas>
@@ -2422,6 +2509,7 @@
       $("satcomAimEbno").parentElement.classList.remove("locked");
       aimHist.length = 0;
       drawMiniSpark($("satcomAimSpark"), aimHist, AIM_HIST_N, "#5fce85", AIM_SCALE_DB);
+      renderSpecIdle("—");
     }
 
     async function pollSatcomHealth() {
@@ -2456,6 +2544,8 @@
           : "עדיין אין נעילה — סובב את האנטנה לאט ועקוב אחרי הגרף.";
         drawMiniSpark($("satcomAimSpark"), aimHist, AIM_HIST_N, "#5fce85", AIM_SCALE_DB);
 
+        syncSpecChannels(chans);
+        specAvailable = h.spectrum !== false;   // undefined בגרסת שרת ישנה => לא חוסמים
         $("satcomAimChans").innerHTML = chans.map((c) => {
           const nd = aimNoDemod(c);
           return '<div class="aim-chan' + (c.lock ? " locked" : "") + '">' +
@@ -2470,6 +2560,108 @@
         renderAimIdle("אין תשובה מה-Pi.");
       } finally { satcomHealthInFlight = false; }
     }
+    /* ---------- ספקטרום הערוץ: "יש RF בכלל?" ----------
+       ⚠ הבעיה שזה פותר: ‏lock=false + ebno="—" הוא בדיוק אותו חיווי עבור
+       (א) אנטנה מנותקת, (ב) LNA בלי מתח (bias-T כבוי / מעל 100mA של ה-RSP1B),
+       (ג) כיוון שגוי. שלוש תקלות, טיפול שונה לגמרי, חיווי זהה. רצפת הרעש
+       מפרידה ביניהן: LNA מוזן מקפיץ אותה בעשרות dB מול שרשרת מתה.
+       §12: אנחנו מציגים את ה-dB **הגולמי מהמפענח** ולא ממציאים סף "טוב/רע" —
+       ההשוואה שהמשתמש עושה בעצמו (נתק/חבר את ה-LNA וראה אם הרצפה זזה) היא
+       המדידה. הרמז בטקסט מנוסח כהוראת-פעולה, לא כפסק-דין. */
+    let specAvailable = true;         // מתעדכן מ-/api/satcom/health (spectrum_enabled)
+    let specInFlight = false;
+    let specChIds = "";               // חתימת רשימת הערוצים — בונים select רק כשהיא משתנה
+
+    function syncSpecChannels(chans) {
+      const sig = chans.map((c) => c.ch + ":" + c.baud).join(",");
+      if (sig === specChIds) return;
+      specChIds = sig;
+      const sel = $("satcomSpecCh"), prev = sel.value;
+      sel.innerHTML = chans.map((c) =>
+        '<option value="' + c.ch + '">ch' + c.ch + " · " + fmtBaud(c.baud) + "</option>").join("");
+      // שמירה על בחירת המשתמש בין רענונים; אחרת ch0 (ה-P-channel — הערוץ
+      // הרציף מהתחנה הקרקעית, זה שאמור להיות שם *תמיד* כשהכיוון נכון).
+      if (prev && chans.some((c) => String(c.ch) === prev)) sel.value = prev;
+    }
+
+    function renderSpecIdle(txt) {
+      $("satcomSpecFloor").textContent = "—";
+      $("satcomSpecPeak").textContent = "—";
+      $("satcomSpecHint").textContent = txt;
+      drawSpectrum($("satcomSpecCv"), null);
+    }
+
+    // ציור ספקטרום: סקאלת Y נגזרת מהנתונים עצמם (min..max) — אין "סף" לצייר
+    // מולו, וסקאלה קבועה הייתה מסתירה בדיוק את מה שמחפשים (תזוזה של הרצפה).
+    function drawSpectrum(cv, mags) {
+      if (!cv) return;
+      const dpr = window.devicePixelRatio || 1;
+      const w = cv.clientWidth, h = cv.clientHeight;
+      if (!w) return;
+      if (cv.width !== w * dpr) { cv.width = w * dpr; cv.height = h * dpr; }
+      const ctx = cv.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      if (!mags || mags.length < 2) return;
+      let lo = Math.min.apply(null, mags), hi = Math.max.apply(null, mags);
+      if (hi - lo < 6) { const mid = (hi + lo) / 2; lo = mid - 3; hi = mid + 3; }  // אות שטוח לגמרי
+      const y = (v) => h - (v - lo) / (hi - lo) * (h - 4) - 2;
+      const x = (i) => (i / (mags.length - 1)) * w;
+      const grad = ctx.createLinearGradient(0, 0, 0, h);
+      grad.addColorStop(0, "#4da3ff4d"); grad.addColorStop(1, "#4da3ff00");
+      ctx.beginPath();
+      mags.forEach((v, i) => (i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v))));
+      ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+      ctx.fillStyle = grad; ctx.fill();
+      ctx.beginPath();
+      mags.forEach((v, i) => (i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v))));
+      ctx.strokeStyle = "#4da3ff"; ctx.lineWidth = 1.2; ctx.lineJoin = "round"; ctx.stroke();
+    }
+
+    const median = (a) => {   // רצפת רעש = חציון, לא ממוצע: עמיד לגבנון האות עצמו
+      const s = a.slice().sort((p, q) => p - q);
+      return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
+    };
+
+    async function pollSatcomSpectrum() {
+      if (specInFlight) return;
+      specInFlight = true;
+      try {
+        const ch = $("satcomSpecCh").value || "0";
+        const s = await fetchJSON("/api/satcom/spectrum?ch=" + encodeURIComponent(ch));
+        if (!s.ok || !s.available || !s.mags_db || !s.mags_db.length) {
+          renderSpecIdle(specAvailable
+            ? "אין נתוני ספקטרום לערוץ הזה."
+            : "הספקטרום כבוי במפענח — הפעל מחדש את SATCOM כדי לאפשר אותו.");
+          return;
+        }
+        const mags = s.mags_db;
+        const floor = median(mags), peak = Math.max.apply(null, mags);
+        $("satcomSpecFloor").textContent = floor.toFixed(1) + " dB";
+        $("satcomSpecPeak").textContent = peak.toFixed(1) + " dB";
+        drawSpectrum($("satcomSpecCv"), mags);
+        // הוראת-פעולה, לא פסק-דין: אנחנו לא יודעים מהי "רצפה תקינה" בהתקנה
+        // הזו — אבל המשתמש יכול לגלות את זה בעשר שניות (§12).
+        $("satcomSpecHint").textContent = "השווה: נתק את ה-LNA מהאנטנה וראה אם "
+          + "רצפת הרעש צונחת. אם היא לא זזה כלל — האות לא מגיע למקלט בכלל "
+          + "(אנטנה/כבל/מתח ל-LNA), ולא שאלה של כיוון.";
+      } catch (e) {
+        renderSpecIdle("אין תשובה מה-Pi.");
+      } finally { specInFlight = false; }
+    }
+
+    /* ---------- לוג המפענח (על דרישה) ---------- */
+    $("satcomLogBtn").onclick = async function () {
+      const box = $("satcomLogBox");
+      if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
+      box.classList.remove("hidden");
+      box.textContent = "טוען…";
+      try {
+        const r = await fetchJSON("/api/satcom/log");
+        box.textContent = (r.log || "").trim() || "היומן ריק.";
+      } catch (e) { box.textContent = "לא ניתן לקרוא את היומן."; }
+    };
+
     // קצב 1 שנייה (ולא 5) — כיוון אנטנה דורש משוב כמעט-מיידי, כמו מדדי ה-RF
     // של הקול. רץ רק בתצוגת satcom וכשהדף גלוי, וה-in-flight guard מונע ערימה.
     // ⚠ וגם רק כשהמקלט *באמת* פעיל: כל בקשה גורמת ל-_is_active בשרת, שהוא
@@ -2479,6 +2671,11 @@
     setInterval(() => {
       if (!document.hidden && appMode === "satcom" && satcom && satcom.active) pollSatcomHealth();
     }, 1000);
+    // הספקטרום איטי יותר בכוונה (2ש'): מטען כבד פי כמה (256 ערכים) ומדד
+    // "האם יש RF בכלל" משתנה לאט — בניגוד ל-Eb/No שמגיב לסיבוב אנטנה מיידית.
+    setInterval(() => {
+      if (!document.hidden && appMode === "satcom" && satcom && satcom.active) pollSatcomSpectrum();
+    }, 2000);
 
     /* ---------- חיווי מתח ל-Pi ---------- */
     // המתח משתנה לאט => פולינג כל 5 שניות. החיווי החשוב ביותר לסוללה ניידת הוא
@@ -2963,7 +3160,7 @@
           satcom.setActive(live === "satcom");
           // המקלט נדלק ממקום אחר (טלפון שני/⏻) — פאנל הכיוון לא מפולל כשהמקלט
           // כבוי (ר' ה-interval), אז מתניעים אותו כאן במקום לחכות לגילוי.
-          if (live === "satcom" && appMode === "satcom") pollSatcomHealth();
+          if (live === "satcom" && appMode === "satcom") { pollSatcomHealth(); pollSatcomSpectrum(); }
         }
         updateSdrPip(); renderPower();
         if (scanning) {
@@ -3004,7 +3201,7 @@
       if (mode === "satcom") satcom.show(); else satcom.hide();
       // רענון מיידי של מכשיר הכיוון — בלי זה הפאנל ריק עד לטיק הבא (שנייה),
       // ובכניסה חוזרת מוצגים נתונים ישנים לרגע. גם מיישר את שורת ההצעה.
-      if (mode === "satcom") { pollSatcomHealth(); renderPowerAdvice(); }
+      if (mode === "satcom") { pollSatcomHealth(); pollSatcomSpectrum(); renderPowerAdvice(); }
     }
 
     async function applyMode(mode, extra) {
@@ -3093,6 +3290,11 @@
             renderPowerAdvice();   // קביעה תוכניתית לא מפעילה onchange
           }
           if (typeof data.satcom_skip_c === "boolean") $("satcomSkipC").checked = data.satcom_skip_c;
+          if ("satcom_gain" in data) {
+            $("satcomAgc").checked = !(typeof data.satcom_gain === "number");
+            if (typeof data.satcom_gain === "number") $("satcomGain").value = 59 - data.satcom_gain;
+            renderSatcomGainUI();
+          }
           satcom.setActive(true);
           renderPower();
           satcom.poll();                       // רענון מיידי אחרי ש-inmarsat-sniffer עלה
@@ -3855,6 +4057,11 @@
         let rate = 0;
         if (ts.length >= 2) { const span = (Math.max(...ts) - Math.min(...ts)) / 60; rate = span > 0.1 ? ts.length / span : 0; }
         E("StRate").textContent = rate ? rate.toFixed(1) : "0";
+        // ⬆/⬇ קיימים רק ב-satcom (ר' ההערה ליד satcomStUp ב-HTML) — E() מחזיר
+        // null בתצוגות אחרות, לכן מוגן ולא מחושב לחינם כשלא מוצג.
+        const stUp = E("StUp"), stDown = E("StDown");
+        if (stUp) stUp.textContent = msgs.filter((m) => m.dir === "uplink").length;
+        if (stDown) stDown.textContent = msgs.filter((m) => m.dir === "downlink").length;
       }
       function renderFilters() {
         const box = E("Filters");
@@ -4278,10 +4485,25 @@
       renderPowerAdvice();
     };
     $("satcomExternalLna").onchange = renderPowerAdvice;
+    // gRdB לשליחה: null = AGC. הסליידר מציג *רווח* (0-39dB) וה-gRdB הוא
+    // ההפחתה המשלימה — אותה היפוך בדיוק כמו sliderToIFGR של הקול.
+    const satcomGainVal = () =>
+      $("satcomAgc").checked ? null : 59 - parseInt($("satcomGain").value, 10);
+
+    function renderSatcomGainUI() {
+      const auto = $("satcomAgc").checked;
+      $("satcomGainVal").textContent = $("satcomGain").value;
+      $("satcomGainWrap").classList.toggle("dim", auto);
+      $("satcomGain").disabled = auto;
+    }
+    $("satcomAgc").onchange = renderSatcomGainUI;
+    $("satcomGain").oninput = renderSatcomGainUI;
+
     function enterSatcom() {
       if (!confirmSatcomAntenna()) return;
       const extra = { bias_tee: !$("satcomExternalLna").checked,
-                      skip_c: $("satcomSkipC").checked };
+                      skip_c: $("satcomSkipC").checked,
+                      gain: satcomGainVal() };
       if (satcom.selFreqs) extra.freqs = satcom.selFreqs;
       applyMode("satcom", extra);
     }
@@ -4449,6 +4671,11 @@
       // אותו נימוק (enterSatcom נקרא גם מחוץ לתצוגה), רק בלי סיכון החומרה:
       // ‏state ישן בלי השדה => ברירת המחדל החסכונית, כמו בשרת.
       $("satcomSkipC").checked = st.satcom_skip_c !== false;
+      // רווח: null/חסר => AGC. מספר => ידני, והסליידר מציג את הרווח (59 − gRdB).
+      var sg = st.satcom_gain;
+      $("satcomAgc").checked = !(typeof sg === "number");
+      if (typeof sg === "number") $("satcomGain").value = 59 - sg;
+      renderSatcomGainUI();
       // app_mode מגיע מהמציאות (השירות הפעיל), ובאין צרכן — מהכוונה השמורה
       // (mode_ok=false אומר שהמצב השמור אמור לרוץ אבל לא רץ). נוחתים בתצוגת
       // המצב הפעיל; off/תקלה נוחתים במסך הבית (התצוגה הניטרלית).

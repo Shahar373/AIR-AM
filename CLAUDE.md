@@ -132,7 +132,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_app.py              # render_config, parse, presets, מדדים, יומן, רולבק/נפילה-ל-off.
   test_acars.py            # נרמול ACARS, latlon, labels, ATIS, OOOI, actype, מעברי מצב.
   test_vdl2.py             # נרמול VDL2 (מסלול A/B), env, מעברי מצב, ייצוא, health.
-  test_satcom.py           # נרמול SATCOM (inmarsat-sniffer JSON, מאומת מהמקור), env, מעברי מצב, ייצוא.
+  test_satcom.py           # נרמול SATCOM (inmarsat-sniffer JSON, מאומת מהמקור), env, מעברי מצב, ייצוא,
+                           #   שלושת מתגי ה-satcom (bias_tee/skip_c/spectrum), health/spectrum/log.
   test_boot.py             # _boot_restore: שחזור המצב באתחול (המתזמר) — כולל SATCOM.
   test_scan.py             # מצב סריקה: validate_scan_plan, _scan_loop, /api/mode, /api/scan, boot restore.
   test_roster.py           # רוסטר מטוסים מאוחד: היתוך זהות ACARS/VDL2/ADS-B, מיון, /api/aircraft.
@@ -160,9 +161,9 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 | `/etc/rtl_airband/airband.conf` | קונפיג קול חי (תדר נבחר) | app.py בכל `/api/tune` |
 | `/etc/airam/acars.env` | תדרי ACARS חיים | app.py בכל מעבר ל-ACARS |
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
-| `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain, bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
+| `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain (`--sdrplay-gain=N` או ריק=AGC), bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `signal_baseline`, `last_session_view_at`) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline`, `last_session_view_at`) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
 | `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
@@ -178,7 +179,9 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 הקובץ מאורגן בבלוקים מסומנים `# --- ... ---`. נקודות עיקריות:
 
 - **קבועים (ל~145):** נתיבים, gain של SDRplay (IFGR 20–59 / RFGR 0–9, **קטן=רווח גדול**),
-  ספי squelch, קבועי ACARS, מילוני `ACARS_LABELS` ו-`_ACARS_DIR_BY_LABEL`, הקלטות, whisper.
+  ספי squelch, קבועי ACARS, מילוני `ACARS_LABELS` ו-`_ACARS_DIR_BY_LABEL` (חלקם
+  התווספו רק מקליטת שטח אמיתית — למשל `A0`/`1B`/`4P`/`2F`, לייבלים שנצפו
+  בקליטת SATCOM ראשונה מוצלחת ולא היו מתועדים קודם; ר' §12), הקלטות, whisper.
 - **`_guard` (before_request):** אכיפת אבטחה לכל בקשה משנת-מצב — בדיקת `Origin==Host`
   (CSRF/DNS-rebind) + PIN אופציונלי. **כל route שמשנה מצב חייב לעבור דרכו.**
 - **בניית קונפיג קול:** `render_config` → `write_config` (כתיבה אטומית), `_squelch_line`
@@ -221,9 +224,14 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   **מדדי איכות קליטה** — `level`=dBFS מקורי מהמפענח (נשמר כמות שהוא); `snr` מחושב
   **רק** כש-`noise` קיים בקלט (acarsdec עצמו לא מספק רצפת רעש לכל הודעה — ראו
   bullet הבא — כך שב-ACARS אמיתי `snr` תמיד None; ה-dBm נדחה במכוון, ראו §12),
-  `_text_latlon`/`_scan_latlon` (חילוץ מיקום), פרסרים לפי label: `_parse_atis` (A9),
+  `_text_latlon`/`_scan_latlon` (חילוץ מיקום — `_text_latlon` דורש בדיוק התאמה
+  *אחת* בטקסט; 2+ = שרשרת waypoints (מסלול טיסה), לא דיווח מיקום בודד, ר' §12),
+  פרסרים לפי label: `_parse_atis` (A9),
   `_parse_oooi_80` (80), `_parse_wx_alternates` (WX), `_parse_sa_media` (SA),
-  `_parse_h1`+`_parse_fpn` (H1 sub-labels + תוכנית טיסה), `_parse_label15` (נ"צ, גם עם
+  `_parse_h1`+`_parse_fpn` (H1 sub-labels + תוכנית טיסה — `_H1_SUB_RE` תופס `#`
+  גם אחרי prefix כמו `"- "`/`\n` (לא רק בתחילת הטקסט ממש), `_parse_fpn` תופס גם
+  `"M3FPN/"` בלי קו-נטוי פותח — שני הפורמטים נצפו בקליטת SATCOM אמיתית, ר' §12),
+  `_parse_label15` (נ"צ, גם עם
   error — מבני), `_parse_sq` (squitter תחנה, בלי נ"צ), `_parse_autotune` (`:;`),
   `_parse_loadsheet` (C1, ZFW/TOW/נוסעים), `_parse_pdc` (A3, אישור טרום-המראה),
   `_parse_label16`/`_parse_nav_fuel` (16/1L, נ"צ עשרוני — לא-מתועדים ב-ARINC, זוהו
@@ -247,20 +255,43 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 - **SATCOM (מצב רביעי, ACARS דרך לוויין Inmarsat):** `_satcom_listener` (thread, מאזין
   UDP 5558 מ-`inmarsat-sniffer`), `_normalize_satcom` (מסלול יחיד — הכלי מפיק רק ACARS:
   מסנתז dict בסגנון acarsdec משדות `isu.acars.*` (סכמת JAERO JSONdump, אומתה מ-`feed.c`
-  במקור) ומזרים דרך `_normalize_acars` ⇒ כל הפרסרים חלים; `arinc622` מקונן ⇒ ADS-C בחינם;
-  `src/dst.type` "Aircraft/Ground Earth Station" קובע `dir` מבני. **בלי `level`/`snr`/`freq`**
+  במקור) ומזרים דרך `_normalize_acars` ⇒ כל הפרסרים חלים; `arinc622` מקונן ⇒ ADS-C בחינם —
+  **מאומת בקליטת שדה אמיתית** (לא רק הנחה מהמקור): הודעת A6 אמיתית עם
+  `arinc622.acars.arinc622.adsc.basic_report.{lat,lon}` הניבה `pos_src="adsc"` עם נ"צ
+  אמיתי על המפה. **CPDLC (label AA) גם נצפה בשפע בקליטה** (14 הודעות ב-33 דק') אבל
+  ברוב המקרים `decoded` נשאר `None` — לא כי הקוד לא מטפל בזה, אלא כי **המפענח עצמו
+  (`inmarsat-sniffer`/`libacars`) נכשל בפענוח היישום המקונן** (`"cpdlc":{"err":true}`
+  בפנים, גם כש-`crc_ok` של המעטפת החיצונית תקין — כנראה איתות שולי מדי לתוכן ברמת
+  נעילה ראשונית). `_libacars_decode` (משותף ל-SATCOM/VDL2 מסלול B) מחזיר כעת 3-tuple: `(kind, text, decode_failed)`
+  — `decode_failed=True` (נגזר מסריקה רקורסיבית אחר `"err":true` נכשל אחר; §12: לא
+  ממציאים טקסט, אבל *כן* חושפים שהיה ניסיון) מציג `decoded="לא פוענח — המפענח החזיר
+  שגיאה (כנראה איתות שולי)"` במקום `None` סתמי, כדי להבדיל "לא ניסינו" מ"ניסינו
+  ונכשלנו". **פענוח CPDLC-לטקסט-קריא עצמו (clearance/instruction) עדיין לא מומש** —
+  דורש דגימת JSON גולמית עם `cpdlc.err=false` (עדיין לא נצפתה בקליטת שדה) לפני שבונים
+  אקסטרקטור בלי לנחש שמות שדות. `src/dst.type` "Aircraft/Ground Earth Station" קובע
+  `dir` מבני. **בלי `level`/`snr`/`freq`**
   — הכלי לא חושף אותם (§12), ו-`isu.refno`≠MSN ⇒ `msgno` לא ממופה), `write_satcom_env`
   (לוויין `--satellite=`, `SATCOM_GAIN`=`--sdrplay-gain` (נייטיבי, לא `--soapy-gain`) או
-  ריק=AGC, `SATCOM_BIAS_TEE`=`-B`/ריק, `SATCOM_SKIP_C`=`--skip-c-channel`/ריק — ר' §12),
+  ריק=AGC — נבחר מה-UI דרך `_sanitize_satcom_gain` (`None`=AGC / int 20–59, ר' §12), `SATCOM_BIAS_TEE`=`-B`/ריק, `SATCOM_SKIP_C`=`--skip-c-channel`/ריק — ר' §12),
   `_enter_satcom` (עוצר שלושת האחרים, מנקה
   תקרת-הפעלות קודמת עם `reset-failed` לפני ה-restart — ר' §12, מרים
   inmarsat-sniffer, verify), `_sanitize_satellite`/`_satcom_window_error` (לוויין יחיד
   מתוך `SATCOM_BANKS`, לא בנק תדרים), `SATCOM_BANKS` (לוויינים: AF1/4F3/3F5/F1). התמדה:
   `_append_satcom_log`/`_trim_satcom_log`/`_load_satcom_history` (clones של צמד ה-VDL2).
-  **אבחון:** `_fetch_satcom_web_state`/`api_satcom_health` — proxy מקומי (כמו
-  `/stream`) ל-dashboard האבחוני המובנה של inmarsat-sniffer (`--web=SATCOM_WEB_PORT`,
+  **אבחון (שלוש שכבות, כל אחת עונה על שאלה שהקודמת לא יכולה):** (1)
+  `_fetch_satcom_web_state`/`api_satcom_health` — proxy מקומי (כמו `/stream`)
+  ל-dashboard האבחוני המובנה של inmarsat-sniffer (`--web=SATCOM_WEB_PORT`,
   ברירת מחדל 8888): נעילת דמודולטור/ebno/mse לכל ערוץ, גם באפס הודעות — ההבדל
   בין "אין אנטנה" ל"תקין, שקט כרגע" (`_is_active` בלבד לא מבחין ביניהם).
+  (2) `api_satcom_spectrum` (`GET /api/satcom/spectrum`, דרך `_fetch_satcom_web`
+  הגנרי, דורש `--spectrum`) — **ההבחנה שחסרה בשכבה (1): `lock=false` הוא בדיוק
+  אותו חיווי עבור אנטנה מנותקת, LNA בלי מתח, וכיוון שגוי ב-5°.** רצפת הרעש
+  ב-`mags_db` מפרידה ביניהם (LNA מוזן מקפיץ אותה בעשרות dB). מוגש גולמי, בלי
+  סף (§12) — ה-UI מנסח הוראת-פעולה ("נתק את ה-LNA וראה אם הרצפה זזה"), לא
+  פסק-דין. (3) `api_satcom_log` (`GET /api/satcom/log`) — זנב journalctl **על
+  דרישה בלבד** (fork; ה-health כבר בקצב 1s): `sdrplay: bias tee enabled` מול
+  `bias tee not supported on this model` הוא התשובה הוודאית היחידה לשאלה "האם
+  ה-LNA בכלל מקבל מתח", ובשטח מהטלפון אין SSH.
 - **רוסטר מטוסים מאוחד:** `_aircraft_identity` (מפתח זהות מהודעה מנורמלת — רישום
   מנורמל קודם, אחרת icao, אחרת מספר טיסה), `_build_roster` (מהתך `_acars_msgs`+
   `_vdl2_msgs`+`_satcom_msgs` לפי הזהות, מעשיר ב-`adsb.aircraft_snapshot`, ממוין lastT
@@ -337,7 +368,11 @@ ADS-B מ-`GET /api/aircraft`, כולל כשה-SDR ב-standby; כולל מקור 
 בין הערוצים — האות שמכווננים לפיו תוך סיבוב האנטנה) + גרף היסטוריה (`drawMiniSpark`
 עם פרמטר חמישי אופציונלי `fixedMax` — סקאלה קבועה 0–15dB כדי שרעש זעיר לא ייראה
 כאות חזק; קוראי rate-spark הקיימים של ACARS/VDL2 לא מעבירים אותו ולא מושפעים),
-ופירוט פר-ערוץ. צביעה **לפי `lock` בלבד** (לא סף Eb/No מומצא — ר' §12); `ebno=0 &&
+ופירוט פר-ערוץ, **וכן ספקטרום הערוץ הנבחר** (`pollSatcomSpectrum`, 2ש' — איטי
+יותר מה-health בכוונה: מטען כבד פי כמה, ומדד "יש RF בכלל" משתנה לאט) עם רצפת
+רעש (חציון — עמיד לגבנון האות עצמו) ושיא ב-dB, `drawSpectrum` בסקאלת Y
+נגזרת-מהנתונים (סקאלה קבועה הייתה מסתירה בדיוק את מה שמחפשים — תזוזת הרצפה),
+וכפתור **📜 לוג המפענח** (`GET /api/satcom/log`, על דרישה בלבד). צביעה **לפי `lock` בלבד** (לא סף Eb/No מומצא — ר' §12); `ebno=0 &&
 !lock && mse≈1.0` (חתימת "אין דמודולטור" מהמקור) מוצג כ-"—" ולא כ-"0.0 dB" מטעה.
 `pollPower` (בכל תצוגה) מזין גם **הגנת מתח**: `confirmSatcomAntenna()` מוסיף אזהרה
 כשזוהתה צניחת מתח/throttling, ושורת הצעה לא-חוסמת בתצוגת SATCOM מציעה בנקישה אחת
@@ -369,7 +404,18 @@ cursor/filters משלו — כלום לא משותף בזיכרון בין הש�
 `opts.onReset()` — נקרא כשה-cursor מתאפס (ACARS: מנקה את לוח ה-ATIS מהסשן
 הקודם; VDL2/SATCOM לא מעבירים). `opts.emptyHint`
 — טקסט מותאם למצב "אין הודעות עדיין" (VDL2: הפניה לתדר 136.975; SATCOM: הפניה
-לאנטנת L-band/Alphasat; ACARS מקבל ברירת מחדל גנרית). הפקטורי עושה שימוש חוזר
+לאנטנת L-band/Alphasat; ACARS מקבל ברירת מחדל גנרית). `renderStats()` (משותף)
+מכיל שתי שורות מוגנות-DOM (`E("StUp")`/`E("StDown")`, `null` בתצוגות בלי
+האלמנטים) שממלאות שני תגי סטטיסטיקה **SATCOM-only** (`satcomStUp`/
+`satcomStDown` — לא קיימים ב-`#acarsView`/`#vdl2View`) לספירת `dir===
+"uplink"/"downlink"`. זה לא קוד-מיוחד-מחוץ-לפקטורי (העיקרון בפסקה הבאה) —
+זו התאמה דרך *נוכחות ה-DOM* בהתאם ל-HTML של כל תצוגה, בדיוק כמו `opts.emptyHint`.
+**הסיבה שזה קיים רק ב-SATCOM:** קליטת שטח ראשונה שהצליחה (16 דק', 206 הודעות,
+54 מטוסים) הייתה **100% uplink** — ה-P channel (קרקע→מטוס, שידור-שידור גלובלי
+חזק מה-GES) נועל ראשון וקל; ה-R/C channels (מטוס→קרקע, מקור התוכן ה"אמיתי" —
+OOOI/דיווחי מיקום/הודעות טייס) חלשים משמעותית ותלויי-כיוון אנטנת המטוס. בלי
+פירוט כיווני, "P channel בלבד" ו"קליטה דו-כיוונית מלאה" נראים זהים בפיד —
+זו לא תקלה, אלא סימן ברור למה עוד לכוון/לחזק. הפקטורי עושה שימוש חוזר
 בעוזרים ה*טהורים* הגלובליים בלבד (`fmtTime`/`mkSpan`/`dirBadge`/`normReg`/`trackColor`/
 `CAT_GROUPS`/`DIR_INFO`/`MULTIBLOCK_RE`/`RETRANS_WINDOW_S`/`msgSig`/`patchMsgTime`/
 `reconcileFeed`/`segSet`/`qualityCls` — מיון dBFS/SNR לשלוש רמות צבע). `showView`
@@ -437,7 +483,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `scan_plan`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`) |
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
-| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית) ו-`skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12). לשניהם: ברירת מחדל = הבחירה השמורה, ואם אין אחת — `true`. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
+| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית), `skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12), `spectrum` (bool אופציונלי — `false` לכיבוי האבחון, ר' §9/§12) ו-`gain` (‏`null`=AGC (ברירת מחדל) או מספר=gRdB ידני 20–59, נחתך; ר' §12). לכולם: ברירת מחדל = הבחירה השמורה. ⚠ ב-`gain` בלבד `null` הוא **ערך משמעותי** (AGC מפורש) ולא היעדר — הזיהוי הוא לפי נוכחות המפתח בגוף הבקשה. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
 | GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור) |
 | GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון; `?day=YYYY-MM-DD` ארכיון מהדיסק, snapshot סטטי) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט; לא ב-`?day=`). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM, עמודות `level`+`snr`) |
@@ -445,7 +491,9 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/vdl2/export?format=csv\|json` | ייצוא VDL2 (CSV עם BOM, עמודות `icao`+`level`+`snr`) |
 | GET | `/api/satcom` | הודעות SATCOM (Inmarsat, inmarsat-sniffer) אחרונות — אותם `?since=`/`?all=1`/`?day=`. אותה סכמת כרטיס כמו ACARS; **בלי** `level`/`snr`/`freq`/`adsb` (המפענח לא חושף אותם ב---feed/--udp — לעולם לא מומצאים, ראו §12) |
 | GET | `/api/satcom/export?format=csv\|json` | ייצוא SATCOM (אותן עמודות כמו ACARS export) |
-| GET | `/api/satcom/health` | אבחון SATCOM — proxy מקומי ל-dashboard האבחוני המובנה של inmarsat-sniffer (`--web`): נעילת דמודולטור/ebno/mse לכל ערוץ, גם באפס הודעות מפוענחות. `available:false` (לא שגיאה) כש-satcom כבוי/dashboard לא זמין |
+| GET | `/api/satcom/health` | אבחון SATCOM — proxy מקומי ל-dashboard האבחוני המובנה של inmarsat-sniffer (`--web`): נעילת דמודולטור/ebno/mse לכל ערוץ, גם באפס הודעות מפוענחות. `available:false` (לא שגיאה) כש-satcom כבוי/dashboard לא זמין. כולל `spectrum` (‎`spectrum_enabled` **של הכלי עצמו**, לא ה-state שלנו — האם `/api/satcom/spectrum` יעבוד *עכשיו*) |
+| GET | `/api/satcom/spectrum?ch=N&bins=N` | ספקטרום baseband של ערוץ בודד (proxy ל-`/api/spectrum` של הכלי, דורש `--spectrum`). **האבחון היחיד שמפריד "אין RF בכלל" מ"יש RF, לא נעול"** — `lock`/`ebno` מציגים את שניהם זהים. `mags_db` מוגש **כמות שהוא**, בלי סף/ציון מומצא (§12). `bins` נחתך ל-32..1024 כמו ב-`web.c`. `available:false` (לא שגיאה) כשכבוי/ערוץ לא קיים |
+| GET | `/api/satcom/log` | זנב `journalctl -u airam-satcom` (‎`SATCOM_LOG_TAIL_LINES`=40). שורות הפתיחה מכריעות אם ה-bias-T נדלק (`sdrplay: bias tee enabled` מול `bias tee not supported on this model`) — בשטח אין SSH. **על דרישה בלבד**, לא בפולינג (fork ל-journalctl) |
 | GET | `/api/aircraft` | רוסטר מטוסים מאוחד — היתוך ACARS+VDL2+SATCOM+ADS-B לפי זהות (רישום/icao/טיסה). חי בכל מצב |
 | GET | `/api/session` | דוח סשן ("מה קרה בזמן שלא הסתכלת"): כמות הודעות/מטוסים (וחדשים), עד `SESSION_HIGHLIGHTS_MAX` הודעות `notable` (ר' `_interest_score`), ומסלול פעיל/שיבוש GPS מתוך `adsb.session_series`. קורא מהדיסק (jsonl), לא מהזיכרון — עקבי עם `?day=`. `?since=<epoch>` דורס את הסמן השמור; `GET` idempotent — לא מקדם אותו |
 | POST | `/api/session/ack` | מקדם את הסמן (`state["last_session_view_at"]`) ל"עכשיו" — הפעולה המפורשת היחידה שמקדמת אותו. דרך `_guard` |
@@ -476,6 +524,14 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
   ‏`inmarsat-sniffer --web` לא ניתן להגבלה ל-loopback דרך הכלי עצמו (נבדק
   במקור). נגיש ברשת המקומית גם בלי `GET /api/satcom/health` (ה-proxy של
   airam-web) — אותה קטגוריית סיכון בדיוק כמו Icecast (גם הוא בלי אימות).
+  ⚠ **`--spectrum` (דלוק כברירת מחדל) מוסיף לאותו פורט גם `GET /api/tune?ch=N&hz=X`
+  — endpoint משנה-מצב** (retune של דמודולטור), בנוסף ל-`/api/spectrum`/
+  `/api/constellation` הקוראים בלבד. זה לא נוגע ב-state של AIR-AM ולא ב-SDR
+  עצמו (רק בדמודולטור של הכלי, עד ההפעלה הבאה), אבל זו הרחבה אמיתית של משטח
+  התקיפה על פורט לא-מאומת. לכן זה **מתג** (`POST /api/mode {mode:"satcom",
+  spectrum:false}`, נשמר ב-`state["satcom_spectrum"]`) ולא קבוע — מי שמעדיף
+  לוותר על האבחון יכול לכבות. ההצדקה לברירת המחדל: בלי נעילה המצב חסר ערך
+  ממילא, וזה הכלי היחיד שמאבחן *למה* אין נעילה (ר' §12).
 - מיועד **לרשת פרטית בלבד**. אל תחשוף 8080/8000/8888 לאינטרנט; לגישה מרחוק — VPN/Tailscale.
 
 ---
@@ -582,6 +638,36 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   ‏`POST /api/mode {mode:"satcom", skip_c:false}` מחזיר את כל 12 הערוצים.
   ⚠ ה-auto-enable של הדגל במקור עטוף ב-`#ifdef HAVE_RTLSDR` ⇒ **ב-SDRplay
   הוא לא נדלק לבד** — חייבים להעביר אותו במפורש, וזה מה ש-`SATCOM_SKIP_C` עושה.
+  (6) **`spectrum` — אבחון, לא חיסכון (המתג היחיד מהשלושה שלא נוגע בחשמל).**
+  ‏`lock`/`ebno` לבדם מציגים **בדיוק אותו חיווי** ("אין נעילה") עבור אנטנה
+  מנותקת, LNA בלי מתח, וכיוון שגוי — שלוש תקלות עם טיפול שונה לגמרי. רצפת
+  הרעש ב-`GET /api/satcom/spectrum` היא ההפרדה היחידה: LNA מוזן מקפיץ אותה
+  בעשרות dB. **דולק כברירת מחדל** (`state["satcom_spectrum"]=True`) — עלות
+  CPU רציפה **אפס** (`web_get_spectrum_by_channel` קורא את מצב הדמודולטור
+  הקיים, בלי ring buffer ובלי FFT מתמשך — אומת מ-`web.c`/`main.c`), ובלי
+  נעילה המצב חסר ערך ממילא. המחיר האמיתי הוא **אבטחתי**: הדגל מוסיף גם
+  `GET /api/tune` (משנה-מצב) לפורט הלא-מאומת — ר' §9, ולכן זה מתג ולא קבוע.
+  ⚠ §12 חל כאן בדיוק כמו על `snr`/Eb·No: `mags_db` מוגש **גולמי**, ואין שום
+  סף "רצפה תקינה" — אין ערך כזה שנכון לכל התקנה. ה-UI מנסח **הוראת-פעולה**
+  ("נתק את ה-LNA וראה אם הרצפה זזה") שהופכת את המשתמש למדידה, במקום ניחוש שלנו.
+  ⚠ **חומרה: `bias_tee` של ה-RSP1B נותן 100mA ו-SAWbird+ iO צורך ~180mA
+  נומינלית** (מפרט היצרן) — הוא לא נכנס בתקציב. LNA תת-מוזן לא נכשל בצורה
+  ברורה, והתסמין זהה ל"לא מכוון"; זה החשוד מספר 1 ל"מעולם לא הייתה נעילה".
+  (7) **`gain` — AGC מול gRdB ידני, ו*למה* זה לא מקביל לרווח של הקול.**
+  ‏`SATCOM_GAIN` ריק (ברירת מחדל) => `sdrplay_api_AGC_5HZ` עם setpoint
+  ‎`-30dBfs`; `--sdrplay-gain=N` => `gRdB=N` (נחתך 20..59), **`LNAstate=0`
+  מקובע**, ו-`AGC_DISABLE` (הכול מצוטט מ-`sdrplay.c` ליד `SATCOM_GAIN_DEFAULT`).
+  שתי מסקנות: (א) הטווח **זהה ל-IFGR של הקול** (`IFGR_MIN`/`IFGR_MAX`) ובעל
+  אותה סמנטיקה הפוכה — לכן משתמשים באותם קבועים ובאותו היפוך-סליידר;
+  (ב) **אין `RFGR`/`LNAstate` לשלוט בו כמו בקול** — הכלי מקבע רווח RF מקסימלי,
+  ולכן ב-UI יש **סליידר אחד** ולא שניים. זו לא השמטה אלא מה שהכלי חושף.
+  **למה זה שימושי דווקא כשאין נעילה:** ה-AGC מכוון ל-setpoint על *כל* האנרגיה
+  בחלון, כך שסלולר חזק ליד ה-L-band (בדיוק מה שה-SAW של ה-LNA נועד לחתוך)
+  יכול לגרום לו להוריד רווח ולהחניק את נשא הלוויין; רווח ידני עוקף את זה.
+  לכן זו **אופציה, לא ברירת מחדל** — AGC נשאר `None`.
+  ⚠ `null` ב-`POST /api/mode` הוא **AGC מפורש**, לא "לא נשלח": הזיהוי חייב
+  להיות `"gain" in data` ולא `data.get("gain")`, אחרת אין דרך לחזור מרווח
+  ידני ל-AGC והמשתמש נתקע בו לנצח.
   **⚠ מגבלת הזיהוי — למה מניעה גוברת על ניטור:** כשספק הכוח (למשל power bank
   עם OCP) קוטע את המתח, הוא עושה זאת *מיידית* ולעיתים נועל עד ניתוק פיזי —
   ‏`vcgencmd` לעולם לא רואה את זה, ודגלי ה-`_ever` מתאפסים בהדלקה הבאה. לכן
@@ -609,6 +695,34 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   שנחשב חריג) אינו יוצא-דופן לכלל — הוא לא סף "איכות" אלא תצפית פיזיקלית
   (ניתוק אנטנה מנתק מרעש-סביבה ומשאיר רעש-פנים נמוך בהרבה), בדיוק כמו
   ‏`OVERLOAD_DBFS`.
+- **"לא ניסינו" ≠ "ניסינו ונכשלנו" — גם זו לא-המצאה, בכיוון ההפוך.** `_libacars_decode`
+  (SATCOM+VDL2 מסלול B) מבחין ביניהם: כש-`inmarsat-sniffer`/`libacars` עצמו ניסה
+  לפענח יישום מקונן (CPDLC/ADS-C) והחזיר `"err":true` בפנים (גם כש-CRC של המעטפת
+  החיצונית תקין — מאומת מקליטת שדה אמיתית: CPDLC עם `crc_ok:true` ברמת המעטפת
+  אבל `"cpdlc":{"err":true}` פנימה), `decoded` מקבל הודעה מפורשת ("לא פוענח —
+  המפענח החזיר שגיאה") במקום `None` זהה-בדיוק ל"בכלל לא ניסינו". **לא ממציאים
+  טקסט-פענוח** (עדיין `None` בפועל, לא ניחוש-תוכן) — אבל *כן* חושפים עובדה אמיתית
+  שקיימת במבנה (הניסיון-שנכשל עצמו), כי הסתרתה גם היא סוג של הטעיה (המשתמש
+  לא יכול להבדיל "המפענח לא תמך בזה" מ"האיתות היה חלש מדי הפעם").
+- **מיקום — לא רק "לא ממציאים ערך", גם "לא מייחסים ערך אמיתי לישות הלא-נכונה":**
+  שני לקחים מקליטת שטח אמיתית (SATCOM, 33 דק'/465 הודעות/84 מטוסים), מעבר
+  ל-`_parse_sq`'s "לקח 1.7.1" (כתובת תחנת-קרקע ≠ מיקום מטוס):
+  (1) **`_text_latlon` דורש בדיוק התאמת-קואורדינטה *אחת*.** הודעת H1 עם תוכנית
+  טיסה (`#M3FPN/.../F:IVAKI,N32558E015065..LUMED,N34200E014420..`) מכילה
+  *שרשרת* waypoints בפורמט קומפקטי זהה-מבנית לדיווח-מיקום בודד — לקיחת
+  ההתאמה הראשונה (כמו לפני התיקון) מדביקה את נ"צ ה-waypoint הראשון כאילו
+  הוא מיקום המטוס. 2+ התאמות ⇒ מסלול, לא דיווח ⇒ `None` (לא ניחוש איזו
+  התאמה "האמיתית"). (2) **tail דמוי-כתובת-תחנה (`_UPLINK_HEADER_RE`, אותו
+  דפוס בדיוק כמו זיהוי הדר-ניתוב בטקסט) לא מקבל מיקום מנתיבי ה-heuristic**
+  (`_text_latlon`/`_parse_label16`) **בכלל** — תחנת-קרקע לא "טסה", ללא קשר
+  לכמה התאמות קואורדינטה נמצאו. שני ה-guards עצמאיים (כל אחד תופס את המקרה
+  שהשני מפספס): tail תקין עם שרשרת-waypoints עדיין נחסם ע"י (1); tail
+  דמוי-תחנה עם דיווח-מיקום-בודד-תקני עדיין נחסם ע"י (2). **תיקון נלווה, לא
+  קשור למיקום:** `_H1_SUB_RE`/`_parse_fpn` לא תפסו אף הודעת H1 אחת בקליטת
+  ה-SATCOM (12/12) — הפורמט האמיתי הוא `"- #XX..."` (מקף+רווח לפני ה-`#`,
+  לא `#` בתחילת הטקסט ממש) ו-`"M3FPN/"` (בלי קו-נטוי פותח, בניגוד ל-VHF
+  `"/FPN/"`) — שני הרחבות תוספתיות-בלבד (הפורמט המקורי נשאר תקין), שלא
+  נוגעות במיקום כלל (`_parse_h1` תמיד היה string-only, לא lat/lon).
 - **בנקי ACARS/VDL2 = חלון אחד כל אחד:** acarsdec/dumpvdl2 מפענחים ערוצים מרובים בתוך
   חלון דגימה אחד (~2MHz). צביר 131.x ו-136.x רחוקים ~5MHz ⇒ לעולם לא יחד. בנק חדש חייב
   לעבור `_acars_window_error`/`_vdl2_window_error` (שניהם wrappers מעל `_window_error`).
