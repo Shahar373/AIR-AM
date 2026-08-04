@@ -713,3 +713,163 @@ def test_satcom_health_unavailable_on_malformed_response(client, paths, monkeypa
                         lambda url, timeout=None: _FakeWebResp(b"[1,2,3]"))
     r = client.get("/api/satcom/health")
     assert r.get_json()["available"] is False
+
+
+# --- spectrum: "יש RF בכלל?" — האבחון שמפריד אנטנה מתה מכיוון שגוי ------------
+# ‏lock/ebno לבדם מציגים בדיוק אותו חיווי (אין נעילה) עבור אנטנה מנותקת, LNA
+# בלי מתח, וכיוון שגוי. רצפת הרעש מפרידה ביניהם — ר' §12 ו-api_satcom_spectrum.
+
+def test_write_satcom_env_spectrum_default_on(paths):
+    app.write_satcom_env(["AF1"])
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SPECTRUM"] == "--spectrum"
+
+
+def test_write_satcom_env_spectrum_off_writes_empty_flag(paths):
+    """כבוי => ריק לגמרי (לא "false"): $SATCOM_SPECTRUM לא-מצוטט ב-ExecStart
+    נעלם כשריק, בדיוק כמו SATCOM_GAIN/SATCOM_BIAS_TEE/SATCOM_SKIP_C."""
+    app.write_satcom_env(["AF1"], spectrum=False)
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SPECTRUM"] == ""
+
+
+def test_api_mode_satcom_default_spectrum_is_on(client, paths, no_sleep, monkeypatch):
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom"})
+    assert r.status_code == 200 and r.get_json()["satcom_spectrum"] is True
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SPECTRUM"] == "--spectrum"
+    assert app.load_state()["satcom_spectrum"] is True
+
+
+def test_api_mode_satcom_spectrum_false_and_remembered(client, paths, no_sleep, monkeypatch):
+    """מפורש גובר, ואז נזכר בכניסה הבאה — אותו דפוס כמו bias_tee/skip_c."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom", "spectrum": False})
+    assert r.get_json()["satcom_spectrum"] is False
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SPECTRUM"] == ""
+    r = client.post("/api/mode", json={"mode": "satcom"})     # בלי spectrum
+    assert r.get_json()["satcom_spectrum"] is False
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SPECTRUM"] == ""
+
+
+def test_api_mode_satcom_three_switches_are_independent(client, paths, no_sleep, monkeypatch):
+    """שלושת המתגים (זרם / CPU / אבחון) בבקשה אחת — אף אחד לא דורס את האחרים."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    r = client.post("/api/mode", json={"mode": "satcom", "bias_tee": False,
+                                       "skip_c": False, "spectrum": True})
+    body = r.get_json()
+    assert (body["satcom_bias_tee"], body["satcom_skip_c"], body["satcom_spectrum"]) \
+        == (False, False, True)
+    env = _env_lines(app.SATCOM_ENV_PATH)
+    assert env["SATCOM_BIAS_TEE"] == "" and env["SATCOM_SKIP_C"] == ""
+    assert env["SATCOM_SPECTRUM"] == "--spectrum"
+
+
+def test_satcom_health_reports_spectrum_flag_from_tool(client, paths, monkeypatch):
+    """‏spectrum מגיע מ-spectrum_enabled של הכלי עצמו, לא מה-state שלנו — ה-UI
+    צריך לדעת אם /api/satcom/spectrum יעבוד *עכשיו*."""
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    payload = json.dumps({"spectrum_enabled": 1, "channels": []}).encode()
+    monkeypatch.setattr(app.urllib.request, "urlopen", lambda url, timeout=None: _FakeWebResp(payload))
+    assert client.get("/api/satcom/health").get_json()["spectrum"] is True
+
+    payload = json.dumps({"spectrum_enabled": 0, "channels": []}).encode()
+    monkeypatch.setattr(app.urllib.request, "urlopen", lambda url, timeout=None: _FakeWebResp(payload))
+    assert client.get("/api/satcom/health").get_json()["spectrum"] is False
+
+
+def test_satcom_spectrum_not_active_makes_no_http_call(client, paths, monkeypatch):
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)
+    called = []
+    monkeypatch.setattr(app.urllib.request, "urlopen",
+                        lambda *a, **k: called.append(1) or _FakeWebResp(b"{}"))
+    j = client.get("/api/satcom/spectrum").get_json()
+    assert j["ok"] is True and j["available"] is False and called == []
+
+
+def test_satcom_spectrum_returns_mags(client, paths, monkeypatch):
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    urls = []
+    payload = json.dumps({"ok": True, "ch": 2, "baud": 1200, "afc": True,
+                          "mixer_hz": 12.5, "freq_center_hz": 1545e6, "fs": 12000.0,
+                          "lockingbw": 3000.0, "bins": 4,
+                          "mags_db": [-90.0, -88.5, -40.25, -91.0]}).encode()
+
+    def fake(url, timeout=None):
+        urls.append(url)
+        return _FakeWebResp(payload)
+    monkeypatch.setattr(app.urllib.request, "urlopen", fake)
+    j = client.get("/api/satcom/spectrum?ch=2&bins=64").get_json()
+    assert j["available"] is True and j["ch"] == 2 and j["baud"] == 1200
+    assert j["mags_db"] == [-90.0, -88.5, -40.25, -91.0] and j["bins"] == 4
+    assert j["afc"] is True and j["freq_center_hz"] == 1545e6
+    assert "ch=2" in urls[0] and "bins=64" in urls[0]
+
+
+def test_satcom_spectrum_clamps_bins_like_the_tool(client, paths, monkeypatch):
+    """web.c מגביל 32..1024 — אנחנו מגבילים באותם ערכים כדי שבקשה חריגה לא
+    תיפול על הכלי בשקט ותחזור כ"לא זמין"."""
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    urls = []
+
+    def fake(url, timeout=None):
+        urls.append(url)
+        return _FakeWebResp(json.dumps({"ok": True, "mags_db": [-90.0, -90.0]}).encode())
+    monkeypatch.setattr(app.urllib.request, "urlopen", fake)
+    client.get("/api/satcom/spectrum?bins=99999")
+    assert "bins=1024" in urls[-1]
+    client.get("/api/satcom/spectrum?bins=1")
+    assert "bins=32" in urls[-1]
+    client.get("/api/satcom/spectrum?ch=-5&bins=abc")           # ג'אנק => ברירות מחדל שפויות
+    assert "ch=0" in urls[-1] and ("bins=%d" % app.SATCOM_SPECTRUM_BINS) in urls[-1]
+
+
+def test_satcom_spectrum_unavailable_when_flag_off(client, paths, monkeypatch):
+    """‏--spectrum כבוי => הכלי מחזיר ok:false + reason; אנחנו מגישים את זה
+    כ-available:false (לא שגיאה) ומעבירים את ה-reason כמות שהוא."""
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    payload = json.dumps({"ok": False, "ch": 0, "reason": "channel unavailable"}).encode()
+    monkeypatch.setattr(app.urllib.request, "urlopen", lambda url, timeout=None: _FakeWebResp(payload))
+    j = client.get("/api/satcom/spectrum").get_json()
+    assert j["ok"] is True and j["available"] is False and j["reason"] == "channel unavailable"
+
+
+def test_satcom_spectrum_survives_garbage_mags(client, paths, monkeypatch):
+    """ערכים לא-מספריים במערך מסוננים במקום להפיל את הראוט (או להגיע ל-UI)."""
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    payload = json.dumps({"ok": True, "mags_db": [-90.0, None, "x", -80.5]}).encode()
+    monkeypatch.setattr(app.urllib.request, "urlopen", lambda url, timeout=None: _FakeWebResp(payload))
+    j = client.get("/api/satcom/spectrum").get_json()
+    assert j["mags_db"] == [-90.0, -80.5] and j["bins"] == 2
+
+
+def test_satcom_spectrum_unavailable_on_connection_failure(client, paths, monkeypatch):
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+
+    def boom(url, timeout=None):
+        raise ConnectionRefusedError("no one home")
+    monkeypatch.setattr(app.urllib.request, "urlopen", boom)
+    r = client.get("/api/satcom/spectrum")
+    assert r.status_code == 200 and r.get_json()["available"] is False
+
+
+def test_satcom_log_returns_journal_tail(client, paths, monkeypatch):
+    """שורות הפתיחה של המפענח הן האבחון החד-משמעי ל-bias-T; בשטח אין SSH."""
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return types.SimpleNamespace(returncode=0, stdout="sdrplay: bias tee enabled\n", stderr="")
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+    j = client.get("/api/satcom/log").get_json()
+    assert j["ok"] is True and "bias tee enabled" in j["log"]
+    assert app.SATCOM_SERVICE in seen["cmd"] and "journalctl" in seen["cmd"][0]
+
+
+def test_satcom_log_failure_is_graceful(client, paths, monkeypatch):
+    def boom(cmd, **kw):
+        raise OSError("no journalctl here")
+    monkeypatch.setattr(app.subprocess, "run", boom)
+    r = client.get("/api/satcom/log")
+    assert r.status_code == 500 and r.get_json()["ok"] is False and r.get_json()["log"] == ""

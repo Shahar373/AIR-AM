@@ -51,7 +51,14 @@ ExecStartPre=/usr/local/bin/airam-wait-sdrplay
 # ACARS בלבד. דולק כברירת מחדל: הפחתת ה-CPU היא קו ההגנה העיקרי על תקציב
 # החשמל בהפעלה מסוללה (ר' §12 ב-CLAUDE.md). ⚠ ה-auto-enable שבמקור חל רק על
 # RTL-SDR (‎#ifdef HAVE_RTLSDR ב-main.c) => ב-SDRplay חייבים להעביר במפורש.
-ExecStart=/usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero $SATCOM_GAIN $SATCOM_BIAS_TEE $SATCOM_SKIP_C --udp=${SATCOM_UDP} --web=${SATCOM_WEB_PORT} --station-id=airam
+# ‏$SATCOM_SPECTRUM (‎--spectrum או ריק): פותח GET /api/spectrum בלוח האבחון,
+# שממנו GET /api/satcom/spectrum שואב. זה האבחון היחיד שמבחין בין "אין RF
+# בכלל" (רצפת רעש שטוחה ונמוכה — אנטנה מנותקת / LNA לא מוזן) לבין "יש RF, לא
+# נעול" (כיוון שגוי) — ‏ebno/lock לבדם מציגים את שתיהן זהות. עלות ה-CPU
+# הרציפה אפס: web_get_spectrum_by_channel קורא את מצב הדמודולטור הקיים, בלי
+# ring buffer ובלי FFT מתמשך (אומת ב-web.c/main.c). ⚠ הדגל מוסיף גם
+# GET /api/tune?ch=N&hz=X (משנה-מצב) לפורט הלא-מאומת הזה — ר' §9 ב-CLAUDE.md.
+ExecStart=/usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero $SATCOM_GAIN $SATCOM_BIAS_TEE $SATCOM_SKIP_C $SATCOM_SPECTRUM --udp=${SATCOM_UDP} --web=${SATCOM_WEB_PORT} --station-id=airam
 # גישת חומרה (SDR) => כמו rtl_airband, רץ כ-root
 User=root
 Restart=always

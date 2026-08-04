@@ -213,6 +213,20 @@ SATCOM_UDP_PORT = 5558                # חייב להתאים ל-SATCOM_UDP ב-s
 # כמו Icecast (8000, גם הוא בלי אימות, מיועד לרשת פרטית מהימנה בלבד — §9).
 SATCOM_WEB_PORT = 8888
 SATCOM_HEALTH_TIMEOUT = 2.0           # שניות — נקרא ב-polling, חייב להיות מהיר
+# דגל --spectrum (options.c/web.c, אומת מהמקור) פותח שני endpoints נוספים ב-
+# dashboard: GET /api/spectrum?ch=N&bins=N (מערך mags_db + mixer/AFC) ו-
+# /api/constellation. **זה האבחון היחיד שמבחין בין "אין RF בכלל" ל"יש RF, לא
+# נעול"**: ebno/lock לבדם מראים "אין נעילה" גם כשהאנטנה מנותקת וגם כשהיא
+# מכוונת ב-5° שגיאה. רצפת רעש שמזנקת ~20-30dB כשה-LNA מוזן היא הראיה הישירה
+# היחידה שהשרשרת RF חיה בכלל (ר' §12 — משווים מול מדידה של המשתמש, לא מול סף
+# מומצא). המחיר: **אפס CPU רציף** — web_get_spectrum_by_channel קורא את מצב
+# הדמודולטור הקיים (jaero_pmsk_get_spectrum), אין ring buffer ואין FFT מתמשך;
+# העבודה מתרחשת רק כשה-UI מבקש. ⚠ המחיר האמיתי הוא אבטחתי: הדגל מוסיף גם
+# GET /api/tune?ch=N&hz=X (משנה-מצב!) לאותו פורט לא-מאומת שנקשר ל-INADDR_ANY
+# (ר' SATCOM_WEB_PORT למעלה ו-§9) — לכן זה משתנה-מצב שניתן לכבות, ולא קבוע.
+SATCOM_SPECTRUM_BINS = 256            # ברירת מחדל לבקשת ספקטרום (web.c: 32..1024)
+SATCOM_SPECTRUM_TIMEOUT = 3.0         # מעט יותר מ-health: מערך גדול יותר
+SATCOM_LOG_TAIL_LINES = 40            # GET /api/satcom/log — מספיק לשורות הפתיחה
 # "בנקים" של satcom = לוויינים (geostationary), לא צבירי-תדרים כמו ACARS/VDL2 —
 # כל "בנק" הוא לוויין יחיד (freqs בן-איבר-יחיד עם דגל ה---satellite=). זה מאפשר
 # ל-UI לעשות שימוש חוזר במנגנון בורר-הבנקים הקיים כבורר-לוויין, בלי קוד מיוחד.
@@ -370,6 +384,12 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  # True (ברירת מחדל) = מדלגים על דמודולטורי ה-C-channel — חוסך
                  # ~50% CPU ובקושי עולה במידע (ר' §12 ב-CLAUDE.md ו-write_satcom_env).
                  "satcom_skip_c": True,
+                 # True (ברירת מחדל) = --spectrum פעיל => GET /api/satcom/spectrum
+                 # עובד. זה כלי האבחון היחיד שמראה אם יש RF בכלל (ר' הערת
+                 # SATCOM_SPECTRUM_BINS). דולק כברירת מחדל כי בלי נעילה המצב חסר
+                 # ערך ממילא, ועלות ה-CPU היא אפס; ניתן לכיבוי מי שמעדיף לא לחשוף
+                 # את GET /api/tune של הכלי ברשת המקומית (§9).
+                 "satcom_spectrum": True,
                  # בסיס כיול למד השדה: {"noise": dBFS, "freq": MHz, "ts": epoch} או None.
                  # נמדד תמיד תחת אותם תנאים קבועים (AGC, /api/antenna/check) => בר-השוואה
                  # לעצמו לאורך זמן, בלי תלות באיזה מצב פעיל עכשיו. לעולם לא ממציאים
@@ -1997,7 +2017,7 @@ def write_vdl2_env(freqs, ifgr=None, rfgr=None):
     _atomic_write(VDL2_ENV_PATH, text)
 
 
-def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True):
+def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True, spectrum=True):
     """כותב /etc/airam/satcom.env בפורמט EnvironmentFile של systemd.
     ‏freqs כאן הוא רשימה בת-איבר-יחיד עם דגל הלוויין (למשל ["AF1"]) — geostationary
     => אין "ערוצים"/בנק לבחור כמו ACARS/VDL2 (ר' הערה ליד SATCOM_FREQS_DEFAULT).
@@ -2014,7 +2034,11 @@ def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True):
     ‏SATCOM_SKIP_C מכיל את הדגל ‎--skip-c-channel (או ריק) — ר' §12: מדלג על
     ששת דמודולטורי ה-OQPSK 8400 (C-channels) מתוך 12 הערוצים של Alphasat.
     ברירת המחדל **דולקת** כי AIR-AM צורך ACARS בלבד וה-C-channels כמעט לא
-    נושאים אותו, בעוד שהם הדמודולטורים היקרים ביותר (‎~50% CPU לפי המקור)."""
+    נושאים אותו, בעוד שהם הדמודולטורים היקרים ביותר (‎~50% CPU לפי המקור).
+    ‏SATCOM_SPECTRUM מכיל את הדגל ‎--spectrum (או ריק) — פותח את
+    GET /api/spectrum בלוח האבחון של הכלי, שממנו GET /api/satcom/spectrum
+    שואב. **האבחון היחיד שמבחין "אין RF" מ"יש RF בלי נעילה"** (ר' ההערה ליד
+    SATCOM_SPECTRUM_BINS). דולק כברירת מחדל; עלות CPU רציפה אפס."""
     sats = _sanitize_satellite(freqs)
     gain_flag = "--sdrplay-gain=%d" % int(gain) if gain is not None else ""
     text = "\n".join([
@@ -2023,6 +2047,7 @@ def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True):
         f"SATCOM_GAIN={gain_flag}",
         "SATCOM_BIAS_TEE=" + ("-B" if bias_tee else ""),
         "SATCOM_SKIP_C=" + ("--skip-c-channel" if skip_c else ""),
+        "SATCOM_SPECTRUM=" + ("--spectrum" if spectrum else ""),
         f"SATCOM_UDP={ACARS_UDP_HOST}:{SATCOM_UDP_PORT}",
         f"SATCOM_WEB_PORT={SATCOM_WEB_PORT}",
         "",
@@ -2078,7 +2103,7 @@ def _enter_acars(freqs):
     return None, None
 
 
-def _enter_satcom(freqs, bias_tee=True, skip_c=True):
+def _enter_satcom(freqs, bias_tee=True, skip_c=True, spectrum=True):
     """עוצר את שלושת צרכני ה-SDR האחרים ומריץ inmarsat-sniffer. מחזיר
     (error, detail). Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות
     תחילה כדי לשחרר את ה-SDR לפני ש-inmarsat-sniffer פותח אותו (מונע מרוץ על
@@ -2091,13 +2116,15 @@ def _enter_satcom(freqs, bias_tee=True, skip_c=True):
     נייד) מעבר לתקרה. ⚠ אסור להזין משני מקורות בו-זמנית (הזרמה הדדית אפשרית)
     — המשתמש אחראי לוודא שרק אחד מהם דולק בפועל.
     ‏skip_c=True (ברירת מחדל) מוריד את דמודולטורי ה-C-channel — הצד השני של
-    אותו תקציב חשמל, אבל דרך ה-CPU במקום דרך ה-bias-T (ר' §12/write_satcom_env)."""
+    אותו תקציב חשמל, אבל דרך ה-CPU במקום דרך ה-bias-T (ר' §12/write_satcom_env).
+    ‏spectrum=True (ברירת מחדל) מפעיל את ‎--spectrum => GET /api/satcom/spectrum
+    זמין (אבחון "יש RF בכלל?" — ר' SATCOM_SPECTRUM_BINS)."""
     for svc in ("rtl_airband", ACARS_SERVICE, VDL2_SERVICE):
         try:
             _sysctl("stop", svc, timeout=30)
         except Exception:
             pass
-    write_satcom_env(freqs, bias_tee=bias_tee, skip_c=skip_c)
+    write_satcom_env(freqs, bias_tee=bias_tee, skip_c=skip_c, spectrum=spectrum)
     try:
         # airam-satcom.service (בשונה משאר צרכני ה-SDR) מוגדר עם StartLimitBurst
         # סופי — הגנה מפני קריסה חוזרת שמדליקה מחדש bias-T ללא פיקוח (ר' ההערה
@@ -2953,7 +2980,8 @@ def _restore_after_probe(prev_state, prev_live):
         elif prev_live == "satcom":
             _enter_satcom(prev_state.get("satcom_freqs", SATCOM_FREQS_DEFAULT),
                           bias_tee=prev_state.get("satcom_bias_tee", True),
-                          skip_c=prev_state.get("satcom_skip_c", True))
+                          skip_c=prev_state.get("satcom_skip_c", True),
+                          spectrum=prev_state.get("satcom_spectrum", True))
         elif prev_live == "voice":
             _enter_voice({"freq": prev_state["freq"], "mod": prev_state["mod"],
                          "agc": prev_state["agc"], "if_gain": prev_state["if_gain"],
@@ -3401,11 +3429,18 @@ def _fetch_satcom_web_state():
     בכל כשל — satcom לא active, ה---web dashboard לא זמין/עוד לא עלה, timeout,
     או JSON לא תקין. לעולם לא מפיל את הקורא. לא מנסה HTTP כלל כש-satcom לא
     active (המקרה הנפוץ) — נמנע מ-connection-refused מיותר בכל poll."""
+    return _fetch_satcom_web("/api/state", SATCOM_HEALTH_TIMEOUT)
+
+
+def _fetch_satcom_web(path, timeout):
+    """קורא נתיב שרירותי מלוח האבחון של inmarsat-sniffer (‎--web) ומחזיר dict או
+    None בכל כשל. מנוע משותף ל-/api/state (health) ול-/api/spectrum — אותה
+    התניה בדיוק: לא מנסים HTTP כלל כשהשירות לא active."""
     if not _is_active(SATCOM_SERVICE):
         return None
-    url = f"http://127.0.0.1:{SATCOM_WEB_PORT}/api/state"
+    url = f"http://127.0.0.1:{SATCOM_WEB_PORT}{path}"
     try:
-        with urllib.request.urlopen(url, timeout=SATCOM_HEALTH_TIMEOUT) as r:   # noqa: S310 (לוקאלהוסט בלבד)
+        with urllib.request.urlopen(url, timeout=timeout) as r:   # noqa: S310 (לוקאלהוסט בלבד)
             data = json.loads(r.read().decode("utf-8", "replace"))
     except Exception:
         return None
@@ -3431,10 +3466,73 @@ def api_satcom_health():
                          "msgs": ch.get("msgs"), "age": ch.get("age"),
                          "mse": ch.get("mse"), "ebno": ch.get("ebno"),
                          "lock": bool(ch.get("lock"))})
+    # spectrum_enabled מגיע מהכלי עצמו (web.c) ולא מה-state שלנו — כך ה-UI יודע
+    # אם /api/satcom/spectrum באמת יעבוד *עכשיו*, ולא רק מה ביקשנו בכניסה
+    # האחרונה (למשל אחרי שדרוג שהחליף את ה-unit בלי מעבר-מצב חדש).
     return jsonify(ok=True, available=True,
                    total_acars=state.get("total_acars"), feed_drops=state.get("feed_drops"),
+                   spectrum=bool(state.get("spectrum_enabled")),
                    channels=channels, channels_locked=sum(1 for c in channels if c["lock"]),
                    channels_total=len(channels))
+
+
+@app.route("/api/satcom/log")
+def api_satcom_log():
+    """זנב היומן של inmarsat-sniffer (‎journalctl -u airam-satcom).
+
+    **למה זה route ולא שדה ב-/api/satcom/health:** שורות הפתיחה של המפענח הן
+    האבחון החד-משמעי ביותר שיש — ‎"sdrplay: bias tee enabled" מול
+    ‎"bias tee not supported on this model" (sdrplay.c, אומת מהמקור) עונה
+    בוודאות אם ה-LNA בכלל מקבל מתח, ו-"Auto center freq"/"Active channels"
+    מאשרות שהתוכנית שנטענה היא זו שציפינו לה. בשטח, מהטלפון, אין SSH — בלי
+    זה אי אפשר לראות את זה בכלל. אבל זה **לא** נתון פולינג: כל קריאה היא
+    fork ל-journalctl, וה-health כבר רץ בקצב 1s (ר' ההערה ב-pollSatcomHealth
+    ב-index.html) — לכן על דרישה בלבד, בלחיצת כפתור."""
+    try:
+        r = subprocess.run(["journalctl", "-u", SATCOM_SERVICE, "-n",
+                            str(SATCOM_LOG_TAIL_LINES), "--no-pager"],
+                           capture_output=True, text=True, timeout=5)
+        return jsonify(ok=True, log=r.stdout or "")
+    except Exception as e:
+        return jsonify(ok=False, error=str(e), log=""), 500
+
+
+@app.route("/api/satcom/spectrum")
+def api_satcom_spectrum():
+    """ספקטרום baseband של ערוץ בודד מהדמודולטור של inmarsat-sniffer (proxy ל-
+    GET /api/spectrum?ch=N&bins=N בלוח האבחון שלו, דורש ‎--spectrum).
+
+    **למה זה קיים:** ‏ebno/lock ב-/api/satcom/health עונים "אין נעילה" באותה
+    צורה בדיוק כשהאנטנה מנותקת, כשה-LNA לא מוזן, וכשהכיוון שגוי ב-5° — שלוש
+    תקלות שונות לגמרי עם אותו חיווי. הספקטרום הוא הראיה הישירה היחידה שיש RF
+    בכלל: רצפת רעש שמזנקת ~20-30dB ברגע שה-LNA מקבל מתח, וגבנון נראה לעין
+    כשהאנטנה מכוונת. אנחנו מגישים את ‎mags_db **כמות שהוא** מהכלי ולא ממציאים
+    ממנו סף/ציון (§12) — ההשוואה שהמשתמש עושה (LNA מחובר מול מנותק) היא
+    המדידה, לא איזה מספר קסם שלנו.
+
+    ‏available=False (לא שגיאה) כש-satcom כבוי, ‎--spectrum לא פעיל, או הערוץ
+    לא קיים — בדיוק כמו api_satcom_health."""
+    try:
+        ch = int(request.args.get("ch", 0))
+    except (TypeError, ValueError):
+        ch = 0
+    try:
+        bins = int(request.args.get("bins", SATCOM_SPECTRUM_BINS))
+    except (TypeError, ValueError):
+        bins = SATCOM_SPECTRUM_BINS
+    ch = max(0, ch)
+    bins = min(1024, max(32, bins))          # אותם גבולות כמו web.c
+    data = _fetch_satcom_web(f"/api/spectrum?ch={ch}&bins={bins}", SATCOM_SPECTRUM_TIMEOUT)
+    if not data or not data.get("ok"):
+        # reason מגיע מהכלי ("channel unavailable") — גם כש---spectrum כבוי.
+        return jsonify(ok=True, available=False, ch=ch,
+                       reason=(data or {}).get("reason"))
+    mags = [m for m in (data.get("mags_db") or []) if isinstance(m, (int, float))]
+    return jsonify(ok=True, available=True, ch=data.get("ch", ch),
+                   baud=data.get("baud"), afc=bool(data.get("afc")),
+                   mixer_hz=data.get("mixer_hz"), freq_center_hz=data.get("freq_center_hz"),
+                   fs=data.get("fs"), lockingbw=data.get("lockingbw"),
+                   mags_db=mags, bins=len(mags))
 
 
 ROSTER_MAX = 200   # תקרת גודל תגובה — הישנים ביותר נגזמים
@@ -3624,7 +3722,7 @@ def api_mode():
         payload, status = _voice_tune(params)
         return jsonify(payload), status
 
-    plan = freqs = key = enter = bias_tee = None
+    plan = freqs = key = enter = bias_tee = skip_c = spectrum = None
     if mode == "scan":
         plan = _validate_scan_plan(data.get("plan") or st.get("scan_plan"))
         if plan is None:
@@ -3655,6 +3753,10 @@ def api_mode():
             # אבל כאן ברירת המחדל היא True (חיסכון), ר' write_satcom_env.
             skip_c = (data["skip_c"] if isinstance(data.get("skip_c"), bool)
                       else bool(st.get("satcom_skip_c", True)))
+            # spectrum: אותו דפוס בדיוק. ברירת מחדל True — כלי האבחון היחיד
+            # שמבחין "אין RF" מ"יש RF בלי נעילה" (ר' SATCOM_SPECTRUM_BINS).
+            spectrum = (data["spectrum"] if isinstance(data.get("spectrum"), bool)
+                        else bool(st.get("satcom_spectrum", True)))
 
     if not TUNE_LOCK.acquire(timeout=0.5):
         return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב",
@@ -3686,14 +3788,15 @@ def api_mode():
             save_state(new_state)
             return jsonify(ok=True, app_mode="scan", scan_plan=plan)
 
-        # acars / vdl2 / satcom — מסלול דאטה סימטרי (satcom מקבל גם bias_tee/skip_c)
+        # acars / vdl2 / satcom — מסלול דאטה סימטרי (satcom מקבל גם bias_tee/skip_c/spectrum)
         log.info("mode -> %s freqs=%s (from %s)", mode, freqs, request.remote_addr)
-        err, detail = (enter(freqs, bias_tee, skip_c) if mode == "satcom"
+        err, detail = (enter(freqs, bias_tee, skip_c, spectrum) if mode == "satcom"
                        else enter(freqs))
         if err:
             payload, status = _fail_to_off(st, err, detail, "enter " + mode)
             return jsonify(payload), status
-        extra = ({"satcom_bias_tee": bias_tee, "satcom_skip_c": skip_c}
+        extra = ({"satcom_bias_tee": bias_tee, "satcom_skip_c": skip_c,
+                  "satcom_spectrum": spectrum}
                  if mode == "satcom" else {})
         new_state = {**st, "app_mode": mode, key: freqs, **extra}
         save_state(new_state)
