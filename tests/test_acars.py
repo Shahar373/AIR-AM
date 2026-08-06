@@ -662,6 +662,16 @@ def test_parse_atis_wind_with_gust_and_unit_preserved():
     assert "190/8G25KT" in r
 
 
+def test_parse_atis_wind_without_kt_does_not_invent_unit():
+    """⚠ רגרסיה שנמצאה בסבב-בדיקה עצמאי: כש-KT לא נכתב במפורש בענף המילולי
+    ('WIND ddd/ss' בלי סיומת יחידה בכלל), התיקון הקודם הדביק 'KT' בכל זאת —
+    בדיוק ההפרה ש-§12 אוסר, ושהתיקון הזה עצמו אוכף מפורשות ב-loadsheet/nav_fuel
+    (§12: לא ממציאים יחידה שלא הייתה בקלט)."""
+    r = app._parse_atis("LLBG ATIS INFO Y WIND 260/12 QNH 1013")
+    assert r is not None
+    assert "260/12" in r and "260/12KT" not in r
+
+
 def test_parse_atis_sets_decoded_in_normalize():
     n = app._normalize_acars({"timestamp": 1.0, "label": "A9",
                                "text": "INFO A RWY 03 WIND 020/08KT QNH 1013"})
@@ -1135,6 +1145,15 @@ def test_parse_loadsheet_preserves_decimal_and_real_unit():
     d2 = app._parse_loadsheet(text_decimal)
     assert "ZFW 62.3" in d2 and "ZFW 62kg" not in d2
     assert "TOW 71.9" in d2
+
+
+def test_parse_loadsheet_number_survives_unrecognized_suffix():
+    """⚠ רגרסיה שנמצאה בסבב-בדיקה עצמאי: מספר מוצמד-בלי-רווח לסיומת לא-מוכרת
+    ("62000KGS"/"62000K") איבד את כל ההתאמה (\\b חיצוני לקבוצת היחידה נכשל),
+    בעוד הקוד המקורי (בלי מושג יחידה בכלל) כן היה תופס את המספר. המספר עצמו
+    חייב לשרוד גם כשלא ניתן לזהות ממנו יחידה נקייה."""
+    assert "ZFW 62000" in app._parse_loadsheet("LOADSHEET\nZFW 62000KGS")
+    assert "ZFW 62000" in app._parse_loadsheet("LOADSHEET\nZFW 62000K")
 
 
 def test_parse_loadsheet_ignores_mac_prefixed_fields():

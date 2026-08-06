@@ -1046,8 +1046,12 @@ def _parse_atis(text):
         elif m.group("d2"):      # ddd/ssKT בלי prefix
             wind = m.group("d2") + "/" + m.group("sk2")
         else:                     # WIND ddd/ss[Ggg][KT] מילולי
+            # ⚠ רגרסיה שנמצאה בסבב-בדיקה עצמאי: "or 'KT'" המציא יחידה שלא
+            # הייתה בטקסט כש-KT לא נכתב במפורש — בדיוק ההפרה ש-§12 אוסר,
+            # ושהתיקון הזה עצמו אוכף מפורשות ב-loadsheet/nav_fuel. אין KT
+            # בקלט = אין KT בפלט, בדיוק כמו כל שאר השדות כאן.
             wind = (m.group("d3") + "/" + m.group("s3")
-                   + (m.group("g3") or "") + (m.group("u3") or "KT"))
+                   + (m.group("g3") or "") + (m.group("u3") or ""))
         parts.append(f"רוח {wind}")
     m = _ATIS_QNH_RE.search(text)
     if m:
@@ -1274,8 +1278,13 @@ def _parse_autotune(text):
 # test_parse_loadsheet_real_capture) לא נושא שום יחידה בכלל — carrier אמריקאי
 # שמדווח ב-LB היה מקבל תווית "kg" שגויה. עכשיו קולטים יחידה אופציונלית מהטקסט
 # עצמו (KG/LB/LBS) ומציגים אותה *רק* כשהיא באמת שם — בלי יחידה בקלט = בלי
-# יחידה בפלט (§12).
-_LOADSHEET_UNIT = r"(\d+(?:\.\d+)?)\s*(KG|LBS?)?\b"
+# יחידה בפלט (§12). ⚠ רגרסיה שנמצאה בסבב-בדיקה עצמאי: \b *מחוץ* לקבוצת
+# היחידה (כלומר על השרשרת כולה) נכשל כשמספר מוצמד-בלי-רווח לסיומת לא-מוכרת
+# ("62000KGS"/"62000K") — הקבוצה נסוגה לריקה, אבל ה-\b הסוגר עדיין נבדק מול
+# התו הבא (עדיין אות), אז כל ההתאמה נכשלת ו-ZFW/TOW/TOF שלמים אבדו (בעוד
+# הקוד הישן, בלי יחידה בכלל, כן היה תופס את המספר). ה-\b עבר *לתוך* קבוצת
+# היחידה (מותנה בה בלבד) כדי שסיומת לא-מוכרת רק תדיר את היחידה, לא את המספר.
+_LOADSHEET_UNIT = r"(\d+(?:\.\d+)?)(?:\s*(KG|LBS?)\b)?"
 _LOADSHEET_ZFW_RE = re.compile(r"\bZFW\s+" + _LOADSHEET_UNIT)
 _LOADSHEET_TOW_RE = re.compile(r"\bTOW\s+" + _LOADSHEET_UNIT)
 _LOADSHEET_TOF_RE = re.compile(r"\bTOF\s+" + _LOADSHEET_UNIT)
