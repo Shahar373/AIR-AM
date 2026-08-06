@@ -496,6 +496,21 @@ def test_normalize_acars_ground_station_tail_guard_is_specific_not_global():
     assert aircraft["lat"] is not None and abs(aircraft["lat"] - 32.02667) < 0.001
 
 
+def test_normalize_acars_dot_padded_registration_not_treated_as_station():
+    """⚠ רגרסיה אמיתית: acarsdec מרפד גם רישומי מטוס קצרים בנקודה מובילה עד
+    לאורך קבוע (בדיוק כמו כתובות תחנת-קרקע, ר' adsb.norm_reg) — לפני התיקון,
+    _UPLINK_HEADER_RE לבד תפס גם רישומים אמיתיים שמתחילים באות ומרופדים בנקודה
+    (אמריקאי/יפני/קוריאני) ודיכא את מיקומם. ההבחנה: כתובות תחנת-קרקע אמיתיות
+    (.TCARC) הן אותיות בלבד, רישומי מטוס כמעט תמיד מכילים ספרה."""
+    text = "VELOX ,N 32.016,E 034.538,35000,X"
+    for tail in (".N806NN", ".N375WB", ".JA801A", ".HL7783"):
+        n = app._normalize_acars({"timestamp": 1.0, "label": "16", "tail": tail, "text": text})
+        assert n["lat"] is not None, f"tail={tail} should not be suppressed as a ground station"
+    # ההגנה האמיתית (בלי ספרה) ממשיכה לעבוד
+    station = app._normalize_acars({"timestamp": 1.0, "label": "16", "tail": ".TCARC", "text": text})
+    assert station["lat"] is None
+
+
 def test_text_position_skipped_on_corrupted_frame():
     """regression: frame עם acarsdec error>0 לא מפיק מיקום טקסטואלי (ספרה שהתהפכה
     בקואורדינטה => מטוס במקום שגוי). ADS-C מוגן-CRC נשמר; ה-heuristic לא."""
@@ -570,6 +585,21 @@ def test_acars_export_csv(client, paths):
     assert "line1 line2" in body
 
 
+def test_acars_export_csv_neutralizes_formula_injection(client, paths):
+    """⚠ רגרסיה אמיתית: text/tail/decoded מגיעים משידור רדיו — לא נתון סטטי —
+    ותא ש-CSV פותח ב-Excel/Sheets עם '=' וכו' מתפרש כנוסחה חיה. תא כזה חייב
+    לצאת מנוטרל (' מוביל) בייצוא."""
+    app.ACARS_LOG_PATH.write_text(json.dumps({
+        "t": 1.0, "tail": "=HYPERLINK(\"http://evil\")", "flight": "@cmd",
+        "text": "+SUM(A1:A9)",
+    }) + "\n")
+    body = client.get("/api/acars/export?format=csv").data.decode("utf-8-sig")
+    line = body.splitlines()[1]
+    assert "'=HYPERLINK" in line
+    assert "'@cmd" in line
+    assert "'+SUM(A1:A9)" in line
+
+
 def test_acars_export_json(client, paths):
     app.ACARS_LOG_PATH.write_text(
         json.dumps({"t": 2.0, "tail": "B"}) + "\n" + json.dumps({"t": 1.0, "tail": "A"}) + "\n")
@@ -613,6 +643,23 @@ def test_parse_atis_basic():
 def test_parse_atis_no_match():
     assert app._parse_atis("HELLO WORLD") is None
     assert app._parse_atis(None) is None
+
+
+def test_parse_atis_standard_metar_wind_group():
+    """⚠ רגרסיה אמיתית: קבוצת רוח בתקן METAR הרגיל (dddssKT מחוברים, בלי '/')
+    היא הפורמט הנפוץ ביותר בפועל — הגרסה הקודמת דרשה '/' בין כיוון למהירות
+    בכל מקרה, אז הרוח נעלמה בשקט מהמקרה השכיח ביותר."""
+    r = app._parse_atis("LLBG ATIS INFO K RWY 26 30012KT CAVOK Q1013")
+    assert r is not None
+    assert "26" in r and "300/12KT" in r and "1013" in r
+
+
+def test_parse_atis_wind_with_gust_and_unit_preserved():
+    """⚠ רגרסיה אמיתית: הענף המילולי 'WIND ddd/ss' איבד את ה-gust ואת היחידה
+    (KT) גם כשהם היו נוכחים בטקסט."""
+    r = app._parse_atis("LLBG ATIS INFO X WIND 190/8G25KT QNH 1013")
+    assert r is not None
+    assert "190/8G25KT" in r
 
 
 def test_parse_atis_sets_decoded_in_normalize():
@@ -697,6 +744,16 @@ def test_parse_wx_alternates_llbg_ignored():
     """LLBG עצמה לא מסומנת כ-alternate (זהו השדה הביתי)."""
     r = app._parse_wx_alternates("METAR LLBG")
     assert r is None
+
+
+def test_parse_wx_alternates_ignores_metar_jargon():
+    """⚠ רגרסיה אמיתית: מילות-מפתח נפוצות בדוח METAR (לא שדות תעופה) הוצגו
+    בעבר כ-"ALTERNATE" — הרג'קס תופס כל מילה אנגלית בת 4 אותיות, וה-blocklist
+    לא כיסה אותן."""
+    r = app._parse_wx_alternates("WXR LLBG 121350Z 30012KT CAVOK TEMP 25 DEWP 18 QNH 1013 RMK LAST DATA")
+    assert r is None
+    r2 = app._parse_wx_alternates("REQUEST WEATHER ARRIVAL INFO GATE TIME FUEL")
+    assert r2 is None
 
 
 def test_parse_wx_alternates_no_icao():
@@ -1018,21 +1075,66 @@ def test_normalize_acars_adsc_uplink_never_yields_position_even_without_err():
     assert n["group"] != "position"
 
 
+# --- _scan_latlon: זוג lat/lon חייב להיות מאותו dict -------------------------
+
+def test_scan_latlon_does_not_combine_unrelated_branches():
+    """⚠ רגרסיה אמיתית: הגרסה הקודמת חיפשה lat ראשון ו-lon ראשון *בנפרד* בעץ
+    ושילבה ביניהם — שני מפתחות מתת-עצים לא-קשורים בכלל הורכבו לקואורדינטה
+    מזויפת."""
+    assert app._scan_latlon({"a": {"lat": 45.85}, "b": {"lon": -29.60}}) is None
+
+
+def test_scan_latlon_prefers_basic_report_over_predicted_route():
+    """⚠ רגרסיה אמיתית: ADS-C יכול לשאת גם "predicted_route"/"next_wpt" עם
+    lat/lon תקינים לכל דבר (זוג אמיתי, לא מורכב) — אלה waypoints עתידיים,
+    לא המיקום הנוכחי. "basic_report" הוא הדיווח בפועל ומועדף כשקיים."""
+    obj = {"adsc": {"tags": [
+        {"predicted_route": {"next_wpt": {"lat": 50.0, "lon": -20.0}}},
+        {"basic_report": {"lat": 45.85, "lon": -29.60}},
+    ]}}
+    assert app._scan_latlon(obj) == (45.85, -29.6)
+
+
+def test_scan_latlon_falls_back_to_generic_pair_without_basic_report():
+    """בלי "basic_report" בכלל (למשל waypoint ב-CPDLC route_clearance) — עדיין
+    מוצא זוג lat/lon תקין מאותו dict, ההתנהגות המקורית (המתוקנת) לזוגות."""
+    obj = {"route_clearance": {"waypoint": {"lat": 51.0, "lon": -15.0}}}
+    assert app._scan_latlon(obj) == (51.0, -15.0)
+
+
 # --- פרסרים נוספים שנבנו מקליטה אמיתית (C1 loadsheet, 16, 1L, A3 PDC) ----------
 # כל הווקטורים הבאים הם טקסטים מדויקים מתוך קליטה אמיתית ב-131.725/131.825 MHz
 # (LLBG, יוני 2026) — לא סינתטיים.
 
 def test_parse_loadsheet_real_capture():
+    """⚠ רגרסיה אמיתית: הטקסט האמיתי הזה לא נושא שום יחידת משקל — הקוד הישן
+    הדביק 'kg' בכוח על כל משקל (§12: לא ממציאים יחידה שלא הייתה בקלט)."""
     text = (".UTCKM1P IZ/271346\nAGM\nFI IZ1843/AN 4X-EMF\n-  LOADSHEET\n"
             "FINAL01 IZ1843/27   TLVETM 4XEMF 27JUN26\n"
             "CREW    2/3  PAX  60             TTL  61\n"
             "ZFW   33937  MAX    42600\nTOF    6650\nTOW   40587  MAX    52290\nTIF    1645")
     d = app._parse_loadsheet(text)
-    assert "ZFW 33937kg" in d
-    assert "TOW 40587kg" in d
-    assert "TOF 6650kg" in d
+    assert "ZFW 33937" in d
+    assert "TOW 40587" in d
+    assert "TOF 6650" in d
+    assert "kg" not in d          # לא ממציאים יחידה שהטקסט לא נושא
     assert "נוסעים 60" in d and "צוות 2/3" in d
     assert 'סה"כ 61' in d
+
+
+def test_parse_loadsheet_preserves_decimal_and_real_unit():
+    """⚠ רגרסיה אמיתית נוספת: \\d+ בלבד קטע משקלים עשרוניים; carrier שמדווח
+    ב-LB (לא kg) קיבל תווית "kg" שגויה. עכשיו: יחידה אמיתית מהטקסט מוצגת
+    כמות שהיא, ומספר עשרוני נשמר בשלמותו."""
+    text_lb = "LOADSHEET FINAL\nZFW 138500 LB\nTOW 174200 LB"
+    d = app._parse_loadsheet(text_lb)
+    assert "ZFW 138500LB" in d
+    assert "TOW 174200LB" in d
+
+    text_decimal = "LOADSHEET PRELIM\nZFW 62.3\nTOW 71.9"
+    d2 = app._parse_loadsheet(text_decimal)
+    assert "ZFW 62.3" in d2 and "ZFW 62kg" not in d2
+    assert "TOW 71.9" in d2
 
 
 def test_parse_loadsheet_ignores_mac_prefixed_fields():
@@ -1049,7 +1151,7 @@ def test_parse_loadsheet_requires_keyword():
 def test_loadsheet_in_normalize():
     n = app._normalize_acars({"timestamp": 1.0, "label": "C1", "tail": "4X-EMF",
                               "text": "LOADSHEET\nZFW   33937  MAX    42600"})
-    assert n["decoded"] == "ZFW 33937kg"
+    assert n["decoded"] == "ZFW 33937"            # בלי יחידה מומצאת — הטקסט לא נושא אחת
     assert n["dir"] == "downlink"                 # C1 כבר ממופה downlink
 
 
@@ -1078,12 +1180,16 @@ def test_parse_label16_rejects_garbage():
 
 
 def test_parse_nav_fuel_real_capture():
+    """⚠ רגרסיה אמיתית: הטקסט לא נושא יחידת דלק (בניגוד ל-ALT/CAS ששם ft/kt הן
+    מוסכמות תעופה כמעט-אוניברסליות) — הקוד הישן הדביק 't' (טונות) בכוח, למרות
+    שדלק יכול להיות מדווח ב-kg/lb/t לפי חברה/מטוס (§12)."""
     text = "00178220200 N 31.432/E 30.998/UTC 1842/FOB     4.9/ALT  15000/CAS 279.7/ETA 1902"
     n = app._normalize_acars({"timestamp": 1.0, "label": "1L", "error": 0, "text": text})
     assert n["pos_src"] == "nav-fuel"
     assert abs(n["lat"] - 31.432) < 0.001
     assert abs(n["lon"] - 30.998) < 0.001
-    assert "18:42" in n["decoded"] and "4.9t" in n["decoded"] and "19:02" in n["decoded"]
+    assert "18:42" in n["decoded"] and "19:02" in n["decoded"]
+    assert "דלק 4.9 " in n["decoded"] and "4.9t" not in n["decoded"]
 
 
 def test_parse_nav_fuel_short_variant_not_matched():

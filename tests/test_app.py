@@ -263,6 +263,43 @@ def test_tune_sdr_down_keeps_new_config(client, paths, monkeypatch):
     assert app.load_state()["freq"] == 134.6
 
 
+def test_tune_preserves_unrelated_state_fields(client, paths, tuned_ok):
+    """⚠ רגרסיה אמיתית: _voice_tune בנה בעבר state חדש מ-{**params, ...} במקום
+    למזג על גבי ה-state הקודם — כל שדה שאינו קול (satcom_bias_tee/satcom_gain/
+    signal_baseline/scan_plan/last_session_view_at) נמחק בשקט. הכי חמור:
+    satcom_bias_tee=False (המשתמש מזין LNA חיצוני) היה נדרס בחזרה ל-True
+    (ברירת המחדל, ר' load_state/DEFAULT_STATE) בכניסה הבאה ל-SATCOM — בדיוק
+    הסיכון החומרתי ש-§12 מזהיר מפניו."""
+    app.save_state({**app.DEFAULT_STATE, "satcom_bias_tee": False, "satcom_gain": 40,
+                    "signal_baseline": {"noise": -70.0, "freq": 132.5, "ts": 1.0},
+                    "scan_plan": [{"mode": "acars", "dwell_sec": 60}],
+                    "last_session_view_at": 123.0})
+    r = client.post("/api/tune", json={"freq": 134.6})
+    assert r.status_code == 200
+    st = app.load_state()
+    assert st["satcom_bias_tee"] is False
+    assert st["satcom_gain"] == 40
+    assert st["signal_baseline"] == {"noise": -70.0, "freq": 132.5, "ts": 1.0}
+    assert st["scan_plan"] == [{"mode": "acars", "dwell_sec": 60}]
+    assert st["last_session_view_at"] == 123.0
+    assert st["freq"] == 134.6 and st["app_mode"] == "voice"   # הכיוונון עצמו עדיין קרה
+
+
+def test_api_mode_off_twice_preserves_prev_mode(client, paths, monkeypatch):
+    """⚠ רגרסיה אמיתית: שתי בקשות off רצופות (טאב כפול/לחיצה כפולה) לא אמורות
+    לדרוס את prev_mode ב-"off" עצמו — אחרת כפתור ההדלקה מאבד את המצב האמיתי
+    האחרון שהיה פעיל."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: None)
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "acars"})
+    r1 = client.post("/api/mode", json={"mode": "off"})
+    assert r1.status_code == 200
+    assert app.load_state()["prev_mode"] == "acars"
+    r2 = client.post("/api/mode", json={"mode": "off"})
+    assert r2.status_code == 200
+    assert app.load_state()["prev_mode"] == "acars"   # לא נדרס ל-"off"
+
+
 # --- presets ------------------------------------------------------------------
 
 def test_presets_default_then_edit(client, paths):
@@ -480,12 +517,37 @@ def test_sweep_removes_transcript_sidecar(paths, monkeypatch):
     assert len(list(app.REC_DIR.glob("*.txt"))) == 1   # קובץ-הצד של הנמחק הוסר איתו
 
 
+def test_sweep_removes_orphaned_transcript_without_mp3(paths):
+    """‏.txt בלי .mp3 תואם (mp3 שכבר נמחק לפני שהתמלול הספיק להיכתב — מרוץ בין
+    _transcribe_worker ל-_sweep_recordings, ר' §12) לא אמור להצטבר לנצח: הלולאה
+    הרגילה מוחקת .txt רק יחד עם .mp3 שעדיין ברשימת ה-retention, ולא רואה קובץ
+    שכבר נעדר ממנה בכלל."""
+    orphan = app.REC_DIR / "airam_20260611_120001_134600000.mp3.txt"
+    orphan.write_text("תמלול של הקלטה שכבר נמחקה")
+    app._sweep_recordings()
+    assert not orphan.exists()
+
+
 def test_transcribe_file_handles_failure(paths, monkeypatch):
     p = _mk_rec(paths, "airam_20260611_120001_134600000.mp3")
     def boom(*a, **k):
         raise FileNotFoundError("ffmpeg")
     monkeypatch.setattr(app.subprocess, "run", boom)
     assert app._transcribe_file(p) is None             # כשל => None, בלי לזרוק
+
+
+def test_journal_tail_has_timeout_and_does_not_raise_on_timeout(monkeypatch):
+    """⚠ רגרסיה אמיתית: _journal_tail נקראת מתוך _enter_*/_restart_and_verify/
+    _enter_standby *בזמן* שהקורא מחזיק TUNE_LOCK. journalctl תקוע (journald לא
+    מגיב) בלי timeout היה תוקע את התהליך לנצח ונועל כל שינוי מצב/כיוונון/בדיקת
+    אנטנה עתידי מאחורי TUNE_LOCK שאף פעם לא משתחרר."""
+    captured = {}
+    def fake_run(cmd, **kw):
+        captured.update(kw)
+        raise app.subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+    assert app._journal_tail("rtl_airband") == ""      # לא זורק, מחזיר ריק
+    assert captured.get("timeout") is not None and captured["timeout"] <= 10
 
 
 # --- stream proxy (same-origin עבור HTTPS) -----------------------------------

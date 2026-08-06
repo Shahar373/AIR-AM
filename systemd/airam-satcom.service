@@ -29,8 +29,12 @@ Type=simple
 # systemd מנתח KEY=VALUE *בבטחה* (לא מריץ shell) => קובץ הניתן-לכתיבה ע"י airam
 # לא יכול להסליל הרצת קוד כ-root (בניגוד ל-source ב-bash).
 EnvironmentFile=-/etc/airam/satcom.env
-# שער מוכנות: מחכה שה-SDRplay API באמת יענה לפני הרצת inmarsat-sniffer (כמו rtl_airband)
-ExecStartPre=/usr/local/bin/airam-wait-sdrplay
+# שער מוכנות: מחכה שה-SDRplay API באמת יענה לפני הרצת inmarsat-sniffer (כמו
+# rtl_airband). %n (שם היחידה הזו) מועבר לשער כדי שהוא ידע לדלג על "בעיטת"
+# ה-restart ל-sdrplay.service במקרה הזה בלבד — היחידה הזו (בניגוד לשלושת
+# צרכני ה-SDR האחרים) עם StartLimitBurst סופי, וה-restart היה מפיץ אליה
+# בחזרה דרך PartOf וצורך מתקציב ההפעלות שלה עצמה (ר' airam-wait-sdrplay).
+ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
 # ⚠ החלפת אנטנה (VHF airband <-> L-band + LNA) היא פעולה *ידנית* של המשתמש —
 # ר' docs/satcom-feasibility.md §3. ‏$SATCOM_BIAS_TEE ו-$SATCOM_GAIN *ללא*
 # סוגריים => נעלמים לגמרי כשריקים. SATCOM_BIAS_TEE="-B" מדליק את ה-bias-T של

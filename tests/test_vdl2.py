@@ -105,6 +105,19 @@ def test_normalize_vdl2_acars_label15_position():
     assert abs(n["lat"] - 32.02667) < 0.001 and abs(n["lon"] - 34.89667) < 0.001
 
 
+def test_normalize_vdl2_acars_msgno_int_does_not_raise():
+    """⚠ רגרסיה אמיתית: msg_num/msg_num_seq עלולים להגיע כ-int (dumpvdl2 לא
+    מבטיח str) — חיבור מחרוזות ישיר (‎"" + int) היה מפיל את כל הפריים
+    ב-TypeError, שנתפס ע"י _vdl2_listener אבל זרק את ההודעה כולה בשקט."""
+    n = app._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
+        "err": False, "crc_ok": True, "more": False, "reg": ".4X-EKF",
+        "mode": "2", "label": "_d", "blk_id": "3", "ack": "^",
+        "msg_num": 5, "msg_num_seq": "A", "msg_text": "",
+    }})))
+    assert n is not None
+    assert n["msgno"] == "5A"
+
+
 def test_normalize_vdl2_acars_empty_ack_tolerated():
     """ACK ריק (label _d, בלי טקסט) — נסבל בלי קריסה, כמו ב-acarsdec."""
     n = app._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
@@ -131,6 +144,27 @@ def test_normalize_vdl2_acars_arinc622_nested():
     assert n["category"] == "ADS-C"
     assert n["pos_src"] == "adsc" and n["group"] == "position"
     assert abs(n["lat"] - 32.1234) < 1e-4 and abs(n["lon"] - 34.5678) < 1e-4
+
+
+def test_normalize_vdl2_path_a_uplink_adsc_never_yields_position():
+    """⚠ רגרסיה אמיתית: מסלול A (ACARS-over-AVLC, ר' test_normalize_vdl2_acars_arinc622_nested
+    למעלה) לא העביר _structural_dir ל-_normalize_acars — חסם ה-ADS-C-uplink
+    (ר' test_normalize_vdl2_uplink_adsc_never_yields_position_even_without_err
+    למטה, שם זה כן עובד במסלול B) לא חל בכלל כאן, בדיוק המסלול הכי סביר לשאת
+    ADS-C אמיתי (ACARS-over-AVLC). err=False בכל מקום (הפענוח "מצליח" מבנית) —
+    ה-guard חייב לחסום בכל זאת מכיוון בלבד."""
+    n = app._normalize_vdl2(_vdl2(_avlc_uplink({"acars": {
+        "err": False, "crc_ok": True, "more": False, "reg": ".4X-EDA",
+        "mode": "2", "label": "H1", "blk_id": "2", "ack": "!",
+        "flight": "LY0027", "msg_num": "D64", "msg_num_seq": "A",
+        "msg_text": "#DFB...",
+        "arinc622": {"msg_type": "adsc_msg", "adsc": {
+            "err": False, "tags": [{"basic_report": {"lat": 18.34167, "lon": 2.11006}}]}},
+    }})))
+    assert n["dir"] == "uplink"
+    assert n["category"] == "ADS-C"
+    assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
+    assert n["group"] != "position"
 
 
 def test_normalize_vdl2_crc_error_blocks_text_heuristic():
@@ -186,6 +220,21 @@ def test_normalize_vdl2_adsc_x25_position():
     assert n["category"] == "ADS-C (VDL2)"
     assert n["group"] == "position" and n["pos_src"] == "adsc"
     assert abs(n["lat"] - 31.9) < 1e-6 and abs(n["lon"] - 35.1) < 1e-6
+
+
+def test_normalize_vdl2_cpdlc_with_adsc_substring_not_treated_as_position():
+    """⚠ רגרסיה אמיתית: is_adsc הוא בדיקת-substring גולמית על *כל* ה-blob, לא
+    exclusive מול "cpdlc" בו. הודעת CPDLC שמזכירה "ADSC" בתוך טקסט חופשי מקונן
+    (למשל בקשת קונטרקט) עדיין עברה בעבר את תנאי חילוץ המיקום למרות שה-category
+    כבר הוכרע כ-CPDLC — waypoint מ-route_clearance יוחס בטעות כמיקום המטוס."""
+    n = app._normalize_vdl2(_vdl2(_avlc_downlink({
+        "x25": {"err": False, "pkt_type_name": "Data",
+                "clnp": {"cotp": {"cpdlc": {
+                    "err": False,
+                    "msg_data": [{"free_text": "REQUEST ADSC CONTRACT"},
+                                 {"route_clearance": {"waypoint": {"lat": 51.0, "lon": -15.0}}}]}}}}})))
+    assert n["category"] == "CPDLC (VDL2)" and n["group"] == "clearance"
+    assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
 
 
 def test_normalize_vdl2_adsc_decode_failed_never_yields_position():

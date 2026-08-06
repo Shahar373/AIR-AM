@@ -177,3 +177,66 @@ def test_boot_restore_state_changed_while_waiting_for_sdr(paths, no_sleep, sysct
     app._boot_restore()
     assert sysctl_calls == []                        # לא נגע בכוונה הישנה (voice) בכלל
     assert app.load_state()["app_mode"] == "acars"    # הבחירה הטרייה של המשתמש נשמרת
+
+
+# --- _mode_reconcile_once: התאוששות מקריסת sdrplay שלא הופצה לצרכן ------------
+
+def test_mode_reconcile_reenters_when_consumer_dead(paths, sysctl_calls, monkeypatch):
+    """המצב השמור voice, אבל אף צרכן לא רץ (סימולציית קריסת sdrplay שלא
+    הופצה) — הבדיקה נכנסת מחדש."""
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "acars", "acars_freqs": ["131.550"]})
+    monkeypatch.setattr(app, "_is_active", lambda svc: ("restart", svc) in sysctl_calls)
+    app._mode_reconcile_once()
+    assert ("restart", app.ACARS_SERVICE) in sysctl_calls
+    assert app.load_state()["app_mode"] == "acars"    # המצב השמור לא השתנה — רק נכנס בפועל
+
+
+def test_mode_reconcile_noop_when_consumer_already_alive(paths, sysctl_calls, monkeypatch):
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "voice"})
+    monkeypatch.setattr(app, "_live_mode", lambda: "voice")   # כבר רץ
+    app._mode_reconcile_once()
+    assert sysctl_calls == []                          # לא ניגע בכלום — אין תקלה
+
+
+def test_mode_reconcile_skips_off_scan_satcom(paths, sysctl_calls, monkeypatch):
+    """off/scan/satcom לא בטיפול הפוליסה הזו — scan יש לו thread ייעודי משלו,
+    ו-satcom לא משוחזר אוטומטית בכוונה (בטיחות bias-T, ר' §12)."""
+    for mode in ("off", "scan", "satcom"):
+        app.save_state({**app.DEFAULT_STATE, "app_mode": mode})
+        app._mode_reconcile_once()
+    assert sysctl_calls == []
+
+
+def test_mode_reconcile_skips_when_sdr_absent(paths, sysctl_calls, monkeypatch):
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "vdl2", "vdl2_freqs": ["136.975"]})
+    monkeypatch.setattr(app, "_sdr_present", lambda: False)
+    app._mode_reconcile_once()
+    assert sysctl_calls == []                          # udev יטפל כשה-SDR יחזור, לא אנחנו
+
+
+def test_mode_reconcile_defers_to_concurrent_operation(paths, sysctl_calls):
+    """TUNE_LOCK תפוס (המשתמש כרגע עושה משהו אחר) => לא מתחרים, מוותר בשקט."""
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "voice"})
+    assert app.TUNE_LOCK.acquire(blocking=False)
+    try:
+        app._mode_reconcile_once()
+        assert sysctl_calls == []
+    finally:
+        app.TUNE_LOCK.release()
+
+
+def test_mode_reconcile_loop_survives_exception(monkeypatch):
+    """חריגה בתוך _mode_reconcile_once לא מפילה את ה-thread — נתפסת ונרשמת,
+    והלולאה ממשיכה לסיבוב הבא (לא רק "לא קורסת פעם אחת")."""
+    sleep_calls = []
+
+    def fake_sleep(_):
+        sleep_calls.append(1)
+        if len(sleep_calls) >= 2:
+            raise StopIteration   # עוצר את הלולאה האינסופית אחרי הסיבוב השני
+    monkeypatch.setattr(app.time, "sleep", fake_sleep)
+    monkeypatch.setattr(app, "_mode_reconcile_once",
+                        lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(StopIteration):
+        app._mode_reconcile_loop()
+    assert len(sleep_calls) == 2   # המשיך לסיבוב שני למרות החריגה בראשון

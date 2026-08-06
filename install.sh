@@ -75,8 +75,13 @@ else
 
   # ספריות: בוחרים את הקובץ המלא libsdrplay_api.so.MAJOR.MINOR (שני מקטעי גרסה),
   # לא את ה-symlink הקצר .so.3 - אחרת ה-ln למטה היה מצביע על עצמו.
-  LIB="$(ls "$EXT/$APIARCH"/libsdrplay_api.so.*.* 2>/dev/null | head -1)"
-  [[ -n "$LIB" ]] || LIB="$(ls "$EXT/$APIARCH"/libsdrplay_api.so.* 2>/dev/null | head -1)"
+  # ⚠ "|| true" הכרחי כאן תחת set -e -o pipefail: כש-ls לא מוצא שום קובץ תואם
+  # הוא יוצא בקוד שגיאה (הגלוב עצמו מועבר כמחרוזת מילולית) — pipefail מפיץ את
+  # זה גם כש-head מצליח, וה-die למטה אף פעם לא היה מגיע (אומת: הסקריפט יצא
+  # בקוד 2, בלי הודעה, ישר משורת ה-ls). בלי זה, שינוי עתידי בשם הקבצים בארכיון
+  # של SDRplay הופך מקרה-שחזור (fallback לתבנית הרחבה יותר) לקריסה שקטה.
+  LIB="$(ls "$EXT/$APIARCH"/libsdrplay_api.so.*.* 2>/dev/null | head -1 || true)"
+  [[ -n "$LIB" ]] || LIB="$(ls "$EXT/$APIARCH"/libsdrplay_api.so.* 2>/dev/null | head -1 || true)"
   [[ -n "$LIB" ]] || die "לא נמצאה ספריית libsdrplay_api ב-API שחולץ."
   cp -f "$LIB" /usr/local/lib/
   BASE="$(basename "$LIB")"                       # libsdrplay_api.so.3.15
@@ -104,9 +109,24 @@ if SoapySDRUtil --info 2>/dev/null | grep -qi sdrplay; then
 else
   log "בונה SoapySDRPlay3..."
   cd "$BUILD_DIR"
-  [[ -d SoapySDRPlay3 ]] || git clone https://github.com/pothosware/SoapySDRPlay3.git
+  # checkout קיים => מעדכנים (לא הורסים), כמו libacars למטה — עץ שכבר קיים
+  # מריצה קודמת (שנכשלה לפני שהגיע ל-SoapySDRUtil check, או גרסת SDRplay
+  # ישנה) יקבל תיקוני upstream בהרצה חוזרת במקום להישאר קפוא לנצח.
+  if [[ -d SoapySDRPlay3 ]]; then
+    git -C SoapySDRPlay3 pull --ff-only || true
+  else
+    git clone https://github.com/pothosware/SoapySDRPlay3.git
+  fi
   cd SoapySDRPlay3 && rm -rf build && mkdir build && cd build
-  cmake .. && make -j"$(nproc)" && make install && ldconfig
+  # ⚠ "|| die" הכרחי: set -e לא תופס כשל של פקודה לא-אחרונה ברשימת && (אומת
+  # אמפירית — "false && echo B" ממשיך לרוץ), אז כשל cmake/make היה מדולג
+  # בשקט והתקנה נחשבת "הצלחה" בלי שהמודול קיים בפועל.
+  cmake .. && make -j"$(nproc)" && make install && ldconfig \
+    || die "בניית SoapySDRPlay3 נכשלה."
+  # אימות אחרי בנייה (כמו command -v לבינארים) — לא מספיק ש-make הצליח, צריך
+  # ש-SoapySDR באמת מזהה את המודול (אחרת מצב תמידית "לא נמצא SDR" בממשק).
+  SoapySDRUtil --info 2>/dev/null | grep -qi sdrplay \
+    || die "SoapySDRPlay3 נבנה אך לא זוהה ע\"י SoapySDR - בדוק את פלט הבנייה למעלה."
 fi
 
 # ----------------------------------------------------------------------------
@@ -172,7 +192,14 @@ else
     grep -qF "$pat" src/output.cpp || { PATCH_OK=0; warn "ה-patch לא נתפס: '$pat' (הקוד השתנה ב-upstream?)"; }
   done
   rm -rf build && mkdir build && cd build
-  cmake $RTL_CMAKE_FLAGS .. && make -j"$(nproc)" && make install
+  # ⚠ "|| die" הכרחי: בלעדיו כשל cmake/make היה מדולג בשקט (set -e לא תופס
+  # כשל של פקודה לא-אחרונה ברשימת &&) וה-marker למטה נכתב על סמך PATCH_OK
+  # בלבד — בלי שום קשר להאם הבנייה בפועל הצליחה. תרחיש אמיתי: rtl_airband
+  # ישן כבר מותקן (command -v מצליח), הבנייה נכשלת מסיבה לא-קשורה ל-patch
+  # (תלות חסרה וכו') — לפני התיקון ה-marker נכתב בכל זאת ו-"git pull && sudo
+  # ./install.sh" הבא היה רואה "כבר מותקן" ומדלג לנצח על בנייה מחדש.
+  cmake $RTL_CMAKE_FLAGS .. && make -j"$(nproc)" && make install \
+    || die "בניית RTLSDR-Airband נכשלה."
   if [[ $PATCH_OK -eq 1 ]]; then
     mkdir -p "$(dirname "$AIRAM_RTL_MARK")"
     printf '%s' "$RTL_BUILD_SIG" > "$AIRAM_RTL_MARK"
@@ -202,7 +229,13 @@ else
     git clone https://github.com/szpajder/libacars.git
   fi
   cd libacars && rm -rf build && mkdir build && cd build
-  cmake .. && make -j"$(nproc)" && make install && ldconfig
+  cmake .. && make -j"$(nproc)" && make install && ldconfig \
+    || die "בניית libacars נכשלה."
+  # אימות אחרי בנייה (כמו command -v לבינארים) — בלעדיו כשל כאן היה מדולג
+  # בשקט (אין marker/command -v לבדוק) וממשיך ישר לבניית acarsdec/dumpvdl2,
+  # שתלויים ב-libacars ונכשלים עם שגיאה מטעה שמאשימה אותם ולא את השורש האמיתי.
+  pkg-config --atleast-version=2.1.0 libacars-2 2>/dev/null \
+    || die "libacars נבנה אך pkg-config לא מזהה גרסה ≥2.1.0 - בדוק את פלט הבנייה למעלה."
 fi
 
 # acarsdec: בנייה מחדש כשמשתנים דגלי ה-cmake (חתימה => אידמפוטנטי כמו rtl_airband)
@@ -217,8 +250,12 @@ else
   [[ -d acarsdec ]] || git clone https://github.com/TLeconte/acarsdec.git
   cd acarsdec && rm -rf build && mkdir build && cd build
   # PKG_CONFIG_PATH => כדי ש-cmake ימצא את libacars-2 שהותקן ל-/usr/local
+  # ⚠ "|| die" על שרשרת הבנייה עצמה (לא רק על command -v למטה): בהתקנה
+  # קיימת שכבר יש לה בינארי acarsdec ישן ותקין, command -v לבד היה "מצליח"
+  # גם כשהבנייה *הזו* נכשלה בלי לעדכן כלום — נדרש שער נפרד בדיוק במקום הכשל.
   PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
-    cmake $ACARS_CMAKE_FLAGS .. && make -j"$(nproc)" && make install
+    cmake $ACARS_CMAKE_FLAGS .. && make -j"$(nproc)" && make install \
+    || die "בניית acarsdec נכשלה."
   command -v acarsdec >/dev/null 2>&1 || die "בניית acarsdec נכשלה (בדוק SoapySDR/libacars)."
   mkdir -p "$(dirname "$AIRAM_ACARS_MARK")"
   printf '%s' "$ACARS_BUILD_SIG" > "$AIRAM_ACARS_MARK"
@@ -248,8 +285,11 @@ else
   [[ -d dumpvdl2 ]] || git clone --depth 1 --branch "$DUMPVDL2_VER" https://github.com/szpajder/dumpvdl2.git
   cd dumpvdl2 && rm -rf build && mkdir build && cd build
   # PKG_CONFIG_PATH => כדי ש-cmake ימצא את libacars-2 שהותקן ל-/usr/local
+  # ⚠ "|| die" על שרשרת הבנייה עצמה — כמו acarsdec, command -v לבד למטה לא
+  # מבחין בין "נבנה עכשיו בהצלחה" ל"בינארי ישן עדיין שם, הבנייה הזו נכשלה".
   PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
-    cmake $DUMPVDL2_CMAKE_FLAGS .. && make -j"$(nproc)" && make install && ldconfig
+    cmake $DUMPVDL2_CMAKE_FLAGS .. && make -j"$(nproc)" && make install && ldconfig \
+    || die "בניית dumpvdl2 נכשלה."
   command -v dumpvdl2 >/dev/null 2>&1 || die "בניית dumpvdl2 נכשלה (בדוק SoapySDR/libacars/glib2)."
   # אזהרה מוקדמת (לא כישלון): הבינארי חייב לכלול את קלט ה-SoapySDR שה-unit משתמש בו
   dumpvdl2 --version 2>&1 | grep -qi soapysdr \
@@ -293,7 +333,9 @@ else
   CMAKE_LOG="$(mktemp)"
   PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
     cmake .. 2>&1 | tee "$CMAKE_LOG"
-  make -j"$(nproc)" && make install && ldconfig
+  # ⚠ "|| die" על שרשרת הבנייה עצמה — כמו acarsdec/dumpvdl2, command -v לבד
+  # למטה לא מבחין בין "נבנה עכשיו בהצלחה" ל"בינארי ישן עדיין שם".
+  make -j"$(nproc)" && make install && ldconfig || die "בניית inmarsat-sniffer נכשלה."
   command -v inmarsat-sniffer >/dev/null 2>&1 || die "בניית inmarsat-sniffer נכשלה (בדוק SDRplay API/libacars)."
   # ⚠ סימן-הבנייה נכתב *רק* כשתמיכת SDRplay אושרה בפועל. אחרת הרצה חוזרת של
   # install.sh (אחרי שהמשתמש מתקין את SDRplay API בשלב 2) הייתה רואה
@@ -372,7 +414,14 @@ done
 # reset-failed ל-airam-satcom בלבד: היחידה היחידה עם StartLimitBurst סופי (בטיחות
 # bias-T, ר' systemd/airam-satcom.service) — _enter_satcom צריך לאפס תקרה קודמת
 # כדי שכניסה ידנית מחדש מה-UI תמיד תעבוד גם אחרי כמה קריסות רצופות.
-cat > /etc/sudoers.d/airam <<'EOF'
+# ⚠ נכתב תחילה לקובץ זמני ומאומת *לפני* שהוא מגיע ל-/etc/sudoers.d/airam —
+# לא ישירות ליעד. sudo מסרב לרוץ *בכלל* כשקובץ כלשהו תחת sudoers.d לא תקין,
+# כולל לניסיונות התיקון של המשתמש עצמו (sudo ...) — קובץ פגום שנשאר ביעד
+# אחרי כשל ולידציה היה מנעל sudo למערכת כולה. הקובץ הזה קבוע (לא מבוסס
+# משתנים) אז הסיכון בפועל נמוך, אבל התבנית הבטוחה זולה ותואמת את _atomic_write
+# ב-app.py (כתוב-זמני → אמת → העבר), לא סיבה להתפשר עליה כאן.
+SUDOERS_TMP="$(mktemp)"
+cat > "$SUDOERS_TMP" <<'EOF'
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart rtl_airband
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop rtl_airband
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-acars
@@ -383,8 +432,10 @@ airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-satcom
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-satcom
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed airam-satcom
 EOF
-chmod 440 /etc/sudoers.d/airam
-visudo -cf /etc/sudoers.d/airam >/dev/null || die "קובץ sudoers לא תקין (/etc/sudoers.d/airam)."
+visudo -cf "$SUDOERS_TMP" >/dev/null \
+  || { rm -f "$SUDOERS_TMP"; die "קובץ sudoers לא תקין (נבדק לפני התקנה — /etc/sudoers.d/airam לא נגע)."; }
+install -m440 "$SUDOERS_TMP" /etc/sudoers.d/airam
+rm -f "$SUDOERS_TMP"
 # קובץ environment ל-PIN אופציונלי (כבוי כברירת מחדל => חוויית 'בלי סיסמאות' נשמרת)
 mkdir -p /etc/airam
 if [[ ! -f /etc/airam/airam.env ]]; then
@@ -394,6 +445,11 @@ if [[ ! -f /etc/airam/airam.env ]]; then
 # AIRAM_PIN=1234
 EOF
 fi
+# ⚠ umask ברירת המחדל של root משאיר את הקובץ 644 (world-readable) — AIRAM_PIN
+# בפנים הוא הסוד היחיד במערכת. 640 (לא 600) כי airam-web קורא אותו כ-airam
+# והבעלות/קבוצה נקבעות ל-airam:airam למטה (chown -R). מוחל תמיד (לא רק
+# ביצירה) כדי שגם שדרוג מגרסת סקריפט ישנה יתקן קובץ קיים שנוצר 644.
+chmod 640 /etc/airam/airam.env
 # הגדרות ACARS/VDL2/SATCOM (ברירת מחדל; airam-web דורס בכל מעבר מצב). בבעלות airam => airam-web יכול לכתוב.
 [[ -f /etc/airam/acars.env ]] || cp "$REPO_DIR/config/acars.env" /etc/airam/acars.env
 [[ -f /etc/airam/vdl2.env ]] || cp "$REPO_DIR/config/vdl2.env" /etc/airam/vdl2.env

@@ -109,6 +109,16 @@ def test_validate_scan_plan_normalizes_freqs():
     assert plan[0]["freqs"] == ["136.975"]
 
 
+def test_api_scan_reports_server_clock(client, paths, monkeypatch):
+    """⚠ /api/scan מגיש 'now' (שעון השרת) כדי שה-UI יחשב סטייה מול Date.now()
+    בלקוח — next_switch_at הוא זמן-שרת, ובלי סטייה Pi headless בלי RTC/NTP
+    (תרחיש שדה) יכול להציג ספירה-לאחור שגויה למרות ששני השעונים 'תקינים'
+    כל אחד בפני עצמו."""
+    monkeypatch.setattr(app.time, "time", lambda: 1700000000.0)
+    status = client.get("/api/scan").get_json()
+    assert status["ok"] and status["now"] == 1700000000.0
+
+
 # --- /api/mode: כניסה לסריקה --------------------------------------------------
 
 def test_api_mode_enter_scan_starts_leg0_and_thread(client, paths, no_sleep, monkeypatch):
@@ -535,3 +545,89 @@ def test_validate_scan_plan_rejects_non_string_window_fields():
                                      "active_from": 900, "active_to": "22:00"}]) is None
     assert app._validate_scan_plan([{"mode": "acars", "dwell_sec": 60,
                                      "active_from": ["06", "00"], "active_to": "22:00"}]) is None
+
+
+# --- באג: /api/tune (לא רק /api/mode voice) חייב לעצור סבב פעיל --------------
+
+def test_api_tune_stops_running_scan(client, paths, monkeypatch):
+    """POST /api/tune הוא נתיב נפרד מ-/api/mode {mode:voice} (משמש את בורר
+    התדרים בתצוגת הקול ישירות) — גם הוא חייב לעצור סבב סריקה פעיל, אחרת הסבב
+    ממשיך לרוץ ברקע ומחליף את ה-SDR מתחת לרגליים של המשתמש בסוף ה-dwell.
+    בלי no_sleep בכוונה (כמו test_api_mode_tune_lock_busy_does_not_stop_running_scan):
+    dwell אמיתי (60ש') => thread הסריקה יושב בהמתנה ולא מתחרה על TUNE_LOCK."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    client.post("/api/mode", json={"mode": "scan", "plan": [ACARS_LEG, VDL2_LEG]})
+    assert app._scan_thread is not None and app._scan_thread.is_alive()
+
+    monkeypatch.setattr(app, "_restart_and_verify", lambda: (None, None, False))
+    r = client.post("/api/tune", json={"freq": 134.6})
+    assert r.status_code == 200
+    assert app._scan_thread is None
+    assert app.load_state()["app_mode"] == "voice"
+
+
+def test_api_mode_voice_tune_lock_busy_does_not_stop_running_scan(client, paths, monkeypatch):
+    """אותה דרישה כמו test_api_mode_tune_lock_busy_does_not_stop_running_scan,
+    אבל למצב voice — מסלול קוד שונה (_voice_tune מנהל את TUNE_LOCK בעצמו),
+    אז זו לא אותה בדיקה בדיוק: _scan_stop_thread צריך להיקרא מתוך _voice_tune
+    אחרי שהוא תפס את הנעילה, לא לפני כן ב-api_mode עצמו — אחרת בקשת voice
+    שנכשלת לתפוס נעילה (409) הייתה עוצרת סבב תקין בחינם ("scan זומבי")."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    client.post("/api/mode", json={"mode": "scan", "plan": [ACARS_LEG, VDL2_LEG]})
+    thread_before = app._scan_thread
+    assert thread_before is not None and thread_before.is_alive()
+    assert app.TUNE_LOCK.acquire(blocking=False)   # מדמה כיוונון/בדיקת אנטנה אחרת שכבר רצה
+    try:
+        r = client.post("/api/mode", json={"mode": "voice", "freq": 134.6})
+        assert r.status_code == 409
+    finally:
+        app.TUNE_LOCK.release()
+    assert app._scan_thread is thread_before and app._scan_thread.is_alive()
+    assert app.load_state()["app_mode"] == "scan"
+
+
+# --- באג: _scan_activate כפולה (למשל _boot_restore אחרי שהמשתמש כבר התחיל
+#     בעצמו את אותו לוח בזמן ההמתנה ל-SDR) לא אמורה להשאיר thread ישן דולף ----
+
+def test_scan_activate_called_twice_stops_previous_thread(paths, no_sleep, monkeypatch):
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    app._scan_activate([ACARS_LEG, VDL2_LEG])
+    thread1 = app._scan_thread
+    assert thread1 is not None and thread1.is_alive()
+
+    app._scan_activate([ACARS_LEG, VDL2_LEG])
+    thread2 = app._scan_thread
+    assert thread2 is not None and thread2 is not thread1
+    thread1.join(timeout=2)
+    assert not thread1.is_alive()      # thread1 נעצר כשהופעל השני — לא דולף
+    assert thread2.is_alive()
+
+
+# --- באג: _enter_standby בתוך _scan_loop חייב לרוץ תחת TUNE_LOCK -------------
+
+def test_scan_loop_out_of_window_skips_standby_when_tune_lock_busy(paths, no_sleep, monkeypatch):
+    """אם TUNE_LOCK תפוס (כמו בדיקת אנטנה מקבילה) בדיוק ברגע שסבב שלם מסתיים
+    בלי אף רגל בחלון — לא קוראים ל-_enter_standby בלי הנעילה (כל שינוי חומרה
+    תחת TUNE_LOCK, כמו כניסת הרגל עצמה כמה שורות למעלה). consumer_active
+    צריך להישאר True כדי שה-recheck הבא ינסה לכבות שוב, לא לוותר בשקט."""
+    class _NeverAcquire:
+        def acquire(self, *a, **k):
+            return False
+        def release(self):
+            pass
+    monkeypatch.setattr(app, "TUNE_LOCK", _NeverAcquire())
+    standby_calls = []
+    monkeypatch.setattr(app, "_enter_standby", lambda: standby_calls.append(1) or (None, None))
+    monkeypatch.setattr(app, "_leg_active_now", lambda leg: False)
+
+    stop_evt = threading.Event()
+    plan = [ACARS_LEG]
+    th = threading.Thread(target=app._scan_loop, args=(stop_evt, plan, 0, 0, True), daemon=True)
+    th.start()
+    time.sleep(0.2)
+    stop_evt.set()
+    th.join(timeout=5)
+    assert standby_calls == []   # לא כיבינו בלי הנעילה

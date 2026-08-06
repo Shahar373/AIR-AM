@@ -18,3 +18,25 @@ jobs:
       - run: python -m pytest tests/ -v
       - name: bash syntax check
         run: bash -n install.sh scripts/airam-wait-sdrplay
+      - name: shellcheck
+        # bash -n -o תחביר בלבד; shellcheck תופס בעיות סמנטיות אמיתיות (משתנה
+        # לא-מצוטט שנשבר עם רווח, קוד שלעולם לא רץ וכו') שהיו שם ולא נתפסו —
+        # ר' תיקון ה-"|| true"‎ ב-ls|head תחת set -e -o pipefail. -S warning
+        # (לא error/style) כדי לא להיכשל על הערות info סגנוניות שכבר קיימות
+        # בכוונה בקוד (כמו A && B || die, ש-shellcheck מציין כ-info בלבד).
+        run: shellcheck -S warning install.sh scripts/airam-wait-sdrplay
+      - name: systemd unit files verify
+        # מריצים אימות אמיתי (לא רק בדיקת syntax) על כל היחידות — תופס בעיות
+        # כמו מפתח במקטע הלא-נכון (StartLimitIntervalSec תחת [Service] במקום
+        # [Unit] — נתפס ותוקן בפועל בזמן הכנת התיקון הזה) שלא רואים ב-bash -n
+        # כי הן לא קובצי shell בכלל. מתעלמים מ"בינארי לא קיים" — ה-runner של
+        # CI לא מריץ install.sh, אז /usr/local/bin/* לא קיימים; זו לא בעיה
+        # בקובץ היחידה עצמו, רק עדות לסביבה חסרה. כל הודעה *אחרת* מפילה את הבדיקה.
+        run: |
+          out="$(systemd-analyze verify --recursive-errors=no systemd/*.service 2>&1 || true)"
+          echo "$out"
+          bad="$(printf '%s\n' "$out" | grep -v 'is not executable: No such file or directory' || true)"
+          if [ -n "$bad" ]; then
+            echo "systemd-analyze verify found real issues (see above)"
+            exit 1
+          fi

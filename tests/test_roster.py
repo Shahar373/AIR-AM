@@ -54,13 +54,13 @@ def _feed_adsb(ac_list, now=None):
 
 
 def _acars(tail=None, flight=None, icao=None, t=1.0, category="הודעה", group="text",
-          dir_=None, lat=None, lon=None, pos_src=None, actype=None):
+          dir_=None, lat=None, lon=None, pos_src=None, actype=None, tail_is_station=False):
     with app._acars_lock:
         app._acars_seq += 1
         app._acars_msgs.append({"id": app._acars_seq, "t": t, "tail": tail, "flight": flight,
                                 "icao": icao, "category": category, "group": group,
                                 "dir": dir_, "lat": lat, "lon": lon, "pos_src": pos_src,
-                                "actype": actype})
+                                "actype": actype, "tail_is_station": tail_is_station})
 
 
 def _vdl2(tail=None, flight=None, icao=None, t=1.0, category="VDL2", group="comm",
@@ -110,6 +110,29 @@ def test_roster_identity_by_flight_when_no_tail_or_icao():
 
 def test_roster_message_without_identity_ignored():
     _acars(tail=None, flight=None, icao=None, t=1.0)
+    assert app._build_roster() == []
+
+
+def test_roster_folds_icao_only_frame_into_matching_reg_entry():
+    """⚠ רגרסיה אמיתית: VDL2 מערבב פריימי ACARS-over-AVLC (עם reg+icao) ופריימי
+    XID/x25 (בלי reg, רק icao) מאותה כתובת AVLC בדיוק — לפני התיקון, שני
+    ה-buckets (("reg",...) ו-("icao",...)) נשארו נפרדים ואותו מטוס הופיע
+    כשתי שורות נפרדות ברוסטר."""
+    _vdl2(tail="4X-EKF", icao="4CA1FB", t=1.0, category="OOOI")
+    _vdl2(tail=None, icao="4CA1FB", t=2.0, category="VDL2 · XID")
+    roster = app._build_roster()
+    assert len(roster) == 1
+    c = roster[0]
+    assert c["tail"] == "4X-EKF" and c["icao"] == "4CA1FB"
+    assert c["count"] == 2 and sorted(c["sources"]) == ["vdl2"]
+    assert c["last_category"] == "VDL2 · XID"   # ההודעה המאוחרת קובעת גם אחרי המיזוג
+
+
+def test_roster_excludes_ground_station_tail():
+    """⚠ רגרסיה אמיתית: הודעת squitter של תחנת-קרקע (tail דמוי-כתובת-תחנה,
+    tail_is_station=True — ר' _normalize_acars) לא אמורה להופיע ברוסטר
+    כ"מטוס" בשם כתובת התחנה עצמה."""
+    _acars(tail=".TCARC", t=1.0, category="תחנת קרקע", tail_is_station=True)
     assert app._build_roster() == []
 
 
