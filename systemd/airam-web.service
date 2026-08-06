@@ -4,6 +4,13 @@ Description=AIR-AM web tuner (frequency selector UI)
 # מפעילי-המצבים — קורא את state.json ומשחזר את המצב השמור (voice/acars/vdl2/off).
 After=network-online.target icecast2.service
 Wants=network-online.target
+# ⚠ רגרסיה אמיתית: היה ב-[Service] (מיקום שהתקף רק לפני systemd 230) — systemd
+# מודרני מתעלם ממנו שם בשקט (systemd-analyze verify תפס: "Unknown key name
+# 'StartLimitIntervalSec' in section 'Service'"), כך שהמשטח היחיד של הבקרה
+# היה כפוף לתקרת ברירת-המחדל של systemd במקום "מתאושש לנצח" כפי שההערה למטה
+# מתעדת בכוונה — קריסה חוזרת (למשל באג בקוד) הייתה יכולה להשבית את airam-web
+# לצמיתות (start-limit-hit) בלי אף התאוששות אוטומטית, בניגוד למטרה #3 בפרויקט.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -17,7 +24,6 @@ ExecStart=/usr/bin/python3 /opt/airam/webtune/app.py
 User=airam
 Group=airam
 # always (לא on-failure): זה משטח הבקרה היחיד — חייב לקום גם אחרי יציאה "נקייה"
-StartLimitIntervalSec=0
 Restart=always
 RestartSec=5
 

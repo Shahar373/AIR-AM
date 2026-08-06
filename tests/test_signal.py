@@ -4,6 +4,7 @@
 # ----------------------------------------------------------------------------
 #  רץ בלי חומרה: כל נתיבי הקבצים מנותבים ל-tmp, ו-restart/systemctl ממוקפים.
 # ============================================================================
+import threading
 import time
 import types
 
@@ -33,6 +34,13 @@ def _clean_state_corrupt_flag():
     app._reset_state_corrupt_warned()
     yield
     app._reset_state_corrupt_warned()
+
+
+@pytest.fixture(autouse=True)
+def _stop_leftover_scan():
+    """מבטיח שאף thread סריקה לא דולף בין בדיקות (כמו ב-test_scan.py)."""
+    yield
+    app._scan_stop_thread()
 
 
 def _clear_acars():
@@ -295,3 +303,33 @@ def test_antenna_check_no_fresh_data_returns_504(client, paths, monkeypatch):
     r = client.post("/api/antenna/check", json={"freq": 121.5})
     assert r.status_code == 504
     assert r.get_json()["ok"] is False
+
+
+def test_antenna_check_restores_active_scan_leg_not_state_bank(client, paths, monkeypatch):
+    """תוך כדי סבב סריקה עם רגל שיש לה freqs מפורשים (שונים מהבנק הכללי השמור
+    ב-state.json) — בדיקת אנטנה חייבת לשחזר בדיוק את הרגל הרצה בפועל, לא את
+    הבנק הכללי (אחרת ה-thread הפעיל נשאר תקוע על בנק שגוי, ר' _restore_after_probe)."""
+    scan_leg = {"mode": "acars", "freqs": ["131.550"], "dwell_sec": 600}
+    stop_evt = threading.Event()
+    th = threading.Thread(target=stop_evt.wait, daemon=True)
+    th.start()
+    with app._scan_lock:
+        app._scan_thread = th
+        app._scan_thread_stop = stop_evt
+        app._scan_status.update(idx=0, leg=scan_leg, next_switch_at=time.time() + 600, plan=[scan_leg])
+
+    st = app.load_state()
+    st["acars_freqs"] = ["136.700"]      # בנק כללי שונה מהרגל הפעילה בפועל
+    app.save_state(st)
+
+    monkeypatch.setattr(app, "_live_mode", lambda: "acars")
+    calls = []
+    monkeypatch.setattr(app, "_enter_voice",
+                        lambda params: (_write_stats(paths / "stats.txt", params["freq"],
+                                                     sig=-30.0, noise=-72.0) or (None, None, False)))
+    monkeypatch.setattr(app, "_enter_acars", lambda freqs: calls.append(freqs) or (None, None))
+    monkeypatch.setattr(app, "ANTENNA_CHECK_SAMPLE_SEC", 1.0)
+
+    r = client.post("/api/antenna/check", json={"freq": 121.5})
+    assert r.status_code == 200
+    assert calls == [["131.550"]]        # שוחזרה הרגל הפעילה בפועל, לא ["136.700"]

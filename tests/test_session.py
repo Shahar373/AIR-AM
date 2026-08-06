@@ -166,6 +166,20 @@ def test_session_ack_advances_marker(client, paths):
     assert r2.get_json()["duration_sec"] < 2
 
 
+def test_session_ack_busy_returns_409_and_does_not_lose_concurrent_write(client, paths):
+    """⚠ רגרסיה אמיתית: read-modify-write של state.json בלי נעילה משותפת עם
+    שאר הכותבים (מעברי מצב) היה מאפשר lost update — בקשה שמגיעה תוך כדי מעבר
+    מצב יכולה לקרוא state ישן ולדרוס בחזרה את app_mode החדש. תחת אותו TUNE_LOCK
+    כמו כל שינוי אחר: כש-TUNE_LOCK תפוס מחזיר 409 (לא תוקע/לא דורס בשקט)."""
+    assert app.TUNE_LOCK.acquire(blocking=False)   # מדמה מעבר מצב שכבר רץ
+    try:
+        r = client.post("/api/session/ack")
+        assert r.status_code == 409
+    finally:
+        app.TUNE_LOCK.release()
+    assert app.load_state()["last_session_view_at"] is None   # לא קודם תוך כדי תפוסה
+
+
 # --- adsb.session_series ------------------------------------------------------
 
 def test_adsb_session_series_filters_by_since_and_never_raises():

@@ -12,6 +12,7 @@
 # ============================================================================
 import collections
 import csv
+import hmac
 import io
 import json
 import logging
@@ -95,6 +96,14 @@ ACARS_RATEMULT_DEFAULT = 160          # 160 => 2.0 MS/s (חלון ±1MHz)
 ACARS_MAX_CHANNELS = 8               # מגבלת acarsdec — עד 8 ערוצים בו-זמנית
 ACARS_WINDOW_MHZ = 1.9               # span מרבי בחלון דגימה אחד (2.0MS/s, עם שוליים)
 ACARS_BUF_MAX = 500                   # הודעות אחרונות בזיכרון (נטענות לקליינט בעלייה, היום בלבד)
+# ⚠ לא רק "ולידציית איכות" — זו גבול-האבטחה היחיד נגד הזרקת ארגומנטים: ה-
+# ExecStart-ים ב-systemd/*.service משתמשים במפורש ב-$ACARS_FREQS/$VDL2_FREQS
+# *בלי* מרכאות (כדי שיתפצלו למספר ארגומנטים — כל תדר כארגומנט נפרד, פיצ'ר
+# systemd מכוון), אז כל תו רווח בערך הזה הופך לגבול-ארגומנט חדש בתהליך root.
+# ‎_FREQ_RE מעוגן (^...$), ספרות+נקודה בלבד — ערך שלא עובר לא נכתב ל-env בכלל
+# (מסונן מהרשימה, לא "מנוקה"). אם אי-פעם משנים את זה, לוודא שהתבנית עדיין
+# שוללת רווחים/מקפים-מובילים/מטא-תווים — אחרת airam עם גישת-כתיבה כלשהי
+# ל-/etc/airam/*.env (למשל RCE בערוץ אחר לגמרי) יכול להזריק דגלים לתהליך root.
 _FREQ_RE = re.compile(r"^\d{2,3}\.\d{1,3}$")   # ולידציית תדר ACARS (MHz) לפני כתיבה ל-env
 
 # התמדה: כל הודעה מפוענחת נכתבת ל-acars.jsonl (כמו activity.jsonl) => שורדת restart.
@@ -332,20 +341,61 @@ SUDO = [] if os.geteuid() == 0 else ["sudo", "-n"]
 # לא הוגדר => אפס שינוי בחוויה ("בלי סיסמאות" כברירת מחדל).
 AIRAM_PIN = os.environ.get("AIRAM_PIN", "").strip()
 
+# ⚠ הגנה נגד ניחוש PIN: בלי rate-limit, PIN בן 4 ספרות (הדוגמה במסמכים) הוא
+# מרחב של 10,000 ערכים — לקוח ברשת המקומית (או דף DNS-rebinding, ר' _guard)
+# יכול למצות אותו תוך שניות. לא חוסמים IP לגמרי (DHCP/NAT הופכים חסימה קבועה
+# לפגיעה במשתמש לגיטימי) — רק מאטים משמעותית ניסיונות חוזרים מאותו מקור.
+_PIN_FAIL_LOCK = threading.Lock()
+_pin_fails = {}              # remote_addr -> (count, window_start_epoch)
+PIN_RATE_WINDOW_SEC = 60.0
+PIN_RATE_MAX_ATTEMPTS = 5    # מעבר לזה — השהיה בכל ניסיון נוסף באותו חלון
+PIN_RATE_DELAY_SEC = 1.0     # ~2.7 שעות למיצוי מרחב 4-ספרות במקום שניות
+
+
+def _pin_rate_limited(ip):
+    now = time.time()
+    with _PIN_FAIL_LOCK:
+        count, start = _pin_fails.get(ip, (0, now))
+        if now - start > PIN_RATE_WINDOW_SEC:
+            count, start = 0, now
+        return count >= PIN_RATE_MAX_ATTEMPTS
+
+
+def _pin_record_fail(ip):
+    now = time.time()
+    with _PIN_FAIL_LOCK:
+        count, start = _pin_fails.get(ip, (0, now))
+        if now - start > PIN_RATE_WINDOW_SEC:
+            count, start = 0, now
+        _pin_fails[ip] = (count + 1, start)
+
+
+def _pin_record_success(ip):
+    with _PIN_FAIL_LOCK:
+        _pin_fails.pop(ip, None)
+
 
 @app.before_request
 def _guard():
     """הגנות קלות על בקשות משנות-מצב (POST/PUT/DELETE):
       1. CSRF / DNS-rebinding: אם נשלח Origin/Referer הוא חייב להתאים ל-Host.
-      2. אימות אופציונלי: אם AIRAM_PIN הוגדר, נדרש header X-AIRAM-PIN תואם.
+      2. אימות אופציונלי: אם AIRAM_PIN הוגדר, נדרש header X-AIRAM-PIN תואם —
+         השוואה בזמן-קבוע (hmac.compare_digest, לא ==) + rate-limit רך לפי IP.
     בקשות GET (סטרים/מדדים/health/activity/airspace/metar/power) לא מושפעות."""
     if request.method not in ("POST", "PUT", "DELETE"):
         return None
     origin = request.headers.get("Origin") or request.headers.get("Referer")
     if origin and urlparse(origin).netloc != request.host:
         return jsonify(ok=False, error="מקור הבקשה לא תואם (Origin)"), 403
-    if AIRAM_PIN and request.headers.get("X-AIRAM-PIN", "") != AIRAM_PIN:
-        return jsonify(ok=False, error="נדרש PIN", auth=True), 401
+    if AIRAM_PIN:
+        ip = request.remote_addr or "unknown"
+        if _pin_rate_limited(ip):
+            time.sleep(PIN_RATE_DELAY_SEC)
+        supplied = request.headers.get("X-AIRAM-PIN", "")
+        if not hmac.compare_digest(supplied, AIRAM_PIN):
+            _pin_record_fail(ip)
+            return jsonify(ok=False, error="נדרש PIN", auth=True), 401
+        _pin_record_success(ip)
     return None
 
 # פריסטים של נתב"ג / TMA - רק זריעה ראשונית; מרגע עריכה בממשק האמת היא
@@ -640,8 +690,16 @@ def _sdr_present():
 
 
 def _journal_tail(service="rtl_airband", lines=8):
-    return subprocess.run(["journalctl", "-u", service, "-n", str(lines), "--no-pager"],
-                          capture_output=True, text=True).stdout
+    """זנב יומן לאבחון כישלון. timeout קצר וחובה: נקראת מתוך _enter_*/
+    _restart_and_verify/_enter_standby *בזמן* שהקורא מחזיק TUNE_LOCK — journalctl
+    תקוע (journald לא מגיב, בדיוק הרגע שהשירותים מתנהגים לא תקין) בלי timeout
+    היה תוקע את התהליך הזה לנצח ונועל את כל שינויי המצב/כיוונון/בדיקת האנטנה
+    העתידיים מאחורי TUNE_LOCK שאף פעם לא משתחרר."""
+    try:
+        return subprocess.run(["journalctl", "-u", service, "-n", str(lines), "--no-pager"],
+                              capture_output=True, text=True, timeout=5).stdout
+    except subprocess.TimeoutExpired:
+        return ""
 
 
 def _restart_and_verify():
@@ -710,31 +768,65 @@ _satcom_drop_count = 0         # הודעות לא-מזוהות (סכמה לא �
 
 
 def _scan_latlon(obj):
-    """סורק רקורסיבית מבנה libacars אחר זוג lat/lon תקין (ADS-C/CPDLC). מחזיר
-    (lat, lon) או None. הגנתי לשינויי סכמה בין גרסאות — מזהה לפי שם המפתח, לא מבנה."""
-    lat = lon = None
-
-    def walk(o):
-        nonlocal lat, lon
-        if lat is not None and lon is not None:
-            return
-        if isinstance(o, dict):
-            for k, v in o.items():
+    """סורק רקורסיבית מבנה libacars אחר *זוג* lat/lon תקין (ADS-C/CPDLC).
+    מחזיר (lat, lon) או None. הגנתי לשינויי סכמה בין גרסאות — מזהה לפי שם
+    המפתח, לא מבנה.
+    ⚠ רגרסיה אמיתית שתוקנה: הגרסה הקודמת חיפשה lat ראשון ו-lon ראשון *בנפרד*
+    בכל העץ ושילבה ביניהם — שני מפתחות שנמצאים בתת-עצים לא-קשורים בכלל
+    (למשל שני tags שונים ברשימת ADS-C) הורכבו לקואורדינטה מזויפת. עכשיו lat
+    ו-lon חייבים להופיע *יחד* באותו dict. בנוסף: ADS-C יכול לשאת גם
+    "predicted_route"/"next_wpt"/"intermediate_projected_intent" עם lat/lon
+    תקינים לכל דבר — אבל אלה waypoints עתידיים/מתוכננים, לא המיקום הנוכחי;
+    "basic_report" הוא הדיווח בפועל (ר' libacars/adsc.c) ומועדף כשקיים."""
+    def pair_in(o):
+        lat = lon = None
+        for k, v in o.items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
                 kl = str(k).lower()
-                if isinstance(v, (int, float)) and not isinstance(v, bool):
-                    if lat is None and kl in ("lat", "latitude"):
-                        lat = float(v)
-                    elif lon is None and kl in ("lon", "lng", "long", "longitude"):
-                        lon = float(v)
-                else:
-                    walk(v)
+                if kl in ("lat", "latitude"):
+                    lat = float(v)
+                elif kl in ("lon", "lng", "long", "longitude"):
+                    lon = float(v)
+        return (lat, lon) if lat is not None and lon is not None else None
+
+    def first_pair(o):
+        if isinstance(o, dict):
+            p = pair_in(o)
+            if p:
+                return p
+            for v in o.values():
+                p = first_pair(v)
+                if p:
+                    return p
         elif isinstance(o, list):
             for v in o:
-                walk(v)
-
-    walk(obj)
-    if lat is None or lon is None:
+                p = first_pair(v)
+                if p:
+                    return p
         return None
+
+    def find_by_key(o, key):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if str(k).lower() == key:
+                    return v
+                r = find_by_key(v, key)
+                if r is not None:
+                    return r
+        elif isinstance(o, list):
+            for v in o:
+                r = find_by_key(v, key)
+                if r is not None:
+                    return r
+        return None
+
+    basic = find_by_key(obj, "basic_report")
+    pair = first_pair(basic) if isinstance(basic, dict) else None
+    if pair is None:
+        pair = first_pair(obj)
+    if pair is None:
+        return None
+    lat, lon = pair
     if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
         return None                           # 0/0 = "אין מיקום" טיפוסי, לא מרכז האוקיינוס
     return round(lat, 5), round(lon, 5)
@@ -903,7 +995,17 @@ def _acars_direction(label, text):
     return None
 
 
-_ATIS_WIND_RE = re.compile(r"(\d{3})/(\d{2,3}KT)|WIND\s+(\d+)/(\d+)")
+# ⚠ רגרסיה אמיתית: הגרסה הקודמת דרשה "/" בין כיוון למהירות בכל מקרה, אז קבוצת
+# רוח בתקן METAR הרגיל (dddssKT/dddssGggKT מחוברים, בלי "/" — הפורמט הנפוץ
+# ביותר בפועל) לא נתפסה בכלל. גם הענף השני (WIND ddd/ss) לא לכד יחידה/משב
+# (gust). שלושה ענפים: (1) תקן METAR מחובר, כולל gust אופציונלי; (2) ddd/ssKT
+# בלי prefix "WIND" (פורמט שכבר נצפה); (3) "WIND ddd/ss" מילולי, עכשיו כולל
+# gust ויחידה אופציונליים במקום לזרוק אותם.
+_ATIS_WIND_RE = re.compile(
+    r"\b(?P<d1>\d{3})(?P<s1>\d{2,3})(?P<g1>G\d{2,3})?KT\b"
+    r"|(?P<d2>\d{3})/(?P<sk2>\d{2,3}KT)"
+    r"|WIND\s+(?P<d3>\d+)/(?P<s3>\d+)(?P<g3>G\d+)?(?P<u3>KT)?"
+)
 _ATIS_RWY_RE = re.compile(r"R(?:WY|/W)\s?(\d{1,2}[LRC]?)", re.IGNORECASE)
 _ATIS_QNH_RE = re.compile(r"Q(?:NH\s?)?(\d{4})")
 _ACTYPE_RE = re.compile(r"\b(B7[3-9]\d|A[23][0-9]\d|E[17][0-9]\d|CRJ\d|AT[57]\d)\b")
@@ -912,11 +1014,19 @@ _ACTYPE_RE = re.compile(r"\b(B7[3-9]\d|A[23][0-9]\d|E[17][0-9]\d|CRJ\d|AT[57]\d)
 _OOOI_PAIR_RE = re.compile(r"\b(OUT|OFF|ON|IN)\s?(\d{2}[:.]\d{2}|\d{4})", re.IGNORECASE)
 
 # WX (בקשות מזג אוויר): מחלץ קודי ICAO מארבע אותיות. מסנן מילות-מפתח שאינן שדות תעופה.
+# ⚠ אין לנו רשימת-אמת גלובלית של prefixes אזוריים תקינים לקוד ICAO — בלי אחת,
+# הרג'קס לבד תופס *כל* מילה אנגלית בת 4 אותיות. _WX_NON_AIRPORT הוא הגנה
+# יחידה, מטבעה חלקית; הורחב אחרי שהודגם בפועל ש-TEMP/DEWP/INFO/GATE/TIME/FUEL
+# (מונחי METAR/דוח-מצב נפוצים, לא שדות) נספרו כ"alternate" (וניפחו גם את
+# הרשימה ל-2+ קודים כשמדובר במונח בודד אמיתי) — כמו ACARS_LABELS, מתעדכן רק
+# ממקרים שהודגמו, לא ניחוש מקיף.
 _WX_ICAO_RE = re.compile(r"\b([A-Z]{4})\b")
 _WX_NON_AIRPORT = frozenset({
     "METAR", "SPECI", "SIGMET", "PIREP", "ATIS", "CAVOK", "NOSIG", "TEMPO",
     "BECMG", "PROB", "FROM", "TILL", "WIND", "GUST", "SHRA", "TSRA", "ACFT",
     "ACARS", "UPDT", "REQU", "RESP",
+    "TEMP", "DEWP", "INFO", "GATE", "TIME", "FUEL", "DATA", "LAST", "NEXT",
+    "RMRK", "REMK",
 })
 _HOME_AIRPORT = "LLBG"
 
@@ -931,7 +1041,17 @@ def _parse_atis(text):
         parts.append(f"מסלול {m.group(1)}")
     m = _ATIS_WIND_RE.search(text)
     if m:
-        wind = (m.group(1) + "/" + m.group(2)) if m.group(1) else (m.group(3) + "/" + m.group(4))
+        if m.group("d1"):        # תקן METAR מחובר: dddssGggKT
+            wind = m.group("d1") + "/" + m.group("s1") + (m.group("g1") or "") + "KT"
+        elif m.group("d2"):      # ddd/ssKT בלי prefix
+            wind = m.group("d2") + "/" + m.group("sk2")
+        else:                     # WIND ddd/ss[Ggg][KT] מילולי
+            # ⚠ רגרסיה שנמצאה בסבב-בדיקה עצמאי: "or 'KT'" המציא יחידה שלא
+            # הייתה בטקסט כש-KT לא נכתב במפורש — בדיוק ההפרה ש-§12 אוסר,
+            # ושהתיקון הזה עצמו אוכף מפורשות ב-loadsheet/nav_fuel. אין KT
+            # בקלט = אין KT בפלט, בדיוק כמו כל שאר השדות כאן.
+            wind = (m.group("d3") + "/" + m.group("s3")
+                   + (m.group("g3") or "") + (m.group("u3") or ""))
         parts.append(f"רוח {wind}")
     m = _ATIS_QNH_RE.search(text)
     if m:
@@ -1153,9 +1273,21 @@ def _parse_autotune(text):
 
 # Loadsheet אלקטרוני (label C1): מגיע בבלוקים נפרדים (multi-block, msgno D57A/B/C...) —
 # כל בלוק מחלץ מה שיש בו; \b לפני הקיצור מונע התאמה בתוך "MACZFW"/"LIZFW"/"MACTOW".
-_LOADSHEET_ZFW_RE = re.compile(r"\bZFW\s+(\d+)")
-_LOADSHEET_TOW_RE = re.compile(r"\bTOW\s+(\d+)")
-_LOADSHEET_TOF_RE = re.compile(r"\bTOF\s+(\d+)")
+# ⚠ רגרסיה אמיתית שתוקנה: (1) \d+ בלבד קטע משקלים עשרוניים (חלק מה-loadsheets
+# מדווחים ב-XX.X); (2) "kg" הודבק בכוח בקוד הישן למרות שהטקסט האמיתי (ר'
+# test_parse_loadsheet_real_capture) לא נושא שום יחידה בכלל — carrier אמריקאי
+# שמדווח ב-LB היה מקבל תווית "kg" שגויה. עכשיו קולטים יחידה אופציונלית מהטקסט
+# עצמו (KG/LB/LBS) ומציגים אותה *רק* כשהיא באמת שם — בלי יחידה בקלט = בלי
+# יחידה בפלט (§12). ⚠ רגרסיה שנמצאה בסבב-בדיקה עצמאי: \b *מחוץ* לקבוצת
+# היחידה (כלומר על השרשרת כולה) נכשל כשמספר מוצמד-בלי-רווח לסיומת לא-מוכרת
+# ("62000KGS"/"62000K") — הקבוצה נסוגה לריקה, אבל ה-\b הסוגר עדיין נבדק מול
+# התו הבא (עדיין אות), אז כל ההתאמה נכשלת ו-ZFW/TOW/TOF שלמים אבדו (בעוד
+# הקוד הישן, בלי יחידה בכלל, כן היה תופס את המספר). ה-\b עבר *לתוך* קבוצת
+# היחידה (מותנה בה בלבד) כדי שסיומת לא-מוכרת רק תדיר את היחידה, לא את המספר.
+_LOADSHEET_UNIT = r"(\d+(?:\.\d+)?)(?:\s*(KG|LBS?)\b)?"
+_LOADSHEET_ZFW_RE = re.compile(r"\bZFW\s+" + _LOADSHEET_UNIT)
+_LOADSHEET_TOW_RE = re.compile(r"\bTOW\s+" + _LOADSHEET_UNIT)
+_LOADSHEET_TOF_RE = re.compile(r"\bTOF\s+" + _LOADSHEET_UNIT)
 _LOADSHEET_PAX_RE = re.compile(r"\bCREW\s+(\d+)/(\d+)\s+PAX\s+(\d+)")
 _LOADSHEET_TTL_RE = re.compile(r"\bTTL\s+(\d+)")
 
@@ -1166,15 +1298,11 @@ def _parse_loadsheet(text):
     if not text or "LOADSHEET" not in text:
         return None
     parts = []
-    m = _LOADSHEET_ZFW_RE.search(text)
-    if m:
-        parts.append(f"ZFW {m.group(1)}kg")
-    m = _LOADSHEET_TOW_RE.search(text)
-    if m:
-        parts.append(f"TOW {m.group(1)}kg")
-    m = _LOADSHEET_TOF_RE.search(text)
-    if m:
-        parts.append(f"TOF {m.group(1)}kg")
+    for name, rx in (("ZFW", _LOADSHEET_ZFW_RE), ("TOW", _LOADSHEET_TOW_RE),
+                     ("TOF", _LOADSHEET_TOF_RE)):
+        m = rx.search(text)
+        if m:
+            parts.append(f"{name} {m.group(1)}{m.group(2) or ''}")
     m = _LOADSHEET_PAX_RE.search(text)
     if m:
         parts.append(f"נוסעים {m.group(3)} · צוות {m.group(1)}/{m.group(2)}")
@@ -1235,7 +1363,11 @@ def _parse_nav_fuel(text):
         return None
     if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
         return None
-    decoded = (f"UTC {utc[:2]}:{utc[2:]}z · דלק {fob}t · {alt}ft · "
+    # ⚠ רגרסיה אמיתית: "t" (טונות) הודבק בעבר בכוח על FOB למרות שהטקסט לא נושא
+    # שום יחידה עבורו (בניגוד ל-ALT/CAS, ששם ft/kt הן מוסכמות תעופה אוניברסליות
+    # כמעט-בלי-חלופה — לא כך דלק, שיכול להיות מדווח ב-kg/lb/t לפי חברה/מטוס).
+    # §12: לא ממציאים יחידה שלא הייתה בקלט.
+    decoded = (f"UTC {utc[:2]}:{utc[2:]}z · דלק {fob} · {alt}ft · "
                f"CAS {cas}kt · ETA {eta[:2]}:{eta[2:]}z")
     return round(lat, 5), round(lon, 5), decoded
 
@@ -1333,8 +1465,19 @@ def _normalize_acars(m):
     # הנתיבים ה-heuristic (text_latlon/label16) — הנתיבים המבניים (/.POS/,
     # label15, ADS-C) לא רלוונטיים לתחנת-קרקע מלכתחילה (אלה פורמטים שרק
     # מטוס-בפועל משדר), אז אין צורך לגדר אותם.
+    # ⚠ רגרסיה אמיתית: acarsdec מרפד גם רישומי מטוס קצרים בנקודה מובילה עד
+    # לאורך קבוע (ר' adsb.norm_reg: ‎'.4X-EHD') — אותו דפוס *בדיוק* כמו כתובת
+    # תחנת-קרקע. בלי הגבלה נוספת, _UPLINK_HEADER_RE לבד תפס גם רישומים אמיתיים
+    # שמתחילים באות ומרופדים בנקודה (למשל ‎.N806NN האמריקאי, ‎.JA801A היפני,
+    # ‎.HL7783 הקוריאני) ודיכא את מיקומם האמיתי — 4X-/C-/G- לא נפגעו כי המקף
+    # שבהם שובר את הרצף התווי הנדרש ע"י הרג'קס (ר' ‎.4X-EHD/‎.C-GHKX למטה),
+    # ולכן זה לא נתפס בקליטה המקומית. ההבחנה שכן שורדת: כתובות תחנת-קרקע
+    # שנצפו בפועל (‎.TCARC/‎.CNTMM) הן אותיות בלבד בלי ספרה, בעוד שרישומי מטוס
+    # אמיתיים כמעט תמיד מכילים ספרה — לכן ספרה כלשהי בתג פוסלת את הסיווג
+    # כתחנת-קרקע, גם אם הצורה הכללית תואמת את הרג'קס.
     tail_val = g("tail", "registration")
-    tail_is_station = bool(tail_val) and bool(_UPLINK_HEADER_RE.match(str(tail_val)))
+    tail_is_station = (bool(tail_val) and bool(_UPLINK_HEADER_RE.match(str(tail_val)))
+                       and not any(ch.isdigit() for ch in str(tail_val)))
 
     # פענוח ARINC-622 (libacars): kind => badge וקבוצה, וטקסט קריא אם יש.
     lat = lon = pos_src = decoded = None
@@ -1467,6 +1610,10 @@ def _normalize_acars(m):
         "text": text,
         "error": m.get("error"),
         "actype": _extract_actype(label, text),  # סוג מטוס best-effort (H1/C1) או None
+        # מוזרם החוצה (לא רק שדה-עזר פנימי) כדי ש-_aircraft_identity/_build_roster
+        # לא יתייחסו לכתובת תחנת-קרקע כאילו היא רישום מטוס — בלעדיו הרוסטר
+        # המאוחד הציג בעבר תחנות קרקע (SQ squitters וכו') כשורות "מטוס" משלהן.
+        "tail_is_station": tail_is_station,
     }
     rec["notable"] = _interest_score(rec)     # לדוח הסשן + סינון/התראות ב-UI (ר' §1 "האנליסט")
     return rec
@@ -1679,10 +1826,18 @@ def _normalize_vdl2(m):
             "label": acars.get("label"),
             "tail": acars.get("reg"),         # יתכן '.' מוביל — כמו acarsdec (norm_reg מטפל)
             "flight": acars.get("flight"),
-            "msgno": ((acars.get("msg_num") or "") + (acars.get("msg_num_seq") or "")) or None,
+            # msg_num/msg_num_seq עלולים להגיע כ-int (dumpvdl2 לא מבטיח str) —
+            # str() לפני החיבור, אחרת TypeError מפיל את כל הפריים ב-_vdl2_listener.
+            "msgno": (str(acars.get("msg_num") or "") + str(acars.get("msg_num_seq") or "")) or None,
             "text": acars.get("msg_text"),
             # err=פריים פגום / crc_ok=False => כמו acarsdec error>0 (מגדר heuristics של טקסט)
             "error": 0 if (not acars.get("err") and acars.get("crc_ok", True)) else 1,
+            # ⚠ בלי זה, חסם ה-ADS-C-uplink (adsc_dir_ok ב-_normalize_acars) לא
+            # חל בכלל במסלול הזה — הוא היחיד מבין שלושת המסלולים (כאן/VDL2
+            # מסלול B/SATCOM) שלא העביר את הכיוון המבני, בדיוק המסלול הכי סביר
+            # לשאת ADS-C אמיתי (ACARS-over-AVLC). אותו קלאס-באג שתועד ותוקן
+            # פעמיים ב-§12 — כאן פשוט לא יושם על המסלול השלישי.
+            "_structural_dir": direction,
         }
         if apps:
             raw["libacars"] = apps
@@ -1719,10 +1874,18 @@ def _normalize_vdl2(m):
                 category = "VDL2 · X.25"
             # מיקום *רק* מ-ADS-C: CPDLC עלול לשאת נ"צ מוטבע (waypoint ב-clearance)
             # שאינו מיקום המטוס עצמו — לא מייחסים אותו כמיקום כדי לא להטעות במפה.
+            # ⚠ רגרסיה אמיתית: is_adsc הוא בדיקת-substring גולמית על *כל* ה-blob
+            # (לא exclusive מול "cpdlc" בו) — בלוק ה-if/elif למעלה כן exclusive
+            # (cpdlc זוכה קודם), אבל הבדיקה כאן חזרה על is_adsc הגולמי במקום על
+            # התוצאה שכבר הוכרעה, אז הודעת CPDLC שגם מכילה את המחרוזת "adsc"
+            # במקום כלשהו (למשל free_text שמזכיר ADSC, או waypoint מקונן) עדיין
+            # עברה את התנאי הזה וייחסה נ"צ-clearance כמיקום מטוס — גם כש-category
+            # כבר "CPDLC (VDL2)". גייטינג לפי category (לא is_adsc הגולמי) מחזיר
+            # את ה-exclusivity: מיקום רק כשההודעה *בפועל* סווגה כ-ADS-C למעלה.
             # ⚠ אותה הגנה כמו SATCOM (ר' ההערה המקבילה ב-_normalize_acars): CRC
             # תקין ב-AVLC ≠ פענוח-יישום מוצלח — decode_failed=True חוסם גם כאן,
             # וכיוון שגוי (adsc_dir_ok) חוסם גם כשאין שום err (ר' ההערה למעלה).
-            if is_adsc and not decode_failed and adsc_dir_ok:
+            if category == "ADS-C (VDL2)" and not decode_failed and adsc_dir_ok:
                 pos = _scan_latlon(x25)          # מוגן-CRC בשכבת AVLC + decode_failed + כיוון
                 if pos:
                     lat, lon, pos_src, group = pos[0], pos[1], "adsc", "position"
@@ -2082,6 +2245,8 @@ def _vdl2_window_error(freqs):
     return _window_error(freqs, VDL2_MAX_CHANNELS, VDL2_WINDOW_MHZ, "dumpvdl2")
 
 
+# ⚠ אותו גבול-אבטחה כמו _FREQ_RE (ר' ההערה שם) — אלפאנומרי בלבד, בלי מקף
+# מוביל/רווח, לפני כתיבה ל-SATCOM_SATELLITE ב-env שנקרא ע"י $-לא-מצוטט ב-ExecStart.
 _SAT_RE = re.compile(r"^[A-Z0-9]{2,4}$")   # פורמט דגל לוויין (טוקן קצר) לפני כתיבה ל-env
 
 
@@ -2521,12 +2686,20 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
             if consecutive_skip >= len(plan):
                 # סבב שלם בלי אף רגל בחלון => אין מה לשדר עכשיו, מכבים בפועל
                 # (לא רק מסתירים מה-UI) — אחרת הרגל האחרונה שרצה ממשיכה לשדר
-                # כל עוד אף רגל אחרת לא נכנסת בפועל.
+                # כל עוד אף רגל אחרת לא נכנסת בפועל. תחת TUNE_LOCK כמו כל שינוי
+                # חומרה אחר (כמו _scan_enter_leg למטה) — בלעדיו זה יכול לרוץ
+                # בו-זמנית עם /api/antenna/check ולכבות את הצרכן שהבדיקה מודדת.
                 if consumer_active:
-                    log.info("scan: אף רגל לא בחלון השעות — מכבה את הצרכן הפעיל")
-                    _enter_standby()
-                    consumer_active = False
-                    last_entered = None
+                    if TUNE_LOCK.acquire(timeout=5):
+                        try:
+                            log.info("scan: אף רגל לא בחלון השעות — מכבה את הצרכן הפעיל")
+                            _enter_standby()
+                        finally:
+                            TUNE_LOCK.release()
+                        consumer_active = False
+                        last_entered = None
+                    # אחרת: הנעילה תפוסה כרגע (בדיקת אנטנה/מעבר אחר) — לא נוגעים
+                    # בצרכן הפעם; consumer_active נשאר True וה-recheck הבא ינסה שוב.
                 remaining = SCAN_WINDOW_RECHECK_SEC   # אף רגל לא בחלון — לא רודפים בלולאה
                 consecutive_skip = 0
             else:
@@ -2557,11 +2730,21 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
             consecutive_fail += 1
             if consecutive_fail >= len(plan):
                 log.warning("scan: כל הרגלים נכשלו בסבב — נופל ל-off")
-                _enter_standby()
-                if stop_evt.is_set():
-                    return   # מעבר מצב אחר כבר תפס פיקוד בינתיים — לא דורסים את ה-state שלו
-                cur = load_state()
-                save_state({**cur, "app_mode": "off", "prev_mode": "scan"})
+                # תחת TUNE_LOCK עד סוף כתיבת ה-state (כולל) — לא רק סביב
+                # _enter_standby: בלעדיו קריאה/כתיבה מקבילה ל-state.json (כמו
+                # /api/session/ack, שגם הוא עכשיו תחת TUNE_LOCK) הייתה עלולה
+                # לקרוא לפני השינוי הזה ולדרוס אותו אחרי — lost update.
+                if not TUNE_LOCK.acquire(timeout=5):
+                    log.warning("scan: לא ניתן היה לתפוס TUNE_LOCK לכיבוי — פעולה אחרת כנראה כבר משתלטת")
+                    return
+                try:
+                    _enter_standby()
+                    if stop_evt.is_set():
+                        return   # מעבר מצב אחר כבר תפס פיקוד בינתיים — לא דורסים את ה-state שלו
+                    cur = load_state()
+                    save_state({**cur, "app_mode": "off", "prev_mode": "scan"})
+                finally:
+                    TUNE_LOCK.release()
                 with _scan_lock:
                     _scan_status.update(idx=-1, leg=None, next_switch_at=None)
                 return
@@ -2585,8 +2768,14 @@ def _scan_activate(plan):
     לאף רגל חלון — זו הרגל הראשונה, כרגיל) ונכנס אליה (הקורא מחזיק את
     TUNE_LOCK — עקבי עם שאר _enter_*). אם אף רגל לא בחלון כרגע — **לא כשל**:
     ה-SDR נשאר כבוי ומתחיל thread שממתין לחלון הבא (ר' _scan_loop).
-    מחזיר (error, detail) — error רק על כשל אמיתי בכניסה לרגל."""
+    מחזיר (error, detail) — error רק על כשל אמיתי בכניסה לרגל.
+    ⚠ עוצר קודם thread סריקה קיים (אם יש) — הקורא מחזיק TUNE_LOCK, אז זה בטוח.
+    בלעדיו, קריאה כפולה עם אותו מצב שמור (למשל _boot_restore אחרי שהמשתמש כבר
+    התחיל את אותו לוח scan בעצמו בזמן ההמתנה ל-SDR) הייתה דורסת את
+    _scan_thread/_scan_thread_stop הגלובליים ומשאירה thread ישן שרץ ללא-הפניה
+    ובלתי-ניתן-לעצירה יותר (שני threads מסתובבים בין רגליים בו-זמנית)."""
     global _scan_thread, _scan_thread_stop
+    _scan_stop_thread()
     active_idx = next((i for i, leg in enumerate(plan) if _leg_active_now(leg)), None)
     if active_idx is None:
         stop_evt = threading.Event()
@@ -2901,6 +3090,16 @@ def _sweep_recordings():
                 p.unlink()
         except OSError:
             pass
+    # .txt יתום (בלי mp3 תואם) — יכול להיווצר כשה-thread המתמלל (ריצה עצמאית,
+    # ר' _transcribe_worker) מסיים לתמלל mp3 שנגזם ע"י הרצה מקבילה/קודמת של
+    # הפונקציה הזו בדיוק לפני שהתמלול הספיק לכתוב; הלולאה למעלה מוחקת .txt רק
+    # יחד עם ה-.mp3 שעדיין ברשימה, ולא רואה קובץ שכבר נעדר ממנה.
+    for p in REC_DIR.glob("*.txt"):
+        try:
+            if not p.with_suffix("").exists():
+                p.unlink()
+        except OSError:
+            pass
 
 
 def _scan_new_recordings(last_seen):
@@ -3125,7 +3324,21 @@ def _restore_after_probe(prev_state, prev_live):
     TUNE_LOCK (הקורא כבר מחזיק אותו, כמו כל _enter_* אחר) ולא כותב ל-state.json
     (זו לא בקשת מעבר-מצב — הכוונה השמורה לא השתנתה בכלל). best-effort: כישלון
     שחזור לא הופך את הבדיקה עצמה לכישלון, רק נרשם ללוג; המשתמש עדיין יכול
-    להיכנס למצב מחדש ידנית, בדיוק כמו כל _enter_* אחר שנכשל."""
+    להיכנס למצב מחדש ידנית, בדיוק כמו כל _enter_* אחר שנכשל.
+    ⚠ תוך כדי סבב סריקה, prev_state["acars_freqs"/"vdl2_freqs"] הוא הבנק
+    השמור ב-state.json — לא בהכרח תדרי הרגל שבאמת רצה (רגל עם freqs מפורשים
+    לא נכתבת ל-state, ר' _scan_enter_leg). שחזור לפי prev_state היה מכוונן
+    מחדש לבנק הלא-נכון, וה-thread הפעיל (last_entered) לא היה מבחין בכך
+    (משווה מול הרגל שבלוח, לא מול מה שבאמת נכנס) => נשאר תקוע על בנק שגוי עד
+    שהלוח מתקדם. משחזרים את הרגל הנוכחית עצמה כשסבב פעיל."""
+    with _scan_lock:
+        scan_active = _scan_thread is not None and _scan_thread.is_alive()
+        scan_leg = dict(_scan_status["leg"]) if scan_active and _scan_status.get("leg") else None
+    if scan_leg:
+        err, detail = _scan_enter_leg(scan_leg)
+        if err:
+            log.warning("בדיקת אנטנה: שחזור רגל הסריקה הנוכחית (%s) נכשל: %s", scan_leg.get("mode"), err)
+        return
     try:
         if prev_live == "acars":
             _enter_acars(prev_state.get("acars_freqs", ACARS_FREQS_DEFAULT))
@@ -3331,10 +3544,18 @@ def _voice_tune(params):
         return {"ok": False, "error": "כיוונון אחר מתבצע כרגע — המתן שנייה ונסה שוב",
                 "state": load_state()}, 409
     try:
+        # תפסנו את הנעילה — הבקשה תקינה, עוצרים סבב קודם (אם יש), בדיוק כמו
+        # שאר המצבים ב-/api/mode (ר' ההערה שם): *לא* לפני הנעילה, אחרת ניסיון
+        # כיוונון שנכשל לתפוס נעילה (409, למשל בדיקת אנטנה מקבילה) היה עוצר
+        # סבב תקין "בחינם" ומשאיר "scan זומבי" — צרכן רץ בלי thread שממשיך אותו.
+        _scan_stop_thread()
         prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
-        new_state = {**params, "app_mode": "voice",
-                     "acars_freqs": prev.get("acars_freqs", ACARS_FREQS_DEFAULT),
-                     "vdl2_freqs": prev.get("vdl2_freqs", VDL2_FREQS_DEFAULT)}
+        # ⚠ מיזוג על גבי prev, לא דריסה: params מכיל רק שדות קול (freq/mod/
+        # gain/squelch). דריסה מלאה הייתה מוחקת satcom_bias_tee/satcom_gain/
+        # signal_baseline/scan_plan/last_session_view_at וכו' — עם satcom_bias_tee
+        # במיוחד, load_state הבא היה ממזג מ-DEFAULT_STATE=True ומדליק bias-T
+        # מחדש בכניסה הבאה ל-SATCOM גם כשהמשתמש כבר מזין LNA חיצוני (§12).
+        new_state = {**prev, **params, "app_mode": "voice"}
         log.info("tune %.3f MHz mod=%s agc=%s if_gain=%d rf_gain=%d squelch=%s snr=%.1f (from %s)",
                  params["freq"], params["mod"], params["agc"], params["if_gain"],
                  params["rf_gain"], params["squelch_mode"], params["squelch_snr"], request.remote_addr)
@@ -3451,6 +3672,19 @@ def _read_vdl2_log():
     return _read_jsonl_log(VDL2_LOG_PATH)
 
 
+_CSV_FORMULA_CHARS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(v):
+    """מונע הזרקת נוסחה ב-Excel/LibreOffice/Sheets: תא שמתחיל ב-=/+/-/@/Tab/CR
+    מתפרש כנוסחה (או DDE/HYPERLINK חי) עם פתיחת הקובץ. תוכן ה-text/decoded/
+    tail מגיע משידור רדיו — לא נתון סטטי-מהימן — אז לא מניחים שהוא 'בטוח' רק
+    כי הוא טקסט. מוסיף ' מוביל (המוסכמה הסטנדרטית לניטרול) רק כשצריך."""
+    if isinstance(v, str) and v[:1] in _CSV_FORMULA_CHARS:
+        return "'" + v
+    return v
+
+
 def _export_response(recs, cols, basename):
     """בונה תגובת ייצוא (CSV עם BOM ל-Excel / JSON) מרשומות מנורמלות. משותף
     ל-/api/acars/export ול-/api/vdl2/export — אותה סכמת כרטיס, עמודות לפי cols."""
@@ -3473,9 +3707,9 @@ def _export_response(recs, cols, basename):
                 elif c == "timestamp":
                     row.append(t)
                 elif c == "text":
-                    row.append((r.get("text") or "").replace("\r", " ").replace("\n", " "))
+                    row.append(_csv_safe((r.get("text") or "").replace("\r", " ").replace("\n", " ")))
                 else:
-                    row.append(r.get(c))
+                    row.append(_csv_safe(r.get(c)))
             w.writerow(row)
         # BOM => Excel מזהה UTF-8 ומציג עברית (category) נכון
         resp = app.response_class("﻿" + buf.getvalue(),
@@ -3696,8 +3930,10 @@ ROSTER_MAX = 200   # תקרת גודל תגובה — הישנים ביותר נ
 def _aircraft_identity(m):
     """מפתח זהות מטוס מהודעה מנורמלת (ACARS/VDL2/SATCOM): רישום מנורמל קודם
     (חוצה ACARS↔VDL2↔SATCOM↔ADS-B), אחרת icao (פריימי VDL2 בלי tail), אחרת
-    מספר טיסה."""
-    reg = adsb.norm_reg(m.get("tail"))
+    מספר טיסה. ⚠ tail_is_station (ר' _normalize_acars) מדיר את ה-tail מהזהות —
+    בלעדיו הודעת squitter של תחנת-קרקע (SQ וכו') הייתה יוצרת שורת "מטוס" מזויפת
+    ברוסטר המאוחד מכתובת התחנה עצמה."""
+    reg = None if m.get("tail_is_station") else adsb.norm_reg(m.get("tail"))
     if reg:
         return ("reg", reg)
     if m.get("icao"):
@@ -3705,6 +3941,37 @@ def _aircraft_identity(m):
     if m.get("flight"):
         return ("flight", str(m["flight"]).upper())
     return None
+
+
+def _fold_roster_buckets(craft, from_type, to_types, field):
+    """ממזג in-place bucket-ים מסוג from_type (למשל "icao") לתוך bucket שכבר
+    יש לו זהות מסוג to_types (למשל "reg") שגם ה-field שלו (למשל "icao") תואם —
+    אותו מטוס בפועל שדיווח לפעמים בלי הזהות החזקה (tail) ולפעמים איתה. ⚠
+    רגרסיה אמיתית: VDL2 מערבב פריימי ACARS-over-AVLC (עם reg) ופריימי XID/x25
+    (בלי reg, רק icao) מאותה כתובת AVLC בדיוק — בלי המיזוג הזה, _aircraft_identity
+    לבד יוצר שני מפתחות שונים (("reg",...)  ו-("icao",...)) לאותו מטוס, והרוסטר
+    המאוחד מציג אותו כשתי שורות נפרדות. פוסט-פאס (לא במהלך הצבירה עצמה) כי
+    ה-reg/icao של bucket "חזק" יכולים עדיין להתמלא מאוחר יותר באותו מעבר."""
+    index = {c[field]: k for k, c in craft.items() if k[0] in to_types and c.get(field)}
+    for k in [k for k in craft if k[0] == from_type and craft[k].get(field) in index]:
+        target_key = index[craft[k][field]]
+        if target_key == k:
+            continue
+        target, src = craft[target_key], craft.pop(k)
+        target["count"] += src["count"]
+        target["sources"] |= src["sources"]
+        if src["last_t"] is not None and (target["last_t"] is None or src["last_t"] >= target["last_t"]):
+            target["last_t"] = src["last_t"]
+            target["last_category"] = src["last_category"]
+            target["last_group"] = src["last_group"]
+            target["last_dir"] = src["last_dir"]
+        target["tail"] = target["tail"] or src["tail"]
+        target["flight"] = target["flight"] or src["flight"]
+        target["icao"] = target["icao"] or src["icao"]
+        target["actype"] = target["actype"] or src["actype"]
+        if src["_pos_t"] is not None and (target["_pos_t"] is None or src["_pos_t"] >= target["_pos_t"]):
+            target["lat"], target["lon"] = src["lat"], src["lon"]
+            target["pos_src"], target["_pos_t"] = src["pos_src"], src["_pos_t"]
 
 
 def _build_roster():
@@ -3738,12 +4005,18 @@ def _build_roster():
                 c["last_category"] = m.get("category")
                 c["last_group"] = m.get("group")
                 c["last_dir"] = m.get("dir")
-            c["tail"] = c["tail"] or m.get("tail")
+            # לא מזינים את כתובת התחנה עצמה כ-"tail" של הרשומה — גם אם ההודעה
+            # הצטרפה תחת זהות icao/flight אחרת (השדה משמש להצגה ולחיפוש
+            # ADS-B, לא רק לזהות ה-key).
+            if not m.get("tail_is_station"):
+                c["tail"] = c["tail"] or m.get("tail")
             c["flight"] = c["flight"] or m.get("flight")
             c["icao"] = c["icao"] or m.get("icao")
             c["actype"] = c["actype"] or m.get("actype")
             if m.get("lat") is not None and (c["_pos_t"] is None or t >= c["_pos_t"]):
                 c["lat"], c["lon"], c["pos_src"], c["_pos_t"] = m["lat"], m["lon"], m.get("pos_src"), t
+    _fold_roster_buckets(craft, "icao", ("reg",), "icao")
+    _fold_roster_buckets(craft, "flight", ("reg", "icao"), "flight")
     regs = {adsb.norm_reg(c["tail"]) for c in craft.values() if c["tail"]}
     regs.discard(None)
     snap = adsb.aircraft_snapshot(regs) if regs else {}
@@ -3839,8 +4112,17 @@ def api_session():
 def api_session_ack():
     """מסמן שהמשתמש ראה את דוח הסשן — מקדם את הסמן ל'עכשיו', כך שהדוח הבא
     יתחיל מכאן. פעולה מפורשת (לא חלק מ-GET) כדי ש-/api/session יישאר
-    idempotent — פתיחה/רענון חוזרים של הכרטיס לא 'צורכים' אותו בטעות."""
-    save_state({**load_state(), "last_session_view_at": time.time()})
+    idempotent — פתיחה/רענון חוזרים של הכרטיס לא 'צורכים' אותו בטעות.
+    תחת TUNE_LOCK כמו כל read-modify-write אחר של state.json — בלעדיו בקשה
+    שמגיעה בדיוק תוך כדי מעבר מצב יכולה לקרוא state ישן ולדרוס את app_mode
+    החדש בחזרה לישן (lost update); זו לא פעולת חומרה, אז timeout קצר מספיק
+    ו-409 (לא 500) כשעסוקה — המשתמש פשוט מנסה שוב."""
+    if not TUNE_LOCK.acquire(timeout=2):
+        return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב"), 409
+    try:
+        save_state({**load_state(), "last_session_view_at": time.time()})
+    finally:
+        TUNE_LOCK.release()
     return jsonify(ok=True)
 
 
@@ -3873,7 +4155,9 @@ def api_mode():
         params, perr = _parse_tune(data if "freq" in data else st)
         if perr:   # state פגום => נופלים לברירת מחדל
             params, _ = _parse_tune(DEFAULT_STATE)
-        _scan_stop_thread()
+        # _scan_stop_thread נקרא בתוך _voice_tune עצמו, אחרי שהוא תופס את
+        # TUNE_LOCK — לא כאן (ר' ההערה בתוך _voice_tune; אותה סיבה בדיוק
+        # שהמצבים האחרים למטה קוראים לו רק אחרי הנעילה).
         payload, status = _voice_tune(params)
         return jsonify(payload), status
 
@@ -3932,9 +4216,14 @@ def api_mode():
             if err:
                 log.warning("enter standby failed: %s", err)
                 return jsonify(ok=False, error=err, detail=detail, state=st), 500
-            # prev_mode => כפתור ההדלקה ב-UI מחזיר את המצב האחרון, בלי לקודד קול
+            # prev_mode => כפתור ההדלקה ב-UI מחזיר את המצב האחרון, בלי לקודד קול.
+            # ⚠ אם כבר off (טאב כפול/לחיצה כפולה ששלחו שתי בקשות off) — לא
+            # דורסים prev_mode ב-"off" עצמו; שומרים את prev_mode הקודם כדי
+            # שכפתור ההדלקה עדיין יזכור את המצב האמיתי האחרון שהיה פעיל.
+            cur_mode = st.get("app_mode", "off")
             new_state = {**st, "app_mode": "off",
-                         "prev_mode": st.get("app_mode", "off")}
+                         "prev_mode": (cur_mode if cur_mode != "off"
+                                      else st.get("prev_mode", "off"))}
             save_state(new_state)
             return jsonify(ok=True, app_mode="off")
 
@@ -3968,11 +4257,15 @@ def api_mode():
 @app.route("/api/scan")
 def api_scan():
     """סטטוס סבב הסריקה החי: רגל נוכחית, אינדקס, ומועד המעבר הבא — ל-UI
-    (ספירה לאחור, הדגשת הרגל הפעילה). ריק/idx=-1 כשאין סבב פעיל."""
+    (ספירה לאחור, הדגשת הרגל הפעילה). ריק/idx=-1 כשאין סבב פעיל.
+    ‏now: שעון השרת (epoch) — ה-UI מחשב ממנו סטייה חד-פעמית מול שעון הלקוח,
+    כי next_switch_at הוא זמן-שרת ו-Date.now() בדפדפן הוא זמן-לקוח; בלי סטייה
+    ל-Pi headless בלי RTC/NTP (תרחיש שדה אמיתי) הייתה יכולה להיות ספירה-
+    לאחור שגויה (שלילית/ענקית) למרות שהשרת עצמו מדויק לגמרי."""
     with _scan_lock:
         status = dict(_scan_status)
         active = _scan_thread is not None and _scan_thread.is_alive()
-    return jsonify(ok=True, active=active, **status)
+    return jsonify(ok=True, active=active, now=time.time(), **status)
 
 
 # --- שחזור מצב באתחול: airam-web הוא המתזמר ---------------------------------
@@ -4070,6 +4363,64 @@ def _boot_restore():
         log.exception("boot restore crashed (ignored)")
 
 
+MODE_RECONCILE_INTERVAL_SEC = 60
+
+
+def _mode_reconcile_once():
+    """בדיקה בודדת (קרואה מ-_mode_reconcile_loop, וישירות מבדיקות): מתאוששת
+    מקריסת sdrplay.service שלא הופצה לצרכן הפעיל.
+    ⚠ Requires=sdrplay.service מפיץ עצירה *נקייה* בלבד (ש-Restart=always של
+    הצרכן מתעלם ממנה במכוון), ו-PartOf=sdrplay.service מפיץ job מפורש של
+    restart — אבל הפעלה-מחדש *פנימית* של sdrplay.service (Restart=always על
+    קריסה עצמית, לא restart job חיצוני שמישהו יזם) לא בהכרח נחשבת ל-job כזה
+    ומופצת ל-PartOf. בלעדיה, קריסת sdrplay.service יכולה להשאיר את התחנה
+    שקטה גם אחרי ש-sdrplay עצמו כבר חזר לחיים לבד — בניגוד למטרה #3 בפרויקט
+    ("מתאוששים מקריסה לבד"). בודקת אם המצב השמור *אמור* להריץ צרכן
+    (voice/acars/vdl2 בלבד — לא off, לא scan שיש לו thread ייעודי משלו, ולא
+    satcom שלא משוחזר אוטומטית בכוונה, ר' §12) אבל אף צרכן לא רץ בפועל, ומנסה
+    כניסה מחדש. best-effort: כשל לא נופל ל-off (כדי לא להילחם עם המשתמש שאולי
+    כבר מתקן ידנית) — פשוט מנסה שוב במחזור הבא."""
+    st = load_state()
+    mode = st.get("app_mode", "off")
+    if mode not in ("voice", "acars", "vdl2"):
+        return                          # off/scan/satcom — לא בטיפול הפוליסה הזו
+    if _live_mode() is not None:
+        return                          # צרכן כלשהו רץ בפועל — אין תקלה לתקן
+    if not _sdr_present():
+        return                          # ה-SDR עצמו לא מחובר — udev יטפל כשיחזור
+    if not TUNE_LOCK.acquire(blocking=False):
+        return                          # פעולה אחרת כרגע — לא מתחרים, ננסה שוב במחזור הבא
+    try:
+        st2 = load_state()
+        if st2.get("app_mode") != mode or _live_mode() is not None:
+            return                      # השתנה בזמן שחיכינו לנעילה
+        log.warning("mode reconcile: %s אמור לרוץ אבל שום צרכן לא פעיל — מנסה כניסה מחדש", mode)
+        if mode == "voice":
+            params, perr = _parse_tune(st2)
+            if perr:
+                params, _ = _parse_tune(DEFAULT_STATE)
+            err, detail, _sdr_down = _enter_voice(params)
+        elif mode == "acars":
+            err, detail = _enter_acars(st2.get("acars_freqs"))
+        else:
+            err, detail = _enter_vdl2(st2.get("vdl2_freqs"))
+        if err:
+            log.warning("mode reconcile: כניסה מחדש ל-%s נכשלה: %s — ננסה שוב במחזור הבא", mode, err)
+    finally:
+        TUNE_LOCK.release()
+
+
+def _mode_reconcile_loop():
+    """thread רקע: קורא ל-_mode_reconcile_once כל MODE_RECONCILE_INTERVAL_SEC.
+    כשל בבדיקה בודדת לא מפיל את ה-thread — מנסה שוב במחזור הבא."""
+    while True:
+        time.sleep(MODE_RECONCILE_INTERVAL_SEC)
+        try:
+            _mode_reconcile_once()
+        except Exception:
+            log.exception("mode reconcile crashed (ignored)")
+
+
 if __name__ == "__main__":
     # ניקוי קובצי tmp יתומים מכתיבה שנקטעה (כיבוי פתאומי) — *לפני* כל השאר,
     # ורק כאן: בעלייה אין מופע אחר באמצע כתיבה. ר' _cleanup_orphan_tmp.
@@ -4081,6 +4432,9 @@ if __name__ == "__main__":
     # ר' _boot_restore/§12 ב-CLAUDE.md). מכסה גם שדרוג קונפיג
     # (stats_filepath/localtime) — כניסה לקול תמיד משכתבת את הקונפיג מה-state.
     threading.Thread(target=_boot_restore, daemon=True).start()
+    # התאוששות מקריסת sdrplay.service שלא הופצה לצרכן הפעיל (ר' _mode_reconcile_loop) —
+    # thread נפרד מ-_boot_restore: זה רץ *במשך* הסשן, לא רק פעם אחת באתחול.
+    threading.Thread(target=_mode_reconcile_loop, daemon=True).start()
     REC_DIR.mkdir(parents=True, exist_ok=True)
     threading.Thread(target=_activity_watcher, daemon=True).start()
     _load_acars_history()                                           # היסטוריית ACARS שורדת restart (לפני ה-listener)

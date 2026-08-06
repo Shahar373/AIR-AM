@@ -1680,6 +1680,13 @@
         <!-- בורר לוויין: geostationary => בחירת לוויין יחיד (לא צביר תדרים). משתמש
              חוזר במנגנון בורר-הבנקים של הפקטורי (כל "בנק" = לוויין). -->
         <div class="acars-banks" id="satcomBanks"></div>
+        <!-- מוצג רק כש-SATCOM פעיל (ר' setActive) — bias-T/skip-C/gain הם
+             החלטות-הפעלה (write_satcom_env), אין מסלול קוד ששולח אותן מחדש
+             תוך-כדי-ריצה, אז הבקרות למטה ננעלות בכוונה במקום להראות כאילו
+             הן שולטות במשהו בזמן אמת. -->
+        <p class="sdr-hint hidden" id="satcomControlsLockHint">
+          🔒 bias-T/חסכון-CPU/רווח ננעלים כש-SATCOM פעיל — עצור (⏹) כדי לשנות אותם.
+        </p>
         <!-- הזנת LNA חיצונית: RSP1B bias-T מוגבל ל-100mA - ספק שולי (למשל power
              bank נייד) עלול לצנוח כשמצטרפת גם עליית ה-CPU של inmarsat-sniffer
              באותו רגע. checked=מזינים חיצונית => bias_tee=false בבקשה (ר'
@@ -1821,7 +1828,10 @@
         <div class="acars-stat"><b id="satcomStRate">0</b><span>הודעות/דק׳</span></div>
         <div class="acars-stat"><b id="satcomStCraft">0</b><span>מטוסים</span></div>
         <div class="acars-stat"><b id="satcomStPos">0</b><span>עם מיקום</span></div>
-        <div class="acars-stat"><b id="satcomStAdsb">0</b><span>🛰 ADS‑B</span></div>
+        <!-- אין satcomStAdsb בכוונה: /api/satcom לעולם לא מגיש שדה adsb (המפענח
+             לא חושף level/snr/freq/adsb, ר' §8/§12 ב-CLAUDE.md) — תא שתמיד
+             מציג 0 הוא רק רעש, לא מידע. renderStats מגן על E("StAdsb") בהתאם
+             (אותו דפוס בדיוק כמו StUp/StDown, שגם הם SATCOM-only בכיוון ההפוך). -->
         <!-- ⚠ SATCOM-only (guard בשם ה-DOM ב-renderStats, לא קוד מיוחד בפקטורי):
              P channel (קרקע→מטוס, שידור-שידור גלובלי מה-GES) הרבה יותר קל
              לנעול מ-R channel (מטוס→קרקע, חלש ותלוי-כיוון האנטנה שבמטוס).
@@ -1902,6 +1912,16 @@
     let sdrOff = false;           // האם המקלט בכיבוי (standby) — שני הצרכנים עצורים, ה-SDR פנוי
     let scanning = false;         // האם app_mode השמור הוא "scan" (סבב אוטומטי)
     let scanStatus = { idx: -1, leg: null, next_switch_at: null };   // מ-/api/scan (רגל נוכחית)
+    // ⚠ next_switch_at הוא זמן-*שרת*; Date.now() בלקוח. על Pi headless בלי
+    // RTC/NTP (תרחיש שדה אמיתי) שני השעונים יכולים להיות תקינים כל אחד בפני
+    // עצמו אבל לא-מסונכרנים — ספירה-לאחור נאיבית (next_switch_at - Date.now())
+    // הייתה יכולה לצאת שלילית/ענקית. clockSkewSec מחושב פעם בכל תשובת
+    // /api/scan (sc.now) ומיושם על Date.now() בחישוב המקומי (renderHome).
+    let clockSkewSec = 0;
+    function applyScanStatus(sc) {
+      scanStatus = sc;
+      if (typeof sc.now === "number") clockSkewSec = sc.now - Date.now() / 1000;
+    }
     let scanLegs = [{ mode: "voice", dwell_sec: 60 },
                     { mode: "acars", dwell_sec: 120 },
                     { mode: "vdl2", dwell_sec: 120 }];   // עורך הלוח במסך הבית (ברירת מחדל)
@@ -1938,6 +1958,14 @@
       $("connChip").classList.toggle("hidden", !down);
     }
     setInterval(_updateConnChip, 3000);
+    // ⚠ כל poller מוגדר על !document.hidden (לא רץ ברקע) — אבל ה-interval
+    // שמריץ _updateConnChip כן ממשיך לרוץ ברקע. חזרה לטאב/PWA אחרי יותר
+    // מ-NET_DISCONNECT_AFTER במסך הבית הציגה "אין קשר לשרת" שווא עד שהפולינג
+    // הראשון אחרי החזרה מספיק לחזור בהצלחה (עד ~5ש', ר' pollPower). מרעננים
+    // כאן במקום — נותנים לפולינג עצמו להוכיח ניתוק *אמיתי* אם יש כזה.
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) { lastNetOkAt = Date.now(); _updateConnChip(); }
+    });
 
     async function fetchTimeout(url, opts = {}) {
       const timeoutMs = opts.timeoutMs || (opts.method && opts.method !== "GET" ? NET_TIMEOUT_POST : NET_TIMEOUT_GET);
@@ -2192,7 +2220,10 @@
     /* ---------- נגן ---------- */
     // טעינת השמע מחדש עם ניסיונות חוזרים (ה-mount חוזר כמה שניות אחרי restart)
     function reloadStream(tries = 10) {
-      if (sdrOff || acars.active || (vdl2 && vdl2.active)) return;   // SDR לא בקול — אין מה לטעון
+      // ⚠ satcom חסר כאן היה מאפשר, למשל, ללחוץ ▶ במסך-הנעילה (MediaSession)
+      // תוך כדי SATCOM ולנסות להתחבר ל-Icecast מת (sdrOff=false ב-SATCOM,
+      // בניגוד ל-off, אז הבדיקה הישנה עברה בטעות).
+      if (sdrOff || acars.active || (vdl2 && vdl2.active) || (satcom && satcom.active)) return;
       stopReplay();                 // חזרה ל-live עוצרת הקלטה מתנגנת (לא שני זרמים יחד)
       clearTimeout(retryTimer);
       player.onerror = null;
@@ -2932,14 +2963,28 @@
           stats += " · שיבוש GPS: " + Math.round(last.gps_bad_ratio * 100) + "%";
       }
       $("sessionStats").textContent = stats;
-      $("sessionHighlights").innerHTML = d.highlights.length
-        ? d.highlights.map((h) => {
-            const who = h.tail || h.flight || "—";
-            const txt = h.decoded || h.category || "";
-            return '<div class="sh-item"><span class="sh-time">' + fmtTime(h.t) + '</span>' +
-              '<span class="sh-tail">' + who + '</span><span class="sh-txt">' + txt + '</span></div>';
-          }).join("")
-        : '<p class="hint">אין הודעות בולטות בחלון הזה.</p>';
+      // ⚠ בנייה דרך DOM/textContent, לא innerHTML של מחרוזת מורכבת: h.decoded
+      // מגיע משידור רדיו (CPDLC/libacars free_text, עד 300 תווים) — לא נתון
+      // סטטי-מהימן. innerHTML עם הטמעת מחרוזת היה מריץ HTML/JS שהוזרק דרך
+      // הודעה מפוענחת (למשל <img src=x onerror=...>) ברגע שהכרטיס מצטייר.
+      const box = $("sessionHighlights");
+      box.innerHTML = "";
+      if (!d.highlights.length) {
+        box.innerHTML = '<p class="hint">אין הודעות בולטות בחלון הזה.</p>';
+      } else {
+        for (const h of d.highlights) {
+          const item = document.createElement("div");
+          item.className = "sh-item";
+          const timeSpan = document.createElement("span");
+          timeSpan.className = "sh-time"; timeSpan.textContent = fmtTime(h.t);
+          const tailSpan = document.createElement("span");
+          tailSpan.className = "sh-tail"; tailSpan.textContent = h.tail || h.flight || "—";
+          const txtSpan = document.createElement("span");
+          txtSpan.className = "sh-txt"; txtSpan.textContent = h.decoded || h.category || "";
+          item.append(timeSpan, tailSpan, txtSpan);
+          box.appendChild(item);
+        }
+      }
     }
 
     async function pollSession() {
@@ -3166,7 +3211,7 @@
         if (scanning) {
           try {
             const sc = await fetchJSON("/api/scan");
-            if (sc.ok) scanStatus = sc;
+            if (sc.ok) applyScanStatus(sc);
           } catch (e) { /* לא קריטי — התצוגה תישאר עם הערך הקודם */ }
         }
         if (appMode === "home") renderHome();
@@ -3256,7 +3301,7 @@
           try {
             const sc = await fetchJSON("/api/scan");
             if (sc.ok) {
-              scanStatus = sc;
+              applyScanStatus(sc);
               acars.setActive(!!(sc.leg && sc.leg.mode === "acars"));
               vdl2.setActive(!!(sc.leg && sc.leg.mode === "vdl2"));
               satcom.setActive(false);   // satcom אינו scannable — לעולם לא רגל בסבב
@@ -3426,7 +3471,7 @@
         } else {
           const legLabel = leg ? (SCAN_MODE_LABEL[leg.mode] || leg.mode) : (live ? SCAN_MODE_LABEL[live] : "—");
           const secLeft = scanStatus.next_switch_at != null
-            ? Math.max(0, Math.round(scanStatus.next_switch_at - Date.now() / 1000)) : null;
+            ? Math.max(0, Math.round(scanStatus.next_switch_at - (Date.now() / 1000 + clockSkewSec))) : null;
           txt.innerHTML = "🔁 <b>סורק</b> — רגל נוכחית: <b>" + legLabel + "</b>"
             + (secLeft != null ? " · מעבר בעוד " + secLeft + "ש׳" : "");
         }
@@ -3470,9 +3515,16 @@
         const row = document.createElement("div");
         row.className = "scan-leg";
         const sel = document.createElement("select");
-        for (const m of ["voice", "acars", "vdl2"]) {
+        // ⚠ אם leg.mode אי-פעם לא אחד משלושת הידועים (עדיין לא קורה בפועל —
+        // satcom לא ניתן-לסריקה כרגע — אבל scan_plan מגיע מהשרת, לא ניחוש
+        // מקומי), select בלי option תואם היה מציג "📻 קול" שקרי בעוד scanLegs[i]
+        // עדיין מחזיק את הערך האמיתי — עד שהמשתמש נוגע ב-select ומדביק בטעות
+        // "voice" בחזרה. מוסיפים option לערך עצמו כדי שהתצוגה לעולם לא תשקר.
+        const knownModes = ["voice", "acars", "vdl2"];
+        const modes = knownModes.includes(leg.mode) ? knownModes : [...knownModes, leg.mode];
+        for (const m of modes) {
           const opt = document.createElement("option");
-          opt.value = m; opt.textContent = SCAN_MODE_LABEL[m];
+          opt.value = m; opt.textContent = SCAN_MODE_LABEL[m] || m;
           if (m === leg.mode) opt.selected = true;
           sel.appendChild(opt);
         }
@@ -3831,12 +3883,21 @@
             .bindTooltip("ADS-B חי").addTo(map);
         }
       }
+      function _dropMarker(id, mk) {
+        // ⚠ מסיר לגמרי (לא רק מנתק מהמפה עם removeLayer): בלעדיו markers/
+        // tracks גדלים ללא הגבלה לאורך סשן headless ארוך — כל מטוס שנראה
+        // אי-פעם, כולל popup DOM וה-polyline שלו, נשאר בזיכרון לנצח.
+        map.removeLayer(mk);
+        delete markers[id];
+        const tr = tracks[id];
+        if (tr) { if (tr.line) map.removeLayer(tr.line); delete tracks[id]; }
+      }
       function renderMapSelection() {
         if (!map) return;
         let hasAny = false;
         for (const id in markers) {
           const mk = markers[id];
-          if (tooOldForMap(id)) { map.removeLayer(mk); continue; }
+          if (tooOldForMap(id)) { _dropMarker(id, mk); continue; }
           mk.addTo(map).setOpacity(id === focus ? (isStale(id) ? .45 : 1) : .4);
           hasAny = true;
         }
@@ -3862,7 +3923,7 @@
         if (!map) return;
         for (const id in markers) {
           const mk = markers[id];
-          if (tooOldForMap(id)) { map.removeLayer(mk); continue; }
+          if (tooOldForMap(id)) { _dropMarker(id, mk); continue; }
           if (!map.hasLayer(mk)) mk.addTo(map);
           mk.setOpacity(id === focus ? (isStale(id) ? .45 : 1) : .4);
         }
@@ -4062,7 +4123,10 @@
         E("StTotal").textContent = totalMsgs;
         E("StCraft").textContent = Object.keys(craft).length;
         E("StPos").textContent = Object.values(craft).filter((c) => c.hasPos).length;
-        E("StAdsb").textContent = Object.keys(craft).filter((id) => adsbFor(id)).length;
+        // אין satcomStAdsb ב-DOM (ר' ההערה ב-HTML) — /api/satcom לעולם לא
+        // מגיש adsb, אז התא היה תמיד מציג 0 בלי שום מידע. מוגן כמו StUp/StDown.
+        const stAdsb = E("StAdsb");
+        if (stAdsb) stAdsb.textContent = Object.keys(craft).filter((id) => adsbFor(id)).length;
         // הקצב לעומת זאת *צריך* להיות מבוסס-חלון (מגמה עדכנית, לא ממוצע-כל-הסשן) —
         // msgs נשאר המקור הנכון כאן, בכוונה.
         const ts = msgs.map((m) => m.t).filter((t) => typeof t === "number");
@@ -4106,7 +4170,13 @@
         const filtered = msgs.filter((m) => matches(m, q)).slice(-200);
         const retxMap = new Map();   // dedupKey => { m, hasRetx, dedupKey }
         for (const m of filtered) {
-          const dedupKey = (m.tail || m.icao || "") + "|" + (m.label || "") + "|" + (m.text || "").slice(0, 50);
+          // ⚠ פריימי VDL2 מסלול B (XID/CPDLC/ADS-C/גנרי) מגיעים עם
+          // tail=label=text=null — dedupKey היה מתנוון ל-"<icao>||" זהה לכל
+          // סוגי הפריימים מאותו מטוס, כך שהודעה חדשה (למשל CPDLC אחרי XID)
+          // נחשבה בטעות ל"שידור חוזר" של הקודמת ואבדה. category/decoded
+          // מבדילים בין סוגי-תוכן שונים גם כש-text ריק.
+          const dedupKey = (m.tail || m.icao || "") + "|" + (m.label || "") + "|" +
+                           (m.text || m.decoded || m.category || "").slice(0, 50);
           if (retxMap.has(dedupKey)) {
             const prev = retxMap.get(dedupKey);
             if (typeof m.t === "number" && typeof prev.m.t === "number" && Math.abs(m.t - prev.m.t) <= RETX_S) {
@@ -4182,6 +4252,26 @@
         updateSdrPip();
         E("Inactive").classList.toggle("hidden", on);
         E("ActiveCtrl").classList.toggle("hidden", !on);
+        // ⚠ SATCOM בלבד: bias-T/skip-C/gain הם החלטות-הפעלה (write_satcom_env
+        // בצד השרת) — נשלחות רק מתוך enterSatcom (כרטיס הבית/⏻/הפעלה), ואין
+        // שום מסלול קוד ששולח אותן מחדש תוך-כדי-ריצה. לפני התיקון הבקרות
+        // האלה נשארו פעילות גם כש-SATCOM כבר רץ, ומצג-שווא ששינוי בהן משפיע
+        // על החומרה בפועל — מסוכן במיוחד ל-bias-T/הזנה-חיצונית (§12). נועלים
+        // במקום זה, לא מיישמים live-apply: שינוי חומרה שקט תוך-כדי-ריצה
+        // (בלי לעבור שוב דרך confirmSatcomAntenna) הוא בדיוק מה שהדיאלוג הזה
+        // נועד למנוע.
+        if (opts.prefix === "satcom") {
+          ["satcomExternalLna", "satcomSkipC", "satcomAgc"].forEach((id) => {
+            const el = $(id);
+            if (el) el.disabled = on;
+          });
+          // satcomGain: מקור-האמת ל-disabled שלו הוא renderSatcomGainUI עצמו
+          // (גם auto וגם satcom.active) — קוראים לו כאן במקום לגעת ב-disabled
+          // ישירות, כדי שלא יהיו שני מנגנונים חופפים שיכולים לסתור זה את זה.
+          if (typeof renderSatcomGainUI === "function") renderSatcomGainUI();
+          const lockHint = $("satcomControlsLockHint");
+          if (lockHint) lockHint.classList.toggle("hidden", !on);
+        }
         const hint = E("SdrHint");
         if (hint && !on) {
           // "השמע ממשיך לרוץ" נכון *רק* כשה-SDR באמת בקול — לא ב-standby ולא
@@ -4215,8 +4305,14 @@
         const data = await fetchJSON("/api/" + opts.prefix + "?day=" + day);
         if (!data.ok) throw new Error(data.error || "שגיאה בטעינת הארכיון");
         if (!liveSnapshot) {
+          // craft/icaoToId נשמרים גם הם: _rebuildFromMsgs (ב-exitArchive) בונה
+          // אותם מחדש מ-msgs, אבל msgs הוא חלון-נגלל (MAX=500) — סשן חי ארוך
+          // יותר היה מאבד את הצבירה (count/up/down) של מטוסים שכבר נגזמו
+          // מהחלון. שמירה ישירה כאן מונעת את זה (ר' ההערה ב-exitArchive).
           liveSnapshot = { msgs: msgs.slice(), lastId, feedMax, totalMsgs,
-                          feedCacheEntries: Array.from(feedCache.entries()) };
+                          feedCacheEntries: Array.from(feedCache.entries()),
+                          craft: JSON.parse(JSON.stringify(craft)),
+                          icaoToId: Object.assign({}, icaoToId) };
         }
         stopPolling();
         archiveDay = day;
@@ -4238,17 +4334,37 @@
         lastId = liveSnapshot.lastId; feedMax = liveSnapshot.feedMax; totalMsgs = liveSnapshot.totalMsgs;
         feedCache.clear();
         liveSnapshot.feedCacheEntries.forEach(([k, v]) => feedCache.set(k, v));
+        const savedCraft = liveSnapshot.craft, savedIcaoToId = liveSnapshot.icaoToId;
         liveSnapshot = null;
         _rebuildFromMsgs();
+        // ⚠ _rebuildFromMsgs בונה craft/icaoToId מחדש מ-msgs (החלון-הנגלל,
+        // MAX=500 בלבד) — נכון בכניסה לארכיון (שם msgs *הוא* כל הודעות היום),
+        // אבל שגוי כאן: סשן חי ארוך מ-500 הודעות מאבד את המונים המצטברים
+        // (count/up/down) של מטוסים שכבר נגזמו מהחלון. משחזרים את הצבירה
+        // האמיתית מהתמונה שנשמרה ב-enterArchiveDay, ומרעננים מה שתלוי בה.
+        for (const id in craft) delete craft[id];
+        Object.assign(craft, savedCraft);
+        for (const k in icaoToId) delete icaoToId[k];
+        Object.assign(icaoToId, savedIcaoToId);
+        renderStats(); renderRoster(); renderDetail();
         startPolling();
       }
 
       /* ----- polling ----- */
       async function poll() {
+        // ⚠ בזמן עיון בארכיון, msgs/lastId מוחלפים בתוכן היום שנבחר (ר'
+        // enterArchiveDay) — פולינג חי בכל זאת (הפעלת מצב מגיעה גם מכרטיס
+        // הבית, לא רק מהתצוגה הזו) היה מזריק הודעות היום הנוכחי לתוך תצוגת
+        // הארכיון תוך כדי שהתווית עדיין אומרת "מציג ארכיון: …".
+        if (archiveDay) return;
         if (inFlight) return;
         inFlight = true;
         try {
           const data = await fetchJSON("/api/" + opts.prefix + "?since=" + lastId);
+          // בדיקה שנייה אחרי ה-await: בקשה שכבר הייתה "בטיסה" כש-enterArchiveDay
+          // הוחלף אליו (הבדיקה בראש הפונקציה לא תפסה את זו) לא אמורה לעבד את
+          // התוצאה על msgs/lastId שכבר הוחלפו לתוכן הארכיון.
+          if (archiveDay) return;
           if (!data.ok) return;
           setActive(data.active);
           if (data.freqs) renderFreqs(data.freqs);
@@ -4343,7 +4459,17 @@
           renderStats(); renderFilters(); renderRoster(); renderDetail(); renderFeed();
           // PWA שנשארת פתוחה מעבר לחצות: מחשבים "היום" מחדש בכל כניסה לתצוגה,
           // לא פעם אחת בטעינת הדף — אחרת אי אפשר לבחור את ה"אתמול" החדש.
-          E("ArchiveDate").max = new Date().toISOString().slice(0, 10);
+          // ⚠ תאריך *מקומי*, לא toISOString (UTC): בשעות הקטנות (למשל 01:30
+          // ב-UTC+3) toISOString עדיין ב"אתמול" ב-UTC, כך שה-max חוסם את
+          // הבחירה ב-"היום" האמיתי — בדיוק כשארכיון-לילה הכי רלוונטי. השרת
+          // עצמו גוזר ?day= לפי גבולות-יום מקומיים (_day_bounds), אז ה-UI
+          // חייב להתאים.
+          {
+            const now = new Date();
+            E("ArchiveDate").max = now.getFullYear() + "-"
+              + String(now.getMonth() + 1).padStart(2, "0") + "-"
+              + String(now.getDate()).padStart(2, "0");
+          }
           if (!archiveDay) startPolling();   // בארכיון: לא מחדשים שידור חי בחזרה לתצוגה
         },
         hide() { stopPolling(); },
@@ -4510,9 +4636,14 @@
 
     function renderSatcomGainUI() {
       const auto = $("satcomAgc").checked;
+      // ⚠ מקור-אמת יחיד ל-disabled של satcomGain: גם auto (AGC מסומן) וגם
+      // satcom.active (הבקרה ננעלת כש-SATCOM פעיל, ר' setActive) — אחרת שני
+      // המקומות שקוראים לפונקציה הזו (טעינת state / כניסה מוצלחת ל-satcom)
+      // יכלו לדרוס זה את זה בהתאם לסדר הקריאות.
+      const locked = auto || (satcom && satcom.active);
       $("satcomGainVal").textContent = $("satcomGain").value;
-      $("satcomGainWrap").classList.toggle("dim", auto);
-      $("satcomGain").disabled = auto;
+      $("satcomGainWrap").classList.toggle("dim", locked);
+      $("satcomGain").disabled = locked;
     }
     $("satcomAgc").onchange = renderSatcomGainUI;
     $("satcomGain").oninput = renderSatcomGainUI;

@@ -15,7 +15,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 # שער מוכנות: מחכה שה-SDRplay API באמת יענה לפני הרצת rtl_airband
-ExecStartPre=/usr/local/bin/airam-wait-sdrplay
+ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
 ExecStart=/usr/local/bin/rtl_airband -f -c /etc/rtl_airband/airband.conf
 # rtl_airband זקוק להרשאות root לגישת חומרה ולעדיפות זמן-אמת
 User=root

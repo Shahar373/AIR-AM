@@ -344,9 +344,15 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_transcribe_worker` (thread whisper אופציונלי), `_sweep_recordings` (retention).
 - **`__main__`:** מרים את thread השחזור `_boot_restore` (מחזיר את המצב השמור, כולל
-  שכתוב קונפיג ישן בשדרוג — `_config_stale`) + threads (activity, acars, **vdl2**,
-  **satcom**, transcribe, adsb), `app.run(threaded=True)` — threaded **חובה** כי
-  `/stream` הוא חיבור ארוך-טווח.
+  שכתוב קונפיג ישן בשדרוג — `_config_stale`) + `_mode_reconcile_loop` (thread
+  נפרד, רץ לאורך כל הסשן — לא רק פעם אחת באתחול כמו `_boot_restore`: כל
+  `MODE_RECONCILE_INTERVAL_SEC` בודק אם המצב השמור voice/acars/vdl2 *אמור*
+  להריץ צרכן אבל `_live_mode()` מחזיר `None`, ונכנס מחדש — מכסה קריסת
+  `sdrplay.service` שההפעלה-מחדש הפנימית שלה, כקריסה עצמית ולא כ-restart job
+  מפורש, לא בהכרח מופצת דרך `PartOf=` לצרכן שהיה פעיל; `off`/`scan`/`satcom`
+  לא בטיפולו — scan יש לו thread ייעודי, satcom לא משוחזר אוטומטית בכוונה) +
+  threads (activity, acars, **vdl2**, **satcom**, transcribe, adsb),
+  `app.run(threaded=True)` — threaded **חובה** כי `/stream` הוא חיבור ארוך-טווח.
 
 ---
 
@@ -565,8 +571,19 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 - **`acars.env`/`vdl2.env` מנותחים ע"י systemd (`EnvironmentFile`), לא ע"י shell** → קובץ
   שכותב `airam` לא יכול להסליל הרצת קוד כ-root. **אל תעביר את הקבצים האלה דרך bash source.**
 - **מאזינים בלי סיסמה;** סיסמת ה-source ל-Icecast פנימית קבועה (`airam`).
-- **PIN אופציונלי** דרך `AIRAM_PIN` ב-`/etc/airam/airam.env` (כבוי כברירת מחדל).
-- **הגנת CSRF/DNS-rebind:** `_guard` דוחה בקשות משנות-מצב כש-`Origin != Host`.
+- **PIN אופציונלי** דרך `AIRAM_PIN` ב-`/etc/airam/airam.env` (כבוי כברירת מחדל, קובץ
+  `chmod 640` — לא world-readable). השוואה בזמן-קבוע (`hmac.compare_digest`, לא `==`)
+  + rate-limit רך לפי IP (`PIN_RATE_MAX_ATTEMPTS`/`PIN_RATE_DELAY_SEC`) — לא חוסם
+  IP לצמיתות (DHCP/NAT), רק מאט brute-force על מרחב 4-ספרות מ"שניות" ל"שעות".
+- **הגנת CSRF (לא DNS-rebinding):** `_guard` דוחה בקשות משנות-מצב כש-`Origin != Host`.
+  ⚠ **זו לא הגנת DNS-rebinding אמיתית** — בהתקפת rebinding הדפדפן שולח `Host`
+  *ו*-`Origin` שנגזרים מאותו דומיין-תוקף ששוחזר ל-IP של ה-Pi, כך ששניהם תואמים
+  ועוברים את הבדיקה. **החלטה מכוונת לא לצמצם**: תיקון אמיתי דורש allowlist של
+  Host מותרים (IP/hostname ספציפיים), וזה סותר את המטרה "אפס-קונפיגורציה,
+  שליטה מכל מכשיר ברשת" — IP יכול להשתנות (DHCP), וגישה יכולה לבוא דרך
+  hostname/mDNS/Tailscale שונים. ה-`_guard` נשאר כהגנת-CSRF-רגילה (חוסם בקשה
+  מדף בדומיין *אחר* לגמרי, המקרה הנפוץ), וה-DNS-rebinding הספציפי נשאר סיכון
+  מקובל בהתאם למודל "רשת פרטית מהימנה בלבד" (סעיף זה, למטה) — לא "לא ידענו".
 - **פורט אבחון SATCOM (`SATCOM_WEB_PORT`, ברירת מחדל 8888) נקשר ל-INADDR_ANY** —
   ‏`inmarsat-sniffer --web` לא ניתן להגבלה ל-loopback דרך הכלי עצמו (נבדק
   במקור). נגיש ברשת המקומית גם בלי `GET /api/satcom/health` (ה-proxy של
@@ -829,7 +846,9 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   מראוטים ב-polling תכוף כמו `/api/metrics`).
 - **threaded=True חובה** ל-Flask (סטרים ארוך-טווח לא חוסם בקשות).
 - **שמע ברקע = MediaSession** (אין API ל"שיחת טלפון" בדפדפן). אל תחפש חלופה.
-- **עברית ב-RTL** ב-UI; CSV עם BOM ל-Excel.
+- **עברית ב-RTL** ב-UI; CSV עם BOM ל-Excel. `_csv_safe` (`_export_response`)
+  מנטרל הזרקת נוסחה: תא שמתחיל ב-`=`/`+`/`-`/`@`/Tab/CR (למשל תוכן `text`/`tail`
+  שמגיע משידור רדיו — לא נתון סטטי-מהימן) מקבל `'` מוביל לפני שהוא נכתב.
 
 ---
 

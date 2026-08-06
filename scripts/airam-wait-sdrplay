@@ -11,8 +11,18 @@
 #  restart ל-sdrplay. לכן: אם אחרי כמה ניסיונות עדיין אין מענה, מפעילים מחדש
 #  את sdrplay פעם אחת וממשיכים לבדוק. (אומת בשטח: restart פותר את התקיעה.)
 #
-#  יציאה != 0 => systemd ינסה שוב (Restart=always).
+#  יציאה != 0 => systemd ינסה שוב (Restart=always) — *חוץ* מ-airam-satcom,
+#  שיש לו StartLimitBurst סופי (בטיחות bias-T, ר' systemd/airam-satcom.service).
+#
+#  %n (שם היחידה הקוראת, מועבר כארגומנט ראשון ע"י ExecStartPre=...%n ב-
+#  systemd/*.service): "בעיטה" ל-sdrplay (למטה) מפיצה restart דרך PartOf גם
+#  ליחידה הקוראת עצמה אם היא-airam-satcom פעילה כרגע — כלומר קריאת השער
+#  *מתוך* airam-satcom.service יכולה לגרום ל-restart של airam-satcom.service
+#  עצמו, וזה צורך תקציב מתוך ה-StartLimitBurst=5 הסופי שלו. SDR שלוקח זמן
+#  להתעורר (חיבור USB טרי) יכול למצות את חמשת הניסיונות תוך פחות מדקה, אז
+#  SATCOM מסרב לעלות עד reset-failed ידני — למרות שה-SDR באמת התעורר בסוף.
 # ============================================================================
+CALLER="${1:-}"
 
 # --find קל מ---probe (לא פותח/מגדיר את המכשיר) ועושה בדיוק את handshake ה-
 # ApiVersion שנכשל כשה-daemon תקוע. grep מוודא שמכשיר *באמת* נמצא, לא רק שה-API ענה.
@@ -28,7 +38,9 @@ for attempt in $(seq 1 30); do
   # --no-block: לא חוסם את השער; אם ה-restart מפיל את ההפעלה הנוכחית של
   # rtl_airband (תלות Requires), הוא יעלה שוב לבד (Restart=always) וכבר ימצא
   # API בריא. כתיבה בריאה (device_ready בניסיון 1) לא מגיעה לכאן כלל.
-  if [ "$attempt" -eq 8 ]; then
+  # מדלגים על הבעיטה כש-airam-satcom הוא הקורא — ר' ההערה למעלה; שלושת
+  # הצרכנים האחרים מתאוששים לנצח (StartLimitIntervalSec=0) ולא נפגעים מזה.
+  if [ "$attempt" -eq 8 ] && [ "$CALLER" != "airam-satcom.service" ]; then
     systemctl restart --no-block sdrplay.service 2>/dev/null || true
   fi
   sleep 1

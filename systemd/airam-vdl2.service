@@ -22,7 +22,7 @@ Type=simple
 # לא יכול להסליל הרצת קוד כ-root (בניגוד ל-source ב-bash).
 EnvironmentFile=-/etc/airam/vdl2.env
 # שער מוכנות: מחכה שה-SDRplay API באמת יענה לפני הרצת dumpvdl2 (כמו rtl_airband)
-ExecStartPre=/usr/local/bin/airam-wait-sdrplay
+ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
 # ‎$VDL2_FREQS ו-$VDL2_GAIN *ללא* סוגריים => systemd מפצל לארגומנטים; VDL2_GAIN
 # ריק (ברירת מחדל) פשוט נעלם => AGC של הדרייבר. ‎${VDL2_MSG_FILTER} *עם* סוגריים
 # => ארגומנט יחיד (token בלי רווחים). התדרים ב-*Hz* (ראה vdl2.env).
