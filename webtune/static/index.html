@@ -2085,8 +2085,11 @@
     }
 
     /* ---------- פריסטים ---------- */
+    // ⚠ (cfg.presets || []): שדה חסר בתשובת /api/state (שרת ישן/חדש יותר אחרי
+    // שדרוג, תשובה חלקית) הפיל את *כל* האתחול דרך updateDisplay — הדף נשאר על
+    // שלד הטעינה. פריסטים הם קישוט; הם לא צריכים להיות תנאי לעליית הממשק.
     const presetFor = (freq) =>
-      cfg.presets.find((p) => Math.abs(p.freq - freq) < 0.0005);
+      (cfg.presets || []).find((p) => Math.abs(p.freq - freq) < 0.0005);
 
     let editingPresets = false;
 
@@ -3263,6 +3266,9 @@
       // המצב שעוזבים — נשמר כ-prev_mode מקומי כדי שכפתור ההדלקה יחזיר אותו
       const leaving = sdrOff ? null : scanning ? "scan" : (satcom && satcom.active) ? "satcom"
                     : (vdl2 && vdl2.active) ? "vdl2" : acars.active ? "acars" : "voice";
+      // מצב התצוגה לפני העדכון האופטימי — משוחזר כשהבקשה נדחית ב-_guard
+      // (אימות), כלומר כשידוע בוודאות ששום דבר בשרת לא השתנה.
+      const prevView = appMode, prevSdrOff = sdrOff, prevScanning = scanning;
       // mode "off"/"scan" => נוחתים במסך הבית (אין תצוגה ייעודית לסריקה — היא "אפליקציית-על")
       sdrOff = (mode === "off");
       scanning = (mode === "scan");
@@ -3282,7 +3288,20 @@
           // בלי היציאה הזאת נפלנו ל-back="off" (אין data.state בתשובת אימות)
           // והממשק היה מכריז "המקלט בכיבוי" בזמן שהוא ממשיך לשדר כרגיל —
           // בדיוק סוג החיווי-שאינו-תואם-מציאות ש-mode_ok נועד למנוע.
-          if (data.auth) { await pollGlobalState(); return false; }
+          // ⚠ הבקשה נעצרה ב-_guard: היא מעולם לא הגיעה ללוגיקת המצבים, ולכן
+          // ידוע *בוודאות* ששום דבר בשרת/בחומרה לא השתנה. מבטלים את העדכון
+          // האופטימי וחוזרים למצב שלפני הלחיצה — סינכרונית, בלי להישען על
+          // הפולינג התקופתי (10ש') שיסנכרן ממילא. בלי זה המשתמש נשאר בתצוגה
+          // של מצב שלא רץ, ולפני התיקון אף הוצג לו "המקלט בכיבוי" (ר' למטה:
+          // תשובת אימות היא בלי `state`, ולכן back נפל ל-"off").
+          if (data.auth) {
+            sdrOff = prevSdrOff;
+            scanning = prevScanning;
+            showView(prevView);
+            updateSdrPip();
+            renderHome();
+            return false;
+          }
           // כישלון כניסה למצב => השרת נופל ל-off (אין fallback לקול) — נוחתים בבית
           const back = (data.state && data.state.app_mode) || "off";
           sdrOff = (back === "off");
@@ -4892,7 +4911,21 @@
         player.src = streamURL();
         pollActivity();   // עכשיו כש-cfg.presets נטען, שמות הפריסטים יופיעו ביומן
       }
-    }).catch(() => { document.body.classList.remove("loading"); setStatus("אין חיבור לשרת", "err"); });
+    }, () => {
+      // ⚠ מסלול הדחייה של ה-fetch עצמו (ארגומנט שני ל-then), *לא* .catch:
+      // שגיאה שנזרקת בגוף האתחול למעלה לא מגיעה לכאן אלא ל-catch שמתחת.
+      document.body.classList.remove("loading");
+      setStatus("אין חיבור לשרת", "err");
+    }).catch((e) => {
+      // ⚠ השרת ענה — האתחול עצמו נכשל (שדה חסר בתשובה, אי-התאמת גרסה אחרי
+      // שדרוג, באג בדף). קודם כל השגיאות האלה הוצגו כ"אין חיבור לשרת", מה
+      // ששולח את המשתמש לבדוק Wi-Fi ו-USB בזמן שה-Pi ענה מצוין. אותו עיקרון
+      // כמו §12: לא מדווחים תקלה שלא זיהינו באמת.
+      document.body.classList.remove("loading");
+      console.error("AIR-AM: אתחול הדף נכשל", e);
+      setStatus("שגיאה באתחול הדף (השרת ענה) — נסה לרענן", "err");
+      showError(e && e.message ? String(e.message) : null);
+    });
 
     // רישום ה-service worker => מאפשר "הוסף למסך הבית" כאפליקציה. לא מטמיין כלום.
     if ("serviceWorker" in navigator) {
