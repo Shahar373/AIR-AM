@@ -220,7 +220,7 @@ def classify(ac):
 _LOCK = threading.Lock()
 _THREAD = None
 _S = {
-    "events": deque(),        # (t_mono, rwy, kind)
+    "events": deque(),        # (t_mono, rwy, kind, mode) — mode: "pos"/"track"
     "last_event": {},         # (hex, kind) -> t_mono  (dedup)
     "gps_hist": deque(),      # (t_mono, bad, total)
     "last_known": {},         # kind -> (rwy, t_mono)  - גם אחרי שהחלון התרוקן
@@ -251,6 +251,13 @@ def process(ac_list, now=None):
 
     bad = total = spoofed = 0
     for ac in ac_list:
+        # ⚠ מקור חיצוני (adsb.lol/adsb.fi) => לא מניחים סכמה. רשומה שאינה
+        # אובייקט הפילה את *כל* ה-poll ב-AttributeError: ‏_loop אמנם תופס ולא
+        # מפיל את ה-thread, אבל המנה כולה נזרקת — כלומר דקה שלמה בלי מסלול
+        # פעיל ובלי אינדיקציית שיבוש, בגלל רשומה פגומה אחת. דילוג נקודתי
+        # שומר על שאר המנה (§12: בידוד מקורות חיצוניים, נפילה חיננית).
+        if not isinstance(ac, dict):
+            continue
         nic = _num(ac.get("nic"))
         # ספירת מזויפים (להצגה): מטוסים באוויר עם nic נמוך
         if ac.get("alt_baro") != "ground" and nic is not None and nic < SPOOF_NIC:

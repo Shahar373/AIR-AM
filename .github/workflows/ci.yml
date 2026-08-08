@@ -9,12 +9,30 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false      # כשל בגרסה אחת לא מסתיר את תוצאת השנייה
+      matrix:
+        # ⚠ שתי גרסאות, כי שתיהן בשטח בפועל:
+        #   3.11 — Raspberry Pi OS Bookworm (Debian 12)
+        #   3.13 — Raspberry Pi OS Trixie   (Debian 13)
+        # ה-CI נעץ 3.11 בלבד מאז ההתחלה, אבל ה-Pi שמריץ את הפרויקט כבר עבר
+        # ל-Debian 13 (‏systemd 257) => **הגרסה שרצה בייצור לא נבדקה בכלל**.
+        # זו לא בעיה תיאורטית אלא הפער הקלאסי שבו באג ספציפי-לגרסה מגיע ישר
+        # למשתמש. תומכים בשתיהן ובודקים את שתיהן.
+        python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"   # Raspberry Pi OS Bookworm
+          python-version: ${{ matrix.python-version }}
       - run: pip install flask pytest
+      # node כבר מותקן ב-ubuntu-latest. הוא נחוץ ל-tests/test_frontend.py, שמריץ
+      # `node --check` על הסקריפט ה-inline של index.html: אין build step ל-UI,
+      # ולכן שגיאת תחביר שם לא נתפסת בשום מקום אחר — הדף פשוט נשבר אצל המשתמש.
+      # אם node חסר הבדיקה מדלגת (skipif) במקום להיכשל.
+      - run: node --version
+      # בדיקות הדפדפן (test_ui_browser.py) מדלגות כאן — playwright לא מותקן
+      # ב-job הזה בכוונה, כדי שהחבילה המהירה תמשיך לחסום מהר. ר' ה-job שאחריו.
       - run: python -m pytest tests/ -v
       - name: bash syntax check
         run: bash -n install.sh scripts/airam-wait-sdrplay
@@ -40,3 +58,17 @@ jobs:
             echo "systemd-analyze verify found real issues (see above)"
             exit 1
           fi
+
+  # ‏job נפרד בכוונה: הבדיקות האלה מריצות Chromium אמיתי (התקנת דפדפן ~דקה),
+  # ולכן אסור להן לעכב את המשוב המהיר של חבילת ה-Python. הפרדה גם מבטיחה
+  # ש-flake אפשרי של דפדפן לא חוסם עבודת backend — ר' tests/test_ui_browser.py.
+  ui-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install flask pytest pytest-playwright
+      - run: playwright install --with-deps chromium
+      - run: python -m pytest tests/test_ui_browser.py -v

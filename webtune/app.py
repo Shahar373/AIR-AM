@@ -348,22 +348,36 @@ AIRAM_PIN = os.environ.get("AIRAM_PIN", "").strip()
 _PIN_FAIL_LOCK = threading.Lock()
 _pin_fails = {}              # remote_addr -> (count, window_start_epoch)
 PIN_RATE_WINDOW_SEC = 60.0
-PIN_RATE_MAX_ATTEMPTS = 5    # מעבר לזה — השהיה בכל ניסיון נוסף באותו חלון
-PIN_RATE_DELAY_SEC = 1.0     # ~2.7 שעות למיצוי מרחב 4-ספרות במקום שניות
+PIN_RATE_MAX_ATTEMPTS = 5    # מעבר לזה — הבקשה נדחית בלי לבדוק PIN עד סוף החלון
+PIN_RATE_DELAY_SEC = 1.0     # השהיה נוספת על הדחייה (מייקרת גם ניסיון בודד)
+_PIN_FAILS_MAX = 256         # מעליו מגזמים חלונות שפג תוקפם (ר' _pin_prune)
 
 
 def _pin_rate_limited(ip):
     now = time.time()
     with _PIN_FAIL_LOCK:
+        _pin_prune(now)
         count, start = _pin_fails.get(ip, (0, now))
         if now - start > PIN_RATE_WINDOW_SEC:
             count, start = 0, now
         return count >= PIN_RATE_MAX_ATTEMPTS
 
 
+def _pin_prune(now):
+    """גיזום חלונות שפג תוקפם. ⚠ נקרא תחת _PIN_FAIL_LOCK בלבד. בלעדיו המילון
+    גדל לצמיתות: הערכים נמחקים רק בהצלחה (_pin_record_success), כך שכל IP
+    שנכשל ולא הצליח אף פעם נשאר בזיכרון עד אתחול (DHCP/NAT מייצרים כתובות
+    חדשות לאורך זמן)."""
+    if len(_pin_fails) < _PIN_FAILS_MAX:
+        return
+    for ip in [k for k, (_c, start) in _pin_fails.items() if now - start > PIN_RATE_WINDOW_SEC]:
+        _pin_fails.pop(ip, None)
+
+
 def _pin_record_fail(ip):
     now = time.time()
     with _PIN_FAIL_LOCK:
+        _pin_prune(now)
         count, start = _pin_fails.get(ip, (0, now))
         if now - start > PIN_RATE_WINDOW_SEC:
             count, start = 0, now
@@ -390,7 +404,16 @@ def _guard():
     if AIRAM_PIN:
         ip = request.remote_addr or "unknown"
         if _pin_rate_limited(ip):
+            # ⚠ דוחים *בלי לבדוק את ה-PIN בכלל*, לא רק משהים. הגרסה הקודמת
+            # השהתה שנייה ואז בדקה בכל זאת — וזה לא מגביל קצב: Flask רץ
+            # threaded=True, כך שההשהיה מתרחשת בכל thread במקביל. תוקף שפותח
+            # 100 חיבורים בו-זמנית היה ממצה מרחב של 4 ספרות בכ-100 שניות,
+            # ולא ב-"~2.7 שעות" שההערה כאן הבטיחה. דחייה מוחלטת לאורך החלון
+            # חוסמת את המקביליות: 5 ניסיונות ל-60 שניות, ולא משנה כמה חיבורים.
+            # החסימה מוגבלת-בזמן (מתפוגגת לבד) => DHCP/NAT לא נענשים לצמיתות.
             time.sleep(PIN_RATE_DELAY_SEC)
+            return jsonify(ok=False, auth=True,
+                           error="יותר מדי ניסיונות PIN — המתן דקה ונסה שוב"), 429
         supplied = request.headers.get("X-AIRAM-PIN", "")
         if not hmac.compare_digest(supplied, AIRAM_PIN):
             _pin_record_fail(ip)
@@ -1619,6 +1642,30 @@ def _normalize_acars(m):
     return rec
 
 
+def _jsonl_records(lines):
+    """מפרסר שורות JSONL לרשומות — **רק אובייקטים**. משותף לכל הקוראים
+    (ייצוא, ארכיון, וטעינת ההיסטוריה באתחול).
+
+    ⚠ למה בדיקת ה-dict קריטית ולא קוסמטית: הקוראים ניגשים מיד ל-`r.get("t")`.
+    שורה שהיא JSON *תקין* אך אינה אובייקט (‏`null`, ‏`0`, מחרוזת, מערך — שריד
+    אפשרי של בלוק פגום אחרי כיבוי פתאומי, בדיוק התרחיש ש-_atomic_write נבנה
+    בשבילו) הפילה את הקוראים ב-AttributeError. ‏json.loads הצליח עליה, ולכן
+    ה-`except ValueError` הקיים *לא* תפס אותה.
+    החומרה: `_load_*_history` נקראות ב-__main__ **בלי try** לפני `app.run()`,
+    כך ששורה אחת כזאת מנעה מ-airam-web לעלות בכלל — וזה המתזמר שמשחזר את מצב
+    ה-SDR (‏`_boot_restore`). עם `Restart=always` זו לולאת קריסה: התחנה כולה
+    מתה, ובשטח אין SSH כדי לאבחן (ר' §9/§12 ב-CLAUDE.md)."""
+    out = []
+    for ln in lines:
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            continue                          # שורה פגומה (כתיבה חלקית) => דילוג
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
 def _append_jsonl_log(path, rec):
     """מוסיף הודעה מנורמלת לקובץ JSONL (append; thread ה-listener הוא הכותב היחיד).
     נכשל בשקט (דיסק מלא וכו') => הפיד החי ממשיך לפעול. משותף ל-ACARS ול-VDL2."""
@@ -1682,12 +1729,7 @@ def _load_acars_history():
         lines = ACARS_LOG_PATH.read_text(encoding="utf-8").splitlines()
     except OSError:
         return
-    recs = []
-    for ln in lines[-ACARS_BUF_MAX:]:
-        try:
-            recs.append(json.loads(ln))
-        except ValueError:
-            continue                          # שורה פגומה (כתיבה חלקית) => דילוג
+    recs = _jsonl_records(lines[-ACARS_BUF_MAX:])
     floor = _today_start()
     recs = [r for r in recs if (r.get("t") or 0) >= floor]   # היום בלבד (הדיסק נשמר)
     recs.sort(key=lambda r: r.get("t") or 0)
@@ -1925,12 +1967,7 @@ def _load_vdl2_history():
         lines = VDL2_LOG_PATH.read_text(encoding="utf-8").splitlines()
     except OSError:
         return
-    recs = []
-    for ln in lines[-VDL2_BUF_MAX:]:
-        try:
-            recs.append(json.loads(ln))
-        except ValueError:
-            continue                          # שורה פגומה (כתיבה חלקית) => דילוג
+    recs = _jsonl_records(lines[-VDL2_BUF_MAX:])
     floor = _today_start()
     recs = [r for r in recs if (r.get("t") or 0) >= floor]
     recs.sort(key=lambda r: r.get("t") or 0)
@@ -2111,12 +2148,7 @@ def _load_satcom_history():
         lines = SATCOM_LOG_PATH.read_text(encoding="utf-8").splitlines()
     except OSError:
         return
-    recs = []
-    for ln in lines[-SATCOM_BUF_MAX:]:
-        try:
-            recs.append(json.loads(ln))
-        except ValueError:
-            continue
+    recs = _jsonl_records(lines[-SATCOM_BUF_MAX:])
     floor = _today_start()
     recs = [r for r in recs if (r.get("t") or 0) >= floor]
     recs.sort(key=lambda r: r.get("t") or 0)
@@ -2188,6 +2220,29 @@ def _satcom_listener():
         seen += 1
         if seen % 200 == 0:
             _trim_satcom_log()
+
+
+HEALTH_SERVICES = ("rtl_airband", "icecast2", "sdrplay",
+                   "airam-acars", "airam-vdl2", "airam-satcom")
+
+
+def _services_status(names):
+    """סטטוס של כמה יחידות ב-fork *אחד*. `systemctl is-active a b c` מקבל רשימת
+    יחידות ומדפיס שורה לכל אחת, לפי הסדר שנשלח.
+    ⚠ למה זה משנה: /api/health נקרא בפולינג כל 10 שניות מכל טלפון שפתוח, וקודם
+    פתח שישה תהליכים בכל קריאה => ~2,160 forks בשעה, בפרויקט שחוסך 50% CPU
+    בדמודולטור (skip_c) בדיוק כדי לשרוד על ספק כוח שולי בשטח. ניטור עצמי לא
+    אמור להיות הצרכן הגדול בתקציב.
+    ‏rc!=0 הוא המצב *הרגיל* כאן (הוא רק מציין שלא כל היחידות active) — ולכן
+    קוראים את stdout ולא בודקים returncode. שורה חסרה => "unknown", כמו קודם."""
+    try:
+        r = subprocess.run(["systemctl", "is-active", *names],
+                           capture_output=True, text=True, timeout=5)
+        lines = r.stdout.splitlines()
+    except Exception:
+        lines = []
+    return {svc: (lines[i].strip() if i < len(lines) else "") or "unknown"
+            for i, svc in enumerate(names)}
 
 
 def _is_active(service):
@@ -2673,7 +2728,14 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
     while not stop_evt.is_set():
         while remaining > 0 and not stop_evt.is_set():
             step = min(1.0, remaining)
-            time.sleep(step)
+            # ⚠ stop_evt.wait ולא time.sleep: ההמתנה נקטעת *מיידית* כשמבקשים
+            # לעצור, במקום להשלים עד שנייה שלמה של שינה לפני שבודקים שוב. זה
+            # מקצר מעבר-מצב/עצירת-סריקה שהמשתמש מחכה לו בפועל, ובנוסף הופך את
+            # ההמתנה לדטרמיניסטית בבדיקות — no_sleep ממקף את `time.sleep`
+            # *הגלובלי* (app.time הוא מודול time עצמו), כך שבדיקה שהסתמכה עליו
+            # ניטרלה בטעות גם את ה-sleep של עצמה והפכה תלוית-מזל (ר' §12).
+            if stop_evt.wait(step):
+                break
             remaining -= step
         if stop_evt.is_set():
             break
@@ -2910,14 +2972,7 @@ def api_presets():
 @app.route("/api/health")
 def api_health():
     """סטטוס המערכת — מאפשר ל-UI להבדיל בין "אין שידור" ל"משהו נפל"."""
-    services = {}
-    for svc in ("rtl_airband", "icecast2", "sdrplay", "airam-acars", "airam-vdl2", "airam-satcom"):
-        try:
-            r = subprocess.run(["systemctl", "is-active", svc],
-                               capture_output=True, text=True, timeout=5)
-            services[svc] = (r.stdout.strip() or "unknown")
-        except Exception:
-            services[svc] = "unknown"
+    services = _services_status(HEALTH_SERVICES)
     try:
         stats_age = round(time.time() - STATS_PATH.stat().st_mtime, 1)
     except OSError:
@@ -2975,7 +3030,17 @@ def parse_stats(text, want_freq):
             continue
         fl = _FREQ_LABEL_RE.search(m.group(2))
         if fl and fl.group(1) == want_freq:
-            vals[m.group(1)] = float(m.group(3))
+            try:
+                vals[m.group(1)] = float(m.group(3))
+            except ValueError:
+                # ⚠ התבנית (-?[0-9.]+) מקבלת גם מחרוזות שאינן מספר — "."‏, ".."‏,
+                # "1.2.3" — ו-float עליהן זרק ValueError *לא-מטופל*. הקובץ יושב
+                # ב-tmpfs ונכתב ~פעם בשנייה בזמן שאנחנו קוראים אותו, כך שקריאה
+                # קרועה היא תרחיש אמיתי. הנפילה לא הייתה מקומית: parse_stats
+                # מזין את /api/metrics (פולינג כל שנייה), את /api/signal, ואת
+                # _sample_probe_stats — כלומר גם **בדיקת האנטנה** הייתה נכשלת.
+                # מדלגים על המדד הפגום; השאר בשורה/בקובץ עדיין תקפים.
+                continue
     return vals
 
 
@@ -3155,12 +3220,18 @@ def api_activity():
             ev = json.loads(ln)
         except ValueError:
             continue
-        ev["exists"] = bool(ev.get("file")) and (REC_DIR / ev["file"]).is_file()
+        # ⚠ אותה משפחת באג כמו ב-_jsonl_records: שורת JSON תקין שאינה אובייקט
+        # (‏null/מספר/מערך — שריד בלוק פגום אחרי כיבוי פתאומי) עברה את
+        # ה-except ValueError ואז הפילה את הראוט ב-TypeError. ‏/api/activity
+        # נקרא בפולינג כל 15 שניות במצב קול, כך שזה 500 חוזר ולא תקלה חד-פעמית.
+        if not isinstance(ev, dict):
+            continue
+        ev["exists"] = bool(ev.get("file")) and (REC_DIR / str(ev["file"])).is_file()
         ev["text"] = None
         if ev.get("file"):
             try:
-                ev["text"] = (REC_DIR / (ev["file"] + ".txt")).read_text().strip() or None
-            except OSError:
+                ev["text"] = (REC_DIR / (str(ev["file"]) + ".txt")).read_text().strip() or None
+            except (OSError, ValueError):
                 pass   # אין תמלול (כבוי, עדיין מעובד, או נמחק) => None
         events.append(ev)
     return jsonify(ok=True, events=events)
@@ -3385,7 +3456,18 @@ def api_antenna_check():
         return jsonify(ok=False, error="פעולה אחרת מתבצעת כרגע — המתן שנייה ונסה שוב"), 409
     try:
         prev_live = _live_mode()
-        already_voice = (prev_live == "voice" and abs(prev.get("freq", -999.0) - freq) < 5e-4)
+        # ⚠ "כבר בקול" לא מספיק כדי לדלג על ההכנה: הדגימה חייבת להיעשות *באותם
+        # תנאים* שבהם נמדד הבסיס, אחרת ההשוואה של _signal_verdict חסרת משמעות.
+        # רצפת הרעש ב-dBFS נמדדת אחרי שרשרת הרווח => משתמש שיושב בקול עם רווח
+        # ידני (IFGR שונה מברירת המחדל) היה מקבל רצפה שונה בעשרות dB מהבסיס
+        # שנמדד תחת AGC, ו-verdict של "below_baseline" (= "האנטנה מנותקת!") בלי
+        # שדבר באמת השתנה. זו בדיוק ההמצאה שעקרון §12 אוסר, רק בכיוון של
+        # פסק-דין במקום ערך. לכן מדלגים רק כשהמצב החי *זהה* לתנאי הבדיקה.
+        already_voice = (prev_live == "voice"
+                         and abs(prev.get("freq", -999.0) - freq) < 5e-4
+                         and prev.get("mod") == "am"
+                         and bool(prev.get("agc")) is True
+                         and prev.get("squelch_mode") == "open")
         if not already_voice:
             params = {"freq": freq, "mod": "am", "agc": True, "if_gain": IF_GAIN_DEFAULT,
                       "rf_gain": RF_GAIN_DEFAULT, "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}
@@ -3654,12 +3736,7 @@ def _read_jsonl_log(path):
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
-    out = []
-    for ln in lines:
-        try:
-            out.append(json.loads(ln))
-        except ValueError:
-            continue
+    out = _jsonl_records(lines)
     out.sort(key=lambda r: r.get("t") or 0)
     return out
 
