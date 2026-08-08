@@ -633,7 +633,8 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
 - **בדיקות:** `python -m pytest tests/ -v`. כל מה שתלוי ב-SDR/systemd **ממוקף**
   בבדיקות עצמן → רצות בלי חומרה. הוסף בדיקה לכל שינוי backend (זו מוסכמה בפרויקט —
   ראה ה-CHANGELOG: כל גרסה כמעט הוסיפה בדיקות).
-- **CI** (`.github/workflows/ci.yml`): pytest על Python 3.11 (כמו Pi OS Bookworm)
+- **CI** (`.github/workflows/ci.yml`): pytest על **Python 3.11 ו-3.13** (מטריצה —
+  Pi OS Bookworm/Debian 12 מול Pi OS Trixie/Debian 13; שתיהן בשטח בפועל)
   + `bash -n` (בדיקת תחביר) על `install.sh` ו-`airam-wait-sdrplay`. **שמור את שניהם ירוקים.**
 - **בדיקה ידנית של adsb:** `python3 webtune/adsb.py --selftest` (בלי רשת).
 

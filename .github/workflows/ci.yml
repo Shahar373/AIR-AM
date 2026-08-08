@@ -9,11 +9,22 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false      # כשל בגרסה אחת לא מסתיר את תוצאת השנייה
+      matrix:
+        # ⚠ שתי גרסאות, כי שתיהן בשטח בפועל:
+        #   3.11 — Raspberry Pi OS Bookworm (Debian 12)
+        #   3.13 — Raspberry Pi OS Trixie   (Debian 13)
+        # ה-CI נעץ 3.11 בלבד מאז ההתחלה, אבל ה-Pi שמריץ את הפרויקט כבר עבר
+        # ל-Debian 13 (‏systemd 257) => **הגרסה שרצה בייצור לא נבדקה בכלל**.
+        # זו לא בעיה תיאורטית אלא הפער הקלאסי שבו באג ספציפי-לגרסה מגיע ישר
+        # למשתמש. תומכים בשתיהן ובודקים את שתיהן.
+        python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"   # Raspberry Pi OS Bookworm
+          python-version: ${{ matrix.python-version }}
       - run: pip install flask pytest
       # node כבר מותקן ב-ubuntu-latest. הוא נחוץ ל-tests/test_frontend.py, שמריץ
       # `node --check` על הסקריפט ה-inline של index.html: אין build step ל-UI,
