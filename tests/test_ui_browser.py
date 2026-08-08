@@ -260,3 +260,104 @@ def test_boot_failure_is_not_reported_as_network_failure(page):
     status = page.locator("#status")
     expect(status).to_contain_text("אתחול", timeout=15000)
     assert "אין חיבור" not in status.text_content()
+
+
+# --- ארכיון רב-יומי + createDataView -----------------------------------------
+
+def _acars_stream(total, day_count=3):
+    """מוק ACARS: זרם חי (since=) + snapshot ארכיוני (day=). מחזיר (handler, state)."""
+    state = {"sent": 0, "live_polls": 0, "day_calls": 0}
+
+    def handler(route, url):
+        if "day=" in url:
+            state["day_calls"] += 1
+            msgs = [{"t": 1_600_000_000 + i, "tail": f"ARC-{i}", "label": "10",
+                     "text": f"archive {i}", "category": "כללי", "dir": "uplink"}
+                    for i in range(day_count)]
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True, "day": "2026-01-02",
+                                           "messages": msgs}))
+            return
+        state["live_polls"] += 1
+        msgs = []
+        if state["sent"] == 0:
+            msgs = [{"id": i + 1, "t": 1_700_000_000 + i, "tail": f"4X-EH{i % 5}",
+                     "label": "10", "text": f"live {i}", "category": "כללי",
+                     "dir": "downlink"} for i in range(total)]
+            state["sent"] = total
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "active": True,
+                                       "freqs": ["131.550"], "cursor": state["sent"],
+                                       "messages": msgs, "adsb": {}}))
+    return handler, state
+
+
+def _acars_mode_overrides(handler):
+    return {"/api/acars": handler,
+            "/api/state": {**_default_api()["/api/state"], "app_mode": "acars"},
+            "/api/health": {"ok": True, "app_mode": "acars", "mode_ok": True,
+                            "stats_age": None,
+                            "services": {"airam-acars": "active", "sdrplay": "active",
+                                         "icecast2": "active", "rtl_airband": "inactive",
+                                         "airam-vdl2": "inactive",
+                                         "airam-satcom": "inactive"}}}
+
+
+def test_archive_round_trip_restores_live_session(page):
+    """⚠ הקוד המורכב ביותר ב-UI: הכניסה לארכיון מחליפה את `msgs` בתוכן יום
+    שלם מהדיסק, ו-exitArchive משחזר את הסשן החי מ-liveSnapshot.
+    הסכנה הספציפית: `_rebuildFromMsgs` בונה craft מחדש מ-`msgs`, שהוא חלון
+    נגלל (MAX=500) — סשן חי ארוך יותר היה מאבד את הצבירה של מטוסים שכבר נגזמו
+    מהחלון. כאן: 600 הודעות חיות => ארכיון (3 הודעות) => חזרה, ומוודאים
+    שהמונה המצטבר חזר ל-600 ולא ל-500 (או ל-3)."""
+    live_total = 600
+    handler, state = _acars_stream(live_total)
+    _mount(page, overrides=_acars_mode_overrides(handler))
+    page.click("#modeSeg button[data-v=acars]")
+    expect(page.locator("#acarsStTotal")).to_have_text(str(live_total), timeout=15000)
+
+    page.fill("#acarsArchiveDate", "2026-01-02")
+    page.click("#acarsArchiveGo")
+    expect(page.locator("#acarsArchiveLabel")).to_be_visible(timeout=15000)
+    expect(page.locator("#acarsStTotal")).to_have_text("3", timeout=15000)
+
+    page.click("#acarsArchiveLive")
+    # חזרה לשידור חי: המונה המצטבר משוחזר במלואו, לא נגזר מחדש מחלון ה-500
+    expect(page.locator("#acarsStTotal")).to_have_text(str(live_total), timeout=15000)
+    expect(page.locator("#acarsArchiveLabel")).to_be_hidden()
+
+
+def test_archive_stops_live_polling_while_open(page):
+    """בזמן עיון בארכיון הפולינג החי נעצר — אחרת הודעות היום הנוכחי היו
+    נדחפות לתוך תצוגת הארכיון בזמן שהתווית עדיין אומרת "מציג ארכיון"."""
+    handler, state = _acars_stream(5)
+    _mount(page, overrides=_acars_mode_overrides(handler))
+    page.click("#modeSeg button[data-v=acars]")
+    expect(page.locator("#acarsStTotal")).to_have_text("5", timeout=15000)
+
+    page.fill("#acarsArchiveDate", "2026-01-02")
+    page.click("#acarsArchiveGo")
+    expect(page.locator("#acarsArchiveLabel")).to_be_visible(timeout=15000)
+    polls_at_entry = state["live_polls"]
+
+    # מעבר לתצוגה אחרת וחזרה — show() לא אמור לחדש polling כשארכיון פתוח
+    page.click("#modeSeg button[data-v=home]")
+    page.click("#modeSeg button[data-v=acars]")
+    expect(page.locator("#acarsArchiveLabel")).to_be_visible()
+    page.wait_for_timeout(4000)          # יותר ממחזור פולינג אחד (3ש')
+    assert state["live_polls"] == polls_at_entry, (
+        f"הפולינג החי המשיך בזמן ארכיון: {polls_at_entry} => {state['live_polls']}")
+    # והמונה עדיין מציג את הארכיון, לא את הזרם החי
+    expect(page.locator("#acarsStTotal")).to_have_text("3")
+
+
+def test_data_view_instances_are_isolated(page):
+    """שלושת מופעי createDataView (ACARS/VDL2/SATCOM) הם closures נפרדים —
+    שום state לא משותף. הודעות שנכנסות ל-ACARS לא אמורות להופיע במוני VDL2."""
+    handler, _ = _acars_stream(7)
+    _mount(page, overrides=_acars_mode_overrides(handler))
+    page.click("#modeSeg button[data-v=acars]")
+    expect(page.locator("#acarsStTotal")).to_have_text("7", timeout=15000)
+    page.click("#modeSeg button[data-v=vdl2]")
+    expect(page.locator("#vdl2StTotal")).to_have_text("0")
+    expect(page.locator("#satcomStTotal")).to_have_text("0")
