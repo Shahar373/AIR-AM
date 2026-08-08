@@ -3277,6 +3277,12 @@
         if (!data.ok) {
           setStatus("שגיאה: " + (data.error || "מעבר מצב נכשל"), "err");
           showError(data.detail || null);
+          // ⚠ כישלון *אימות* (PIN חסר/שגוי 401, או חריגה מהקצב 429) נעצר
+          // ב-_guard — הבקשה מעולם לא הגיעה ללוגיקת המצבים, וה-SDR לא נגע.
+          // בלי היציאה הזאת נפלנו ל-back="off" (אין data.state בתשובת אימות)
+          // והממשק היה מכריז "המקלט בכיבוי" בזמן שהוא ממשיך לשדר כרגיל —
+          // בדיוק סוג החיווי-שאינו-תואם-מציאות ש-mode_ok נועד למנוע.
+          if (data.auth) { await pollGlobalState(); return false; }
           // כישלון כניסה למצב => השרת נופל ל-off (אין fallback לקול) — נוחתים בבית
           const back = (data.state && data.state.app_mode) || "off";
           sdrOff = (back === "off");

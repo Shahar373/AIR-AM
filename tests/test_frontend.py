@@ -84,3 +84,16 @@ def test_too_old_for_map_guards_missing_timestamp():
     body = re.search(r"const tooOldForMap = \(id\) => \{(.*?)\n      \};", js, re.S)
     assert body, "tooOldForMap לא נמצא — עודכן שמו/מבנהו?"
     assert "lastT == null" in body.group(1), "tooOldForMap חייב לבדוק lastT חסר"
+
+
+def test_auth_failure_does_not_fake_standby_in_applyMode():
+    """⚠ רגרסיה: תשובת כישלון-אימות (401 בלי PIN, 429 בחריגה מהקצב) נעצרת
+    ב-_guard ולכן **אין בה `state`** — ו-applyMode נפל ל-`back = "off"`,
+    כלומר הכריז "המקלט בכיבוי (Standby)" בזמן שה-SDR ממשיך לשדר כרגיל.
+    הבקשה מעולם לא הגיעה ללוגיקת המצבים; שום דבר בחומרה לא נגע."""
+    js = _inline_js()
+    assert "if (data.auth) {" in js, "applyMode חייב לצאת מוקדם בכישלון אימות"
+    # היציאה חייבת לקרות *לפני* גזירת back מ-data.state
+    auth_at = js.index("if (data.auth) {")
+    back_at = js.index('const back = (data.state && data.state.app_mode)')
+    assert auth_at < back_at, "בדיקת data.auth חייבת לקדום לגזירת back"
