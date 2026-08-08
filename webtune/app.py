@@ -1642,6 +1642,30 @@ def _normalize_acars(m):
     return rec
 
 
+def _jsonl_records(lines):
+    """מפרסר שורות JSONL לרשומות — **רק אובייקטים**. משותף לכל הקוראים
+    (ייצוא, ארכיון, וטעינת ההיסטוריה באתחול).
+
+    ⚠ למה בדיקת ה-dict קריטית ולא קוסמטית: הקוראים ניגשים מיד ל-`r.get("t")`.
+    שורה שהיא JSON *תקין* אך אינה אובייקט (‏`null`, ‏`0`, מחרוזת, מערך — שריד
+    אפשרי של בלוק פגום אחרי כיבוי פתאומי, בדיוק התרחיש ש-_atomic_write נבנה
+    בשבילו) הפילה את הקוראים ב-AttributeError. ‏json.loads הצליח עליה, ולכן
+    ה-`except ValueError` הקיים *לא* תפס אותה.
+    החומרה: `_load_*_history` נקראות ב-__main__ **בלי try** לפני `app.run()`,
+    כך ששורה אחת כזאת מנעה מ-airam-web לעלות בכלל — וזה המתזמר שמשחזר את מצב
+    ה-SDR (‏`_boot_restore`). עם `Restart=always` זו לולאת קריסה: התחנה כולה
+    מתה, ובשטח אין SSH כדי לאבחן (ר' §9/§12 ב-CLAUDE.md)."""
+    out = []
+    for ln in lines:
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            continue                          # שורה פגומה (כתיבה חלקית) => דילוג
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
 def _append_jsonl_log(path, rec):
     """מוסיף הודעה מנורמלת לקובץ JSONL (append; thread ה-listener הוא הכותב היחיד).
     נכשל בשקט (דיסק מלא וכו') => הפיד החי ממשיך לפעול. משותף ל-ACARS ול-VDL2."""
@@ -1705,12 +1729,7 @@ def _load_acars_history():
         lines = ACARS_LOG_PATH.read_text(encoding="utf-8").splitlines()
     except OSError:
         return
-    recs = []
-    for ln in lines[-ACARS_BUF_MAX:]:
-        try:
-            recs.append(json.loads(ln))
-        except ValueError:
-            continue                          # שורה פגומה (כתיבה חלקית) => דילוג
+    recs = _jsonl_records(lines[-ACARS_BUF_MAX:])
     floor = _today_start()
     recs = [r for r in recs if (r.get("t") or 0) >= floor]   # היום בלבד (הדיסק נשמר)
     recs.sort(key=lambda r: r.get("t") or 0)
@@ -1948,12 +1967,7 @@ def _load_vdl2_history():
         lines = VDL2_LOG_PATH.read_text(encoding="utf-8").splitlines()
     except OSError:
         return
-    recs = []
-    for ln in lines[-VDL2_BUF_MAX:]:
-        try:
-            recs.append(json.loads(ln))
-        except ValueError:
-            continue                          # שורה פגומה (כתיבה חלקית) => דילוג
+    recs = _jsonl_records(lines[-VDL2_BUF_MAX:])
     floor = _today_start()
     recs = [r for r in recs if (r.get("t") or 0) >= floor]
     recs.sort(key=lambda r: r.get("t") or 0)
@@ -2134,12 +2148,7 @@ def _load_satcom_history():
         lines = SATCOM_LOG_PATH.read_text(encoding="utf-8").splitlines()
     except OSError:
         return
-    recs = []
-    for ln in lines[-SATCOM_BUF_MAX:]:
-        try:
-            recs.append(json.loads(ln))
-        except ValueError:
-            continue
+    recs = _jsonl_records(lines[-SATCOM_BUF_MAX:])
     floor = _today_start()
     recs = [r for r in recs if (r.get("t") or 0) >= floor]
     recs.sort(key=lambda r: r.get("t") or 0)
@@ -3021,7 +3030,17 @@ def parse_stats(text, want_freq):
             continue
         fl = _FREQ_LABEL_RE.search(m.group(2))
         if fl and fl.group(1) == want_freq:
-            vals[m.group(1)] = float(m.group(3))
+            try:
+                vals[m.group(1)] = float(m.group(3))
+            except ValueError:
+                # ⚠ התבנית (-?[0-9.]+) מקבלת גם מחרוזות שאינן מספר — "."‏, ".."‏,
+                # "1.2.3" — ו-float עליהן זרק ValueError *לא-מטופל*. הקובץ יושב
+                # ב-tmpfs ונכתב ~פעם בשנייה בזמן שאנחנו קוראים אותו, כך שקריאה
+                # קרועה היא תרחיש אמיתי. הנפילה לא הייתה מקומית: parse_stats
+                # מזין את /api/metrics (פולינג כל שנייה), את /api/signal, ואת
+                # _sample_probe_stats — כלומר גם **בדיקת האנטנה** הייתה נכשלת.
+                # מדלגים על המדד הפגום; השאר בשורה/בקובץ עדיין תקפים.
+                continue
     return vals
 
 
@@ -3201,12 +3220,18 @@ def api_activity():
             ev = json.loads(ln)
         except ValueError:
             continue
-        ev["exists"] = bool(ev.get("file")) and (REC_DIR / ev["file"]).is_file()
+        # ⚠ אותה משפחת באג כמו ב-_jsonl_records: שורת JSON תקין שאינה אובייקט
+        # (‏null/מספר/מערך — שריד בלוק פגום אחרי כיבוי פתאומי) עברה את
+        # ה-except ValueError ואז הפילה את הראוט ב-TypeError. ‏/api/activity
+        # נקרא בפולינג כל 15 שניות במצב קול, כך שזה 500 חוזר ולא תקלה חד-פעמית.
+        if not isinstance(ev, dict):
+            continue
+        ev["exists"] = bool(ev.get("file")) and (REC_DIR / str(ev["file"])).is_file()
         ev["text"] = None
         if ev.get("file"):
             try:
-                ev["text"] = (REC_DIR / (ev["file"] + ".txt")).read_text().strip() or None
-            except OSError:
+                ev["text"] = (REC_DIR / (str(ev["file"]) + ".txt")).read_text().strip() or None
+            except (OSError, ValueError):
                 pass   # אין תמלול (כבוי, עדיין מעובד, או נמחק) => None
         events.append(ev)
     return jsonify(ok=True, events=events)
@@ -3711,12 +3736,7 @@ def _read_jsonl_log(path):
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
-    out = []
-    for ln in lines:
-        try:
-            out.append(json.loads(ln))
-        except ValueError:
-            continue
+    out = _jsonl_records(lines)
     out.sort(key=lambda r: r.get("t") or 0)
     return out
 
