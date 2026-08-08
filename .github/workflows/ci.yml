@@ -15,6 +15,11 @@ jobs:
         with:
           python-version: "3.11"   # Raspberry Pi OS Bookworm
       - run: pip install flask pytest
+      # node כבר מותקן ב-ubuntu-latest. הוא נחוץ ל-tests/test_frontend.py, שמריץ
+      # `node --check` על הסקריפט ה-inline של index.html: אין build step ל-UI,
+      # ולכן שגיאת תחביר שם לא נתפסת בשום מקום אחר — הדף פשוט נשבר אצל המשתמש.
+      # אם node חסר הבדיקה מדלגת (skipif) במקום להיכשל.
+      - run: node --version
       - run: python -m pytest tests/ -v
       - name: bash syntax check
         run: bash -n install.sh scripts/airam-wait-sdrplay

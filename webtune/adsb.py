@@ -220,7 +220,7 @@ def classify(ac):
 _LOCK = threading.Lock()
 _THREAD = None
 _S = {
-    "events": deque(),        # (t_mono, rwy, kind)
+    "events": deque(),        # (t_mono, rwy, kind, mode) — mode: "pos"/"track"
     "last_event": {},         # (hex, kind) -> t_mono  (dedup)
     "gps_hist": deque(),      # (t_mono, bad, total)
     "last_known": {},         # kind -> (rwy, t_mono)  - גם אחרי שהחלון התרוקן

@@ -538,8 +538,10 @@ def test_api_state_vdl2_wins_over_saved(client, paths, monkeypatch):
 
 def test_api_health_vdl2_mode(client, paths, monkeypatch):
     def run(cmd, **kw):
-        active = "active" if cmd[-1] in ("sdrplay", "airam-vdl2", "icecast2") else "inactive"
-        return types.SimpleNamespace(returncode=0, stdout=active, stderr="")
+        # is-active מקבל כמה יחידות בקריאה אחת => שורה לכל יחידה, לפי הסדר
+        out = "\n".join("active" if n in ("sdrplay", "airam-vdl2", "icecast2") else "inactive"
+                        for n in cmd[2:])
+        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
     monkeypatch.setattr(app.subprocess, "run", run)
     monkeypatch.setattr(app, "_sdr_present", lambda: True)
     body = client.get("/api/health").get_json()

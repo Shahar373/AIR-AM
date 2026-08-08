@@ -333,3 +333,56 @@ def test_antenna_check_restores_active_scan_leg_not_state_bank(client, paths, mo
     r = client.post("/api/antenna/check", json={"freq": 121.5})
     assert r.status_code == 200
     assert calls == [["131.550"]]        # שוחזרה הרגל הפעילה בפועל, לא ["136.700"]
+
+
+# --- באג: דגימה בתנאים שונים מהבסיס => פסק-דין שקרי -------------------------
+
+def test_antenna_check_reenters_voice_when_live_params_differ_from_probe(client, paths, monkeypatch):
+    """⚠ רגרסיה: "כבר במצב קול על אותו תדר" לא הספיק כדי לדלג על ההכנה.
+
+    רצפת הרעש ב-dBFS נמדדת *אחרי* שרשרת הרווח. משתמש שיושב בקול עם רווח ידני
+    (AGC כבוי) קיבל דגימה בסקאלה אחרת לגמרי מהבסיס שנמדד תחת AGC — ומכאן
+    verdict של below_baseline ("האנטנה מנותקת!") בלי שדבר השתנה בחומרה.
+    עכשיו מדלגים על ההכנה רק כשהמצב החי זהה *בפועל* לתנאי הבדיקה."""
+    st = app.load_state()
+    st.update(app_mode="voice", freq=121.5, mod="am",
+              agc=False, if_gain=30, rf_gain=2, squelch_mode="auto")
+    app.save_state(st)
+    monkeypatch.setattr(app, "_live_mode", lambda: "voice")
+    entered = []
+
+    def fake_enter_voice(params):
+        entered.append(params)
+        _write_stats(paths / "stats.txt", params["freq"], sig=-30.0, noise=-72.0)
+        return None, None, False
+
+    monkeypatch.setattr(app, "_enter_voice", fake_enter_voice)
+    monkeypatch.setattr(app, "ANTENNA_CHECK_SAMPLE_SEC", 1.0)
+
+    r = client.post("/api/antenna/check", json={"freq": 121.5})
+    assert r.status_code == 200
+    # נכנס לקול בתנאי הבדיקה המתוקננים, ואז שיחזר את הרווח הידני של המשתמש
+    assert len(entered) == 2, f"ציפינו לכניסת-בדיקה + שחזור, קיבלנו {entered}"
+    probe, restored = entered
+    assert probe["agc"] is True and probe["squelch_mode"] == "open"
+    assert restored["agc"] is False and restored["if_gain"] == 30
+
+
+def test_antenna_check_skips_reentry_when_live_params_match_probe(client, paths, monkeypatch):
+    """הצד השני: כשהמצב החי *כן* זהה לתנאי הבדיקה — לא עושים restart מיותר
+    (‏~3 שניות של קטיעת שמע) רק כדי להגיע לאותה מדידה בדיוק."""
+    st = app.load_state()
+    st.update(app_mode="voice", freq=121.5, mod="am", agc=True,
+              if_gain=app.IF_GAIN_DEFAULT, rf_gain=app.RF_GAIN_DEFAULT,
+              squelch_mode="open")
+    app.save_state(st)
+    monkeypatch.setattr(app, "_live_mode", lambda: "voice")
+    entered = []
+    monkeypatch.setattr(app, "_enter_voice", lambda p: entered.append(p) or (None, None, False))
+    monkeypatch.setattr(app, "ANTENNA_CHECK_SAMPLE_SEC", 1.0)
+    _write_stats(paths / "stats.txt", 121.500, sig=-30.0, noise=-72.0)
+
+    r = client.post("/api/antenna/check", json={"freq": 121.5})
+    assert r.status_code == 200
+    assert entered == []                    # אין restart — התנאים כבר נכונים
+    assert r.get_json()["noise"] == -72.0

@@ -348,22 +348,36 @@ AIRAM_PIN = os.environ.get("AIRAM_PIN", "").strip()
 _PIN_FAIL_LOCK = threading.Lock()
 _pin_fails = {}              # remote_addr -> (count, window_start_epoch)
 PIN_RATE_WINDOW_SEC = 60.0
-PIN_RATE_MAX_ATTEMPTS = 5    # מעבר לזה — השהיה בכל ניסיון נוסף באותו חלון
-PIN_RATE_DELAY_SEC = 1.0     # ~2.7 שעות למיצוי מרחב 4-ספרות במקום שניות
+PIN_RATE_MAX_ATTEMPTS = 5    # מעבר לזה — הבקשה נדחית בלי לבדוק PIN עד סוף החלון
+PIN_RATE_DELAY_SEC = 1.0     # השהיה נוספת על הדחייה (מייקרת גם ניסיון בודד)
+_PIN_FAILS_MAX = 256         # מעליו מגזמים חלונות שפג תוקפם (ר' _pin_prune)
 
 
 def _pin_rate_limited(ip):
     now = time.time()
     with _PIN_FAIL_LOCK:
+        _pin_prune(now)
         count, start = _pin_fails.get(ip, (0, now))
         if now - start > PIN_RATE_WINDOW_SEC:
             count, start = 0, now
         return count >= PIN_RATE_MAX_ATTEMPTS
 
 
+def _pin_prune(now):
+    """גיזום חלונות שפג תוקפם. ⚠ נקרא תחת _PIN_FAIL_LOCK בלבד. בלעדיו המילון
+    גדל לצמיתות: הערכים נמחקים רק בהצלחה (_pin_record_success), כך שכל IP
+    שנכשל ולא הצליח אף פעם נשאר בזיכרון עד אתחול (DHCP/NAT מייצרים כתובות
+    חדשות לאורך זמן)."""
+    if len(_pin_fails) < _PIN_FAILS_MAX:
+        return
+    for ip in [k for k, (_c, start) in _pin_fails.items() if now - start > PIN_RATE_WINDOW_SEC]:
+        _pin_fails.pop(ip, None)
+
+
 def _pin_record_fail(ip):
     now = time.time()
     with _PIN_FAIL_LOCK:
+        _pin_prune(now)
         count, start = _pin_fails.get(ip, (0, now))
         if now - start > PIN_RATE_WINDOW_SEC:
             count, start = 0, now
@@ -390,7 +404,16 @@ def _guard():
     if AIRAM_PIN:
         ip = request.remote_addr or "unknown"
         if _pin_rate_limited(ip):
+            # ⚠ דוחים *בלי לבדוק את ה-PIN בכלל*, לא רק משהים. הגרסה הקודמת
+            # השהתה שנייה ואז בדקה בכל זאת — וזה לא מגביל קצב: Flask רץ
+            # threaded=True, כך שההשהיה מתרחשת בכל thread במקביל. תוקף שפותח
+            # 100 חיבורים בו-זמנית היה ממצה מרחב של 4 ספרות בכ-100 שניות,
+            # ולא ב-"~2.7 שעות" שההערה כאן הבטיחה. דחייה מוחלטת לאורך החלון
+            # חוסמת את המקביליות: 5 ניסיונות ל-60 שניות, ולא משנה כמה חיבורים.
+            # החסימה מוגבלת-בזמן (מתפוגגת לבד) => DHCP/NAT לא נענשים לצמיתות.
             time.sleep(PIN_RATE_DELAY_SEC)
+            return jsonify(ok=False, auth=True,
+                           error="יותר מדי ניסיונות PIN — המתן דקה ונסה שוב"), 429
         supplied = request.headers.get("X-AIRAM-PIN", "")
         if not hmac.compare_digest(supplied, AIRAM_PIN):
             _pin_record_fail(ip)
@@ -2190,6 +2213,29 @@ def _satcom_listener():
             _trim_satcom_log()
 
 
+HEALTH_SERVICES = ("rtl_airband", "icecast2", "sdrplay",
+                   "airam-acars", "airam-vdl2", "airam-satcom")
+
+
+def _services_status(names):
+    """סטטוס של כמה יחידות ב-fork *אחד*. `systemctl is-active a b c` מקבל רשימת
+    יחידות ומדפיס שורה לכל אחת, לפי הסדר שנשלח.
+    ⚠ למה זה משנה: /api/health נקרא בפולינג כל 10 שניות מכל טלפון שפתוח, וקודם
+    פתח שישה תהליכים בכל קריאה => ~2,160 forks בשעה, בפרויקט שחוסך 50% CPU
+    בדמודולטור (skip_c) בדיוק כדי לשרוד על ספק כוח שולי בשטח. ניטור עצמי לא
+    אמור להיות הצרכן הגדול בתקציב.
+    ‏rc!=0 הוא המצב *הרגיל* כאן (הוא רק מציין שלא כל היחידות active) — ולכן
+    קוראים את stdout ולא בודקים returncode. שורה חסרה => "unknown", כמו קודם."""
+    try:
+        r = subprocess.run(["systemctl", "is-active", *names],
+                           capture_output=True, text=True, timeout=5)
+        lines = r.stdout.splitlines()
+    except Exception:
+        lines = []
+    return {svc: (lines[i].strip() if i < len(lines) else "") or "unknown"
+            for i, svc in enumerate(names)}
+
+
 def _is_active(service):
     """is-active הוא קריאת-קריאה => לא דורש sudo (עובד לכל משתמש)."""
     try:
@@ -2673,7 +2719,14 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
     while not stop_evt.is_set():
         while remaining > 0 and not stop_evt.is_set():
             step = min(1.0, remaining)
-            time.sleep(step)
+            # ⚠ stop_evt.wait ולא time.sleep: ההמתנה נקטעת *מיידית* כשמבקשים
+            # לעצור, במקום להשלים עד שנייה שלמה של שינה לפני שבודקים שוב. זה
+            # מקצר מעבר-מצב/עצירת-סריקה שהמשתמש מחכה לו בפועל, ובנוסף הופך את
+            # ההמתנה לדטרמיניסטית בבדיקות — no_sleep ממקף את `time.sleep`
+            # *הגלובלי* (app.time הוא מודול time עצמו), כך שבדיקה שהסתמכה עליו
+            # ניטרלה בטעות גם את ה-sleep של עצמה והפכה תלוית-מזל (ר' §12).
+            if stop_evt.wait(step):
+                break
             remaining -= step
         if stop_evt.is_set():
             break
@@ -2910,14 +2963,7 @@ def api_presets():
 @app.route("/api/health")
 def api_health():
     """סטטוס המערכת — מאפשר ל-UI להבדיל בין "אין שידור" ל"משהו נפל"."""
-    services = {}
-    for svc in ("rtl_airband", "icecast2", "sdrplay", "airam-acars", "airam-vdl2", "airam-satcom"):
-        try:
-            r = subprocess.run(["systemctl", "is-active", svc],
-                               capture_output=True, text=True, timeout=5)
-            services[svc] = (r.stdout.strip() or "unknown")
-        except Exception:
-            services[svc] = "unknown"
+    services = _services_status(HEALTH_SERVICES)
     try:
         stats_age = round(time.time() - STATS_PATH.stat().st_mtime, 1)
     except OSError:
@@ -3385,7 +3431,18 @@ def api_antenna_check():
         return jsonify(ok=False, error="פעולה אחרת מתבצעת כרגע — המתן שנייה ונסה שוב"), 409
     try:
         prev_live = _live_mode()
-        already_voice = (prev_live == "voice" and abs(prev.get("freq", -999.0) - freq) < 5e-4)
+        # ⚠ "כבר בקול" לא מספיק כדי לדלג על ההכנה: הדגימה חייבת להיעשות *באותם
+        # תנאים* שבהם נמדד הבסיס, אחרת ההשוואה של _signal_verdict חסרת משמעות.
+        # רצפת הרעש ב-dBFS נמדדת אחרי שרשרת הרווח => משתמש שיושב בקול עם רווח
+        # ידני (IFGR שונה מברירת המחדל) היה מקבל רצפה שונה בעשרות dB מהבסיס
+        # שנמדד תחת AGC, ו-verdict של "below_baseline" (= "האנטנה מנותקת!") בלי
+        # שדבר באמת השתנה. זו בדיוק ההמצאה שעקרון §12 אוסר, רק בכיוון של
+        # פסק-דין במקום ערך. לכן מדלגים רק כשהמצב החי *זהה* לתנאי הבדיקה.
+        already_voice = (prev_live == "voice"
+                         and abs(prev.get("freq", -999.0) - freq) < 5e-4
+                         and prev.get("mod") == "am"
+                         and bool(prev.get("agc")) is True
+                         and prev.get("squelch_mode") == "open")
         if not already_voice:
             params = {"freq": freq, "mod": "am", "agc": True, "if_gain": IF_GAIN_DEFAULT,
                       "rf_gain": RF_GAIN_DEFAULT, "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}

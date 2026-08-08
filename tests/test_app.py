@@ -583,7 +583,8 @@ def test_api_health(client, paths, monkeypatch):
     def fake_run(cmd, **kw):
         class R:
             returncode = 0
-            stdout = "active\n" if cmd[1] == "is-active" else ""
+            # is-active מקבל עכשיו את כל היחידות ב-fork אחד ומחזיר שורה לכל אחת
+            stdout = "\n".join(["active"] * len(cmd[2:])) if cmd[1] == "is-active" else ""
             stderr = ""
         return R()
     monkeypatch.setattr(app.subprocess, "run", fake_run)

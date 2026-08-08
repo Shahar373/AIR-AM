@@ -2529,7 +2529,11 @@
       return b >= 8400 ? (b / 1000) + "k OQPSK" : b + " MSK";
     }
     // חתימת "אין דמודולטור פעיל" (main.c:104) — לא ניתנת להבחנה ממדידה אמיתית
-    const aimNoDemod = (c) => !c.lock && c.ebno === 0 && c.mse >= 1.0;
+    // "אין דמודולטור" — החתימה מהמקור (web.c). ⚠ typeof ולא השוואה ישירה:
+    // ערוץ שהגיע בלי ebno מספרי (גרסת כלי אחרת / תשובה חלקית) נחשב כאן
+    // no-demod ומוצג "—", במקום להגיע ל-c.ebno.toFixed() ולזרוק TypeError.
+    const aimNoDemod = (c) => typeof c.ebno !== "number"
+                           || (!c.lock && c.ebno === 0 && c.mse >= 1.0);
 
     function renderAimIdle(txt) {
       $("satcomAimPill").className = "pill";
@@ -3220,7 +3224,10 @@
           setStatus("תקלה: המצב (" + (h.app_mode || "?") + ") לא רץ — בדוק את המערכת", "err");
       } catch (e) { /* offline — הסטטוס הראשי כבר מציג שגיאת רשת במקומות אחרים */ }
     }
-    setInterval(pollGlobalState, 10000);
+    // ⚠ document.hidden כמו בכל שאר ה-pollers: זה היה ה-poller היחיד בלי הבדיקה,
+    // וכל קריאה שלו היא /api/health על ה-Pi. ‏PWA שנשארת פתוחה ברקע בכיס (בדיוק
+    // תרחיש השטח) הייתה ממשיכה לתשאל לנצח בלי שאיש מסתכל.
+    setInterval(() => { if (!document.hidden) pollGlobalState(); }, 10000);
     // ספירה-לאחור חלקה לרגל הבאה בסריקה — חישוב מקומי בלבד (בלי רשת) מול
     // scanStatus.next_switch_at שהתקבל מ-/api/scan; מתעדכן כל שנייה כשהבית מוצג.
     setInterval(() => { if (scanning && appMode === "home") renderHome(); }, 1000);
@@ -3758,7 +3765,16 @@
         if (m.dir) { c.lastDir = m.dir; if (m.dir === "uplink") c.up++; else if (m.dir === "downlink") c.down++; }
         if (m.lat != null) { c.hasPos = true; c.lastLat = m.lat; c.lastLon = m.lon; c.lastPosSrc = m.pos_src || null; }
       }
-      const tooOldForMap = (id) => { const c = craft[id]; return !c || (Date.now() - c.lastT * 1000) > MAP_AGE_MS; };
+      // ⚠ c.lastT == null נבדק במפורש (כמו ב-isStale ממש למטה): בלעדיו
+      // `null * 1000` הוא 0, כלומר "1970" => כל מטוס שהודעותיו הגיעו בלי חותמת
+      // זמן מספרית (updateCraft מגן על זה בעצמו) נחשב מיד ישן-מדי, והסמן שלו
+      // נמחק מהמפה בפריים הבא אחרי שנוצר.
+      const tooOldForMap = (id) => {
+        const c = craft[id];
+        if (!c) return true;
+        if (c.lastT == null) return false;      // אין חותמת זמן — לא ראיה לישנוּת
+        return (Date.now() - c.lastT * 1000) > MAP_AGE_MS;
+      };
       const isStale = (id) => { const c = craft[id]; return !!c && c.lastT != null && (Date.now() - c.lastT * 1000) > STALE_MS; };
 
       /* ----- מפה (Leaflet, טעינה עצלנית + נפילה חיננית) ----- */
@@ -3829,7 +3845,10 @@
         if (!map || !id || m.lat == null || m.lon == null) return;
         const label = m.tail || m.flight || m.icao || opts.label;
         const mk = markers[id];
-        if (mk) { mk.setLatLng([m.lat, m.lon]); mk.setPopupContent(buildPopup(m)); }
+        // ⚠ גם ה-tooltip מתעדכן, לא רק המיקום וה-popup: הזהות מתחדדת תוך כדי
+        // סשן (הודעה ראשונה עם icao בלבד, אחר-כך מספר טיסה, ובסוף רישום), ובלי
+        // העדכון הסמן היה נשאר עם התווית הראשונה והגרועה ביותר עד סוף הסשן.
+        if (mk) { mk.setLatLng([m.lat, m.lon]); mk.setPopupContent(buildPopup(m)); mk.setTooltipContent(label); }
         else markers[id] = L.marker([m.lat, m.lon], icon ? { icon } : undefined).bindPopup(buildPopup(m)).bindTooltip(label);
         updateTrack(m);
         if (id === focus) renderMapSelection();

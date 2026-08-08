@@ -4,6 +4,8 @@
 #  ה-guard של בקשות משנות-מצב: התאמת Origin ל-Host, ו-PIN אופציונלי.
 #  רץ בלי חומרה: בקשות לא-תקינות נחסמות לפני נתיב הכיוונון.
 # ============================================================================
+import time
+
 import pytest
 
 import app
@@ -52,8 +54,13 @@ def test_pin_wrong_rejected(client, tmp_path, monkeypatch):
 
 def test_pin_repeated_failures_are_rate_limited(client, tmp_path, monkeypatch):
     """⚠ רגרסיה אמיתית: בלי rate-limit, PIN בן 4 ספרות (10,000 ערכים) ניתן
-    למיצוי תוך שניות מכל לקוח ברשת המקומית. אחרי כמה ניסיונות כושלים מאותו
-    IP, בקשות נוספות מושהות (לא נחסמות לצמיתות — DHCP/NAT)."""
+    למיצוי תוך שניות מכל לקוח ברשת המקומית.
+
+    ⚠⚠ הגרסה הראשונה של ההגנה *לא באמת הגבילה קצב*: היא השהתה שנייה ואז בדקה
+    את ה-PIN בכל זאת. Flask רץ threaded=True, ולכן ההשהיה מתרחשת במקביל בכל
+    thread — תוקף עם 100 חיבורים בו-זמנית היה ממצה 4 ספרות בכ-100 שניות במקום
+    ב-"2.7 שעות" שההערה בקוד הבטיחה. עכשיו הבקשה **נדחית ב-429 בלי לבדוק PIN
+    בכלל** עד סוף החלון, וזה חסין למקביליות: 5 ניסיונות לחלון, נקודה."""
     monkeypatch.setattr(app, "AIRAM_PIN", "1234")
     monkeypatch.setattr(app, "PRESETS_PATH", tmp_path / "presets.json")
     monkeypatch.setattr(app, "_pin_fails", {})
@@ -65,17 +72,35 @@ def test_pin_repeated_failures_are_rate_limited(client, tmp_path, monkeypatch):
         assert r.status_code == 401
     assert slept == []                          # עדיין מתחת לסף — אין השהיה
     r = client.put("/api/presets", json=body, headers={"X-AIRAM-PIN": "0000"})
-    assert r.status_code == 401
-    assert slept == [app.PIN_RATE_DELAY_SEC]     # מעבר לסף — הושהה
-    # PIN נכון שמגיע תוך כדי חלון-ההשהיה גם הוא מושהה (הבדיקה קודמת לתוצאה —
-    # אחרת "תשובה מיידית" הייתה מסגירה בעצמה שהניסיון נכון), אבל הצלחה מאפסת
-    # את המונה עבור אותו IP.
+    assert r.status_code == 429                 # מעבר לסף — נדחה, לא רק מושהה
+    assert slept == [app.PIN_RATE_DELAY_SEC]
+    # ⚠ המחיר המכוון: גם PIN *נכון* נדחה עד סוף החלון. זו המשמעות של הגבלת
+    # קצב אמיתית — אילו הנכון היה עובר, תוקף מקבילי היה ממשיך לנחש בחינם.
+    blocked = client.put("/api/presets", json=body, headers={"X-AIRAM-PIN": "1234"})
+    assert blocked.status_code == 429
+    assert blocked.get_json()["auth"] is True
+    # אחרי שהחלון פג — הספירה מתאפסת וה-PIN הנכון עובד שוב (לא חסימה קבועה).
+    # ⚠ תופסים את השעון האמיתי *לפני* המיקוף: app.time הוא מודול time הגלובלי,
+    # ולכן lambda שקוראת ל-time.time() אחרי המיקוף קוראת לעצמה (RecursionError).
+    real_time = time.time()
+    monkeypatch.setattr(app.time, "time", lambda: real_time + app.PIN_RATE_WINDOW_SEC + 1)
     ok = client.put("/api/presets", json=body, headers={"X-AIRAM-PIN": "1234"})
     assert ok.status_code == 200
-    assert slept == [app.PIN_RATE_DELAY_SEC] * 2
-    r2 = client.put("/api/presets", json=body, headers={"X-AIRAM-PIN": "0000"})
-    assert r2.status_code == 401
-    assert slept == [app.PIN_RATE_DELAY_SEC] * 2   # לא הושהה שוב מיד אחרי איפוס
+
+
+def test_pin_rate_limit_prunes_expired_entries(monkeypatch):
+    """‏_pin_fails נמחק רק בהצלחה => IP שנכשל ולא הצליח אף פעם נשאר לנצח.
+    ברשת עם DHCP/NAT זו צמיחה איטית אך בלתי-חסומה לאורך סשן headless ארוך."""
+    monkeypatch.setattr(app, "_pin_fails", {})
+    monkeypatch.setattr(app, "_PIN_FAILS_MAX", 4)
+    base = time.time()
+    monkeypatch.setattr(app.time, "time", lambda: base)
+    for i in range(6):
+        app._pin_record_fail(f"10.0.0.{i}")
+    assert len(app._pin_fails) == 6                      # אף אחד לא פג עדיין
+    monkeypatch.setattr(app.time, "time", lambda: base + app.PIN_RATE_WINDOW_SEC + 1)
+    app._pin_record_fail("10.0.0.99")                    # מפעיל גיזום
+    assert app._pin_fails == {"10.0.0.99": (1, base + app.PIN_RATE_WINDOW_SEC + 1)}
 
 
 def test_pin_uses_constant_time_comparison(monkeypatch):

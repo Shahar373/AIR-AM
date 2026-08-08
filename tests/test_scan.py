@@ -214,9 +214,9 @@ def test_api_health_scan_ok_reflects_live_consumer(client, paths, no_sleep, monk
     client.post("/api/mode", json={"mode": "scan", "plan": [ACARS_LEG]})
 
     def fake_run(cmd, **kw):
-        svc = cmd[-1]
-        active = svc == "airam-acars"
-        return types.SimpleNamespace(stdout=("active" if active else "inactive"), stderr="")
+        # is-active מקבל כמה יחידות בקריאה אחת => שורה לכל יחידה, לפי הסדר
+        out = "\n".join("active" if n == "airam-acars" else "inactive" for n in cmd[2:])
+        return types.SimpleNamespace(stdout=out, stderr="")
     monkeypatch.setattr(app.subprocess, "run", fake_run)
     h = client.get("/api/health").get_json()
     assert h["app_mode"] == "scan" and h["ok"] is True
@@ -236,26 +236,40 @@ def test_scan_loop_all_legs_fail_falls_to_off(paths, no_sleep, monkeypatch):
     assert st["app_mode"] == "off" and st["prev_mode"] == "scan"
 
 
-def test_scan_loop_skips_failed_leg_and_recovers(paths, no_sleep):
+def test_scan_loop_skips_failed_leg_and_recovers(paths):
+    """⚠ בלי no_sleep ובלי time.sleep בגוף הבדיקה — בכוונה. הגרסה הקודמת
+    הסתמכה על `time.sleep(0.2)` כדי "לתת ל-thread זמן לרוץ", אבל no_sleep
+    ממקף את `app.time.sleep` — וזה *מודול time הגלובלי* עצמו (app.time is time),
+    כך שגם ה-sleep של הבדיקה הפך ל-no-op. התוצאה: הבדיקה עברה או נפלה לפי מזל
+    תזמון בלבד (עברה לבד, נפלה בריצה מלאה). כאן מסתנכרנים על Event שה-fake
+    עצמו מדליק — דטרמיניסטי לחלוטין, בלי תלות בשעון קיר."""
     calls = []
+    retried = threading.Event()
 
     def fake_enter(leg):
         calls.append(leg["mode"])
-        if leg["mode"] == "vdl2" and calls.count("vdl2") == 1:
-            return "נכשל פעם אחת", None      # רק הניסיון הראשון ל-vdl2 נכשל
+        if leg["mode"] == "vdl2":
+            if calls.count("vdl2") == 1:
+                return "נכשל פעם אחת", None   # רק הניסיון הראשון ל-vdl2 נכשל
+            retried.set()                     # ניסיון חוזר הגיע — אפשר לסיים
         return None, None
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(app, "_scan_enter_leg", fake_enter)
         stop_evt = threading.Event()
-        plan = [ACARS_LEG, VDL2_LEG]
+        # dwell זעיר: הלולאה ממתינה עכשיו על stop_evt.wait (ולא time.sleep),
+        # ולכן no_sleep לא היה מזרז אותה ממילא.
+        plan = [dict(ACARS_LEG, dwell_sec=0.01), dict(VDL2_LEG, dwell_sec=0.01)]
         th = threading.Thread(target=app._scan_loop, args=(stop_evt, plan, 0, 0), daemon=True)
         th.start()
-        time.sleep(0.2)                       # מספיק זמן אמיתי לכמה סבבים (dwell מדומה, בלי sleep)
-        stop_evt.set()
-        th.join(timeout=5)
+        try:
+            assert retried.wait(10), f"לא היה ניסיון חוזר ל-vdl2 בזמן: {calls}"
+        finally:
+            stop_evt.set()
+            th.join(timeout=5)
+        assert not th.is_alive()              # stop_evt.wait נקטע מיידית, בלי להשלים dwell
     assert "vdl2" in calls                    # לא ננטש אחרי כשל אחד — ניסה שוב
-    assert calls.count("vdl2") >= 2           # ניסיון ראשון (כשל) + לפחות ניסיון חוזר שהצליח
+    assert calls.count("vdl2") >= 2           # ניסיון ראשון (כשל) + ניסיון חוזר שהצליח
 
 
 def test_scan_activate_starts_thread_on_success(paths, no_sleep, monkeypatch):
