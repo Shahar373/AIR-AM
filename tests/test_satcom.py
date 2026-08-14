@@ -1155,3 +1155,295 @@ def test_normalize_satcom_adsc_decode_failed_never_yields_position():
     assert n["decoded"] and "לא פוענח" in n["decoded"]
     assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
     assert n["group"] != "position"
+
+
+# ============================================================================
+#  re-decode ARINC-622 בכיוון הנכון (decode_acars_apps) — קליטת 14.08.2026
+# ----------------------------------------------------------------------------
+#  קליטת שדה אמיתית: 12 CPDLC + 11 ADS-C, *כולן* uplink, מעטפות ARINC-622
+#  תקינות (crc_ok=true במעטפת הפנימית) — אבל רוב ההודעות הוצגו כ-"לא פוענח".
+#  הסיבה: inmarsat-sniffer פענח את היישום המקונן בכיוון ASN.1 הלא-נכון, לא
+#  איכות קליטה (ר' CLAUDE.md §5/§12). _decode_libacars_app מריץ re-decode
+#  מקומי עם decode_acars_apps (כלי ה-CLI הרשמי של libacars) בכיוון האמיתי
+#  מ-structural_dir.
+#
+#  ⚠ אין libacars בסביבת ה-CI ⇒ subprocess.run ל-decode_acars_apps תמיד ממוקף
+#  כאן. מחרוזות ה-decoded בבדיקות ה-regression (הווקטורים מ-14.08.2026) הן
+#  **שחזור-לפי-פרוטוקול** — ציפייה למה ש-decode_acars_apps אמור להפיק בכיוון
+#  הנכון, לא stdout שנלכד בפועל. אימות מול הרצה אמיתית על ה-Pi נשאר פתוח.
+# ============================================================================
+
+@pytest.fixture(autouse=True)
+def _reset_libacars_state():
+    """מונע דליפת memo-cache/דגל-לוג בין בדיקות (מפתח הוא (label,dir,text) —
+    בדיקות שונות שחוזרות על אותו טקסט היו מקבלות תוצאה ממוקפת מבדיקה קודמת)."""
+    app._libacars_cache.clear()
+    app._libacars_missing_logged[0] = False
+    yield
+    app._libacars_cache.clear()
+
+
+def _libacars_fake(vectors, calls=None):
+    """fake subprocess.run ל-decode_acars_apps: vectors הוא {msg_text: {"json":
+    dict|None, "text": str|None, "rc_json": int, "rc_text": int}}. echo-first
+    (כמו examples/decode_acars_apps.c האמיתי: printf("%s\\n", txt) לפני העץ),
+    ובוחר JSON/טקסט לפי LA_JSON ב-env (בדיוק כמו _run_libacars האמיתי)."""
+    def fake_run(cmd, **kw):
+        dir_arg, label, text = cmd[1], cmd[2], cmd[3]
+        env = kw.get("env") or {}
+        as_json = "LA_JSON" in env
+        if calls is not None:
+            calls.append((dir_arg, label, as_json))
+        v = vectors.get(text)
+        if v is None:
+            return types.SimpleNamespace(returncode=1, stdout="",
+                                         stderr="unknown vector in test fake")
+        if as_json:
+            rc = v.get("rc_json", 0)
+            body = json.dumps(v["json"]) if v.get("json") is not None else ""
+        else:
+            rc = v.get("rc_text", 0)
+            body = v.get("text") or ""
+        stdout = (text + "\n" + body) if body else (text + "\n")
+        return types.SimpleNamespace(returncode=rc, stdout=stdout, stderr="")
+    return fake_run
+
+
+# --- _decode_libacars_app: כיוון וגייטינג ------------------------------------
+
+def test_decode_libacars_app_uplink_uses_gnd2air_flag(monkeypatch):
+    """structural_dir='uplink' => מריצים decode_acars_apps עם 'u' (GND2AIR),
+    לא כלל קשיח על AA/A6 — הכיוון מגיע רק מהפרמטר."""
+    text = "/PIKCPYA.AT1.C-GEGP21359DE2407AA1"
+    calls = []
+    vectors = {text: {"json": {"arinc622": {"cpdlc": {"err": False}}},
+                       "text": "CONFIRM ASSIGNED ROUTE"}}
+    monkeypatch.setattr(app.subprocess, "run", _libacars_fake(vectors, calls))
+    j, t = app._decode_libacars_app("AA", text, "uplink")
+    assert calls and all(c[0] == "u" for c in calls)
+    assert any(c[2] is True for c in calls)    # קריאת ה-JSON כוללת LA_JSON=1
+    assert any(c[2] is False for c in calls)   # וקריאת הטקסט לא
+    assert j == {"arinc622": {"cpdlc": {"err": False}}}
+    assert t == "CONFIRM ASSIGNED ROUTE"
+
+
+def test_decode_libacars_app_downlink_uses_air2gnd_flag_not_hardcoded(monkeypatch):
+    """structural_dir='downlink' => 'd' (AIR2GND) — מוודא שהכיוון לא קשיח
+    ל-uplink (כל הקליטה עד כה הייתה uplink, אבל הקוד לא מניח את זה)."""
+    text = "/RECOEYA.ADS.A7-BBB070D0B00"
+    calls = []
+    vectors = {text: {"json": {"arinc622": {"adsc": {"err": False}}},
+                       "text": "Basic report"}}
+    monkeypatch.setattr(app.subprocess, "run", _libacars_fake(vectors, calls))
+    j, t = app._decode_libacars_app("A6", text, "downlink")
+    assert calls and all(c[0] == "d" for c in calls)
+    assert j is not None and t == "Basic report"
+
+
+def test_decode_libacars_app_unknown_direction_never_guesses(monkeypatch):
+    """structural_dir=None => לא מריצים subprocess בכלל — לא מנחשים כיוון ASN.1."""
+    calls = []
+    monkeypatch.setattr(app.subprocess, "run", _libacars_fake({}, calls))
+    j, t = app._decode_libacars_app("AA", "/PIKCPYA.AT1.C-GEGP21359DE2407AA1", None)
+    assert (j, t) == (None, None)
+    assert calls == []
+
+
+def test_decode_libacars_app_skips_labels_outside_aa_a6(monkeypatch):
+    """label שאינו AA/A6 (למשל 15, דיווח מיקום רגיל) => אין re-decode בכלל."""
+    calls = []
+    monkeypatch.setattr(app.subprocess, "run", _libacars_fake({}, calls))
+    j, t = app._decode_libacars_app("15", "/PIKCPYA.AT1.C-GEGP21359DE2407AA1", "uplink")
+    assert (j, t) == (None, None)
+    assert calls == []
+
+
+def test_decode_libacars_app_skips_when_no_recognized_imi(monkeypatch):
+    """label AA/A6 אבל בלי IMI מוכר (AT1/CR1/CC1/DR1/ADS/DIS) בטקסט => אין
+    re-decode — _arinc622_kind הוא שער-כניסה, לא ניחוש."""
+    calls = []
+    monkeypatch.setattr(app.subprocess, "run", _libacars_fake({}, calls))
+    j, t = app._decode_libacars_app("AA", "PLAIN ACARS TEXT WITHOUT ANY IMI", "uplink")
+    assert (j, t) == (None, None)
+    assert calls == []
+
+
+# --- _normalize_satcom: אינטגרציה מלאה ---------------------------------------
+
+def test_normalize_satcom_cpdlc_uplink_redecode_shows_human_text(monkeypatch):
+    """AA uplink: re-decode ב-GND2AIR מפיק טקסט אנושי קריא ('CONFIRM ASSIGNED
+    ROUTE') — בניגוד לפענוח השגוי-כיוון שהיה מניב 'לא פוענח'."""
+    text = "/PIKCPYA.AT1.C-GEGP21359DE2407AA1"
+    calls = []
+    vectors = {text: {"json": {"arinc622": {"msg_type": "fans1a_cpdlc_msg",
+                                             "cpdlc": {"err": False}}},
+                       "text": "FANS-1/A CPDLC uplink message:\n"
+                               "  Message: CONFIRM ASSIGNED ROUTE"}}
+    monkeypatch.setattr(app.subprocess, "run", _libacars_fake(vectors, calls))
+    m = _satcom({"mode": "2", "label": "AA", "reg": "C-GEGP", "msg_text": text},
+                src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
+    n = app._normalize_satcom(m)
+    assert calls and all(c[0] == "u" for c in calls)
+    assert n["dir"] == "uplink"
+    assert n["category"] == "CPDLC"
+    assert n["decoded"] and "CONFIRM ASSIGNED ROUTE" in n["decoded"]
+    assert n["text"] == text
+
+
+def test_normalize_satcom_adsc_uplink_redecode_never_yields_position(monkeypatch):
+    """⚠ הבדיקה הקריטית ביותר בקובץ הזה: A6 uplink מציג עכשיו 'Periodic
+    Contract Request' קריא, אבל ה-guard structural_dir!='uplink' חוסם מיקום
+    גם כשה-JSON המתוקן 'מצליח' לגמרי (בלי err) — ההגנה נגד ADS-C uplink
+    נשארת בתוקף במלואה, ללא תלות ב-re-decode. re-decode מוצלח לא עוקף אותה."""
+    text = "/YQXE2YA.ADS.N7400707010BCC0C010D01100185B4"
+    calls = []
+    vectors = {text: {
+        "json": {"arinc622": {"msg_type": "adsc_msg", "adsc": {
+            "err": False,
+            "tags": [{"periodic_contract_request":
+                      {"contract_num": 1, "interval": 832}}]}}},
+        "text": "Periodic Contract Request\n"
+                "  Contract number: 1\n"
+                "  Reporting interval: 832 seconds",
+    }}
+    monkeypatch.setattr(app.subprocess, "run", _libacars_fake(vectors, calls))
+    m = _satcom({"mode": "2", "label": "A6", "reg": "N740070", "msg_text": text},
+                src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
+    n = app._normalize_satcom(m)
+    assert calls and all(c[0] == "u" for c in calls)
+    assert n["dir"] == "uplink"
+    assert n["category"] == "ADS-C"
+    assert n["decoded"] and "Periodic Contract Request" in n["decoded"]
+    assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
+    assert n["group"] != "position"
+
+
+def test_normalize_satcom_redecode_success_does_not_hide_real_crc_failure(monkeypatch):
+    """re-decode מוצלח מחליף רק את תוצאת פענוח ה-application (CPDLC/ADS-C) —
+    לעולם לא 'מתקן' CRC כושל אמיתי של מעטפת ה-ACARS הפנימית (ערוץ נפרד)."""
+    text = "/SNNCPXA.AT1.C-GEGI22A9A228405FB3"
+    vectors = {text: {"json": {"arinc622": {"cpdlc": {"err": False}}},
+                       "text": "CONFIRM ASSIGNED ROUTE"}}
+    monkeypatch.setattr(app.subprocess, "run", _libacars_fake(vectors))
+    m = _satcom({
+        "mode": "2", "label": "AA", "reg": "C-GEGI", "msg_text": text,
+        "arinc622": {"acars": {
+            "err": False, "crc_ok": False,      # CRC כושל אמיתי במעטפת הפנימית
+            "reg": ".C-GEGI", "mode": "2", "label": "AA", "msg_text": text,
+            "arinc622": {"msg_type": "fans1a_cpdlc_msg", "cpdlc": {"err": True}},
+        }},
+    }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
+    n = app._normalize_satcom(m)
+    assert n["error"] == 1                                    # CRC כושל לא מוסתר
+    assert n["decoded"] and "CONFIRM ASSIGNED ROUTE" in n["decoded"]   # אבל התוכן כן מוצג
+
+
+# --- כשל re-decode לא מאבד הודעה: נופל לפענוח המקורי מ-inmarsat-sniffer -----
+
+_FALLBACK_TEXT = "/RECOEYA.ADS.A7-BBB070D0B000C010D010E0110010F01150523D57F"
+_FALLBACK_MSG = {
+    "mode": "2", "label": "A6", "reg": "A7-BBB", "msg_text": _FALLBACK_TEXT,
+    "arinc622": {"acars": {
+        "err": False, "crc_ok": True, "reg": ".A7-BBB", "mode": "2", "label": "A6",
+        "msg_text": _FALLBACK_TEXT,
+        "arinc622": {"msg_type": "adsc_msg", "crc_ok": True,
+                    "adsc": {"basic_report": {"lat": 18.34167, "lon": 2.11006}}},
+    }},
+}
+
+
+def _assert_fallback_preserved_original_decode(n):
+    assert n["dir"] == "downlink"
+    assert n["pos_src"] == "adsc"
+    assert abs(n["lat"] - 18.34167) < 0.001 and abs(n["lon"] - 2.11006) < 0.001
+    assert n["text"] == _FALLBACK_TEXT
+
+
+def test_normalize_satcom_redecode_missing_binary_falls_back(monkeypatch):
+    def fake_run(cmd, **kw):
+        raise FileNotFoundError()
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+    m = _satcom(_FALLBACK_MSG, src_type="Aircraft Earth Station",
+               dst_type="Ground Earth Station")
+    n = app._normalize_satcom(m)      # לא זורק exception
+    _assert_fallback_preserved_original_decode(n)
+
+
+def test_normalize_satcom_redecode_timeout_falls_back(monkeypatch):
+    def fake_run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=app.LIBACARS_DECODE_TIMEOUT)
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+    m = _satcom(_FALLBACK_MSG, src_type="Aircraft Earth Station",
+               dst_type="Ground Earth Station")
+    n = app._normalize_satcom(m)
+    _assert_fallback_preserved_original_decode(n)
+
+
+def test_normalize_satcom_redecode_nonzero_returncode_falls_back(monkeypatch):
+    def fake_run(cmd, **kw):
+        return types.SimpleNamespace(returncode=1, stdout="",
+                                     stderr="decode_acars_apps: parse error")
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+    m = _satcom(_FALLBACK_MSG, src_type="Aircraft Earth Station",
+               dst_type="Ground Earth Station")
+    n = app._normalize_satcom(m)
+    _assert_fallback_preserved_original_decode(n)
+
+
+def test_normalize_satcom_redecode_invalid_json_falls_back(monkeypatch):
+    def fake_run(cmd, **kw):
+        text = cmd[3]
+        as_json = "LA_JSON" in (kw.get("env") or {})
+        stdout = (text + "\nnot valid json at all") if as_json else (text + "\n")
+        return types.SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+    m = _satcom(_FALLBACK_MSG, src_type="Aircraft Earth Station",
+               dst_type="Ground Earth Station")
+    n = app._normalize_satcom(m)
+    _assert_fallback_preserved_original_decode(n)
+
+
+# --- וקטורי regression מקליטת 14.08.2026 (7 מתוך 23 הודעות, כולן uplink) ----
+# ⚠ שחזור-לפי-פרוטוקול (ר' באנר הסעיף למעלה) — לא stdout שנלכד בפועל.
+
+_REAL_20260814_VECTORS = [
+    ("AA", "/PIKCPYA.AT1.C-GEGP21359DE2407AA1",
+     "CONFIRM ASSIGNED ROUTE", "CPDLC"),
+    ("AA", "/PIKCPYA.AT1.N740072236382821DAA360AF54",
+     "NEXT DATA AUTHORITY CZQX", "CPDLC"),
+    ("AA", "/NDJCAYA.AT1.A7-BBG20B619AA43E945A13E9544116A4141527CE85040866E",
+     "REPORT ETA TONBA", "CPDLC"),
+    ("AA", "/YQXE2YA.AT1.C-FDHU2136342A48E3C9AD15050934A2D041527A08F067448"
+           "B4905283124CF415E4459C820C29914782D",
+     "GIVE PIREP TO GANDER RADIO WHEN ABLE", "CPDLC"),
+    ("A6", "/YQXE2YA.ADS.N7400707010BCC0C010D01100185B4",
+     "Periodic Contract Request", "ADS-C"),
+    ("A6", "/ALGCAYA.ADS.D-AIGZ018482",
+     "Cancel all contracts and terminate connection", "ADS-C"),
+    ("A6", "/PIKCPYA.ADS.N183AM07080BCC0C010D0110017602",
+     "Periodic Contract Request", "ADS-C"),
+]
+
+
+@pytest.mark.parametrize("label,text,expect_substr,kind", _REAL_20260814_VECTORS)
+def test_normalize_satcom_20260814_capture_uplink_vectors(monkeypatch, label, text,
+                                                           expect_substr, kind):
+    """שבעה מתוך 23 הודעות (12 CPDLC + 11 ADS-C, כולן uplink) מקליטת 14.08.2026.
+    התוכן (msg_text) הוא שורות אמיתיות מהקליטה; מחרוזות ה-decoded הצפויות הן
+    ציפייה למה ש-decode_acars_apps אמור להפיק בכיוון הנכון (GND2AIR) — לא
+    stdout שנלכד, כי אין libacars בסביבת ה-CI (ר' §12 ב-CLAUDE.md, "שחזור-
+    לפי-פרוטוקול")."""
+    json_payload = ({"arinc622": {"cpdlc": {"err": False}}} if kind == "CPDLC"
+                    else {"arinc622": {"adsc": {"err": False}}})
+    vectors = {text: {"json": json_payload, "text": expect_substr}}
+    monkeypatch.setattr(app.subprocess, "run", _libacars_fake(vectors))
+    m = _satcom({"mode": "2", "label": label, "reg": "TEST", "msg_text": text},
+                src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
+    n = app._normalize_satcom(m)
+    assert n["dir"] == "uplink"
+    assert n["category"] == kind
+    assert n["decoded"] and expect_substr in n["decoded"]
+    assert n["text"] == text
+    # ⚠ invariant קריטי: כל שבעת הווקטורים uplink — אף אחד לא מייצר מיקום,
+    # גם לא ה-ADS-C, גם לא כשה-re-decode "מצליח" בלי err.
+    assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None

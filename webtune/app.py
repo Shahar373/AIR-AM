@@ -1007,6 +1007,153 @@ def _libacars_decode(obj):
     return kind, text, failed[0]
 
 
+# --- re-decode של ARINC-622 בכיוון הנכון (libacars CLI) ---------------------
+# ⚠ הרקע (קליטת SATCOM 14.08.2026, 12 CPDLC + 11 ADS-C, *כולן* uplink): מעטפות
+# ה-ARINC-622 היו תקינות (crc_ok=true במעטפת הפנימית) אבל רוב ההודעות הוצגו
+# כ-"לא פוענח". הסיבה לא הייתה איכות קליטה אלא ש-inmarsat-sniffer פענח את
+# היישום המקונן ב*כיוון הלא-נכון*: ASN.1 PER תלוי-כיוון (FANSATCUplinkMessage
+# מול FANSATCDownlinkMessage ב-CPDLC), ומשמעות ה-tags ב-ADS-C מתהפכת לגמרי
+# (la_adsc_uplink_tag_descriptor_table מול la_adsc_downlink_tag_descriptor_table —
+# tag 7 = "Periodic contract request" ב-uplink מול "Basic report" ב-downlink).
+# ‏AIR-AM *כן* יודע את הכיוון האמיתי משכבת ה-ISU (structural_dir), ולכן אפשר
+# לפענח מחדש מקומית בכיוון הנכון. הכיוון מגיע תמיד מ-structural_dir — **אין**
+# כלל קשיח ש-AA/A6 הם GND2AIR (בקליטה הזו כן, בעתיד ייתכן downlink).
+LIBACARS_DECODER = "decode_acars_apps"     # כלי ה-CLI הרשמי של libacars (מותקן ב-4b)
+LIBACARS_DECODE_TIMEOUT = 2.0
+LIBACARS_TEXT_MAX = 600                    # תקרת טקסט, כמו ה-300 של _libacars_decode
+LIBACARS_CACHE_MAX = 128                   # ריבוי-בלוקים/שידור חוזר => אותה הודעה שוב
+
+_ARINC622_DIRECT_LABELS = {"AA", "A6"}
+_ARINC622_IMI_RE = re.compile(r"\.(AT1|CR1|CC1|DR1|ADS|DIS)\.")
+
+_libacars_cache = collections.OrderedDict()   # (label, dir, text) -> (json, text)
+_libacars_missing_logged = [False]            # אזהרת "בינארי חסר" פעם אחת, לא לכל הודעה
+
+
+def _arinc622_kind(text):
+    """מזהה את יישום ARINC-622 מתוך ה-IMI הגולמי: 'CPDLC' / 'ADS-C' / None.
+
+    ⚠ לא מניחים AA==CPDLC ו-A6==ADS-C (בדרך כלל נכון, אבל ה-IMI בטקסט הוא מקור
+    טוב יותר). משמש כשער-כניסה בלבד (בלי IMI מוכר לא מריצים subprocess) — libacars
+    עצמו נשאר מקור-האמת היחיד לתוכן המפוענח."""
+    if not isinstance(text, str):
+        return None
+    m = _ARINC622_IMI_RE.search(text)
+    if not m:
+        return None
+    imi = m.group(1)
+    if imi in ("AT1", "CR1", "CC1", "DR1"):
+        return "CPDLC"
+    if imi in ("ADS", "DIS"):
+        return "ADS-C"
+    return None
+
+
+def _run_libacars(dir_arg, label, text, as_json):
+    """מריץ decode_acars_apps פעם אחת ומחזיר stdout (str) או None. fail-safe מוחלט.
+
+    ⚠ אבטחה: msg_text הוא תוכן רשת לא-מהימן => לעולם לא shell=True, תמיד argv נפרד."""
+    env = os.environ.copy()
+    if as_json:
+        env["LA_JSON"] = "1"
+    else:
+        env.pop("LA_JSON", None)      # ירושה מהסביבה הייתה הופכת את מסלול הטקסט ל-JSON
+    try:
+        proc = subprocess.run([LIBACARS_DECODER, dir_arg, label, text],
+                              capture_output=True, text=True,
+                              timeout=LIBACARS_DECODE_TIMEOUT, env=env, check=False)
+    except FileNotFoundError:
+        if not _libacars_missing_logged[0]:      # פעם אחת, לא להציף את היומן
+            _libacars_missing_logged[0] = True
+            log.warning("libacars: %s לא נמצא; משאיר את פענוח inmarsat-sniffer",
+                        LIBACARS_DECODER)
+        return None
+    except subprocess.TimeoutExpired:
+        log.warning("libacars: timeout בפענוח %s %s", dir_arg, label)
+        return None
+    except OSError:
+        log.exception("libacars: לא ניתן להריץ decoder")
+        return None
+    if proc.returncode != 0:
+        log.warning("libacars: decoder נכשל rc=%d label=%s dir=%s: %s",
+                    proc.returncode, label, dir_arg, (proc.stderr or "").strip()[:300])
+        return None
+    return proc.stdout or ""
+
+
+def _strip_echoed_msg(stdout, text):
+    """decode_acars_apps מדפיס קודם את ההודעה הגולמית (printf("%s\\n", txt) ב-
+    examples/decode_acars_apps.c) ורק אחריה את הפענוח — מסירים את ההד."""
+    lines = (stdout or "").splitlines()
+    if lines and lines[0].strip() == (text or "").strip():
+        lines = lines[1:]
+    return "\n".join(lines)
+
+
+def _decode_libacars_app(label, text, direction):
+    """מפענח מחדש יישום ARINC-622 עם libacars בכיוון הנכון.
+
+    direction: "uplink" -> LA_MSG_DIR_GND2AIR ('u') · "downlink" -> AIR2GND ('d').
+    מחזיר (json_dict|None, text|None) — לעולם לא זורק exception.
+
+    ⚠ שתי הרצות בכוונה, כי הן משלימות (אומת מהמקור של libacars):
+      • TEXT (בלי LA_JSON) — המקור *היחיד* לטקסט האנושי. ב-ADS-C ה-JSON מכיל רק
+        מפתחות snake_case וערכים מספריים (la_json_append_int64(…,"contract_num",…)
+        ב-adsc.c) בלי שום משפט; ב-CPDLC הטקסט קיים ב-JSON אבל תחת המפתח
+        "choice_label" (la_format_CHOICE_as_json ב-asn1-format-common.c),
+        ש-_libacars_decode לא קוצר (הוא מחפש text/msg/message בלבד).
+      • JSON — המבנה שמוזרם ל-_normalize_acars, כך שכל המנגנונים הקיימים
+        (kind, decode_failed, adsc_dir_ok, _scan_latlon) ממשיכים לעבוד ללא שינוי.
+    """
+    if label not in _ARINC622_DIRECT_LABELS:
+        return None, None
+    if not isinstance(text, str) or not text.strip():
+        return None, None
+    if direction == "uplink":
+        dir_arg = "u"
+    elif direction == "downlink":
+        dir_arg = "d"
+    else:
+        return None, None            # כיוון לא ידוע => לא מנחשים כיוון ASN.1
+    if _arinc622_kind(text) is None:
+        return None, None
+
+    key = (label, direction, text)
+    hit = _libacars_cache.get(key)
+    if hit is not None:
+        _libacars_cache.move_to_end(key)
+        return hit
+
+    decoded_json = None
+    out = _run_libacars(dir_arg, label, text, as_json=True)
+    if out is not None:
+        body = _strip_echoed_msg(out, text)
+        start = body.find("{")
+        if start < 0:
+            log.warning("libacars: לא התקבל JSON עבור label=%s dir=%s", label, direction)
+        else:
+            try:
+                parsed = json.loads(body[start:])
+            except (ValueError, TypeError):
+                log.warning("libacars: JSON לא תקין עבור label=%s dir=%s", label, direction)
+            else:
+                if isinstance(parsed, dict):
+                    decoded_json = parsed
+
+    decoded_text = None
+    out = _run_libacars(dir_arg, label, text, as_json=False)
+    if out is not None:
+        body = "\n".join(ln.rstrip() for ln in _strip_echoed_msg(out, text).splitlines()
+                         if ln.strip())
+        decoded_text = body.strip()[:LIBACARS_TEXT_MAX] or None
+
+    result = (decoded_json, decoded_text)
+    _libacars_cache[key] = result
+    while len(_libacars_cache) > LIBACARS_CACHE_MAX:
+        _libacars_cache.popitem(last=False)
+    return result
+
+
 def _acars_direction(label, text):
     """heuristic שמרני לכיוון ההודעה: 'uplink' (קרקע→מטוס) / 'downlink' (מטוס→קרקע) / None.
     label מוכר קודם (אמין), אחרת header ניתוב בטקסט => uplink. None כשלא חד-משמעי (לא מנחשים)."""
@@ -1508,11 +1655,18 @@ def _normalize_acars(m):
     if libacars:
         kind, dtext, decode_failed = _libacars_decode(libacars)
         category = kind
-        # ⚠ decode_failed=True ≠ "אין נתון" — יש הבדל אמיתי בין "לא ניסינו" ל"ניסינו
-        # ונכשלנו" (המפענח עצמו החזיר err:true על היישום המקונן, אימות מקליטת שדה).
-        # לא ממציאים תוכן, אבל *כן* אומרים למשתמש שהיה ניסיון — עדיף מ-"—" סתמי.
-        decoded = dtext if dtext else (
-            "לא פוענח — המפענח החזיר שגיאה (כנראה איתות שולי)" if decode_failed else None)
+        # ⚠ עדיפות ה-decoded: (1) טקסט אנושי מ-re-decode מקומי בכיוון הנכון
+        # (_libacars_text, ר' _decode_libacars_app) — הוא היחיד שמפיק משפטים
+        # קריאים כמו "CONFIRM ASSIGNED ROUTE"; ה-JSON שממנו חושב kind/decode_failed
+        # למעלה לא מכיל אותם (ADS-C: רק מפתחות מספריים; CPDLC: תחת "choice_label"
+        # ש-_libacars_decode לא קוצר). (2) dtext — מה ש-_libacars_decode עצמו כבר
+        # חילץ מה-JSON (בעיקר למקרים שאין בהם re-decode, כמו arinc622 גנרי).
+        # (3) הודעת-כישלון מפורשת, רק אם decode_failed. "לא ניסינו" ≠ "ניסינו
+        # ונכשלנו" — לא ממציאים תוכן, אבל *כן* אומרים למשתמש שהיה ניסיון.
+        lib_text = m.get("_libacars_text")
+        decoded = lib_text or dtext or (
+            "לא פוענח — libacars החזיר שגיאת פענוח; הטקסט הגולמי נשמר"
+            if decode_failed else None)
         # ⚠ "position" רק כשיהיה בפועל lat/lon (ר' ההערה למטה) — אחרת כרטיס
         # ADS-C-שנכשל-פענוח היה מסונן תחת "📍 מיקום" ב-UI בלי שום מיקום אמיתי.
         # CPDLC נשאר "clearance" גם בלי decoded — סוג ההודעה ידוע מהמעטפת עצמה,
@@ -1899,7 +2053,8 @@ def _normalize_vdl2(m):
             # שנכשל פענוח היה מסונן תחת "📍 מיקום" בלי שום מיקום אמיתי.
             _, dtext, decode_failed = _libacars_decode(x25)
             decoded = dtext if dtext else (
-                "לא פוענח — המפענח החזיר שגיאה (כנראה איתות שולי)" if decode_failed else None)
+                "לא פוענח — libacars החזיר שגיאת פענוח; הטקסט הגולמי נשמר"
+                if decode_failed else None)
             # ⚠ tag ADS-C מספרי פירושו הפוך לגמרי בין uplink/downlink ב-libacars
             # (מאומת מ-adsc.c: la_adsc_uplink_tag_descriptor_table מול
             # ...downlink...; tag 7 = "בקשה" ב-uplink מול "דיווח מיקום אמיתי"
@@ -2110,6 +2265,13 @@ def _normalize_satcom(m):
         # arinc622) אין לנו שום איתות CRC — error נשאר 0 (לא מומצא: פשוט לא ידוע).
         "error": 0,
     }
+    # ⚠ re-decode מקומי בכיוון המבני הנכון (ר' התיעוד המלא ליד _decode_libacars_app) —
+    # לפני שנוגעים בפענוח arinc622 שכבר הגיע (אולי שגוי-כיוון) מ-inmarsat-sniffer.
+    # error (CRC המעטפת הפנימית, למטה) הוא ערוץ נפרד לגמרי מהצלחת פענוח היישום —
+    # re-decode מוצלח מחליף רק את תוצאת ה-application decode, לעולם לא "מתקן" CRC כושל.
+    corrected_json, corrected_text = _decode_libacars_app(
+        acars.get("label"), acars.get("msg_text"), structural_dir)
+
     apps = acars.get("arinc622")
     if isinstance(apps, dict):
         # מפרקים את מעטפת ה-ACARS הכפולה (ר' התיעוד למעלה) — inner הוא היישום
@@ -2126,6 +2288,12 @@ def _normalize_satcom(m):
                 if isinstance(inner, dict) else apps)
         if apps:
             raw["libacars"] = apps
+    # עדיפות: re-decode מתוקן > הפענוח המקורי מ-inmarsat-sniffer > טקסט גולמי בלבד.
+    # כשל ב-helper (בינארי חסר/timeout/JSON פגום) לא מאבד את הפענוח הישן שכבר יש.
+    if corrected_json:
+        raw["libacars"] = corrected_json
+    if corrected_text:
+        raw["_libacars_text"] = corrected_text
     card = _normalize_acars(raw)
     if structural_dir:      # כבר חושב למעלה, לפני הקריאה (ר' ההערה שם) — לא כפול
         card["dir"] = structural_dir

@@ -216,8 +216,12 @@ fi
 # libacars נותן פענוח ARINC-622 (אופציונלי אך מומלץ); acarsdec נבנה עם -Dsoapy=ON.
 # שער גרסה (לא רק קיום): dumpvdl2 v2.6.0 דורש libacars ≥2.1.0 — התקנה ישנה
 # מגרסה קודמת של הסקריפט תיבנה מחדש אוטומטית.
-if pkg-config --atleast-version=2.1.0 libacars-2 2>/dev/null; then
-  log "libacars (≥2.1.0) כבר מותקן - מדלג."
+# ⚠ SATCOM (_decode_libacars_app ב-app.py) מריץ את decode_acars_apps — כלי ה-CLI
+# הרשמי של libacars, כדי לפענח מחדש CPDLC/ADS-C בכיוון הנכון (GND2AIR/AIR2GND) —
+# לכן הגייט בודק גם את הבינארי הזה, לא רק את libacars-2.pc.
+if pkg-config --atleast-version=2.1.0 libacars-2 2>/dev/null \
+   && command -v decode_acars_apps >/dev/null 2>&1; then
+  log "libacars (≥2.1.0) + decode_acars_apps כבר מותקנים - מדלג."
 else
   log "בונה libacars..."
   cd "$BUILD_DIR"
@@ -236,6 +240,11 @@ else
   # שתלויים ב-libacars ונכשלים עם שגיאה מטעה שמאשימה אותם ולא את השורש האמיתי.
   pkg-config --atleast-version=2.1.0 libacars-2 2>/dev/null \
     || die "libacars נבנה אך pkg-config לא מזהה גרסה ≥2.1.0 - בדוק את פלט הבנייה למעלה."
+  # decode_acars_apps מותקן ללא-תנאי ע"י examples/CMakeLists.txt של libacars
+  # (אין דגל build-flag לכבות אותו) — אימות נפרד, כי הבדיקה למעלה בודקת רק
+  # את הספרייה (pkg-config), לא את כלי ה-CLI ש-SATCOM תלוי בו.
+  command -v decode_acars_apps >/dev/null 2>&1 \
+    || die "libacars הותקן אך decode_acars_apps חסר."
 fi
 
 # acarsdec: בנייה מחדש כשמשתנים דגלי ה-cmake (חתימה => אידמפוטנטי כמו rtl_airband)

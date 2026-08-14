@@ -7,6 +7,40 @@
 מוסכמה: כל PR מעדכן את `VERSION` ומוסיף שורות תחת `[Unreleased]`; בעת מיזוג ל-main
 מקדמים לכותרת גרסה ומתייגים את ה-commit.
 
+## [Unreleased]
+
+### תוקן
+- **⚠ SATCOM: CPDLC/ADS-C (labels AA/A6) פוענחו בכיוון ASN.1 הלא-נכון — לא בעיית
+  קליטה.** קליטת שדה אמיתית מ-14.08.2026 (12 CPDLC + 11 ADS-C, כולן uplink,
+  מעטפות ARINC-622 תקינות ‏`crc_ok=true`) הוצגה ברובה כ-"לא פוענח — המפענח
+  החזיר שגיאה (כנראה איתות שולי)" — מסקנה שגויה. פענוח ASN.1 PER תלוי-כיוון:
+  ‏CPDLC משתמש במבני-הודעה נפרדים לגמרי לכל כיוון
+  (‏`FANSATCUplinkMessage`/`FANSATCDownlinkMessage`), ו-ADS-C הופך את משמעות
+  אותו tag מספרי לגמרי בין uplink ל-downlink (מאומת מ-`libacars/adsc.c`
+  במקור: `la_adsc_uplink_tag_descriptor_table` מול
+  `la_adsc_downlink_tag_descriptor_table`). ‏AIR-AM כבר מחשב את הכיוון האמיתי
+  מהשכבה המבנית (`structural_dir`, מתוך `isu.src/dst.type`) — התיקון מריץ
+  re-decode מקומי עם `decode_acars_apps` (כלי ה-CLI הרשמי של `libacars`, שכבר
+  מותקן) בכיוון הנכון, ומעדיף את התוצאה על פני הפענוח השגוי-כיוון של
+  `inmarsat-sniffer`. **שתי הרצות לכל הודעה, לא אחת:** אומת מהמקור של
+  ‏`libacars` ש-`LA_JSON=1` **לא** מכיל את הטקסט האנושי — ב-ADS-C ה-JSON כולל
+  רק מפתחות מספריים (`contract_num` וכו', בלי משפט אחד), וב-CPDLC הטקסט קיים
+  אך תחת מפתח `choice_label` שאין לו טיפול ייעודי. הרצת **TEXT** (בלי
+  `LA_JSON`) מפיקה את הטקסט האנושי (`decoded`); הרצת **JSON** מוזרמת ל-אותו
+  `raw["libacars"]` שכל המנגנונים הקיימים (`_libacars_decode`, `decode_failed`,
+  `adsc_dir_ok`, `_scan_latlon`) ממשיכים לצרוך ללא שינוי ארכיטקטוני. כשל
+  ב-re-decode (בינארי חסר/timeout/JSON פגום) לעולם לא מאבד הודעה — נופל
+  לפענוח המקורי מ-`inmarsat-sniffer`; re-decode מוצלח **לעולם לא** מסתיר CRC
+  כושל אמיתי של מעטפת ה-ACARS הפנימית (ערוץ נפרד לגמרי). **ה-invariant הקריטי
+  נשאר בתוקף במלואו:** ADS-C uplink לעולם לא מייצר `lat`/`lon`/`pos_src="adsc"`,
+  גם כשה-re-decode "מצליח" מבנית בלי `err`. הודעת השגיאה "כנראה איתות שולי"
+  הוסרה — לא הייתה לה הוכחה, ועכשיו יש הוכחה נגדה.
+  ‏`install.sh` מוודא גם `command -v decode_acars_apps`, לא רק את `libacars-2.pc`.
+  ⚠ **וקטורי הבדיקה החדשים (`tests/test_satcom.py`) הם שחזור-לפי-פרוטוקול** —
+  מחרוזות ה-`decoded` הצפויות סופקו כציפייה למה ש-`decode_acars_apps` אמור
+  להפיק, לא stdout שנלכד בפועל (אין `libacars` בסביבת ה-CI). אימות מול הרצה
+  אמיתית על ה-Pi נשאר פתוח.
+
 ## [2.17.0] - 2026-08-08
 
 ### נוסף
