@@ -646,55 +646,75 @@
     .toast #toastUndo { padding: .4rem .8rem; font-size: .82rem; min-height: 36px; }
 
     /* ---------- יומן שידורים ---------- */
-    .act-row { display: flex; align-items: center; gap: .55rem;
-      padding: .5rem 0; border-bottom: 1px solid var(--border); font-size: .88rem; }
+    /* flex-wrap כרשת-ביטחון: אם ★+שם-ארוך+תאריך-מלא לא נכנסים ב-360px, השורה
+       יורדת לשורה שנייה בתוך אותו .act-item במקום לגלוש/לדחוף את ▶ החוצה
+       (נצפה בפועל בגרסה הקודמת — ר' §7). ⚠ 📝 הוצא מהשורה לגמרי לשורת ה-meta
+       שמתחת (ר' .act-tx.meta button.tx-action): זו הפעולה הפחות-תדירה, וזה
+       גם המקום הכי טבעי ללחוץ עליה — היא ממילא מסבירה שם *למה* אין תמלול. */
+    .act-row { display: flex; align-items: center; flex-wrap: wrap;
+      gap: var(--sp-2) var(--sp-2); row-gap: var(--sp-1);
+      padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); font-size: .88rem; }
     .act-row:last-child { border-bottom: 0; }
     .act-row .t { color: var(--dim); font-size: .76rem; min-width: 4.4em; flex: none; }
     .act-row .f { direction: ltr; font-variant-numeric: tabular-nums;
       color: var(--accent); font-size: .85rem; font-weight: 600; flex: none; }
-    .act-row .n { color: var(--dim); flex: 1; min-width: 0;
+    .act-row .n { color: var(--dim); flex: 1 1 4em; min-width: 3.5em;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .act-row .dur { color: var(--dim); font-size: .74rem; flex: none;
       direction: ltr; font-variant-numeric: tabular-nums; }
     .act-row button.play { flex: none; padding: .3rem .75rem; font-size: .8rem;
-      border-radius: 999px; }
+      border-radius: 999px; min-height: 36px; }
     .act-row button.play.playing { background: var(--accent);
       border-color: transparent; }
     .act-item { border-bottom: 1px solid var(--border); }
     .act-item:last-child { border-bottom: 0; }
     .act-item .act-row { border-bottom: 0; }
+    /* תמלול אמיתי — LTR כברירת מחדל (אנגלית, רוב ATC); [dir=rtl] כשהתמלול עברי. */
     .act-tx { direction: ltr; text-align: left; color: var(--dim);
-      font-size: .8rem; line-height: 1.45; padding: 0 0 .55rem; margin-top: -.15rem;
+      font-size: .8rem; line-height: 1.45; padding: 0 0 var(--sp-2); margin-top: -.1rem;
       word-break: break-word; }
-    /* מצב תמלול שאינו טקסט (לא נוסה / נכשל / אין דיבור) — RTL, ומובחן ויזואלית
-       מתמלול אמיתי: המשתמש חייב לדעת *למה* אין טקסט, לא רק שאין (§12). */
+    .act-tx[dir="rtl"] { direction: rtl; text-align: right; }
+    /* מצב שאינו טקסט (לא נוסה / נכשל / אין דיבור) — **תמיד** עברית/RTL, כי זו
+       שפת המערכת (בניגוד לתמלול עצמו, שהוא בשפת הדיבור). המשתמש חייב לדעת
+       *למה* אין טקסט, לא רק שאין (§12) — ולכן גם לא opacity/italic שמטשטש. */
     .act-tx.meta { direction: rtl; text-align: right; font-size: .76rem;
-      opacity: .75; font-style: italic; }
-    .act-tx.failed { color: var(--red); opacity: .9; font-style: normal; }
-    .act-tx .raw { display: block; direction: ltr; text-align: left;
-      opacity: .55; font-size: .72rem; margin-top: .15rem; }
-    .act-row button.star, .act-row button.tx {
-      flex: none; padding: .3rem .5rem; font-size: .85rem; line-height: 1;
-      border-radius: 999px; background: transparent; border: 1px solid var(--border);
-      color: var(--dim); min-height: 30px; }
-    .act-row button.star.on { color: #f5c542; border-color: #f5c54255;
-      background: #f5c5421a; }
-    .act-row button.tx.busy { opacity: .6; }
+      color: var(--text-faint); padding: 0 0 var(--sp-2); margin-top: -.1rem; }
+    .act-tx.meta.failed { color: var(--red); }
+    /* bdi מבודד רק את המטען (אנגלית/stderr), לא את המשפט העברי סביבו —
+       בלי זה "(המפענח פלט: X — סונן)" נקרא בסדר-מילים הפוך ב-RTL. */
+    .act-tx.meta bdi { unicode-bidi: isolate; }
+    .act-tx.meta button.tx-action { background: none; border: none; padding: 0;
+      margin-inline-start: .3em; color: var(--accent); font: inherit; cursor: pointer;
+      text-decoration: underline; }
+    .act-row button.star { flex: none; padding: var(--sp-1) var(--sp-2); font-size: .95rem;
+      line-height: 1; border-radius: 999px; background: transparent; border: 1px solid var(--border);
+      color: var(--dim); min-width: 36px; min-height: 36px; }
+    /* --amber/--amber-rgb (לא hex קשיח): מוגדר גם ל-light וגם ל-dark ב-:root,
+       כך שהכפתור ניגודי בשני המצבים. ⚠ #f5c542 הקבוע-בשני-themes היה 1.62:1
+       מול --panel הבהיר — בלתי-נראה בשמש (הוכח). */
+    .act-row button.star.on { color: var(--amber-fg);
+      border-color: rgba(var(--amber-rgb), .5); background: rgba(var(--amber-rgb), .16); }
     /* שורת מצב התמלול — הפער שבגללו הפיצ'ר "לא היה קיים": כשwhisper לא מותקן
        מוצגת כאן פקודת ההתקנה המדויקת, במקום פשוט לא להציג כלום. */
-    .tx-bar { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
-      font-size: .78rem; color: var(--dim); padding: .1rem 0 .45rem; }
-    .tx-bar code { direction: ltr; background: var(--panel-2); border-radius: 6px;
-      padding: .1rem .35rem; font-size: .74rem; color: var(--text); user-select: all; }
+    .tx-bar { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
+      font-size: .78rem; color: var(--dim); padding: .1rem 0 var(--sp-2); }
+    .tx-bar code { direction: ltr; unicode-bidi: isolate; background: var(--panel-2);
+      border-radius: var(--r-sm); padding: .1rem .35rem; font-size: .74rem; color: var(--text); }
     .tx-bar .sp { flex: 1; }
-    .tx-bar label { display: flex; align-items: center; gap: .35rem; cursor: pointer; }
-    .act-tools { display: flex; align-items: center; gap: .4rem; }
+    .tx-bar label { display: flex; align-items: center; gap: var(--sp-1); cursor: pointer; }
+    .tx-bar select { font: inherit; font-size: .78rem; background: var(--panel-2);
+      border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--text);
+      padding: .2rem .35rem; min-height: 30px; }
+    .tx-bar button.zip { flex: none; padding: .25rem .6rem; font-size: .76rem;
+      border-radius: var(--r-sm); background: var(--panel-2); border: 1px solid var(--border);
+      color: var(--dim); min-height: 30px; }
+    .act-tools { display: flex; align-items: center; gap: var(--sp-2); }
     .act-tools .act-search { margin-bottom: 0; }
-    .act-tools button.filter { flex: none; padding: .5rem .6rem; font-size: .85rem;
-      border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border);
+    .act-tools button.filter { flex: none; min-width: 40px; min-height: 40px; font-size: .95rem;
+      border-radius: var(--r-ctrl); background: var(--panel-2); border: 1px solid var(--border);
       color: var(--dim); }
-    .act-tools button.filter.on { color: #f5c542; border-color: #f5c54255;
-      background: #f5c5421a; }
+    .act-tools button.filter.on { color: var(--amber-fg);
+      border-color: rgba(var(--amber-rgb), .5); background: rgba(var(--amber-rgb), .16); }
     .act-search {
       width: 100%; margin: 0 0 .3rem;
       font: inherit; font-size: .85rem; color: var(--text);
@@ -1384,9 +1404,9 @@
     <div class="panel-tools">
       <div class="act-tools">
         <input id="actSearch" dir="auto" class="act-search" type="search"
-               placeholder="חיפוש בשידורים ובתמלול…" autocomplete="off" />
+               placeholder="חיפוש בשידורים…" autocomplete="off" />
         <button type="button" id="actStarFilter" class="filter"
-                title="הצג רק הקלטות שמורות">⭐</button>
+                aria-pressed="false" title="הצג רק הקלטות שמורות (0/0)">★</button>
       </div>
     </div>
     <div class="panel-bd">
@@ -1395,7 +1415,7 @@
       <p class="hint" style="margin:0">עוד אין שידורים — היומן מתמלא כשהסקוולץ׳ נפתח.</p>
     </div>
     <p class="hint">כל שידור מוקלט אוטומטית ונשמר זמנית (~200 אחרונים) ·
-      ⭐ שומר הקלטה לצמיתות (לא תימחק) · במצב סקוולץ׳ "פתוח" (ATIS) אין הקלטה.</p>
+      ★ שומר הקלטה כך שלא תימחק אוטומטית · במצב סקוולץ׳ "פתוח" (ATIS) אין הקלטה.</p>
     </div><!-- /panel-bd -->
   </section>
 
@@ -3126,43 +3146,28 @@
 
     const emptyActivityHTML = $("activity").innerHTML;   // הודעת "עוד אין" מה-markup
 
-    let actEvents = [];   // נשמר כדי לסנן לפי חיפוש בלי למשוך שוב מהשרת
-    let starOnly = false; // ⭐ מציג רק הקלטות שמורות (נמשכות מ-?starred=1)
-    let txInfo = null;    // מצב מנגנון התמלול (/api/transcribe) — לשורת הסטטוס
+    let actEvents = [];    // נשמר כדי לסנן לפי חיפוש בלי למשוך שוב מהשרת
+    let actLoaded = false; // ⚠ מבדיל "עוד לא נטען" מ"נטען, ריק" — בלעדיו הדלקת/כיבוי
+                            // הפילטר הבזיקה הודעה שגויה למשך עד NET_TIMEOUT_GET (§12,
+                            // אותה הפרה שהתיקון-של-התמלול נועד לחסל — הפעם ביומן עצמו)
+    let actInFlight = false;   // in-flight guard (דפוס metricsInFlight/specInFlight)
+    let starOnly = false;      // מציג רק הקלטות שמורות (★, נמשכות מ-?starred=1)
+    let starMeta = { count: 0, max: 0 };
+    // ⚠ גרסת-מקור ל-starMeta: בלי זה, בקשת /api/activity שיצאה *לפני* לחיצת
+    // ★ אבל הגיעה *אחרי* התשובה של הסימון עוקפת את המספר הטרי בישן שלה —
+    // "מנצח לפי סדר הגעה" במקום "מנצח לפי סדר יציאה" (הוכח ב-Playwright: 0/100
+    // הוצג לרגע אחרי סימון מוצלח). כל POST star מקדם את הגרסה; פולינג שיצא
+    // לפני הקידום מתעלם מהתוצאה שלו לגבי starMeta (שאר הנתונים בתשובה, כמו
+    // actEvents, עדיין מוחלים — רק המונה הזה רגיש-לסדר).
+    let starMetaVersion = 0;
+    let txInfo = null;         // מצב מנגנון התמלול (/api/transcribe) — לשורת הסטטוס
 
-    /* מצב התמלול כטקסט לתצוגה. ⚠ זה הלב של תיקון הפיצ'ר: קודם *כל* המצבים
-       שאינם "יש טקסט" נראו זהים — שורה ריקה — ולכן המשתמש לא ידע אם התמלול
-       כבוי, עדיין רץ, או נכשל. אין כאן ניחוש: כל מחרוזת נגזרת מ-tx.state
-       שהשרת מדווח בפועל (§12). */
+    /* מצב התמלול כטקסט לתצוגה — RTL קבוע, כי זו שפת המערכת ולא שפת השידור. */
     const TX_LABEL = {
       pending: "⏳ מתמלל…",
-      empty:   "🔇 אין דיבור מזוהה בהקלטה",
+      empty:   "🔇 לא זוהה דיבור בהקלטה",
       failed:  "⚠ התמלול נכשל",
     };
-
-    function txNode(ev) {
-      const st = (ev.tx && ev.tx.state) || "none";
-      if (st === "ok" && ev.text) {
-        const d = document.createElement("div");
-        d.className = "act-tx"; d.textContent = ev.text;
-        return d;
-      }
-      if (st === "none") return null;   // לא נוסה — הכפתור 📝 כבר מספר את זה
-      const d = document.createElement("div");
-      d.className = "act-tx meta" + (st === "failed" ? " failed" : "");
-      let txt = TX_LABEL[st] || "";
-      if (st === "failed" && ev.tx.err) txt += " — " + ev.tx.err;
-      d.textContent = txt;
-      // ⚠ סוננה הזיה של whisper => מציגים בכל זאת מה הוא פלט. לא מסתירים
-      // מהמשתמש את הפלט הגולמי, רק מסמנים שאינו אמין (§12).
-      if (st === "empty" && ev.tx.raw) {
-        const raw = document.createElement("span");
-        raw.className = "raw";
-        raw.textContent = "(המפענח פלט: " + ev.tx.raw + " — סונן כהזיה)";
-        d.appendChild(raw);
-      }
-      return d;
-    }
 
     async function toggleStar(ev, btn) {
       const want = !ev.starred;
@@ -3171,39 +3176,94 @@
         const res = await apiSend("POST", "/api/recordings/star",
                                   { file: ev.file, starred: want });
         const d = await res.json();
-        if (!d.ok) { showToast(d.error || "הסימון נכשל"); return; }
+        if (!d.ok) { showToast(d.error || "הפעולה נכשלה"); return; }
         ev.starred = d.starred;
+        if (d.starred_count != null) {
+          starMeta = { count: d.starred_count, max: d.starred_max };
+          starMetaVersion++;       // ר' הערת starMetaVersion — זו התוצאה הטרייה ביותר
+        }
+        updateStarFilterButton();
         if (starOnly && !d.starred) actEvents = actEvents.filter((e) => e !== ev);
         renderActivity();
-        showToast(d.starred ? "⭐ ההקלטה נשמרה — לא תימחק" : "הסימון בוטל");
-      } catch (e) { showToast("שגיאת רשת — הסימון לא נשמר"); }
+        showToast(d.starred ? "★ ההקלטה נשמרה — לא תימחק אוטומטית" : "הסימון בוטל");
+      } catch (e) { showToast("שגיאת רשת — הפעולה לא נשמרה"); }
       finally { btn.disabled = false; }
     }
 
     async function requestTranscribe(ev, btn) {
-      btn.disabled = true; btn.classList.add("busy");
+      btn.disabled = true;
       try {
-        const res = await apiSend("POST", "/api/recordings/transcribe",
-                                  { file: ev.file, force: (ev.tx || {}).state === "failed" });
+        const res = await apiSend("POST", "/api/recordings/transcribe", { file: ev.file });
         const d = await res.json();
         if (!d.ok) { showToast(d.error || "התמלול נכשל"); return; }
         ev.tx = d.tx || { state: "pending" };
         ev.text = ev.tx.text || null;
         renderActivity();
-        if (ev.tx.state === "pending") pollActivitySoon();
+        pollActivitySoon();
       } catch (e) { showToast("שגיאת רשת — התמלול לא נשלח"); }
-      finally { btn.disabled = false; btn.classList.remove("busy"); }
+      finally { btn.disabled = false; }
     }
 
-    /* תמלול לוקח שניות בודדות; מרעננים כמה פעמים מהר במקום לחכות ל-15ש' הבאות. */
+    /* תמלול לוקח שניות עד עשרות שניות; מרעננים כמה פעמים מהר במקום לחכות
+       ל-15ש' הבאות. עובר דרך pollActivity הרגיל => ה-in-flight guard שלו. */
     let txSoonTimer = null, txSoonLeft = 0;
     function pollActivitySoon() {
       txSoonLeft = 10;
       if (txSoonTimer) return;
       txSoonTimer = setInterval(() => {
         if (--txSoonLeft <= 0) { clearInterval(txSoonTimer); txSoonTimer = null; }
-        if (!document.hidden) pollActivity();
+        if (!document.hidden && appMode === "voice") pollActivity();
       }, 3000);
+    }
+
+    function txMetaNode(ev, st) {
+      const d = document.createElement("div");
+      d.className = "act-tx meta" + (st === "failed" ? " failed" : "");
+      d.append((TX_LABEL[st] || "") + (st === "none" ? "" : ""));
+      if (st === "failed" && ev.tx.err) {
+        d.append(" — ");
+        const b = document.createElement("bdi");   // מבודד stderr אנגלי מהמשפט העברי
+        const full = ev.tx.err;
+        b.textContent = full.length > 70 ? full.slice(0, 70) + "…" : full;
+        if (full.length > 70) b.title = full;
+        d.appendChild(b);
+      }
+      // פעולת "תמלל"/"נסה שוב" — רק כשיש כלי זמין ומה לעשות איתו. במצב 'none'
+      // זו הדרך היחידה להפעיל תמלול על השורה הזו (הכפתור לא בשורה הראשית —
+      // ר' הערת .act-row ב-CSS: זה גם מה שפותר את גלישת השורה בטלפון צר).
+      if (ev.exists && txInfo && txInfo.available && (st === "none" || st === "empty" || st === "failed")) {
+        const btn = document.createElement("button");
+        btn.type = "button"; btn.className = "tx-action";
+        btn.textContent = st === "none" ? "📝 תמלל שידור זה" : "📝 נסה לתמלל שוב";
+        btn.onclick = () => requestTranscribe(ev, btn);
+        d.appendChild(btn);
+      }
+      return d;
+    }
+
+    function txNode(ev) {
+      const st = (ev.tx && ev.tx.state) || "none";
+      if (st === "ok" && ev.text) {
+        const d = document.createElement("div");
+        d.className = "act-tx";
+        if ((ev.tx.lang || "en") === "he") d.dir = "rtl";   // תמלול עברי — RTL
+        d.textContent = ev.text;
+        return d;
+      }
+      if (st === "pending") {
+        const d = document.createElement("div");
+        d.className = "act-tx meta";
+        d.textContent = ev.tx.running ? "⏳ מתמלל…" : "⏳ ממתין בתור…";
+        return d;
+      }
+      if (st === "none" && !(ev.exists && txInfo && txInfo.available)) return null;
+      return txMetaNode(ev, st);
+    }
+
+    function updateStarFilterButton() {
+      const btn = $("actStarFilter");
+      btn.title = (starOnly ? "הצג את כל השידורים" : "הצג רק הקלטות שמורות")
+        + " (" + starMeta.count + "/" + starMeta.max + ")";
     }
 
     function renderTxBar() {
@@ -3214,7 +3274,9 @@
       if (!txInfo.available) {
         // ⚠ ההודעה שחסרה קודם לגמרי: בלעדיה "לא מותקן" נראה כמו "אין מה להציג".
         const s = document.createElement("span");
-        s.textContent = "📝 תמלול ATC לא מותקן — הרץ על ה-Pi: ";
+        const wantsHe = txInfo.lang === "he";
+        s.textContent = (wantsHe ? "📝 תמלול לעברית דורש מודל רב-לשוני — הרץ על ה-Pi: "
+                                  : "📝 תמלול ATC לא מותקן — הרץ על ה-Pi: ");
         const c = document.createElement("code");
         c.textContent = txInfo.install_hint;
         bar.append(s, c);
@@ -3229,26 +3291,55 @@
           const res = await apiSend("POST", "/api/transcribe", { auto: cb.checked });
           const d = await res.json();
           if (d.ok) { txInfo = d.tx; renderTxBar(); if (d.tx.auto) pollActivitySoon(); }
+          else { showToast(d.error || "המתג לא נשמר"); cb.checked = !cb.checked; }
         } catch (e) { showToast("שגיאת רשת — המתג לא נשמר"); cb.checked = !cb.checked; }
         finally { cb.disabled = false; }
       };
       lbl.append(cb, document.createTextNode("תמלל כל שידור אוטומטית"));
+      // בורר שפה — מודל .en (אנגלית-בלבד) לא יכול לתמלל עברית כלל, לא "פחות
+      // טוב"; txInfo.langs מדווח אילו שפות יש להן מודל מותקן בפועל.
+      const sel = document.createElement("select");
+      for (const [code, label] of [["en", "אנגלית"], ["he", "עברית"]]) {
+        const o = document.createElement("option");
+        o.value = code; o.textContent = label;
+        if (txInfo.langs && !txInfo.langs[code]) o.textContent += " (מודל חסר)";
+        if (code === txInfo.lang) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.onchange = async () => {
+        try {
+          const res = await apiSend("POST", "/api/transcribe", { lang: sel.value });
+          const d = await res.json();
+          if (d.ok) { txInfo = d.tx; renderTxBar(); }
+          else { showToast(d.error || "השפה לא נשמרה"); }
+        } catch (e) { showToast("שגיאת רשת — השפה לא נשמרה"); }
+      };
       const sp = document.createElement("span");
       sp.className = "sp";
       const info = document.createElement("span");
-      // מסומנות בכוכב תמיד מתומללות — זה החיבור בין שני הפיצ'רים, וכדאי שיהיה גלוי.
+      // הקלטות שמורות (★) מתומללות אוטומטית תמיד — זה החיבור בין שני
+      // הפיצ'רים, וכדאי שיהיה גלוי. queue כולל את הרץ עכשיו.
       info.textContent = txInfo.queue
-        ? "בתור: " + txInfo.queue
-        : "⭐ שמורות מתומללות תמיד · " + (txInfo.model_name || "");
-      bar.append(lbl, sp, info);
+        ? (txInfo.queue === 1 ? "מתמלל…" : "מתמלל · עוד " + (txInfo.queue - 1) + " בתור")
+        : "★ שמורות מתומללות תמיד";
+      bar.append(lbl, sel, sp, info);
+      if (starMeta.count > 0) {
+        const zip = document.createElement("button");
+        zip.type = "button"; zip.className = "zip";
+        zip.textContent = "⬇ הורד שמורות (" + starMeta.count + ")";
+        zip.onclick = () => { location.href = "/api/recordings/starred.zip"; };
+        bar.appendChild(zip);
+      }
     }
 
     function renderActivity() {
       const box = $("activity");
       if (!actEvents.length) {
-        box.innerHTML = starOnly
-          ? '<p class="hint" style="margin:0">אין הקלטות שמורות — סמן שידור ב-⭐ כדי שלא יימחק.</p>'
-          : emptyActivityHTML;
+        box.innerHTML = !actLoaded
+          ? '<p class="hint" style="margin:0">טוען…</p>'
+          : (starOnly
+              ? '<p class="hint" style="margin:0">אין עדיין הקלטות שמורות — לחץ ★ ליד שידור כדי שההקלטה שלו לא תימחק אוטומטית.</p>'
+              : emptyActivityHTML);
         return;
       }
       const q = ($("actSearch").value || "").trim().toLowerCase();
@@ -3264,7 +3355,10 @@
         box.innerHTML = '<p class="hint" style="margin:0">אין תוצאות לחיפוש.</p>';
         return;
       }
-      for (const ev of matches.slice(0, 15)) {   // בטלפון מספיק; השאר נשמר בשרת
+      // בתצוגת "שמורות" יש לפעמים עד REC_STAR_MAX_FILES פריטים אמיתיים
+      // שהמשתמש שמר בכוונה — 15 היה משאיר את רובם בלתי-נגישים.
+      const cap = starOnly ? Math.max(matches.length, starMeta.max || 0) : 15;
+      for (const ev of matches.slice(0, cap)) {
         const item = document.createElement("div");
         item.className = "act-item";
         const row = document.createElement("div");
@@ -3287,24 +3381,16 @@
           star.className = "star" + (ev.starred ? " on" : "");
           star.textContent = ev.starred ? "★" : "☆";
           star.title = ev.starred
-            ? "שמורה — לא תימחק. לחץ לביטול"
-            : "שמור הקלטה (לא תימחק ב-retention)";
+            ? "שמורה — לא תימחק אוטומטית. לחץ לביטול"
+            : "שמור הקלטה כך שלא תימחק אוטומטית";
+          star.setAttribute("aria-pressed", ev.starred ? "true" : "false");
+          star.setAttribute("aria-label", ev.starred ? "בטל שמירת הקלטה" : "שמור הקלטה");
           star.onclick = () => toggleStar(ev, star);
           row.appendChild(star);
-          // כפתור התמלול מוצג רק כשיש במה להשתמש בו — אחרת שורת הסטטוס למעלה
-          // כבר מסבירה שהכלי לא מותקן, ואין טעם בכפתור שתמיד ייכשל.
-          const st = (ev.tx && ev.tx.state) || "none";
-          if (ev.exists && txInfo && txInfo.available && st !== "ok" && st !== "pending") {
-            const tb = document.createElement("button");
-            tb.type = "button"; tb.className = "tx";
-            tb.textContent = "📝";
-            tb.title = st === "failed" ? "נסה לתמלל שוב" : "תמלל את השידור הזה";
-            tb.onclick = () => requestTranscribe(ev, tb);
-            row.appendChild(tb);
-          }
         }
         const b = document.createElement("button");
         b.type = "button"; b.className = "play"; b.textContent = "▶";
+        b.setAttribute("aria-label", "נגן הקלטה");
         if (ev.exists && ev.file) b.onclick = () => playRecording(ev.file, b);
         else { b.disabled = true; b.title = "ההקלטה כבר נמחקה"; }
         row.appendChild(b);
@@ -3316,18 +3402,26 @@
     }
 
     async function pollActivity() {
+      if (actInFlight) return;      // דפוס metricsInFlight/specInFlight — לא לערום בקשות
+      actInFlight = true;
+      const v = starMetaVersion;    // ר' הערת starMetaVersion: תשובה זו עלולה להגיע
+                                     // *אחרי* סימון ★ מוצלח, ואז המספר שבה כבר מיושן
       try {
         const a = await fetchJSON("/api/activity" + (starOnly ? "?starred=1" : ""));
         if (!a.ok) return;
         actEvents = a.events;
-        renderActivity();
+        if (a.starred_count != null && v === starMetaVersion) {
+          starMeta = { count: a.starred_count, max: a.starred_max };
+        }
+        updateStarFilterButton();
       } catch (e) { /* offline - הסטטוס הראשי כבר מציג שגיאת רשת */ }
+      finally { actLoaded = true; actInFlight = false; renderActivity(); }
     }
 
     async function pollTxStatus() {
       try {
         const d = await fetchJSON("/api/transcribe");
-        if (d.ok) { txInfo = d.tx; renderTxBar(); }
+        if (d.ok) { txInfo = d.tx; renderTxBar(); renderActivity(); }
       } catch (e) { /* offline — שורת הסטטוס פשוט לא מתעדכנת */ }
     }
 
@@ -3335,8 +3429,8 @@
     $("actStarFilter").addEventListener("click", () => {
       starOnly = !starOnly;
       $("actStarFilter").classList.toggle("on", starOnly);
-      $("actStarFilter").title = starOnly ? "הצג את כל השידורים" : "הצג רק הקלטות שמורות";
-      actEvents = [];
+      updateStarFilterButton();
+      actEvents = []; actLoaded = false;
       renderActivity();
       pollActivity();
     });
