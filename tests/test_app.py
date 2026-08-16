@@ -22,6 +22,7 @@ def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "STATS_PATH", tmp_path / "stats.txt")
     monkeypatch.setattr(app, "PRESETS_PATH", tmp_path / "presets.json")
     monkeypatch.setattr(app, "ACTIVITY_PATH", tmp_path / "activity.jsonl")
+    monkeypatch.setattr(app, "STARRED_PATH", tmp_path / "starred.json")
     rec = tmp_path / "recordings"
     rec.mkdir()
     monkeypatch.setattr(app, "REC_DIR", rec)
@@ -529,11 +530,17 @@ def test_sweep_removes_orphaned_transcript_without_mp3(paths):
 
 
 def test_transcribe_file_handles_failure(paths, monkeypatch):
+    """כשל (ffmpeg חסר) => ('failed', ...) עם סיבה, ובלי לזרוק. ⚠ החוזה השתנה
+    במכוון מ-None ל-4-tuple: 'נכשל' ו'לא ניסינו' חייבים להיות מובחנים (§12)."""
     p = _mk_rec(paths, "airam_20260611_120001_134600000.mp3")
+    monkeypatch.setattr(app, "WHISPER_BIN", str(paths / "whisper-cli"))
+    (paths / "whisper-cli").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(app, "_whisper_model", lambda: str(paths / "model.bin"))
     def boom(*a, **k):
         raise FileNotFoundError("ffmpeg")
     monkeypatch.setattr(app.subprocess, "run", boom)
-    assert app._transcribe_file(p) is None             # כשל => None, בלי לזרוק
+    state, text, raw, err = app._transcribe_file(p)
+    assert state == "failed" and text is None and err
 
 
 def test_journal_tail_has_timeout_and_does_not_raise_on_timeout(monkeypatch):

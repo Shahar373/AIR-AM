@@ -480,11 +480,15 @@ cp "$REPO_DIR/udev/99-airam.rules" /etc/udev/rules.d/
 udevadm control --reload-rules 2>/dev/null || true
 
 # ----------------------------------------------------------------------------
-# 7b. תמלול ATC (אופציונלי) - whisper.cpp + מודל base.en
+# 7b. תמלול ATC (אופציונלי) - whisper.cpp + מודל small.en
 #     הפעלה:  INSTALL_WHISPER=1 sudo ./install.sh   (בנייה ארוכה => לא ברירת מחדל)
+#     ⚠ small.en ולא base.en: אודיו AM צר-סרט ורועש עם פרזיולוגיית ATC — base
+#     מייצר שם הזיות ושגיאות תדירות. המחיר: ~500MB ופי ~3 זמן תמלול, שנבלע
+#     במודל ההיברידי (לפי דרישה / מסומנות בכוכב) ולא רץ על כל הקלטה כברירת מחדל.
+#     התקנה קיימת עם base.en בלבד ממשיכה לעבוד — app.py נופל אליו (_whisper_model).
 # ----------------------------------------------------------------------------
 if [[ "${INSTALL_WHISPER:-0}" == "1" ]]; then
-  log "מתקין תמלול ATC (whisper.cpp + base.en) - עשוי לקחת כמה דקות ..."
+  log "מתקין תמלול ATC (whisper.cpp + small.en) - עשוי לקחת כמה דקות ..."
   apt-get install -y ffmpeg
   WHISPER_SRC="$BUILD_DIR/whisper.cpp"
   [[ -d "$WHISPER_SRC" ]] || git clone --depth 1 https://github.com/ggml-org/whisper.cpp "$WHISPER_SRC"
@@ -492,14 +496,26 @@ if [[ "${INSTALL_WHISPER:-0}" == "1" ]]; then
   cmake --build "$WHISPER_SRC/build" -j"$(nproc)" --target whisper-cli
   install -m755 "$WHISPER_SRC/build/bin/whisper-cli" /usr/local/bin/whisper-cli
   mkdir -p /opt/airam/models
-  MODEL="/opt/airam/models/ggml-base.en.bin"
-  [[ -f "$MODEL" ]] || curl -fL --retry 3 -o "$MODEL" \
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+  MODEL="/opt/airam/models/ggml-small.en.bin"
+  # הורדה לקובץ זמני ואז mv: הורדה שנקטעה (רשת/חשמל) לא משאירה מודל חתוך
+  # שwhisper ייכשל עליו בכל הרצה מבלי שאיש יבין למה.
+  if [[ ! -f "$MODEL" ]]; then
+    curl -fL --retry 3 -o "$MODEL.part" \
+      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin" \
+      && mv -f "$MODEL.part" "$MODEL" \
+      || { rm -f "$MODEL.part"; die "הורדת מודל התמלול נכשלה."; }
+  fi
   chown -R airam:airam /opt/airam/models
-  # הפעלת התמלול בקובץ ה-environment (אידמפוטנטי)
+  # ⚠ אימות שהכלים באמת עובדים — לא רק שהקבצים קיימים. כך כשל בנייה/הורדה
+  # מתגלה עכשיו, ולא בתור "התמלול פשוט לא מופיע" חודש אחרי.
+  command -v ffmpeg >/dev/null || die "ffmpeg לא הותקן — התמלול לא יעבוד."
+  /usr/local/bin/whisper-cli --help >/dev/null 2>&1 || die "whisper-cli לא רץ — בדוק את הבנייה."
+  log "תמלול ATC מותקן. הפעלה/כיבוי של 'תמלל הכול אוטומטית' — מהממשק (יומן השידורים);"
+  log "תמלול לפי דרישה (📝) והקלטות מסומנות ב-⭐ עובדים תמיד."
+  # AIRAM_TRANSCRIBE הוא כעת רק ברירת המחדל של המתג 'תמלל הכול' בהתקנה טרייה
+  # (state.transcribe_auto). לא נוגעים בו בשדרוג — המתג ב-UI הוא מקור-האמת.
   grep -q '^AIRAM_TRANSCRIBE=' /etc/airam/airam.env 2>/dev/null || \
     printf 'AIRAM_TRANSCRIBE=1\n' >> /etc/airam/airam.env
-  log "תמלול ATC הופעל (לכבות: ערוך /etc/airam/airam.env והסר AIRAM_TRANSCRIBE)."
 else
   log "תמלול ATC לא הותקן (להפעלה: INSTALL_WHISPER=1 sudo ./install.sh)."
 fi

@@ -139,6 +139,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_roster.py           # רוסטר מטוסים מאוחד: היתוך זהות ACARS/VDL2/ADS-B, מיון, /api/aircraft.
   test_archive.py          # ארכיון חיפוש רב-יומי: _day_bounds, ?day= ב-/api/acars ו-/api/vdl2.
   test_adsb_enrich.py      # היתוך ADS-B↔ACARS: העשרת /api/acars מ-snapshot של adsb.py (בלי רשת).
+  test_recordings.py       # ⭐ סימון הקלטות (מכסה, הישרדות retention, ?starred=1) + תמלול
+                           #   (חמשת מצבי tx.state, סדר עדיפויות היברידי, סינון הזיות, fallback מודל).
   test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
   test_signal.py           # מד שדה: _signal_verdict, /api/signal (voice/acars/vdl2/satcom/off), /api/antenna/check.
   test_session.py          # דוח סשן: _interest_score, /api/session, /api/session/ack, adsb.session_series.
@@ -169,7 +171,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 | `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
 | `/var/lib/airam/satcom.jsonl` | היסטוריית SATCOM (שורדת restart, retention 5000) | _satcom_listener |
 | `/var/lib/airam/activity.jsonl` | יומן שידורים (retention 500) | _activity_watcher |
-| `/var/lib/airam/recordings/` | הקלטות MP3 (200 קבצים / 100MB) | rtl_airband, נמחק ע"י app.py |
+| `/var/lib/airam/starred.json` | הקלטות מסומנות ב-⭐ (פטורות מ-retention) — **רשומת האירוע המלאה** לכל קובץ, לא רק השם | app.py (`/api/recordings/star`) |
+| `/var/lib/airam/recordings/` | הקלטות MP3 (200 קבצים / 100MB — **לא כולל מסומנות**) + sidecar תמלול `<file>.mp3.tx.json` | rtl_airband, נמחק ע"י app.py |
 | `/run/rtl_airband_stats.txt` | מדדי RF (tmpfs, ~1Hz) | rtl_airband |
 
 ---
@@ -360,7 +363,20 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   `_restore_after_probe` (הלב של `POST /api/antenna/check`: מעבר זמני לקול,
   מדידה, שחזור המצב הקודם — best-effort גם בכישלון, לא נוגע ב-`state["app_mode"]`).
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
-  `_transcribe_worker` (thread whisper אופציונלי), `_sweep_recordings` (retention).
+  `_sweep_recordings` (retention — **מדלג לחלוטין על מסומנות ולא סופר אותן במכסה**).
+- **הקלטות מסומנות (⭐) + תמלול — שני פיצ'רים מחוברים:** `_load_starred`/`_save_starred`
+  (‏`starred.json`, dict של `{filename: event}`), `_star_usage` (אכיפת המכסה הנפרדת
+  `REC_STAR_MAX_FILES`/`REC_STAR_MAX_BYTES`), `api_star` (`POST /api/recordings/star` —
+  **מסרב** ב-409 כשהמכסה מלאה במקום למחוק מסומנת ותיקה), `_rec_name_arg` (אימות שם
+  מול `_REC_NAME_RE` = גם הגנת path traversal), `_decorate_event` (מוסיף לאירוע יומן
+  `exists`/`starred`/`tx`). **תמלול:** `_tx_path` (sidecar `<file>.mp3.tx.json`),
+  `_read_tx`/`_write_tx` (חמישה מצבי `state`, ר' §12), `_transcript_path` (ה-`.txt`
+  הישן — קריאה בלבד, תאימות), `_whisper_model` (נופל ל-`base.en` בהתקנות ותיקות),
+  `_whisper_ready`/`_tx_status` (זמינות **חיה**), `_tx_enqueue`/`_tx_pending`
+  (תור "לפי דרישה"), `_tx_next_target` (סדר עדיפויות: לפי-דרישה → מסומנות → הכול
+  אם `state["transcribe_auto"]`), `_tx_is_noise` (סינון הזיות whisper),
+  `_transcribe_file` (מחזיר `(state, text, raw, err)` — **לא** טקסט/None),
+  `_transcribe_worker` (thread יחיד, **לא מת** כשwhisper חסר — ר' §12).
 - **`__main__`:** מרים את thread השחזור `_boot_restore` (מחזיר את המצב השמור, כולל
   שכתוב קונפיג ישן בשדרוג — `_config_stale`) + `_mode_reconcile_loop` (thread
   נפרד, רץ לאורך כל הסשן — לא רק פעם אחת באתחול כמו `_boot_restore`: כל
@@ -506,6 +522,15 @@ renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitAr
 `liveSnapshot` ומחדש polling. `show()` **לא** מחדש polling אם `archiveDay` עדיין
 מוגדר (מעבר בין תצוגות תוך כדי עיון בארכיון לא "שובר" אותו בטעות בחזרה).
 
+**יומן השידורים (תצוגת קול):** כל שורה כוללת ★ (סימון/ביטול — `toggleStar`) ו-📝
+(תמלול לפי דרישה — `requestTranscribe`, מוצג רק כשהתמלול זמין ואין כבר תוצאה).
+`txNode(ev)` מנסח את `ev.tx.state` לטקסט — **כולל המצבים שאינם טקסט** ("מתמלל…",
+"אין דיבור מזוהה", "התמלול נכשל — <סיבה>"), וזה בדיוק מה שחסר קודם (§12).
+`renderTxBar` (מ-`GET /api/transcribe`, פולינג 60ש') מציג את פקודת ההתקנה כשwhisper
+חסר, ואת מתג "תמלל כל שידור אוטומטית" כשהוא קיים. `pollActivitySoon` מרענן כל 3ש'
+למשך ~30ש' אחרי בקשת תמלול (במקום להמתין למחזור ה-15ש'). כפתור ⭐ ליד החיפוש מחליף
+את הפיד ל-`GET /api/activity?starred=1`.
+
 > בעריכת ה-UI: שמור על polling קל, על נפילה חיננית בלי רשת, ועל RTL/עברית נכונה.
 > שינוי שנוגע לכל תצוגות-הדאטה — ערוך את הפקטורי `createDataView` (מקום אחד, שלושת
 > המופעים יורשים); שינוי ACARS-only/VDL2-only/SATCOM-only בלבד — דרך `opts`
@@ -570,7 +595,10 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | POST | `/api/session/ack` | מקדם את הסמן (`state["last_session_view_at"]`) ל"עכשיו" — הפעולה המפורשת היחידה שמקדמת אותו. דרך `_guard` |
 | GET | `/api/signal` | מד שדה מאוחד למצב שרץ *בפועל* כרגע: רציף בקול (`_read_voice_metrics`), "הודעה אחרונה בלבד" ב-ACARS/VDL2 (`level`+`snr` — ACARS לעולם בלי `snr`, ר' §12), הפניה ל-`/api/satcom/health` ב-SATCOM. `verdict` (`ok`/`below_baseline`/`no_baseline`/`unknown`) תמיד מול `state["signal_baseline"]` בלבד — לעולם לא סף מומצא |
 | POST | `/api/antenna/check` | בדיקת אנטנה בת ~3 שניות: מעבר זמני לקול (AGC, סקוולץ' פתוח) בתדר המבוקש, מדידת רצפת רעש אמיתית (`_sample_probe_stats`), וחזרה למצב הקודם (`_restore_after_probe`, גם בכישלון). `calibrate:true` שומר את התוצאה כ-`signal_baseline`. לא נוגע ב-`state["app_mode"]` — פעולת אבחון, לא מעבר-מצב. סריאלי תחת `TUNE_LOCK`; 409 כשתפוס |
-| GET | `/api/activity` | יומן שידורים |
+| GET | `/api/activity` | יומן שידורים. כל אירוע כולל `exists`, `starred`, ו-`tx` (‏`{state, text, err?, raw?, filtered?}` — ר' §12). `?starred=1` => רק ההקלטות המסומנות, **מ-`starred.json` ולא מהיומן** (שורדות את קיצוץ `ACTIVITY_KEEP`) |
+| POST | `/api/recordings/star` | `{file, starred}` — סימון/ביטול ⭐. מסומנת פטורה מ-retention. 409 כשמכסת המסומנות מלאה (**לא מוחקים ותיקה**), 404 כשההקלטה כבר לא קיימת. דרך `_guard` |
+| POST | `/api/recordings/transcribe` | `{file, force?}` — תמלול שידור בודד לפי דרישה (נכנס לתור, מוחזר `pending`). 501 עם פקודת ההתקנה כשwhisper חסר. דרך `_guard` |
+| GET/POST | `/api/transcribe` | GET: מצב המנגנון (`available`/`model_name`/`auto`/`queue`/`install_hint`) — זה מה שמאפשר ל-UI לומר "לא מותקן, הנה הפקודה". POST `{auto}`: מתג "תמלל הכול" (נשמר ב-state). דרך `_guard` |
 | GET | `/recordings/<name>` | קובץ הקלטה MP3 |
 | GET | `/api/metrics` | מדדי RF (SNR/signal/noise מ-stats_filepath) |
 | GET | `/api/airspace` | מסלול פעיל + שיבוש GPS (מ-adsb.py) |
@@ -800,6 +828,27 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   טקסט-פענוח** (עדיין `None` בפועל, לא ניחוש-תוכן) — אבל *כן* חושפים עובדה אמיתית
   שקיימת במבנה (הניסיון-שנכשל עצמו), כי הסתרתה גם היא סוג של הטעיה (המשתמש
   לא יכול להבדיל "המפענח לא תמך בזה" מ"האיתות היה חלש מדי הפעם").
+- **⚠ אותו עיקרון, הפעם בפיצ'ר שלנו: תמלול ATC היה בלתי-נראה כי ארבעה מצבים
+  הוצגו זהים.** משתמש דיווח שמעולם לא ראה תמלול — ובדיקה הראתה שהפיצ'ר "עבד"
+  אבל **לא היה שום ערוץ שבו הוא יכול לדווח על עצמו**: `/api/activity` החזיר
+  `text: null` בלבד, ולכן "whisper לא מותקן", "עדיין בתור", "פוענח ואין דיבור"
+  ו-"הפענוח נכשל" נראו כולם כשורה בלי טקסט. בנוסף, ה-worker עשה `return` **ומת**
+  כשהבינארי חסר בעלייה, כך שהתקנה מאוחרת לא הורגשה עד restart. **תוקן**: sidecar
+  ‏`<file>.mp3.tx.json` עם `state` מפורש (`none` = לא ניסינו · `pending` · `ok` ·
+  `empty` = נוסה ואין דיבור · `failed` + `err`), זמינות **נבדקת חיה בכל מחזור**
+  ולא פעם אחת, ושורת סטטוס ב-UI שמציגה את פקודת ההתקנה. **הלקח:** "לא ניסינו ≠
+  ניסינו ונכשלנו" אינו כלל על *פענוח רדיו* בלבד — הוא חל על כל דיווח-מצב שלנו
+  למשתמש. פיצ'ר שאין לו דרך לומר "אני כבוי/חסר/נכשלתי" הוא, מבחינת המשתמש,
+  פיצ'ר שלא קיים. **חריג מכוון אחד לסינון:** הזיות whisper על רעש
+  (`Thank you.`/`[BLANK_AUDIO]`) מסומנות `empty`, אבל **הפלט הגולמי נשמר ב-`raw`
+  ומוצג כמסונן** — מסננים מהתצוגה הראשית, לא מסתירים.
+- **⭐ retention לעולם לא מוחק מה שהמשתמש הגן עליו במפורש.** הקלטה מסומנת
+  פטורה מ-`_sweep_recordings` לחלוטין, **ולא נספרת** במכסת הרגילות (אחרת סימון
+  ‎100MB היה מאפס את חלון 200 השידורים החיים). למסומנות מכסה נפרדת משלהן, וכשהיא
+  מתמלאת **מסרבים לסמן** (409 + הסבר) במקום למחוק מסומנת ותיקה — הבחירה מי
+  להסיר היא של המשתמש, לא שלנו. ⚠ `starred.json` שומר את **רשומת האירוע המלאה**
+  ולא רק את שם הקובץ: `activity.jsonl` מקוצץ ל-`ACTIVITY_KEEP`, ובלי זה הקלטה
+  שמורה מלפני חודש הייתה קיימת על הדיסק אך בלתי-נגישה מה-UI.
 - **⚠ `decode_failed=True` חייב לחסום גם חילוץ נתונים, לא רק להוסיף הודעת-כישלון
   ל-`decoded` — regression אמיתי שקרה בפועל.** כשהוספנו לראשונה את `decode_failed`
   (הבולט הקודם), חילוץ המיקום מ-ADS-C (`_scan_latlon`) המשיך לרוץ *ללא תלות* בדגל

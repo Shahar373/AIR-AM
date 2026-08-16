@@ -293,26 +293,55 @@ SATCOM_LOG_KEEP = 5000                # retention על הדיסק (זנב נשמ
 REC_DIR = Path("/var/lib/airam/recordings")
 REC_BASENAME = "airam"         # filename_template ב-config וגם עוגן הפרסור של השמות
 REC_BYTES_PER_SEC = 6000       # CBR 48kbps (ה-patch ב-install.sh) => הערכת משך מגודל
-REC_MAX_FILES = 200            # retention
+REC_MAX_FILES = 200            # retention (הקלטות *לא* מסומנות בלבד — ר' _sweep_recordings)
 REC_MAX_BYTES = 100 * 1024 * 1024
+# הקלטות מסומנות בכוכב (⭐ "שמור") — פטורות מ-retention לחלוטין, ולכן חייבות
+# מכסה *נפרדת* משלהן: בלי תקרה, סימון חופשי היה ממלא את כרטיס ה-SD בשקט.
+# ⚠ כשהמכסה מלאה *מסרבים לסמן* (שגיאה ל-UI) ולא מוחקים את הישן — מחיקת קובץ
+# שהמשתמש הגן עליו במפורש היא בדיוק מה שהפיצ'ר נועד למנוע.
+STARRED_PATH = Path("/var/lib/airam/starred.json")
+REC_STAR_MAX_FILES = 100
+REC_STAR_MAX_BYTES = 100 * 1024 * 1024
 ACTIVITY_PATH = Path("/var/lib/airam/activity.jsonl")
 ACTIVITY_KEEP = 500            # היומן שורד את מחיקת הקבצים (retention) - רק בלי נגינה
 ACTIVITY_RETURN = 50
 WATCH_INTERVAL = 10.0          # שניות בין סריקות של תיקיית ההקלטות
 
-# תמלול ATC (אופציונלי): whisper.cpp מקומי. לכל הקלטה שמסתיימת נכתב קובץ-צד
-# <file>.mp3.txt עם הטקסט. פעיל רק אם AIRAM_TRANSCRIBE=1 וגם הבינארי+המודל קיימים
-# (install.sh בונה אותם רק עם INSTALL_WHISPER=1) => התקנות קיימות לא מושפעות.
+# --- תמלול ATC (whisper.cpp מקומי) -------------------------------------------
+# מודל ההפעלה **היברידי** (ר' §5/§12 ב-CLAUDE.md): לפי דרישה (כפתור ליד כל
+# שידור) + אוטומטי לכל הקלטה *מסומנת בכוכב* + מתג אופציונלי "תמלל הכול".
+# ⚠ הזמינות נבדקת **חיה בכל מחזור** ולא פעם אחת בעלייה: קודם ה-thread עשה
+# return כשהבינארי חסר, ולכן התקנת whisper אחרי העלייה לא הורגשה עד restart.
 TRANSCRIBE = os.environ.get("AIRAM_TRANSCRIBE", "").strip().lower() in ("1", "true", "yes", "on")
 WHISPER_BIN = os.environ.get("AIRAM_WHISPER_BIN", "/usr/local/bin/whisper-cli")
-WHISPER_MODEL = os.environ.get("AIRAM_WHISPER_MODEL", "/opt/airam/models/ggml-base.en.bin")
+# small.en (ולא base.en): אודיו AM צר-סרט ורועש עם פרזיולוגיית ATC — base
+# מייצר שם הזיות ושגיאות תדירות. ⚠ ההתקנות הקיימות הורידו base.en בלבד, ולכן
+# _whisper_model() נופל אליו כשהמודל המבוקש חסר — שדרוג בלי הורדה מחדש עדיין עובד.
+WHISPER_MODEL = os.environ.get("AIRAM_WHISPER_MODEL", "/opt/airam/models/ggml-small.en.bin")
+WHISPER_MODEL_FALLBACKS = ("/opt/airam/models/ggml-small.en.bin",
+                           "/opt/airam/models/ggml-base.en.bin")
 WHISPER_LANG = os.environ.get("AIRAM_WHISPER_LANG", "en")   # ATC בישראל = אנגלית
-TRANSCRIBE_TIMEOUT = 120.0     # שניות לקובץ בודד (המרה + תמלול)
+# ⚠ פחות מכל הליבות: ל-Pi 5 יש 4, ו-whisper לוקח כברירת מחדל את כולן. הרדיו
+# (rtl_airband/acarsdec) רץ באותו הרגע ואסור שיורעב — התמלול נסוג, לא הקליטה.
+WHISPER_THREADS = os.environ.get("AIRAM_WHISPER_THREADS", "3")
+TRANSCRIBE_TIMEOUT = 300.0     # שניות לקובץ בודד (המרה + תמלול). small.en איטי מ-base פי ~3
+TX_MIN_SEC = 0.7               # קטע קצר מזה = לחיצת סקוולץ', לא דיבור => לא מתמללים
+TX_QUEUE_MAX = 50              # תקרה לתור "לפי דרישה" (לחיצות UI חוזרות)
 # רמז הקשר => מטה את המודל לפרזיולוגיית ATC ושמות מקומיים (משפר דיוק משמעותית)
 WHISPER_PROMPT = ("Air traffic control radio between pilots and Ben Gurion / Tel Aviv "
                   "tower, ground, approach. Phrases: cleared for takeoff, line up and wait, "
                   "taxi to runway, hold short, contact tower, squawk, climb, descend, "
                   "heading, knots, QNH, wind, runway 03 12 21 26 30.")
+# ⚠ whisper *ממציא* טקסט על קלט שהוא רעש בלבד — תמיד אותן שאריות מדאטת האימון
+# (כתוביות YouTube). זו תופעה מתועדת של המודל, לא ניחוש שלנו, ולכן הסינון מותר
+# תחת §12 — אבל **הטקסט הגולמי נשמר** ב-sidecar (`raw`) ומסומן `filtered`, כדי
+# שלא נסתיר מהמשתמש מה המפענח באמת פלט. ההשוואה על טקסט מנורמל (ר' _tx_is_noise).
+WHISPER_NOISE_PHRASES = frozenset({
+    "", "you", "thank you", "thanks", "thank you very much", "thanks for watching",
+    "thank you for watching", "bye", "bye bye", "goodbye", "so", "okay", "ok",
+    "silence", "blank audio", "music", "applause", "subtitles by the amara org community",
+    "please subscribe", "subscribe", "the end", "oh", "hmm", "mm", "uh", "ah",
+})
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -506,7 +535,12 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  # מתי המשתמש ראה לאחרונה את דוח הסשן (epoch) — None עד /api/session/ack
                  # הראשון. /api/session נופל ל"שעה אחורה" כשזה חסר (התקנה טרייה/שדרוג),
                  # לא לכל ההיסטוריה.
-                 "last_session_view_at": None}
+                 "last_session_view_at": None,
+                 # תמלול *כל* הקלטה אוטומטית ברקע. ברירת המחדל היא ערך
+                 # AIRAM_TRANSCRIBE => התקנות קיימות (INSTALL_WHISPER=1 כתב את
+                 # המשתנה) ממשיכות להתנהג בדיוק כמו קודם. כבוי = עדיין מתמללים
+                 # מסומנים-בכוכב ובקשות לפי דרישה; whisper לא רץ סתם ברקע.
+                 "transcribe_auto": TRANSCRIBE}
 
 
 # --- שורת ה-squelch: מקור אמת יחיד -----------------------------------------
@@ -3248,51 +3282,271 @@ def _last_logged_ts():
     return 0.0
 
 
+# --- הקלטות מסומנות בכוכב (⭐ "שמור") ----------------------------------------
+# האחסון שומר את **רשומת האירוע המלאה** ולא רק את שם הקובץ, ובכוונה: היומן
+# (activity.jsonl) מקוצץ ל-ACTIVITY_KEEP שורות, כך שהקלטה ששמרנו לפני חודש
+# הייתה נעלמת מה-UI למרות שהקובץ שרד על הדיסק. עם הרשומה בפנים, GET
+# /api/activity?starred=1 מגיש אותה תמיד, בלי תלות בגיל היומן.
+def _load_starred():
+    """{filename: event} של ההקלטות המסומנות. קובץ חסר/פגום => {} (לא זורק:
+    נקרא גם מ-_sweep_recordings ב-thread רקע ומ-/api/activity בפולינג)."""
+    try:
+        raw = STARRED_PATH.read_text()
+    except OSError:
+        return {}
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        log.warning("starred.json פגום — מתעלמים (ההקלטות עצמן לא נמחקות)")
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _save_starred(d):
+    _atomic_write(STARRED_PATH, json.dumps(d, ensure_ascii=False))
+
+
+def _star_usage(names):
+    """(count, bytes) של קבוצת שמות קבצים — לאכיפת המכסה הנפרדת של המסומנים."""
+    total = 0
+    for n in names:
+        try:
+            total += (REC_DIR / n).stat().st_size
+        except OSError:
+            pass          # נמחק ידנית — לא נספר, ייגזם ב-_sweep_recordings
+    return len(names), total
+
+
+# --- תמלול ATC --------------------------------------------------------------
+# ⚠ ה-sidecar הוא JSON ולא טקסט-חשוף, כי טקסט לבד לא יכול לבטא את ההבדל בין
+# "לא ניסינו", "ניסינו ולא יצא כלום" ו-"ניסינו ונכשלנו" — בדיוק ההבחנה ש-§12
+# מחייב, ושבגללה הפיצ'ר הישן נראה למשתמש כאילו הוא פשוט לא קיים (שורה בלי
+# טקסט, זהה לחלוטין בארבעת המצבים). קובץ .txt ישן עדיין נקרא (תאימות לאחור).
 def _transcript_path(mp3):
-    """קובץ-צד התמלול לצד ההקלטה: airam_....mp3 => airam_....mp3.txt."""
+    """ה-sidecar הישן (טקסט בלבד): airam_....mp3 => airam_....mp3.txt.
+    נשמר לקריאה בלבד — התקנות שכבר תמללו לא מאבדות את מה שיש להן."""
     return mp3.parent / (mp3.name + ".txt")
 
 
+def _tx_path(mp3):
+    """ה-sidecar הנוכחי: airam_....mp3 => airam_....mp3.tx.json."""
+    return mp3.parent / (mp3.name + ".tx.json")
+
+
+def _tx_sidecars(mp3):
+    """שני ה-sidecars של הקלטה (חדש+ישן) — למחיקה משותפת ב-retention."""
+    return (_tx_path(mp3), _transcript_path(mp3))
+
+
+def _tx_is_noise(text):
+    """האם הפלט הוא אחת משאריות-האימון שwhisper פולט על רעש-בלבד (ר'
+    WHISPER_NOISE_PHRASES). נרמול: אותיות קטנות, בלי סימני פיסוק וסוגריים
+    (‏'[BLANK_AUDIO]' / 'Thank you.' / '(silence)' הם אותו מקרה)."""
+    # מחליפים כל תו שאינו אות **ברווח** (ולא מוחקים): '[BLANK_AUDIO]' חייב
+    # להפוך ל-'blank audio' ולא ל-'blankaudio', וכך גם 'Amara.org'.
+    norm = re.sub(r"[^a-z]+", " ", (text or "").lower())
+    return " ".join(norm.split()) in WHISPER_NOISE_PHRASES
+
+
+def _read_tx(mp3):
+    """מצב התמלול של הקלטה, כמילון מוכן ל-API:
+      {"state": "ok"|"empty"|"failed"|"none", "text": str|None, ...}
+    ‏'none' = מעולם לא ניסינו (אין sidecar) — **לא** אותו דבר כמו 'empty'."""
+    try:
+        d = json.loads(_tx_path(mp3).read_text())
+        if isinstance(d, dict) and d.get("state"):
+            return d
+    except (OSError, ValueError):
+        pass
+    try:   # תאימות לאחור: sidecar טקסט ישן. ריק שם = "נוסה ולא יצא" (empty).
+        old = _transcript_path(mp3).read_text().strip()
+        return {"state": "ok" if old else "empty", "text": old or None, "legacy": True}
+    except OSError:
+        return {"state": "none", "text": None}
+
+
+def _write_tx(mp3, state, text=None, raw=None, err=None, filtered=False):
+    rec = {"state": state, "text": text, "ts": round(time.time(), 1),
+           "model": Path(_whisper_model() or WHISPER_MODEL).name}
+    if raw and raw != text:
+        rec["raw"] = raw          # מה whisper *באמת* פלט — לא מסתירים (§12)
+    if filtered:
+        rec["filtered"] = True
+    if err:
+        rec["err"] = err
+    _atomic_write(_tx_path(mp3), json.dumps(rec, ensure_ascii=False))
+    return rec
+
+
+def _whisper_model():
+    """נתיב המודל בפועל: המבוקש, ואם חסר — הראשון שקיים מבין החלופות.
+    ⚠ הנפילה ל-base.en היא מה שמאפשר לשדרג ל-small.en בלי להכריח כל התקנה
+    קיימת להוריד 500MB מחדש; הדיווח ב-/api/transcribe אומר איזה מודל בשימוש."""
+    for p in (WHISPER_MODEL, *WHISPER_MODEL_FALLBACKS):
+        if p and Path(p).exists():
+            return p
+    return None
+
+
+def _whisper_ready():
+    """(bin_ok, model_path) — נבדק **חי** בכל שימוש, לא פעם אחת בעלייה."""
+    return Path(WHISPER_BIN).exists(), _whisper_model()
+
+
+# תור "לפי דרישה": המשתמש לחץ 📝 על שידור מסוים ומחכה לו => עדיפות ראשונה,
+# לפני מסומנים ולפני הסריקה האוטומטית.
+_TX_QUEUE = []
+_TX_LOCK = threading.Lock()
+_TX_BUSY = {"file": None}      # מה מתמלל *כרגע* (ל-UI: "מתמלל…")
+
+
+def _tx_enqueue(name):
+    """מוסיף שם קובץ לתור לפי דרישה. מחזיר את המקום בתור (1-based)."""
+    with _TX_LOCK:
+        if name in _TX_QUEUE:
+            return _TX_QUEUE.index(name) + 1
+        if len(_TX_QUEUE) >= TX_QUEUE_MAX:
+            return 0           # תור מלא — הקורא מדווח שגיאה, לא זורקים בשקט
+        _TX_QUEUE.append(name)
+        return len(_TX_QUEUE)
+
+
+def _tx_pending(name):
+    """האם הקובץ ממתין בתור או מתומלל ברגע זה (=> ה-UI מציג 'מתמלל…')."""
+    with _TX_LOCK:
+        return name in _TX_QUEUE or _TX_BUSY["file"] == name
+
+
+def _tx_status():
+    """מצב מנגנון התמלול כולו — הבסיס לשורת הסטטוס ב-UI. ⚠ הערך שהופך את
+    הפיצ'ר לגלוי: בלעדיו 'whisper לא מותקן' נראה בדיוק כמו 'אין מה לתמלל'."""
+    bin_ok, model = _whisper_ready()
+    with _TX_LOCK:
+        queue, busy = len(_TX_QUEUE), _TX_BUSY["file"]
+    return {"available": bool(bin_ok and model), "bin_ok": bin_ok,
+            "bin": WHISPER_BIN, "model": model,
+            "model_name": Path(model).name if model else None,
+            "auto": bool(load_state().get("transcribe_auto")),
+            "queue": queue, "busy": busy,
+            "install_hint": "INSTALL_WHISPER=1 sudo ./install.sh"}
+
+
 def _transcribe_file(mp3):
-    """ממיר MP3 ל-WAV 16kHz מונו (ffmpeg) ומריץ whisper.cpp. מחזיר טקסט או None.
-    כל כשל (ffmpeg/whisper/timeout) מטופל בשקט => לולאת הרקע ממשיכה."""
+    """ממיר MP3 ל-WAV 16kHz מונו (ffmpeg) ומריץ whisper.cpp.
+    מחזיר (state, text, raw, err) — ולא רק טקסט/None: המידע *למה* אין טקסט
+    הוא בדיוק מה שהמשתמש היה צריך ולא קיבל (§12)."""
+    model = _whisper_model()
+    if not model or not Path(WHISPER_BIN).exists():
+        return "failed", None, None, "whisper לא מותקן"
     wav = mp3.parent / (mp3.name + ".wav.tmp")
     try:
         subprocess.run(["ffmpeg", "-nostdin", "-y", "-i", str(mp3),
                         "-ar", "16000", "-ac", "1", str(wav)],
                        capture_output=True, timeout=TRANSCRIBE_TIMEOUT, check=True)
-        out = subprocess.run([WHISPER_BIN, "-m", WHISPER_MODEL, "-f", str(wav),
-                              "-l", WHISPER_LANG, "-nt", "--prompt", WHISPER_PROMPT],
+        out = subprocess.run([WHISPER_BIN, "-m", model, "-f", str(wav),
+                              "-l", WHISPER_LANG, "-nt", "-t", str(WHISPER_THREADS),
+                              "--prompt", WHISPER_PROMPT],
                              capture_output=True, text=True,
                              timeout=TRANSCRIBE_TIMEOUT, check=True)
-        return " ".join(out.stdout.split()).strip() or None
-    except Exception:
+    except subprocess.TimeoutExpired:
+        log.warning("transcribe %s — timeout אחרי %.0f שניות", mp3.name, TRANSCRIBE_TIMEOUT)
+        return "failed", None, None, f"חריגת זמן ({TRANSCRIBE_TIMEOUT:.0f}ש')"
+    except FileNotFoundError as e:
+        return "failed", None, None, f"כלי חסר: {e.filename or e}"
+    except subprocess.CalledProcessError as e:
+        err = (e.stderr or b"")
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", "replace")
+        log.warning("transcribe %s נכשל (rc=%s)", mp3.name, e.returncode)
+        return "failed", None, None, " ".join(err.split())[-200:] or f"rc={e.returncode}"
+    except Exception as e:
         log.exception("transcribe %s", mp3.name)
-        return None
+        return "failed", None, None, str(e)[:200]
     finally:
         try:
             wav.unlink()
         except OSError:
             pass
+    raw = " ".join(out.stdout.split()).strip()
+    if not raw:
+        return "empty", None, None, None
+    if _tx_is_noise(raw):
+        return "empty", None, raw, None     # הזיה על רעש — הגולמי נשמר ומסומן
+    return "ok", raw, raw, None
+
+
+def _tx_next_target(auto):
+    """ההקלטה הבאה לתמלול, לפי סדר העדיפויות של המודל ההיברידי:
+      1. תור לפי דרישה (המשתמש לוחץ ומחכה)  2. מסומנות בכוכב  3. הכול (רק אם auto)
+    מחזיר Path או None. הקלטה שכבר יש לה sidecar (כולל 'נכשל') לא נבחרת שוב
+    לבד — ניסיון חוזר הוא תמיד פעולה מפורשת של המשתמש (force)."""
+    while True:                       # מנקים מהתור ערכים שכבר לא רלוונטיים
+        with _TX_LOCK:
+            name = _TX_QUEUE.pop(0) if _TX_QUEUE else None
+        if name is None:
+            break
+        p = REC_DIR / name
+        if p.is_file():
+            return p                  # לפי דרישה: מתמללים גם אם יש sidecar (force)
+    try:
+        recs = sorted((p for p in REC_DIR.glob("*.mp3")),
+                      key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    starred = _load_starred()
+    for p in recs:                    # מסומנות קודם, בכל מקרה
+        if p.name in starred and not _tx_path(p).exists() and not _transcript_path(p).exists():
+            return p
+    if not auto:
+        return None
+    for p in recs:
+        if not _tx_path(p).exists() and not _transcript_path(p).exists():
+            return p
+    return None
 
 
 def _transcribe_worker():
-    """לולאת רקע: מתמלל הקלטות שעוד אין להן קובץ-צד .txt (חדש=>ישן).
-    כותב גם תמלול ריק => לא מנסים שוב את אותו קובץ בלולאה הבאה."""
-    if not (Path(WHISPER_BIN).exists() and Path(WHISPER_MODEL).exists()):
-        log.warning("transcription on, but whisper missing (%s / %s) - מדלג",
-                    WHISPER_BIN, WHISPER_MODEL)
-        return
-    log.info("transcription worker started (model=%s)", WHISPER_MODEL)
+    """לולאת רקע יחידה (whisper לוקח את ה-CPU => לא מקבילים אותו).
+    ⚠ בניגוד לגרסה הקודמת ה-thread **לא מת** כשwhisper חסר: הוא ממשיך לישון
+    ולבדוק זמינות, כך שהתקנת whisper בזמן ריצה נתפסת בלי restart לשירות."""
+    warned = False
     while True:
         try:
-            recs = sorted(REC_DIR.glob("*.mp3"),
-                          key=lambda p: p.stat().st_mtime, reverse=True)
-            for mp3 in recs:
-                txt = _transcript_path(mp3)
-                if txt.exists():
-                    continue
-                _atomic_write(txt, (_transcribe_file(mp3) or "") + "\n")
+            bin_ok, model = _whisper_ready()
+            if not (bin_ok and model):
+                if not warned:
+                    log.info("תמלול: whisper לא מותקן (%s) — ממתין; "
+                             "להתקנה: INSTALL_WHISPER=1 sudo ./install.sh", WHISPER_BIN)
+                    warned = True
+                time.sleep(WATCH_INTERVAL)
+                continue
+            if warned:
+                log.info("תמלול: whisper זוהה (model=%s)", Path(model).name)
+                warned = False
+            auto = bool(load_state().get("transcribe_auto"))
+            mp3 = _tx_next_target(auto)
+            if mp3 is None:
+                time.sleep(WATCH_INTERVAL)
+                continue
+            with _TX_LOCK:
+                _TX_BUSY["file"] = mp3.name
+            try:
+                # קטע קצר מדי = פתיחת סקוולץ' בלי דיבור. מדווחים 'empty' במפורש
+                # (ולא "לא ניסינו") כדי שלא ננסה אותו שוב בכל מחזור.
+                try:
+                    short = mp3.stat().st_size < TX_MIN_SEC * REC_BYTES_PER_SEC
+                except OSError:
+                    continue          # נמחק בינתיים (retention)
+                if short:
+                    _write_tx(mp3, "empty", err="קצר מדי לתמלול")
+                else:
+                    state, text, raw, err = _transcribe_file(mp3)
+                    _write_tx(mp3, state, text=text, raw=raw, err=err,
+                              filtered=(state == "empty" and bool(raw)))
+            finally:
+                with _TX_LOCK:
+                    _TX_BUSY["file"] = None
+            continue                  # יש עוד עבודה? נטפל בה מיד, בלי sleep
         except Exception:
             log.exception("transcribe worker")
         time.sleep(WATCH_INTERVAL)
@@ -3300,20 +3554,30 @@ def _transcribe_worker():
 
 def _sweep_recordings():
     """retention: עד REC_MAX_FILES / REC_MAX_BYTES (חדש=>ישן), ו-.tmp נטושים
-    (שידור שנקטע בקריסה משאיר .tmp שלעולם לא ייסגר ל-mp3). קובץ-צד התמלול
-    (.txt) נמחק יחד עם ההקלטה שלו."""
+    (שידור שנקטע בקריסה משאיר .tmp שלעולם לא ייסגר ל-mp3). קובצי-הצד של התמלול
+    נמחקים יחד עם ההקלטה שלהם.
+    ⚠ הקלטות **מסומנות בכוכב פטורות לחלוטין**, וגם *לא נספרות* במכסה של
+    הרגילות: אילו היו נספרות, סימון 100MB היה מאפס את החלון החי של היומן.
+    המכסה שלהן נאכפת בנקודת הסימון (‏api_star), לא כאן — כאן לעולם לא מוחקים
+    קובץ שהמשתמש הגן עליו במפורש."""
     try:
         recs = sorted(REC_DIR.glob("*.mp3"),
                       key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
         return
+    starred = _load_starred()
     total = 0
-    for i, p in enumerate(recs):
+    kept = 0
+    for p in recs:
+        if p.name in starred:
+            continue                 # פטור — ולא נכנס לספירה/למשקל
         try:
             total += p.stat().st_size
-            if i >= REC_MAX_FILES or total > REC_MAX_BYTES:
+            kept += 1
+            if kept > REC_MAX_FILES or total > REC_MAX_BYTES:
                 p.unlink()
-                _transcript_path(p).unlink(missing_ok=True)
+                for s in _tx_sidecars(p):
+                    s.unlink(missing_ok=True)
         except OSError:
             pass
     now = time.time()
@@ -3323,16 +3587,27 @@ def _sweep_recordings():
                 p.unlink()
         except OSError:
             pass
-    # .txt יתום (בלי mp3 תואם) — יכול להיווצר כשה-thread המתמלל (ריצה עצמאית,
+    # sidecar יתום (בלי mp3 תואם) — יכול להיווצר כשה-thread המתמלל (ריצה עצמאית,
     # ר' _transcribe_worker) מסיים לתמלל mp3 שנגזם ע"י הרצה מקבילה/קודמת של
-    # הפונקציה הזו בדיוק לפני שהתמלול הספיק לכתוב; הלולאה למעלה מוחקת .txt רק
+    # הפונקציה הזו בדיוק לפני שהתמלול הספיק לכתוב; הלולאה למעלה מוחקת sidecar רק
     # יחד עם ה-.mp3 שעדיין ברשימה, ולא רואה קובץ שכבר נעדר ממנה.
-    for p in REC_DIR.glob("*.txt"):
+    for pat, strip in (("*.txt", ".txt"), ("*.tx.json", ".tx.json")):
+        for p in REC_DIR.glob(pat):
+            try:
+                if not (p.parent / p.name[:-len(strip)]).exists():
+                    p.unlink()
+            except OSError:
+                pass
+    # רשומת-כוכב שההקלטה שלה נעלמה (מחיקה ידנית / כרטיס SD שהוחלף) — מסירים
+    # כדי שלא תתפוס מקום במכסה לנצח ולא תוצג ב-?starred=1 כשורה מתה.
+    gone = [n for n in starred if not (REC_DIR / n).is_file()]
+    if gone:
+        for n in gone:
+            starred.pop(n, None)
         try:
-            if not p.with_suffix("").exists():
-                p.unlink()
+            _save_starred(starred)
         except OSError:
-            pass
+            log.warning("עדכון starred.json נכשל — יסונכרן בסריקה הבאה")
 
 
 def _scan_new_recordings(last_seen):
@@ -3373,9 +3648,39 @@ def _activity_watcher():
         time.sleep(WATCH_INTERVAL)
 
 
+def _decorate_event(ev, starred):
+    """מוסיף לאירוע יומן את שדות ההקלטה: קיום, כוכב, ומצב התמלול.
+    ⚠ `tx.state` הוא הלב של תיקון התמלול: 'none' (לא ניסינו) / 'pending'
+    (בתור או מתמלל כרגע) / 'ok' / 'empty' (נוסה, אין דיבור) / 'failed'
+    (נוסה ונכשל) הם חמישה מצבים שנראו למשתמש זהים לחלוטין קודם — שורה בלי
+    טקסט. `text` נשמר לתאימות לאחור עם קליינטים ישנים."""
+    name = str(ev.get("file") or "")
+    mp3 = REC_DIR / name if name else None
+    ev["exists"] = bool(name) and mp3.is_file()
+    ev["starred"] = bool(name) and name in starred
+    tx = {"state": "none", "text": None}
+    if name:
+        tx = dict(_read_tx(mp3))
+        if tx.get("state") == "none" and _tx_pending(name):
+            tx["state"] = "pending"
+    ev["tx"] = tx
+    ev["text"] = tx.get("text")
+    return ev
+
+
 @app.route("/api/activity")
 def api_activity():
-    """אירועי השידור האחרונים, חדש=>ישן. exists=False כשההקלטה כבר נמחקה ב-retention."""
+    """אירועי השידור האחרונים, חדש=>ישן. exists=False כשההקלטה כבר נמחקה ב-retention.
+    ‏?starred=1 => רק ההקלטות המסומנות, מתוך starred.json ולא מהיומן — כך הן
+    נשארות נגישות גם אחרי שהשורה שלהן קוצצה מ-activity.jsonl (ACTIVITY_KEEP)."""
+    starred = _load_starred()
+    if request.args.get("starred") in ("1", "true", "yes"):
+        rows = sorted(starred.values(),
+                      key=lambda e: e.get("ts") or 0, reverse=True)
+        events = [_decorate_event(dict(e), starred)
+                  for e in rows if isinstance(e, dict)]
+        return jsonify(ok=True, events=events, starred_only=True,
+                       count=len(events), max=REC_STAR_MAX_FILES)
     try:
         lines = ACTIVITY_PATH.read_text().splitlines()
     except OSError:
@@ -3394,15 +3699,106 @@ def api_activity():
         # נקרא בפולינג כל 15 שניות במצב קול, כך שזה 500 חוזר ולא תקלה חד-פעמית.
         if not isinstance(ev, dict):
             continue
-        ev["exists"] = bool(ev.get("file")) and (REC_DIR / str(ev["file"])).is_file()
-        ev["text"] = None
-        if ev.get("file"):
-            try:
-                ev["text"] = (REC_DIR / (str(ev["file"]) + ".txt")).read_text().strip() or None
-            except (OSError, ValueError):
-                pass   # אין תמלול (כבוי, עדיין מעובד, או נמחק) => None
-        events.append(ev)
-    return jsonify(ok=True, events=events)
+        events.append(_decorate_event(ev, starred))
+    return jsonify(ok=True, events=events, starred_count=len(starred),
+                   starred_max=REC_STAR_MAX_FILES)
+
+
+def _rec_name_arg():
+    """(name, error_response) — שם הקלטה מגוף הבקשה, מאומת מול תבנית השם.
+    ⚠ האימות מול _REC_NAME_RE הוא גם ההגנה מפני path traversal: השם חייב להיות
+    בדיוק airam_<תאריך>_<שעה>_<Hz>.mp3, כך שאין בו לוכסנים/נקודות-נקודה בכלל."""
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("file") or "")
+    if not _REC_NAME_RE.match(name):
+        return None, (jsonify(ok=False, error="שם הקלטה לא תקין"), 400)
+    return name, None
+
+
+@app.route("/api/recordings/star", methods=["POST"])
+def api_star():
+    """סימון/ביטול כוכב להקלטה. מסומנת = פטורה מ-retention (לא תימחק).
+    ⚠ שומרים את **רשומת האירוע** ולא רק את השם — כדי שההקלטה תישאר נגישה
+    ב-?starred=1 גם אחרי שהשורה שלה נעלמה מהיומן."""
+    name, err = _rec_name_arg()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    want = bool(data.get("starred", True))
+    mp3 = REC_DIR / name
+    starred = _load_starred()
+    if not want:
+        starred.pop(name, None)
+        _save_starred(starred)
+        return jsonify(ok=True, file=name, starred=False,
+                       count=len(starred), max=REC_STAR_MAX_FILES)
+    if not mp3.is_file():
+        return jsonify(ok=False, error="ההקלטה כבר לא קיימת"), 404
+    if name not in starred:
+        count, used = _star_usage(starred)
+        try:
+            size = mp3.stat().st_size
+        except OSError:
+            return jsonify(ok=False, error="ההקלטה כבר לא קיימת"), 404
+        # ⚠ מסרבים, לא מוחקים את הישן: המשתמש הגן על שתיהן במפורש, והבחירה
+        # מי מהן להסיר היא שלו. השגיאה אומרת בדיוק מה לעשות.
+        if count >= REC_STAR_MAX_FILES or used + size > REC_STAR_MAX_BYTES:
+            return jsonify(ok=False, count=count, max=REC_STAR_MAX_FILES,
+                           error=(f"מכסת ההקלטות השמורות מלאה ({count}/"
+                                  f"{REC_STAR_MAX_FILES}) — בטל סימון של הקלטה אחרת")), 409
+    ev = dict(data.get("event") or {}) if isinstance(data.get("event"), dict) else {}
+    try:
+        st = mp3.stat()
+    except OSError:
+        return jsonify(ok=False, error="ההקלטה כבר לא קיימת"), 404
+    # מקור-אמת לשדות: הקובץ עצמו (שם/mtime/גודל), לא מה שהלקוח שלח.
+    ev.update({"file": name, "ts": round(st.st_mtime, 1),
+               "freq": _rec_freq_mhz(name),
+               "dur": round(st.st_size / REC_BYTES_PER_SEC, 1),
+               "starred_at": round(time.time(), 1)})
+    starred[name] = ev
+    _save_starred(starred)
+    return jsonify(ok=True, file=name, starred=True,
+                   count=len(starred), max=REC_STAR_MAX_FILES)
+
+
+@app.route("/api/recordings/transcribe", methods=["POST"])
+def api_transcribe_one():
+    """תמלול לפי דרישה של שידור בודד — הדרך המהירה לראות תמלול בלי להריץ את
+    whisper על כל 200 ההקלטות. מחזיר מיד (התור מטופל ב-thread), וה-UI מציג
+    'מתמלל…' עד שה-sidecar נכתב."""
+    name, err = _rec_name_arg()
+    if err:
+        return err
+    if not (REC_DIR / name).is_file():
+        return jsonify(ok=False, error="ההקלטה כבר לא קיימת"), 404
+    bin_ok, model = _whisper_ready()
+    if not (bin_ok and model):
+        return jsonify(ok=False, tx=_tx_status(),
+                       error=("תמלול לא מותקן — הרץ על ה-Pi: "
+                              "INSTALL_WHISPER=1 sudo ./install.sh")), 501
+    data = request.get_json(silent=True) or {}
+    if not data.get("force") and _read_tx(REC_DIR / name).get("state") in ("ok", "empty"):
+        return jsonify(ok=True, file=name, tx=_read_tx(REC_DIR / name))
+    pos = _tx_enqueue(name)
+    if not pos:
+        return jsonify(ok=False, error="תור התמלול מלא — נסה שוב בעוד רגע"), 429
+    return jsonify(ok=True, file=name, queued=pos, tx={"state": "pending", "text": None})
+
+
+@app.route("/api/transcribe", methods=["GET", "POST"])
+def api_transcribe():
+    """GET — מצב מנגנון התמלול (מותקן? איזה מודל? כמה בתור?). זה מה שמאפשר
+    ל-UI לומר 'לא מותקן, הנה הפקודה' במקום פשוט לא להציג כלום.
+    ‏POST {auto: bool} — מתג "תמלל הכול אוטומטית" (נשמר ב-state, שורד reboot)."""
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        if "auto" not in data:
+            return jsonify(ok=False, error="חסר שדה auto"), 400
+        st = load_state()
+        st["transcribe_auto"] = bool(data.get("auto"))
+        save_state(st)
+    return jsonify(ok=True, tx=_tx_status())
 
 
 @app.route("/recordings/<name>")
@@ -4688,8 +5084,13 @@ if __name__ == "__main__":
     threading.Thread(target=_vdl2_listener, daemon=True).start()    # פיד UDP מ-dumpvdl2 (שקט בשאר המצבים)
     _load_satcom_history()                                          # היסטוריית SATCOM (לפני ה-listener, אין מרוץ)
     threading.Thread(target=_satcom_listener, daemon=True).start()  # פיד UDP מ-inmarsat-sniffer (שקט בשאר המצבים)
-    if TRANSCRIBE:   # תמלול ATC אופציונלי - דמון נפרד (לא חוסם את היומן/retention)
-        threading.Thread(target=_transcribe_worker, daemon=True).start()
+    # תמלול ATC — דמון נפרד (לא חוסם את היומן/retention). ⚠ עולה **תמיד**, גם
+    # בלי AIRAM_TRANSCRIBE: המשתנה קובע רק אם מתמללים *הכול* אוטומטית
+    # (DEFAULT_STATE["transcribe_auto"]), בעוד תמלול לפי דרישה ותמלול של
+    # הקלטות מסומנות עובדים בכל מקרה. ה-thread ישן כשwhisper לא מותקן ומזהה
+    # התקנה מאוחרת לבד — קודם הוא עשה return ומת, וזו הייתה אחת הסיבות
+    # שהפיצ'ר "לא עבד" בלי שאיש ידע (ר' _transcribe_worker).
+    threading.Thread(target=_transcribe_worker, daemon=True).start()
     adsb.start()   # רק כשרצים כשרת (לא בזמן import) - דמון, לא מעכב עלייה
     # threaded: סטרים /stream הוא חיבור ארוך-טווח => חייב לא לחסום בקשות אחרות
     app.run(host="0.0.0.0", port=8080, threaded=True)

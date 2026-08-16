@@ -666,6 +666,35 @@
     .act-tx { direction: ltr; text-align: left; color: var(--dim);
       font-size: .8rem; line-height: 1.45; padding: 0 0 .55rem; margin-top: -.15rem;
       word-break: break-word; }
+    /* מצב תמלול שאינו טקסט (לא נוסה / נכשל / אין דיבור) — RTL, ומובחן ויזואלית
+       מתמלול אמיתי: המשתמש חייב לדעת *למה* אין טקסט, לא רק שאין (§12). */
+    .act-tx.meta { direction: rtl; text-align: right; font-size: .76rem;
+      opacity: .75; font-style: italic; }
+    .act-tx.failed { color: var(--red); opacity: .9; font-style: normal; }
+    .act-tx .raw { display: block; direction: ltr; text-align: left;
+      opacity: .55; font-size: .72rem; margin-top: .15rem; }
+    .act-row button.star, .act-row button.tx {
+      flex: none; padding: .3rem .5rem; font-size: .85rem; line-height: 1;
+      border-radius: 999px; background: transparent; border: 1px solid var(--border);
+      color: var(--dim); min-height: 30px; }
+    .act-row button.star.on { color: #f5c542; border-color: #f5c54255;
+      background: #f5c5421a; }
+    .act-row button.tx.busy { opacity: .6; }
+    /* שורת מצב התמלול — הפער שבגללו הפיצ'ר "לא היה קיים": כשwhisper לא מותקן
+       מוצגת כאן פקודת ההתקנה המדויקת, במקום פשוט לא להציג כלום. */
+    .tx-bar { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+      font-size: .78rem; color: var(--dim); padding: .1rem 0 .45rem; }
+    .tx-bar code { direction: ltr; background: var(--panel-2); border-radius: 6px;
+      padding: .1rem .35rem; font-size: .74rem; color: var(--text); user-select: all; }
+    .tx-bar .sp { flex: 1; }
+    .tx-bar label { display: flex; align-items: center; gap: .35rem; cursor: pointer; }
+    .act-tools { display: flex; align-items: center; gap: .4rem; }
+    .act-tools .act-search { margin-bottom: 0; }
+    .act-tools button.filter { flex: none; padding: .5rem .6rem; font-size: .85rem;
+      border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border);
+      color: var(--dim); }
+    .act-tools button.filter.on { color: #f5c542; border-color: #f5c54255;
+      background: #f5c5421a; }
     .act-search {
       width: 100%; margin: 0 0 .3rem;
       font: inherit; font-size: .85rem; color: var(--text);
@@ -1353,15 +1382,20 @@
   <section class="panel p-activity">
     <div class="panel-hd"><p class="ttl">יומן שידורים</p></div>
     <div class="panel-tools">
-      <input id="actSearch" dir="auto" class="act-search" type="search"
-             placeholder="חיפוש בתמלול…" autocomplete="off" />
+      <div class="act-tools">
+        <input id="actSearch" dir="auto" class="act-search" type="search"
+               placeholder="חיפוש בשידורים ובתמלול…" autocomplete="off" />
+        <button type="button" id="actStarFilter" class="filter"
+                title="הצג רק הקלטות שמורות">⭐</button>
+      </div>
     </div>
     <div class="panel-bd">
+    <div class="tx-bar" id="txBar" hidden></div>
     <div class="activity" id="activity">
       <p class="hint" style="margin:0">עוד אין שידורים — היומן מתמלא כשהסקוולץ׳ נפתח.</p>
     </div>
     <p class="hint">כל שידור מוקלט אוטומטית ונשמר זמנית (~200 אחרונים) ·
-      במצב סקוולץ׳ "פתוח" (ATIS) אין הקלטה.</p>
+      ⭐ שומר הקלטה לצמיתות (לא תימחק) · במצב סקוולץ׳ "פתוח" (ATIS) אין הקלטה.</p>
     </div><!-- /panel-bd -->
   </section>
 
@@ -3093,10 +3127,130 @@
     const emptyActivityHTML = $("activity").innerHTML;   // הודעת "עוד אין" מה-markup
 
     let actEvents = [];   // נשמר כדי לסנן לפי חיפוש בלי למשוך שוב מהשרת
+    let starOnly = false; // ⭐ מציג רק הקלטות שמורות (נמשכות מ-?starred=1)
+    let txInfo = null;    // מצב מנגנון התמלול (/api/transcribe) — לשורת הסטטוס
+
+    /* מצב התמלול כטקסט לתצוגה. ⚠ זה הלב של תיקון הפיצ'ר: קודם *כל* המצבים
+       שאינם "יש טקסט" נראו זהים — שורה ריקה — ולכן המשתמש לא ידע אם התמלול
+       כבוי, עדיין רץ, או נכשל. אין כאן ניחוש: כל מחרוזת נגזרת מ-tx.state
+       שהשרת מדווח בפועל (§12). */
+    const TX_LABEL = {
+      pending: "⏳ מתמלל…",
+      empty:   "🔇 אין דיבור מזוהה בהקלטה",
+      failed:  "⚠ התמלול נכשל",
+    };
+
+    function txNode(ev) {
+      const st = (ev.tx && ev.tx.state) || "none";
+      if (st === "ok" && ev.text) {
+        const d = document.createElement("div");
+        d.className = "act-tx"; d.textContent = ev.text;
+        return d;
+      }
+      if (st === "none") return null;   // לא נוסה — הכפתור 📝 כבר מספר את זה
+      const d = document.createElement("div");
+      d.className = "act-tx meta" + (st === "failed" ? " failed" : "");
+      let txt = TX_LABEL[st] || "";
+      if (st === "failed" && ev.tx.err) txt += " — " + ev.tx.err;
+      d.textContent = txt;
+      // ⚠ סוננה הזיה של whisper => מציגים בכל זאת מה הוא פלט. לא מסתירים
+      // מהמשתמש את הפלט הגולמי, רק מסמנים שאינו אמין (§12).
+      if (st === "empty" && ev.tx.raw) {
+        const raw = document.createElement("span");
+        raw.className = "raw";
+        raw.textContent = "(המפענח פלט: " + ev.tx.raw + " — סונן כהזיה)";
+        d.appendChild(raw);
+      }
+      return d;
+    }
+
+    async function toggleStar(ev, btn) {
+      const want = !ev.starred;
+      btn.disabled = true;
+      try {
+        const res = await apiSend("POST", "/api/recordings/star",
+                                  { file: ev.file, starred: want });
+        const d = await res.json();
+        if (!d.ok) { showToast(d.error || "הסימון נכשל"); return; }
+        ev.starred = d.starred;
+        if (starOnly && !d.starred) actEvents = actEvents.filter((e) => e !== ev);
+        renderActivity();
+        showToast(d.starred ? "⭐ ההקלטה נשמרה — לא תימחק" : "הסימון בוטל");
+      } catch (e) { showToast("שגיאת רשת — הסימון לא נשמר"); }
+      finally { btn.disabled = false; }
+    }
+
+    async function requestTranscribe(ev, btn) {
+      btn.disabled = true; btn.classList.add("busy");
+      try {
+        const res = await apiSend("POST", "/api/recordings/transcribe",
+                                  { file: ev.file, force: (ev.tx || {}).state === "failed" });
+        const d = await res.json();
+        if (!d.ok) { showToast(d.error || "התמלול נכשל"); return; }
+        ev.tx = d.tx || { state: "pending" };
+        ev.text = ev.tx.text || null;
+        renderActivity();
+        if (ev.tx.state === "pending") pollActivitySoon();
+      } catch (e) { showToast("שגיאת רשת — התמלול לא נשלח"); }
+      finally { btn.disabled = false; btn.classList.remove("busy"); }
+    }
+
+    /* תמלול לוקח שניות בודדות; מרעננים כמה פעמים מהר במקום לחכות ל-15ש' הבאות. */
+    let txSoonTimer = null, txSoonLeft = 0;
+    function pollActivitySoon() {
+      txSoonLeft = 10;
+      if (txSoonTimer) return;
+      txSoonTimer = setInterval(() => {
+        if (--txSoonLeft <= 0) { clearInterval(txSoonTimer); txSoonTimer = null; }
+        if (!document.hidden) pollActivity();
+      }, 3000);
+    }
+
+    function renderTxBar() {
+      const bar = $("txBar");
+      if (!txInfo) { bar.hidden = true; return; }
+      bar.hidden = false;
+      bar.innerHTML = "";
+      if (!txInfo.available) {
+        // ⚠ ההודעה שחסרה קודם לגמרי: בלעדיה "לא מותקן" נראה כמו "אין מה להציג".
+        const s = document.createElement("span");
+        s.textContent = "📝 תמלול ATC לא מותקן — הרץ על ה-Pi: ";
+        const c = document.createElement("code");
+        c.textContent = txInfo.install_hint;
+        bar.append(s, c);
+        return;
+      }
+      const lbl = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox"; cb.checked = !!txInfo.auto;
+      cb.onchange = async () => {
+        cb.disabled = true;
+        try {
+          const res = await apiSend("POST", "/api/transcribe", { auto: cb.checked });
+          const d = await res.json();
+          if (d.ok) { txInfo = d.tx; renderTxBar(); if (d.tx.auto) pollActivitySoon(); }
+        } catch (e) { showToast("שגיאת רשת — המתג לא נשמר"); cb.checked = !cb.checked; }
+        finally { cb.disabled = false; }
+      };
+      lbl.append(cb, document.createTextNode("תמלל כל שידור אוטומטית"));
+      const sp = document.createElement("span");
+      sp.className = "sp";
+      const info = document.createElement("span");
+      // מסומנות בכוכב תמיד מתומללות — זה החיבור בין שני הפיצ'רים, וכדאי שיהיה גלוי.
+      info.textContent = txInfo.queue
+        ? "בתור: " + txInfo.queue
+        : "⭐ שמורות מתומללות תמיד · " + (txInfo.model_name || "");
+      bar.append(lbl, sp, info);
+    }
 
     function renderActivity() {
       const box = $("activity");
-      if (!actEvents.length) { box.innerHTML = emptyActivityHTML; return; }
+      if (!actEvents.length) {
+        box.innerHTML = starOnly
+          ? '<p class="hint" style="margin:0">אין הקלטות שמורות — סמן שידור ב-⭐ כדי שלא יימחק.</p>'
+          : emptyActivityHTML;
+        return;
+      }
       const q = ($("actSearch").value || "").trim().toLowerCase();
       const matches = actEvents.filter((ev) => {
         if (!q) return true;
@@ -3126,32 +3280,71 @@
         n.textContent = p ? p.name : "";
         const dur = document.createElement("span");
         dur.className = "dur"; dur.textContent = ev.dur ? fmtDur(ev.dur) : "";
+        row.append(t, f, n, dur);
+        if (ev.file) {
+          const star = document.createElement("button");
+          star.type = "button";
+          star.className = "star" + (ev.starred ? " on" : "");
+          star.textContent = ev.starred ? "★" : "☆";
+          star.title = ev.starred
+            ? "שמורה — לא תימחק. לחץ לביטול"
+            : "שמור הקלטה (לא תימחק ב-retention)";
+          star.onclick = () => toggleStar(ev, star);
+          row.appendChild(star);
+          // כפתור התמלול מוצג רק כשיש במה להשתמש בו — אחרת שורת הסטטוס למעלה
+          // כבר מסבירה שהכלי לא מותקן, ואין טעם בכפתור שתמיד ייכשל.
+          const st = (ev.tx && ev.tx.state) || "none";
+          if (ev.exists && txInfo && txInfo.available && st !== "ok" && st !== "pending") {
+            const tb = document.createElement("button");
+            tb.type = "button"; tb.className = "tx";
+            tb.textContent = "📝";
+            tb.title = st === "failed" ? "נסה לתמלל שוב" : "תמלל את השידור הזה";
+            tb.onclick = () => requestTranscribe(ev, tb);
+            row.appendChild(tb);
+          }
+        }
         const b = document.createElement("button");
         b.type = "button"; b.className = "play"; b.textContent = "▶";
         if (ev.exists && ev.file) b.onclick = () => playRecording(ev.file, b);
         else { b.disabled = true; b.title = "ההקלטה כבר נמחקה"; }
-        row.append(t, f, n, dur, b);
+        row.appendChild(b);
         item.appendChild(row);
-        if (ev.text) {   // תמלול ATC (whisper) - מוצג מתחת לשידור אם קיים
-          const tx = document.createElement("div");
-          tx.className = "act-tx"; tx.textContent = ev.text;
-          item.appendChild(tx);
-        }
+        const tx = txNode(ev);
+        if (tx) item.appendChild(tx);
         box.appendChild(item);
       }
     }
 
     async function pollActivity() {
       try {
-        const a = await fetchJSON("/api/activity");
+        const a = await fetchJSON("/api/activity" + (starOnly ? "?starred=1" : ""));
         if (!a.ok) return;
         actEvents = a.events;
         renderActivity();
       } catch (e) { /* offline - הסטטוס הראשי כבר מציג שגיאת רשת */ }
     }
+
+    async function pollTxStatus() {
+      try {
+        const d = await fetchJSON("/api/transcribe");
+        if (d.ok) { txInfo = d.tx; renderTxBar(); }
+      } catch (e) { /* offline — שורת הסטטוס פשוט לא מתעדכנת */ }
+    }
+
     $("actSearch").addEventListener("input", renderActivity);
+    $("actStarFilter").addEventListener("click", () => {
+      starOnly = !starOnly;
+      $("actStarFilter").classList.toggle("on", starOnly);
+      $("actStarFilter").title = starOnly ? "הצג את כל השידורים" : "הצג רק הקלטות שמורות";
+      actEvents = [];
+      renderActivity();
+      pollActivity();
+    });
     setInterval(() => { if (!document.hidden && appMode === "voice") pollActivity(); }, 15000);
+    // מצב התמלול משתנה רק בהתקנה/מתג => מספיק נדיר (וזול) בהרבה מהיומן עצמו.
+    setInterval(() => { if (!document.hidden && appMode === "voice") pollTxStatus(); }, 60000);
     pollActivity();
+    pollTxStatus();
 
     /* ---------- METAR ---------- */
     // פענוח בסיסי בלבד - רוח/ראות/טמפ'/לחץ; הגולמי תמיד מוצג למטה
@@ -3248,7 +3441,7 @@
       segSet("modeSeg", mode);
       renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acars/vdl2/satcom.active — עדכן בכל מעבר
       if (mode === "home") { renderHome(); pollSession(); }
-      if (mode === "voice") { pollActivity(); voiceFm.poll(); }   // רענון מיידי — לא לחכות עד 15ש'/3ש' ל-poll הבא
+      if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
       if (mode === "acars") acarsFm.poll();
       if (mode === "vdl2") vdl2Fm.poll();
       if (mode === "acars") acars.show(); else acars.hide();   // תצוגת ACARS מנוהלת בפקטורי (כמו VDL2/SATCOM)
