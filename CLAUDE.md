@@ -90,11 +90,11 @@ CLAUDE.md                   # ← המסמך הזה: ארכיטקטורה + פי
 webtune/
   app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, SATCOM, סריקה,
                             #   רוסטר מאוחד, מד שדה + בדיקת אנטנה, דוח סשן, REST API, יומן,
-                            #   הקלטות, תמלול, METAR, מדדי RF, מעבר מצבים, ארכיון חיפוש. ~3850 שורות.
+                            #   הקלטות, תמלול, METAR, מדדי RF, מעבר מצבים, ארכיון חיפוש. ~5200 שורות.
   adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS + סדרת סשן. thread נפרד.
                             #   ניתן להרצה ידנית: `python3 adsb.py [--selftest]`.
   static/
-    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~4500 שורות). PWA. 5 תצוגות:
+    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~5200 שורות). PWA. 5 תצוגות:
                             #   🏠 מרכז (בית/standby/scan, כולל דוח סשן+התראות) + קול + ACARS +
                             #   VDL2 + SATCOM. ACARS/VDL2/SATCOM שלושה מופעים סימטריים של אותו
                             #   פקטורי createDataView (ר' §7); מד השדה — פקטורי מקביל, שני.
@@ -139,6 +139,9 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_roster.py           # רוסטר מטוסים מאוחד: היתוך זהות ACARS/VDL2/ADS-B, מיון, /api/aircraft.
   test_archive.py          # ארכיון חיפוש רב-יומי: _day_bounds, ?day= ב-/api/acars ו-/api/vdl2.
   test_adsb_enrich.py      # היתוך ADS-B↔ACARS: העשרת /api/acars מ-snapshot של adsb.py (בלי רשת).
+  test_recordings.py       # ★ שמירת הקלטות (saved/, מכסה תחת מרוץ-מקביל, ?starred=1, ZIP) +
+                           #   תמלול (5 מצבי tx.state, תור מבוסס-sidecar ששורד restart, שתי
+                           #   שפות/מודלים, fallback מודל, retention עמיד ל-stat שנכשל).
   test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
   test_signal.py           # מד שדה: _signal_verdict, /api/signal (voice/acars/vdl2/satcom/off), /api/antenna/check.
   test_session.py          # דוח סשן: _interest_score, /api/session, /api/session/ack, adsb.session_series.
@@ -163,13 +166,14 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
 | `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain (`--sdrplay-gain=N` או ריק=AGC), bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline`, `last_session_view_at`) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
 | `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
 | `/var/lib/airam/satcom.jsonl` | היסטוריית SATCOM (שורדת restart, retention 5000) | _satcom_listener |
 | `/var/lib/airam/activity.jsonl` | יומן שידורים (retention 500) | _activity_watcher |
-| `/var/lib/airam/recordings/` | הקלטות MP3 (200 קבצים / 100MB) | rtl_airband, נמחק ע"י app.py |
+| `/var/lib/airam/recordings/` | הקלטות MP3 (200 קבצים / 100MB) + sidecar תמלול `<file>.mp3.tx.json` | rtl_airband, נמחק ע"י app.py |
+| `/var/lib/airam/recordings/saved/` | הקלטות **שמורות** (★) — **תת-תיקייה, לא רשימה בקובץ צד**. עד 100 קבצים / 100MB, פטורות לגמרי מ-`_sweep_recordings` (‏`glob("*.mp3")` אינו רקורסיבי — הפטור מגיע ב*אפס* שורות לוגיקה, ר' §5/§12) | app.py (`/api/recordings/star`) |
 | `/run/rtl_airband_stats.txt` | מדדי RF (tmpfs, ~1Hz) | rtl_airband |
 
 ---
@@ -360,7 +364,29 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   `_restore_after_probe` (הלב של `POST /api/antenna/check`: מעבר זמני לקול,
   מדידה, שחזור המצב הקודם — best-effort גם בכישלון, לא נוגע ב-`state["app_mode"]`).
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
-  `_transcribe_worker` (thread whisper אופציונלי), `_sweep_recordings` (retention).
+  `_sweep_recordings` (retention — **לא רואה `saved/` בכלל**, ר' למטה).
+- **הקלטות שמורות (★) + תמלול — שני פיצ'רים מחוברים:** הפטור מ-retention הוא
+  **מיקום הקובץ**, לא רשומה במאגר-מצב: `_saved_dir()` (`REC_DIR/saved/`),
+  `_rec_path`/`_is_saved` (מחפשים בשתי התיקיות), `_rec_event` (בונה שורת-יומן
+  **מהקובץ עצמו** — מקור-אמת יחיד, משותף בין היומן החי ל-`?starred=1`),
+  `_saved_usage` (אכיפת המכסה `REC_STAR_MAX_FILES`/`REC_STAR_MAX_BYTES`),
+  `_move_recording` (`os.replace` אטומי + קובצי-הצד), `api_star`
+  (`POST /api/recordings/star`, תחת `_STAR_LOCK` — **מסרב** ב-409 כשהמכסה מלאה
+  במקום למחוק שמורה ותיקה), `api_starred_zip` (`GET /api/recordings/starred.zip`,
+  `ZIP_STORED` — הכרטיס SD יכול למות, זו הדרך להוציא את השמורות), `_rec_name_arg`
+  (אימות שם מול `_REC_NAME_RE` = גם הגנת path traversal), `_decorate_event`
+  (מוסיף לאירוע יומן `exists`/`starred`/`tx`). **תמלול:** `_tx_path` (sidecar
+  `<file>.mp3.tx.json`), `_read_tx`/`_write_tx` (חמישה מצבי `state`, ר' §12),
+  `_transcript_path` (ה-`.txt` הישן — קריאה בלבד, תאימות), `WHISPER_MODELS`/
+  `_whisper_model(lang)` (שני מודלים — `small.en` לאנגלית, `small` הרב-לשוני
+  לעברית; `None` כשאין מודל מתאים לשפה, לא ניחוש), `_whisper_ready`/`_tx_status`
+  (זמינות **חיה**, כולל `langs` פר-שפה), **תור מבוסס-sidecar** (`state="pending"`,
+  לא רשימה בזיכרון — שורד restart; `_tx_queue_len`/`_tx_busy_file`/`_TX_FAILS`),
+  `_tx_next_target` (סדר עדיפויות: `pending` → שמורות (★, תמיד) → הכול אם
+  `state["transcribe_auto"]`; מדלג על קובץ אחרי `TX_MAX_FAILS` כשלונות-כתיבה
+  רצופים — מגן מלולאת whisper אינסופית כשהדיסק מלא), `_transcribe_file`
+  (מחזיר `(state, text, err)`, `nice -n 19` על שני התהליכים — **לא סינון-תוכן**,
+  ר' §12), `_transcribe_worker` (thread יחיד, **לא מת** כשwhisper חסר — ר' §12).
 - **`__main__`:** מרים את thread השחזור `_boot_restore` (מחזיר את המצב השמור, כולל
   שכתוב קונפיג ישן בשדרוג — `_config_stale`) + `_mode_reconcile_loop` (thread
   נפרד, רץ לאורך כל הסשן — לא רק פעם אחת באתחול כמו `_boot_restore`: כל
@@ -506,6 +532,28 @@ renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitAr
 `liveSnapshot` ומחדש polling. `show()` **לא** מחדש polling אם `archiveDay` עדיין
 מוגדר (מעבר בין תצוגות תוך כדי עיון בארכיון לא "שובר" אותו בטעות בחזרה).
 
+**יומן השידורים (תצוגת קול):** כל שורה כוללת ★/☆ (סימון/ביטול שמירה — `toggleStar`,
+36px, `--amber`/`--amber-rgb` ולא hex קשיח — טוקן מוגדר ל-light *ו*-dark, בניגוד
+לגרסה קודמת שהייתה בלתי-נראית בשמש). **כפתור התמלול (📝) אינו בשורה** — הוא חלק
+משורת ה-meta שמתחתיה (`txMetaNode`, ר' למטה): זה גם פותר גלישת-שורה בטלפון צר
+(‏★+שם-ארוך+תאריך לא נכנסו יחד ב-360px בגרסה קודמת — `.act-row` עם `flex-wrap`
+כרשת-ביטחון נוספת) וגם נותן ל-📝 את ההקשר הטבעי שלו (השורה שכבר מסבירה *למה*
+אין תמלול). `txNode(ev)` מנסח את `ev.tx.state` — **כולל המצבים שאינם טקסט**
+("⏳ מתמלל…"/"⏳ ממתין בתור…" מבדיל `running` על סמך `tx.busy`, "🔇 לא זוהה דיבור",
+"⚠ התמלול נכשל — סיבה") — RTL קבוע (שפת המערכת), בעוד תמלול אמיתי (`.act-tx`)
+הוא LTR לאנגלית / `dir="rtl"` לעברית (`ev.tx.lang`). `err`/`raw` עוברים דרך
+`<bdi>` (`unicode-bidi: isolate`) כדי שטקסט אנגלי/stderr בתוך משפט עברי לא ייקרא
+בסדר הפוך. **אין יותר סינון-הזיות** בשרת (§12) — כל מה שwhisper פלט מוצג כפי שהוא.
+`renderTxBar` (מ-`GET /api/transcribe`, פולינג 60ש') מציג את פקודת ההתקנה כשwhisper
+חסר (`sudo INSTALL_WHISPER=1 ./install.sh` — הסדר קריטי, `sudo` מאפס env),
+בורר שפה (`<select>`, מדווח "מודל חסר" כשאין מודל לשפה), מתג "תמלל כל שידור
+אוטומטית", וכפתור הורדת-ZIP של השמורות (`GET /api/recordings/starred.zip`)
+כשיש לפחות שמורה אחת. `pollActivitySoon` מרענן כל 3ש' למשך ~30ש' אחרי בקשת
+תמלול. כפתור ★ ליד החיפוש מחליף את הפיד ל-`GET /api/activity?starred=1`
+(`starMeta`/`starMetaVersion` — **גרסה, לא רק ערך**: פולינג שיצא *לפני* סימון
+מוצלח אבל מגיע *אחרי* התשובה שלו לא ידרוס אותה — "מנצח לפי סדר יציאה", לא
+לפי סדר הגעה; הוכח ב-Playwright עם דחיית-תגובה מכוונת ותוקן).
+
 > בעריכת ה-UI: שמור על polling קל, על נפילה חיננית בלי רשת, ועל RTL/עברית נכונה.
 > שינוי שנוגע לכל תצוגות-הדאטה — ערוך את הפקטורי `createDataView` (מקום אחד, שלושת
 > המופעים יורשים); שינוי ACARS-only/VDL2-only/SATCOM-only בלבד — דרך `opts`
@@ -570,8 +618,12 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | POST | `/api/session/ack` | מקדם את הסמן (`state["last_session_view_at"]`) ל"עכשיו" — הפעולה המפורשת היחידה שמקדמת אותו. דרך `_guard` |
 | GET | `/api/signal` | מד שדה מאוחד למצב שרץ *בפועל* כרגע: רציף בקול (`_read_voice_metrics`), "הודעה אחרונה בלבד" ב-ACARS/VDL2 (`level`+`snr` — ACARS לעולם בלי `snr`, ר' §12), הפניה ל-`/api/satcom/health` ב-SATCOM. `verdict` (`ok`/`below_baseline`/`no_baseline`/`unknown`) תמיד מול `state["signal_baseline"]` בלבד — לעולם לא סף מומצא |
 | POST | `/api/antenna/check` | בדיקת אנטנה בת ~3 שניות: מעבר זמני לקול (AGC, סקוולץ' פתוח) בתדר המבוקש, מדידת רצפת רעש אמיתית (`_sample_probe_stats`), וחזרה למצב הקודם (`_restore_after_probe`, גם בכישלון). `calibrate:true` שומר את התוצאה כ-`signal_baseline`. לא נוגע ב-`state["app_mode"]` — פעולת אבחון, לא מעבר-מצב. סריאלי תחת `TUNE_LOCK`; 409 כשתפוס |
-| GET | `/api/activity` | יומן שידורים |
-| GET | `/recordings/<name>` | קובץ הקלטה MP3 |
+| GET | `/api/activity` | יומן שידורים. כל אירוע כולל `exists`, `starred`, ו-`tx` (‏`{state, text, err?, raw?, filtered?}` — ר' §12). `?starred=1` => רק ההקלטות המסומנות, **מ-`starred.json` ולא מהיומן** (שורדות את קיצוץ `ACTIVITY_KEEP`) |
+| POST | `/api/recordings/star` | `{file, starred}` — שמירה/ביטול (★, מעביר ל/מ-`saved/`, `os.replace` אטומי תחת `_STAR_LOCK`). שמורה פטורה מ-retention. 409 כשהמכסה מלאה (**לא מוחקים שמורה ותיקה**), 404 כשההקלטה כבר לא קיימת. דרך `_guard` |
+| POST | `/api/recordings/transcribe` | `{file, lang?}` — תמלול שידור בודד לפי דרישה (כותב sidecar `state="pending"` — שורד restart, לא תור-בזיכרון). 501 עם פקודת ההתקנה כשwhisper/המודל לשפה חסר. דרך `_guard` |
+| GET | `/api/recordings/starred.zip` | ZIP של כל ההקלטות השמורות + תמלוליהן (`ZIP_STORED`, ללא דחיסה — MP3 כבר דחוס). 404 כשאין שמורות. הדרך להוציא את השמורות לפני מוות של כרטיס SD |
+| GET/POST | `/api/transcribe` | GET: מצב המנגנון (`available`/`model_name`/`lang`/`langs`/`auto`/`queue`/`install_hint`) — זה מה שמאפשר ל-UI לומר "לא מותקן, הנה הפקודה". POST `{auto?, lang?}`: מתג "תמלל הכול" ו/או שפת תמלול (שניהם ב-state). דרך `_guard` |
+| GET | `/recordings/<name>` | קובץ הקלטה MP3 — מחפש בתיקייה החיה ואז ב-`saved/` |
 | GET | `/api/metrics` | מדדי RF (SNR/signal/noise מ-stats_filepath) |
 | GET | `/api/airspace` | מסלול פעיל + שיבוש GPS (מ-adsb.py) |
 | GET | `/api/power` | מתח/טמפ' ה-Pi (`vcgencmd`), מוגש מ-cache בן ~2 שניות (`_POWER_TTL`) |
@@ -644,7 +696,9 @@ releases רשמיים לפרויקט — חתימת בנייה נכתבת *רק*
 **9 פקודות systemctl**: restart/stop × rtl_airband/airam-acars/airam-vdl2/
 airam-satcom, ועוד `reset-failed` ל-airam-satcom בלבד (מנקה תקרת-הפעלות אחרי
 קריסה — ר' §12); seeding של `acars.env`+`vdl2.env`+`satcom.env`). 7. שרת הווב
-(7b: תמלול whisper אופציונלי, `INSTALL_WHISPER=1`). 8. שירותי systemd —
+(7b: תמלול whisper אופציונלי, `sudo INSTALL_WHISPER=1 ./install.sh` — ⚠ הסדר
+קריטי: `INSTALL_WHISPER=1 sudo ...` נבלע בשקט, `sudo` מאפס env כברירת מחדל
+ב-Debian; שני מודלים — `small.en`+`small`, ר' §5/§12). 8. שירותי systemd —
 **enabled רק `sdrplay`+`airam-web`**; אף צרכן SDR (כולל rtl_airband) לא
 enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב משוחזר באתחול ע"י
 `_boot_restore` של airam-web — **חוץ מ-satcom**, שלא משוחזר אוטומטית מסיבות
@@ -800,6 +854,61 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   טקסט-פענוח** (עדיין `None` בפועל, לא ניחוש-תוכן) — אבל *כן* חושפים עובדה אמיתית
   שקיימת במבנה (הניסיון-שנכשל עצמו), כי הסתרתה גם היא סוג של הטעיה (המשתמש
   לא יכול להבדיל "המפענח לא תמך בזה" מ"האיתות היה חלש מדי הפעם").
+- **⚠ אותו עיקרון, הפעם בפיצ'ר שלנו: תמלול ATC היה בלתי-נראה כי ארבעה מצבים
+  הוצגו זהים.** משתמש דיווח שמעולם לא ראה תמלול — ובדיקה הראתה שהפיצ'ר "עבד"
+  אבל **לא היה שום ערוץ שבו הוא יכול לדווח על עצמו**: `/api/activity` החזיר
+  `text: null` בלבד, ולכן "whisper לא מותקן", "עדיין בתור", "פוענח ואין דיבור"
+  ו-"הפענוח נכשל" נראו כולם כשורה בלי טקסט. בנוסף, ה-worker עשה `return` **ומת**
+  כשהבינארי חסר בעלייה, כך שהתקנה מאוחרת לא הורגשה עד restart. **תוקן**: sidecar
+  ‏`<file>.mp3.tx.json` עם `state` מפורש (`none` = לא ניסינו · `pending` · `ok` ·
+  `empty` = נוסה ואין דיבור · `failed` + `err`), זמינות **נבדקת חיה בכל מחזור**
+  ולא פעם אחת, ושורת סטטוס ב-UI שמציגה את פקודת ההתקנה. **הלקח:** "לא ניסינו ≠
+  ניסינו ונכשלנו" אינו כלל על *פענוח רדיו* בלבד — הוא חל על כל דיווח-מצב שלנו
+  למשתמש. פיצ'ר שאין לו דרך לומר "אני כבוי/חסר/נכשלתי" הוא, מבחינת המשתמש,
+  פיצ'ר שלא קיים.
+- **⚠ regression בגרסה הראשונה של הסינון עצמו — נמחק לגמרי, לא רק תוקן.**
+  ניסיון ראשון לסנן הזיות-whisper-על-רעש (blocklist מילולי) נבדק ע"י ביקורת
+  אדוורסרית ונמצא **הוא עצמו** מפר את §12: הנרמול מחק ספרות מהטקסט לפני
+  ההשוואה, כך ש-`"Thank you, 385"` (מסירת תדר שגרתית במגדל) ו-`"Okay, 03"`
+  (אישור קליטה) סוננו — **והוצגו למשתמש כ"סונן כהזיה"**, טענה שלא הייתה לה שום
+  הוכחה. זו לא הייתה המצאת-ערך (§12 הרגיל) אלא **המצאת-פסילה**: לא ניחשנו
+  תוכן, ניחשנו שתוכן-אמיתי הוא רעש. **התיקון: הוסר הסינון כליל.** אין
+  `WHISPER_NOISE_PHRASES`, אין `_tx_is_noise` — `_transcribe_file` מחזיר את מה
+  ש-whisper פלט, בלי שיפוט. הסינון היחיד שנשאר הוא `TX_MIN_SEC` (גודל קובץ —
+  עובדה מדידה, לא ניחוש-תוכן). **הלקח:** blocklist מילולי על תוכן קצר וסטנדרטי
+  (ATC כמעט כולו כזה) הוא סיכון-גבוה במיוחד — כל מילה חוקית עלולה להיות גם
+  התחלה של תשדורת אמיתית.
+- **★ הקלטות שמורות: תת-תיקייה (`saved/`), לא מאגר-מצב מקביל לקבצים.**
+  גרסה ראשונה ניהלה `starred.json` — רשימת-פטורים ש-`_sweep_recordings` קרא
+  כדי לדעת מה לא למחוק. ביקורת אדוורסרית הוכיחה (לא ניחשה) שלוש משפחות-כשל
+  מאותה בחירה: (1) **fail-open** — קובץ פגום/לא-קריא הוחזר כ-`{}` (=אין
+  שמורות), ו-`_sweep_recordings` **מחק בדיוק את ההקלטות שהמשתמש הגן עליהן**,
+  בניגוד ישיר ללוג-האזהרה שהבטיח שהן לא ייפגעו; (2) **מרוץ**: סימון שהצליח
+  (`ok:true`) יכול היה להימחק מיד ע"י `_sweep_recordings` שקרא snapshot ישן
+  לפני שהכתיבה הספיקה; (3) **read-modify-write בלי נעילה** בשני כיוונים —
+  ביטול-סימון שהתבטל מעצמו, ו-20 בקשות מקבילות על מכסה-5 שקיבלו 20 תשובות
+  `ok:true` בזמן ש-2 בלבד נשמרו בפועל (מכסה עקיפה + תשובה שקרית). **התיקון:**
+  שמורה יושבת פיזית ב-`REC_DIR/saved/`. `glob("*.mp3")` אינו רקורסיבי, כך
+  שהפטור מ-`_sweep_recordings` מגיע ב**אפס שורות לוגיקה** — אין רשימה לקרוא,
+  אין מה לפגום, אין עם מה להתחרות. `_STAR_LOCK` (יחיד, כמו `_METAR_LOCK`)
+  מגן על בדיקת-המכסה+ה-`os.replace` כיחידה אטומית אחת, כך שמקבילות לא עוקפת
+  את המכסה. **הלקח:** מאגר-מצב שמשקף "מה נמצא היכן על הדיסק" הוא סיכון
+  מובנה — הקובץ *הוא* המצב שלו; ברגע שיש שני מקורות-אמת (מיקום הקובץ + רשומה
+  עליו), הם *יתפרדו*, השאלה רק מתי.
+- **⚠ retention עמיד ל-symlink/EACCES על קובץ בודד — לא רק על התיקייה כולה.**
+  ‏`sorted(glob(...), key=p.stat().st_mtime)` עטוף ב-`try/except OSError: return`
+  *סביב כל הקריאה* הוא רגרסיה שקטה: `stat()` שנכשל על קובץ **אחד** (symlink
+  שבור, הרשאה) מפיל את כל ה-`sorted` וה-retention **מפסיק לגמרי** בלי שגיאה
+  גלויה — הכרטיס מתמלא בשקט. התיקון: ה-`key` עצמו בולע כשל-פר-פריט (`try:
+  ...except OSError: return 0.0`), כך שקובץ בעייתי אחד פשוט ממוין כ"הכי ישן"
+  ולא מפיל את התהליך. אותו דפוס ב-`_scan_new_recordings`/`_tx_next_target`.
+- **⚠ תור בזיכרון לא שורד restart — בדיוק הבאג ש-§12 בא לתקן, שוב.** גרסה
+  ראשונה של "תמלל לפי דרישה" שמרה את הבקשה ברשימת-Python (`_TX_QUEUE`).
+  ‏`systemctl restart airam-web` (עדכון קוד, קריסה, reboot) איפס אותה, וההקלטה
+  חזרה להיראות **בדיוק כמו "לא ניסינו"** — למרות שהמשתמש ביקש וחיכה. התיקון:
+  הבקשה נכתבת כ-sidecar `state="pending"` על הדיסק; `_tx_next_target` בוחר
+  קודם כל `pending`. שורד restart מהגדרה, כי הוא הקובץ עצמו, לא מבנה-נתונים
+  שגר בתהליך.
 - **⚠ `decode_failed=True` חייב לחסום גם חילוץ נתונים, לא רק להוסיף הודעת-כישלון
   ל-`decoded` — regression אמיתי שקרה בפועל.** כשהוספנו לראשונה את `decode_failed`
   (הבולט הקודם), חילוץ המיקום מ-ADS-C (`_scan_latlon`) המשיך לרוץ *ללא תלות* בדגל

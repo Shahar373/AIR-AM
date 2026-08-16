@@ -480,11 +480,19 @@ cp "$REPO_DIR/udev/99-airam.rules" /etc/udev/rules.d/
 udevadm control --reload-rules 2>/dev/null || true
 
 # ----------------------------------------------------------------------------
-# 7b. תמלול ATC (אופציונלי) - whisper.cpp + מודל base.en
-#     הפעלה:  INSTALL_WHISPER=1 sudo ./install.sh   (בנייה ארוכה => לא ברירת מחדל)
+# 7b. תמלול ATC (אופציונלי) - whisper.cpp + שני מודלים (אנגלית + רב-לשוני)
+#     הפעלה:  sudo INSTALL_WHISPER=1 ./install.sh   (בנייה ארוכה => לא ברירת מחדל)
+#     ⚠ הסדר חשוב: `INSTALL_WHISPER=1 sudo ...` (המשתנה *לפני* sudo) נבלע —
+#     ל-sudo ב-Debian יש env_reset כברירת מחדל, וההתקנה מדלגת בשקט. app.py
+#     מציג את הצורה הנכונה ב-UI (INSTALL_WHISPER_HINT) — אל תסתור אותה כאן.
+#     ⚠ small (לא base): אודיו AM צר-סרט ורועש עם פרזיולוגיית ATC — base מייצר
+#     שם הזיות ושגיאות תדירות. שני מודלים ולא אחד: `small.en` (אנגלית-בלבד,
+#     מדויק יותר באנגלית) ל-ATC בנתב"ג, ו-`small` הרב-לשוני לעברית — מודל .en
+#     לא יכול לתמלל עברית בכלל, לא "פחות טוב". ~1GB יחד, זניח על כרטיס 32GB+.
+#     התקנה קיימת עם base.en בלבד ממשיכה לעבוד — app.py נופל אליו (_whisper_model).
 # ----------------------------------------------------------------------------
 if [[ "${INSTALL_WHISPER:-0}" == "1" ]]; then
-  log "מתקין תמלול ATC (whisper.cpp + base.en) - עשוי לקחת כמה דקות ..."
+  log "מתקין תמלול ATC (whisper.cpp + small.en + small) - עשוי לקחת כמה דקות ..."
   apt-get install -y ffmpeg
   WHISPER_SRC="$BUILD_DIR/whisper.cpp"
   [[ -d "$WHISPER_SRC" ]] || git clone --depth 1 https://github.com/ggml-org/whisper.cpp "$WHISPER_SRC"
@@ -492,16 +500,29 @@ if [[ "${INSTALL_WHISPER:-0}" == "1" ]]; then
   cmake --build "$WHISPER_SRC/build" -j"$(nproc)" --target whisper-cli
   install -m755 "$WHISPER_SRC/build/bin/whisper-cli" /usr/local/bin/whisper-cli
   mkdir -p /opt/airam/models
-  MODEL="/opt/airam/models/ggml-base.en.bin"
-  [[ -f "$MODEL" ]] || curl -fL --retry 3 -o "$MODEL" \
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+  # הורדה לקובץ זמני ואז mv: הורדה שנקטעה (רשת/חשמל) לא משאירה מודל חתוך
+  # שwhisper ייכשל עליו בכל הרצה מבלי שאיש יבין למה.
+  for MFILE in ggml-small.en.bin ggml-small.bin; do
+    MODEL="/opt/airam/models/$MFILE"
+    if [[ ! -f "$MODEL" ]]; then
+      curl -fL --retry 3 -o "$MODEL.part" \
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$MFILE" \
+        && mv -f "$MODEL.part" "$MODEL" \
+        || { rm -f "$MODEL.part"; die "הורדת מודל התמלול ($MFILE) נכשלה."; }
+    fi
+  done
   chown -R airam:airam /opt/airam/models
-  # הפעלת התמלול בקובץ ה-environment (אידמפוטנטי)
-  grep -q '^AIRAM_TRANSCRIBE=' /etc/airam/airam.env 2>/dev/null || \
-    printf 'AIRAM_TRANSCRIBE=1\n' >> /etc/airam/airam.env
-  log "תמלול ATC הופעל (לכבות: ערוך /etc/airam/airam.env והסר AIRAM_TRANSCRIBE)."
+  # ⚠ אימות שהכלים באמת עובדים — לא רק שהקבצים קיימים. כך כשל בנייה/הורדה
+  # מתגלה עכשיו, ולא בתור "התמלול פשוט לא מופיע" חודש אחרי. `nice` נדרש
+  # ב-runtime (app.py: WHISPER_NICE) כדי שהתמלול ייסוג מפני הרדיו — הוא חלק
+  # מ-coreutils וכמעט תמיד קיים, אבל נבדק כאן במפורש ולא מונח כמובן מאליו.
+  command -v ffmpeg >/dev/null || die "ffmpeg לא הותקן — התמלול לא יעבוד."
+  command -v nice >/dev/null || die "nice לא נמצא (חלק מ-coreutils) — נדרש לתעדוף CPU."
+  /usr/local/bin/whisper-cli --help >/dev/null 2>&1 || die "whisper-cli לא רץ — בדוק את הבנייה."
+  log "תמלול ATC מותקן (אנגלית + עברית). שליטה מלאה מהממשק (יומן השידורים):"
+  log "שפה, 'תמלל הכול אוטומטית', תמלול לפי דרישה (📝), הקלטות שמורות (★) — עובדים תמיד."
 else
-  log "תמלול ATC לא הותקן (להפעלה: INSTALL_WHISPER=1 sudo ./install.sh)."
+  log "תמלול ATC לא הותקן (להפעלה: sudo INSTALL_WHISPER=1 ./install.sh)."
 fi
 
 # ----------------------------------------------------------------------------
