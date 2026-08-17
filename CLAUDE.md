@@ -148,12 +148,16 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_session.py          # דוח סשן: _interest_score, /api/session, /api/session/ack, adsb.session_series.
   test_replay_buffer.py    # שחזור-סשן שלב 1: buffer מתגלגל (append/compaction/gap-rows,
                            #   מטוס משובש נשמר עם lat/lon=None ולא מדולג) + GET /api/replay/buffer.
+  test_sessions.py         # שחזור-סשן שלב 2: POST/GET /api/sessions, GET/DELETE
+                           #   ‏/api/sessions/<id>, /track, /clips/<name>, /export.zip —
+                           #   כולל שמורה (★) מועתקת מול לא-שמורה מועברת, חיתוך minutes
+                           #   ל-TRACK_BUFFER_MIN, path-traversal ב-<id>/<name>.
 
 docs/                       # מסמכי תכנון/החלטות. מתעדים *למה* — ומה נדחה ועל סמך מה.
   field-station-roadmap.md  # מפת הדרכים שהובילה למד השדה, דוח הסשן ורוסטר המטוסים.
   satcom-feasibility.md     # היתכנות ואפיון מצב SATCOM (מומש).
-  session-replay-design.md  # ★ תכנון "שחזור סשן" (מפה+אודיו על ציר זמן). **טרם מומש** —
-                            #   ר' §11 שם לשלבי המימוש, ו-§7.4 לאימות שחייב לקרות על ה-Pi תחילה.
+  session-replay-design.md  # ★ תכנון "שחזור סשן" (מפה+אודיו על ציר זמן). שלבים 0–2 בוצעו
+                            #   (buffer מתגלגל + POST /api/sessions) — ר' §11 למימוש שנותר (UI).
 
 .github/workflows/ci.yml   # pytest + `bash -n` על install.sh ו-airam-wait-sdrplay.
 ```
@@ -184,6 +188,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | `/var/lib/airam/track.jsonl` | buffer מתגלגל של ADS-B ל-שחזור-סשן (90 דק', append גולמי + compaction נדיר — **לא** כתיבה-אטומית-על-כל-שורה, ר' §6) | adsb.py |
 | `/var/lib/airam/recordings/` | הקלטות MP3 (500 קבצים / 100MB) + sidecar תמלול `<file>.mp3.tx.json` | rtl_airband, נמחק ע"י app.py |
 | `/var/lib/airam/recordings/saved/` | הקלטות **שמורות** (★) — **תת-תיקייה, לא רשימה בקובץ צד**. עד 100 קבצים / 100MB, פטורות לגמרי מ-`_sweep_recordings` (‏`glob("*.mp3")` אינו רקורסיבי — הפטור מגיע ב*אפס* שורות לוגיקה, ר' §5/§12) | app.py (`/api/recordings/star`) |
+| `/var/lib/airam/sessions/<id>/` | סשן שמור (שחזור-סשן שלב 2) — `meta.json` (אטומי), `track.jsonl.gz` (חתך `track.jsonl` בטווח), `clips/*.mp3` (הקלטות רלוונטיות — שמורה מ*עתיקה*, לא-שמורה מ*ועברת*). אין retention אוטומטי — מחיקה היא `DELETE /api/sessions/<id>` בלבד | app.py (`POST /api/sessions`) |
 | `/run/rtl_airband_stats.txt` | מדדי RF (tmpfs, ~1Hz) | rtl_airband |
 
 ---
@@ -397,6 +402,21 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   רצופים — מגן מלולאת whisper אינסופית כשהדיסק מלא), `_transcribe_file`
   (מחזיר `(state, text, err)`, `nice -n 19` על שני התהליכים — **לא סינון-תוכן**,
   ר' §12), `_transcribe_worker` (thread יחיד, **לא מת** כשwhisper חסר — ר' §12).
+- **שחזור-סשן (שלב 2, `docs/session-replay-design.md`) — שימוש חוזר מכוון בדפוסי
+  ★:** `_new_session_id`/`_session_dir` (מזהה=תאריך-שעה, `SESSION_ID_RE` הוא גם
+  הגנת path traversal, ממש כמו `_REC_NAME_RE`), `api_sessions` (dispatcher
+  ל-`GET`/`POST /api/sessions` — POST חותך `minutes` ל-`adsb.TRACK_BUFFER_MIN`,
+  קורא `adsb.read_track_slice`, ובונה את `sessions/<id>/`: קליפ **שמור מ*עתיק***
+  (`shutil.copy2` — נשאר גם מוגן ב-`saved/`), קליפ **רגיל מ*ועבר*** (`_move_recording`
+  הקיים — משתחרר מ-`_sweep_recordings` בדיוק כמו ★, ר' §4.4 בתכנון), `track.jsonl.gz`
+  נכתב עם `gzip.open`+`os.replace`, `meta.json` עם `_atomic_write`; `app_mode`/`freq`
+  הם תמונת-מצב *נוכחית* (מ-`load_state()`), לא היסטוריית-מעברים — אין ל-AIR-AM
+  יומן כזה, סטייה מתועדת מהתכנון המקורי), `api_session_detail` (dispatcher
+  ל-`GET`/`DELETE /api/sessions/<id>`), `api_session_track`
+  (מפענח `track.jsonl.gz` ל-JSON), `api_session_clip` (route ייעודי, לא הרחבת
+  ‏`/recordings/<name>`), `api_session_export` (`GET .../export.zip`, אותו דפוס
+  בדיוק כמו `api_starred_zip`). **בלי retention אוטומטי לסשנים** — מחיקה היא
+  ‏`DELETE` מפורש בלבד, עקבי עם "לא מוחקים מה שהמשתמש הגן עליו".
 - **`__main__`:** מרים את thread השחזור `_boot_restore` (מחזיר את המצב השמור, כולל
   שכתוב קונפיג ישן בשדרוג — `_config_stale`) + `_mode_reconcile_loop` (thread
   נפרד, רץ לאורך כל הסשן — לא רק פעם אחת באתחול כמו `_boot_restore`: כל
@@ -436,17 +456,19 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   ‏`POLL_SEC` כדי שהחלון לא יתכווץ בשקט). **בזיכרון בלבד, לא נכתב לדיסק** —
   עקבי עם עקרון הבידוד (§12): נועד להישכח בין הפעלות, "מה קרה בסשן הנוכחי"
   ולא ארכיון קבוע. משמש את `GET /api/session` ב-`app.py`.
-- **buffer מתגלגל לשחזור-סשן** (שלב 1, `docs/session-replay-design.md`; שלב 2
-  — `POST /api/sessions` — טרם מומש): כל poll מוסיף שורה ל-`track.jsonl`
-  (`_append_track`) — תמונת-מצב פוזיציונית של `_S["aircraft"]` בהצלחה
-  (`_build_track_row`; `lat`/`lon`=`None` נשמר **במפורש** למטוס משובש, לא
-  מדולג — אותו עיקרון §7.1 כמו ה-snapshot), או שורת `gap` בכשל-fetch (מבדיל
-  "אין מטוסים" מ"אין קליטה"). ⚠ **לא** כתיבה-אטומית-על-כל-שורה כמו `state.json`:
+- **buffer מתגלגל לשחזור-סשן** (שלב 1, `docs/session-replay-design.md`): כל poll
+  מוסיף שורה ל-`track.jsonl` (`_append_track`) — תמונת-מצב פוזיציונית של
+  ‏`_S["aircraft"]` בהצלחה (`_build_track_row`; `lat`/`lon`=`None` נשמר **במפורש**
+  למטוס משובש, לא מדולג — אותו עיקרון §7.1 כמו ה-snapshot), או שורת `gap` בכשל-fetch
+  (מבדיל "אין מטוסים" מ"אין קליטה"). ⚠ **לא** כתיבה-אטומית-על-כל-שורה כמו `state.json`:
   ‏`_append_track` הוא `open(path,"a")` גולמי (זול, בלי `fsync` — buffer אפמרי,
   אובדן השורה האחרונה בקריסה לא-נורא), ורק `_compact_track` (סינון-לפי-גיל,
   כל `TRACK_COMPACT_EVERY`=240 appends ≈ שעה) כותב מחדש אטומית עם `fsync` —
   שם כשל-חצי-כתיבה היה מאבד את *כל* הבאפר, לא שורה אחת. `read_track_buffer()`
   (קריאה טרייה מהדיסק, לעולם לא זורק) מזין את `GET /api/replay/buffer` ב-`app.py`.
+  ‏`read_track_slice(t_start, t_end)` (שלב 2) מגיש חתך-זמן מדויק (ac+gap כמו
+  שהם) ל-`POST /api/sessions` ב-`app.py` — `adsb.py` רק קורא וממיין, gzip/כתיבת
+  ‏`meta.json`/העברת קליפים הם אחריות `app.py` (הוא היחיד שמכיר `REC_DIR`/`saved/`).
 
 החלפת מיקום השדה: ערוך `ARP_LAT/ARP_LON/RUNWAYS` בראש הקובץ.
 
@@ -650,7 +672,12 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/recordings/<name>` | קובץ הקלטה MP3 — מחפש בתיקייה החיה ואז ב-`saved/` |
 | GET | `/api/metrics` | מדדי RF (SNR/signal/noise מ-stats_filepath) |
 | GET | `/api/airspace` | מסלול פעיל + שיבוש GPS (מ-adsb.py) |
-| GET | `/api/replay/buffer` | מצב ה-buffer המתגלגל של ADS-B — `t_oldest`/`samples`/`gaps` (מ-`adsb.read_track_buffer`) + `clips_available` (יש הקלטה בתוך חלון הבאפר, נבדק כאן כי רק app.py מכיר את `REC_DIR`/`saved/`). שלב 1 ב-`docs/session-replay-design.md`; בלי UI עדיין |
+| GET | `/api/replay/buffer` | מצב ה-buffer המתגלגל של ADS-B — `t_oldest`/`samples`/`gaps` (מ-`adsb.read_track_buffer`) + `clips_available` (יש הקלטה בתוך חלון הבאפר, נבדק כאן כי רק app.py מכיר את `REC_DIR`/`saved/`). שלב 1 ב-`docs/session-replay-design.md` |
+| GET/POST | `/api/sessions` | GET: רשימת סשנים שמורים (חדש→ישן). POST `{minutes, note?}`: שומר את N הדקות האחרונות (נחתך ל-`adsb.TRACK_BUFFER_MIN`) — מסלול ADS-B + הקלטות בחלון (שמורה מ*עתיקה*, לא-שמורה מ*ועברת*) ל-`sessions/<id>/`. שלב 2. דרך `_guard` (POST בלבד) |
+| GET/DELETE | `/api/sessions/<id>` | GET: `meta.json`. DELETE: מחיקת הסשן כולו (בלתי הפיך). דרך `_guard` (DELETE בלבד) |
+| GET | `/api/sessions/<id>/track` | מסלול ה-ADS-B של הסשן, מפוענח מ-`track.jsonl.gz` |
+| GET | `/api/sessions/<id>/clips/<name>` | קליפ אודיו של הסשן — route ייעודי, לא הרחבת `/recordings/<name>` |
+| GET | `/api/sessions/<id>/export.zip` | ייצוא הסשן כולו (מטא-דאטה+מסלול+קליפים), אותו דפוס כמו `starred.zip` |
 | GET | `/api/power` | מתח/טמפ' ה-Pi (`vcgencmd`), מוגש מ-cache בן ~2 שניות (`_POWER_TTL`) |
 | GET | `/api/metar` | METAR נתב"ג (LLBG) |
 | GET | `/api/health` | בריאות השירותים |
