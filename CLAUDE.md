@@ -146,6 +146,12 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_signal.py           # מד שדה: _signal_verdict, /api/signal (voice/acars/vdl2/satcom/off), /api/antenna/check.
   test_session.py          # דוח סשן: _interest_score, /api/session, /api/session/ack, adsb.session_series.
 
+docs/                       # מסמכי תכנון/החלטות. מתעדים *למה* — ומה נדחה ועל סמך מה.
+  field-station-roadmap.md  # מפת הדרכים שהובילה למד השדה, דוח הסשן ורוסטר המטוסים.
+  satcom-feasibility.md     # היתכנות ואפיון מצב SATCOM (מומש).
+  session-replay-design.md  # ★ תכנון "שחזור סשן" (מפה+אודיו על ציר זמן). **טרם מומש** —
+                            #   ר' §11 שם לשלבי המימוש, ו-§7.4 לאימות שחייב לקרות על ה-Pi תחילה.
+
 .github/workflows/ci.yml   # pytest + `bash -n` על install.sh ו-airam-wait-sdrplay.
 ```
 

@@ -490,13 +490,21 @@ udevadm control --reload-rules 2>/dev/null || true
 #     מדויק יותר באנגלית) ל-ATC בנתב"ג, ו-`small` הרב-לשוני לעברית — מודל .en
 #     לא יכול לתמלל עברית בכלל, לא "פחות טוב". ~1GB יחד, זניח על כרטיס 32GB+.
 #     התקנה קיימת עם base.en בלבד ממשיכה לעבוד — app.py נופל אליו (_whisper_model).
+#     ⚠ -DBUILD_SHARED_LIBS=OFF **חובה**: whisper.cpp מגדיר ב-CMakeLists.txt
+#     שלו `BUILD_SHARED_LIBS_DEFAULT=ON` בכל פלטפורמה חוץ מ-MinGW (אומת מהמקור,
+#     לא ניחוש) — כלומר בלי הדגל הזה `whisper-cli` נבנה כתלוי ב-`libwhisper.so.1`
+#     (וספריות ggml נוספות) שאנחנו **לעולם לא מתקינים** לנתיב ספריות של המערכת.
+#     התוצאה בשטח: `whisper-cli: error while loading shared libraries:
+#     libwhisper.so.1: cannot open shared object file` — התמלול נכשל על *כל*
+#     הקלטה, בלי קשר לתוכן שלה. עם הדגל, `whisper-cli` נבנה כבינארי עצמאי
+#     יחיד — תואם למודל הפריסה שלנו (קובץ אחד ב-`/usr/local/bin`, כלום אחר).
 # ----------------------------------------------------------------------------
 if [[ "${INSTALL_WHISPER:-0}" == "1" ]]; then
   log "מתקין תמלול ATC (whisper.cpp + small.en + small) - עשוי לקחת כמה דקות ..."
   apt-get install -y ffmpeg
   WHISPER_SRC="$BUILD_DIR/whisper.cpp"
   [[ -d "$WHISPER_SRC" ]] || git clone --depth 1 https://github.com/ggml-org/whisper.cpp "$WHISPER_SRC"
-  cmake -S "$WHISPER_SRC" -B "$WHISPER_SRC/build" -DCMAKE_BUILD_TYPE=Release
+  cmake -S "$WHISPER_SRC" -B "$WHISPER_SRC/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
   cmake --build "$WHISPER_SRC/build" -j"$(nproc)" --target whisper-cli
   install -m755 "$WHISPER_SRC/build/bin/whisper-cli" /usr/local/bin/whisper-cli
   mkdir -p /opt/airam/models
@@ -513,12 +521,17 @@ if [[ "${INSTALL_WHISPER:-0}" == "1" ]]; then
   done
   chown -R airam:airam /opt/airam/models
   # ⚠ אימות שהכלים באמת עובדים — לא רק שהקבצים קיימים. כך כשל בנייה/הורדה
-  # מתגלה עכשיו, ולא בתור "התמלול פשוט לא מופיע" חודש אחרי. `nice` נדרש
-  # ב-runtime (app.py: WHISPER_NICE) כדי שהתמלול ייסוג מפני הרדיו — הוא חלק
-  # מ-coreutils וכמעט תמיד קיים, אבל נבדק כאן במפורש ולא מונח כמובן מאליו.
+  # מתגלה עכשיו, ולא בתור "התמלול פשוט לא מופיע" חודש אחרי (בדיוק מה שקרה:
+  # התקנה ישנה בלי הבדיקה הזו הותירה whisper-cli תלוי-ספרייה-חסרה על ה-Pi
+  # בפועל, בלי שום שגיאת התקנה — ר' הערת BUILD_SHARED_LIBS למעלה). `nice`
+  # נדרש ב-runtime (app.py: WHISPER_NICE) כדי שהתמלול ייסוג מפני הרדיו — הוא
+  # חלק מ-coreutils וכמעט תמיד קיים, אבל נבדק כאן במפורש ולא מונח כמובן מאליו.
   command -v ffmpeg >/dev/null || die "ffmpeg לא הותקן — התמלול לא יעבוד."
   command -v nice >/dev/null || die "nice לא נמצא (חלק מ-coreutils) — נדרש לתעדוף CPU."
-  /usr/local/bin/whisper-cli --help >/dev/null 2>&1 || die "whisper-cli לא רץ — בדוק את הבנייה."
+  # `--help` (לא רק `command -v`) כי הוא מריץ בפועל את הבינארי, כולל resolve
+  # של ספריות משותפות ע"י ה-loader — בדיוק הבדיקה שהייתה תופסת את התלות
+  # החסרה ב-libwhisper.so.1 לפני שהמשתמש נתקל בה בממשק.
+  /usr/local/bin/whisper-cli --help >/dev/null 2>&1 || die "whisper-cli לא רץ (נסה: /usr/local/bin/whisper-cli --help)."
   log "תמלול ATC מותקן (אנגלית + עברית). שליטה מלאה מהממשק (יומן השידורים):"
   log "שפה, 'תמלל הכול אוטומטית', תמלול לפי דרישה (📝), הקלטות שמורות (★) — עובדים תמיד."
 else
