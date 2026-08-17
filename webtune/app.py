@@ -3567,15 +3567,42 @@ def _tx_untouched(p):
     return not _tx_path(p).exists() and not _transcript_path(p).exists()
 
 
+def _session_clip_paths():
+    """קליפי האודיו של *כל* הסשנים השמורים (`sessions/<id>/clips/*.mp3`).
+    ⚠ **בכוונה לא חלק מ-`_iter_recordings()`** — זו לא החמצה: `_iter_recordings`
+    משמש גם את `api_sessions` כדי לבחור אילו הקלטות להעביר לסשן *חדש*, ולכן
+    הוספת קליפי-סשן לשם הייתה גורמת לשמירת סשן חדש **לגנוב קליפים מסשנים
+    קיימים**. הפרדה מפורשת במקום שיתוף מפתה.
+    הסיבה שהפונקציה קיימת בכלל: קליפ ש*הועבר* לסשן יצא מ-`_iter_recordings`,
+    ולכן `_tx_next_target` לא היה מוצא אותו לעולם — כלומר שמירת סשן הוציאה
+    את ההקלטות שלו מתור התמלול לצמיתות, ו"התמלול תחת הנגן" היה ריק תמיד."""
+    out = []
+    try:
+        dirs = sorted(SESSIONS_DIR.iterdir())
+    except OSError:
+        return out
+    for d in dirs:
+        if not SESSION_ID_RE.match(d.name):
+            continue
+        try:
+            out += list((d / SESSION_CLIPS_DIRNAME).glob("*.mp3"))
+        except OSError:
+            continue
+    return out
+
+
 def _tx_next_target(auto):
     """ההקלטה הבאה לתמלול, לפי סדר העדיפויות:
       1. `state="pending"` (המשתמש לחץ 📝 ומחכה — שורד restart)
-      2. הקלטות שמורות (★) שלא נוגעו
+      2. הקלטות שמורות (★) **וקליפים בסשן שמור** שלא נוגעו
       3. הכול (רק אם auto)
     הקלטה עם sidecar קיים (כולל 'נכשל') לא נבחרת שוב לבד — ניסיון חוזר הוא
-    תמיד פעולה מפורשת של המשתמש, שנרשמת כ-pending."""
+    תמיד פעולה מפורשת של המשתמש, שנרשמת כ-pending.
+    ⚠ קליפי-סשן באותה עדיפות כמו ★ **מאותו נימוק בדיוק**: שניהם תוכן שהמשתמש
+    הגן עליו במפורש (לחץ ★ / לחץ "שמור סשן"), בניגוד להקלטה חולפת ביומן."""
     recs = _iter_recordings()
-    for p in recs:
+    sess = _session_clip_paths()
+    for p in recs + sess:
         if _TX_FAILS.get(p.name, 0) >= TX_MAX_FAILS:
             continue              # poison: הכתיבה נכשלת שוב ושוב (דיסק מלא)
         if _read_tx(p).get("state") == "pending":
@@ -3583,6 +3610,9 @@ def _tx_next_target(auto):
     for p in recs:                # שמורות: מתומללות אוטומטית תמיד
         if (_TX_FAILS.get(p.name, 0) < TX_MAX_FAILS
                 and _is_saved(p.name) and _tx_untouched(p)):
+            return p
+    for p in sess:                # קליפי סשן: אותה עדיפות, ר' ה-docstring
+        if _TX_FAILS.get(p.name, 0) < TX_MAX_FAILS and _tx_untouched(p):
             return p
     if not auto:
         return None
@@ -4115,6 +4145,14 @@ def api_session_detail(session_id):
         meta = json.loads((sdir / "meta.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return jsonify(ok=False, error="metadata של הסשן פגום"), 500
+    # ⚠ התמלול נקרא **חי מה-sidecar**, ולא נשמר לתוך meta.json בזמן השמירה:
+    # קליפ יכול להתמלל *אחרי* שהסשן נשמר (התור מבוסס-sidecar, ר' §12), וערך
+    # שהוקפא בשמירה היה נשאר "אין תמלול" לנצח — בדיוק סוג ההקפאה שהפרויקט
+    # למד להימנע ממנה (`starred.json`). meta.json נשאר כפי שנכתב.
+    clips_dir = sdir / SESSION_CLIPS_DIRNAME
+    for c in meta.get("clips") or []:
+        if isinstance(c, dict) and c.get("file"):
+            c["tx"] = _read_tx(clips_dir / c["file"])
     return jsonify(ok=True, session=meta)
 
 
