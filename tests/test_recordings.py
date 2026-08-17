@@ -507,6 +507,25 @@ def test_transcribe_file_returns_ok_text(paths, monkeypatch):
     assert state == "ok" and text == "El Al 385 cleared to land runway 26" and err is None
 
 
+def test_transcribe_file_ffmpeg_gets_explicit_wav_format(paths, monkeypatch):
+    """⚠ רגרסיה אמיתית שקרתה בשטח: הקובץ הזמני נקרא `<name>.mp3.wav.tmp` —
+    הסיומת שffmpeg *באמת* רואה היא `.tmp`, לא `.wav`. בלי `-f wav` מפורש,
+    ffmpeg מנחש פורמט-פלט לפי סיומת ונכשל על *כל* הקלטה עם "Unable to choose
+    an output format", בלי שום קשר לתוכן (נצפה: rc=234, לא שגיאת whisper-cli
+    כפי שההודעה הטעתה להניח בהתחלה). מוודאים את הדגל בפועל, לא רק שהקוד "עובד"."""
+    _fake_whisper(paths, monkeypatch)
+    p = _mk_rec(paths, NAME)
+    calls = []
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return type("R", (), {"stdout": "cleared for takeoff"})()
+    monkeypatch.setattr(app.subprocess, "run", fake_run)
+    app._transcribe_file(p)
+    ffmpeg_cmd = calls[0]
+    assert "ffmpeg" in ffmpeg_cmd
+    assert "-f" in ffmpeg_cmd and ffmpeg_cmd[ffmpeg_cmd.index("-f") + 1] == "wav"
+
+
 def test_transcribe_file_empty_output_is_empty_state(paths, monkeypatch):
     _fake_whisper(paths, monkeypatch)
     p = _mk_rec(paths, NAME)
