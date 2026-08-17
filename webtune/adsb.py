@@ -2,7 +2,7 @@
 # ============================================================================
 #  AIR-AM  -  ניתוח ADS-B: מסלול פעיל לנחיתות/המראות + אינדיקציית שיבוש GPS
 # ----------------------------------------------------------------------------
-#  thread דמון מושך כל ~60 שניות את המטוסים ברדיוס רחב סביב נתב"ג ממקור
+#  thread דמון מושך כל ~15 שניות את המטוסים ברדיוס רחב סביב נתב"ג ממקור
 #  ADS-B קהילתי חופשי (adsb.lol, גיבוי adsb.fi) ומסיק:
 #   1. מסלול נחיתות פעיל - מטוסים בגישה סופית נצברים כאירועים; המסלול עם
 #      הציון הגבוה (דעיכה אקספוננציאלית) הוא הפעיל. עמיד לשיבוש GPS האזורי:
@@ -11,17 +11,22 @@
 #   2. מסלול המראות פעיל - אותו עיקרון על מטוסים מטפסים.
 #   3. שיבוש GPS - אחוז המטוסים באזור שמשדרים NIC נמוך (<7), אותה שיטה
 #      וספים כמו gpsjam.org (ירוק <2%, צהוב 2-10%, אדום >10%).
+#   4. buffer מתגלגל למפה (docs/session-replay-design.md, שלב 1) - כל poll
+#      מוסיף שורה ל-track.jsonl: תמונת-מצב של _S["aircraft"] בהצלחה, או שורת
+#      "gap" בכשל. משמש בעתיד את POST /api/sessions (שלב 2, טרם מומש).
 #
 #  עצמאי לחלוטין: stdlib בלבד, וכשל רשת לעולם לא נוגע בנתיב הרדיו -
 #  הלולאה בולעת כל חריגה ו-snapshot() רק קורא מצב בזיכרון.
 # ============================================================================
 import json
 import math
+import os
 import sys
 import threading
 import time
 import urllib.request
 from collections import deque
+from pathlib import Path
 
 # --- גאומטריית נתב"ג (LLBG) -------------------------------------------------
 # נקודת ייחוס (ARP) וקואורדינטות ה-threshold לכל כיוון נחיתה, מ-OurAirports.
@@ -40,7 +45,12 @@ RUNWAYS = {
 }
 
 # --- כוונון האלגוריתם -------------------------------------------------------
-POLL_SEC = 60            # adsb.lol מבקשים עד ~1 בקשה/שנייה; פעם בדקה נדיב
+# ⚠ 15 ולא 60: מטוס ב-250 קשר עובר 7.7 ק"מ/דקה - קפיצות בלתי-שמישות לאנימציה
+# ב-docs/session-replay-design.md. עדיין נדיב פי 15 מהמותר בשני המקורות
+# (adsb.lol *וגם* adsb.fi מרשים ~1 בקשה/שנייה — אומת מה-README הרשמי של שניהם,
+# לא רק adsb.lol; ר' §6 במסמך). גם משפר את המסלול הפעיל/מחוון השיבוש הקיימים,
+# שהיום מתעדכנים בהשהיה של דקה.
+POLL_SEC = 15
 RADIUS_NM = 250          # רחב בכוונה: מטוסים מזויפים "קופצים" ללבנון/ירדן (>50nm)
 HTTP_TIMEOUT = 10.0
 FRESH_SEC = 180.0        # משיכה ישנה מזה => fresh:false ב-API וכרטיס דהוי
@@ -62,7 +72,10 @@ AC_KEEP_SEC = 600.0      # snapshot פר-מטוס (היתוך ACARS↔ADS-B): ג
 # בלבד (לא נכתבת לדיסק — עקבי עם הבידוד הקיים: תקלת רשת/כתיבה לעולם לא נוגעת
 # ברדיו), שנועדה במפורש להישכח בין הפעלות: "מה קרה בזמן שלא הסתכלת" הוא על
 # הסשן הנוכחי, לא ארכיון קבוע.
-SESSION_SERIES_MAX = 360   # 360 דגימות × POLL_SEC=60 = 6 שעות אחורה — סשן שטח טיפוסי
+# ⚠ 1440 ולא 360: כשהעלינו את POLL_SEC מ-60 ל-15 (פי 4), בלי לתקן כאן היה
+# החלון האפקטיבי מתכווץ בשקט מ-6 שעות ל-1.5 שעות — בדיוק הפוך ממטרת "מה קרה
+# בזמן שלא הסתכלת" (משתמש שחוזר אחרי 4 שעות היה מאבד את שעתיים-וחצי הראשונות).
+SESSION_SERIES_MAX = 1440   # 1440 דגימות × POLL_SEC=15 = 6 שעות אחורה — סשן שטח טיפוסי
 
 # גילוי עמיד-שיבוש: באזור נתב"ג השיבוש מתמשך - מטוסים בגישה משדרים מיקום
 # מזויף או nic=0, אבל שדות ה-baro וה-track שורדים. nic=0 הוא בעצמו אות איתור:
@@ -233,6 +246,7 @@ _S = {
     "spoofed_now": 0,         # מטוסים מזויפים (nic<SPOOF_NIC) בדגימה האחרונה
     "aircraft": {},           # norm_reg(r) -> רשומת מטוס אחרונה (היתוך ACARS↔ADS-B)
     "session_series": deque(maxlen=SESSION_SERIES_MAX),   # (t_wall, gps_ratio|None, runway|None) לדוח הסשן
+    "track_appends": 0,       # מונה מ-compaction אחרון (ר' _append_track/_compact_track)
 }
 
 
@@ -445,6 +459,114 @@ def session_series(since=None):
     return [{"t": t, "gps_bad_ratio": ratio, "runway": rwy} for t, ratio, rwy in series]
 
 
+# --- buffer מתגלגל של מסלולי ADS-B (docs/session-replay-design.md, שלב 1) ---
+# ⚠ בכוונה **לא** כתיבה-אטומית-על-כל-שורה (tmp+fsync+rename, כמו state.json):
+# זה rolling buffer אפמרי, לא state שחייב לשרוד ניתוק-חשמל בלי שריטה — אובדן
+# השורה האחרונה בקריסה הוא לא-נורא (התוצאה היחידה: שורת JSON חתוכה, שנפסלת
+# בשקט בקריאה כמו כל שורת-jsonl פגומה אחרת בפרויקט). הכתיבה קורית כל
+# ‏POLL_SEC (15 שניות) לנצח — fsync על כל שורה הוא עלות אמיתית וקבועה על כרטיס
+# ה-SD לתועלת שולית. append גולמי זול; compaction (סינון-לפי-גיל + כתיבה
+# אטומית אמיתית עם fsync) קורה נדיר — ר' _compact_track — כי שם כשל-חצי-כתיבה
+# היה מאבד את *כל* הבאפר, לא רק שורה אחת.
+TRACK_PATH = Path("/var/lib/airam/track.jsonl")
+TRACK_BUFFER_MIN = 90.0        # חלון רטרואקטיבי ל"שמור סשן" (שלב 2, טרם מומש)
+TRACK_COMPACT_EVERY = 240      # ~שעה ב-POLL_SEC=15 — לא compaction בכל append
+
+
+def _build_track_row():
+    """שורת buffer מ-_S['aircraft'] הנוכחי. נקרא *בתוך* _LOCK (עקביות הקריאה
+    מול process() שרץ באותו thread ממש לפני כן) — הכתיבה לדיסק עצמה קורית
+    מחוץ לנעילה (_append_track), כדי לא לחסום קוראים אחרים על I/O."""
+    ac_rows = []
+    for reg, rec in _S["aircraft"].items():
+        lat = round(rec["lat"], 5) if rec["lat"] is not None else None
+        lon = round(rec["lon"], 5) if rec["lon"] is not None else None
+        alt = round(rec["alt"]) if rec["alt"] is not None else None
+        gs = round(rec["gs"], 1) if rec["gs"] is not None else None
+        trk = round(rec["track"], 1) if rec["track"] is not None else None
+        # ⚠ lat/lon=None נשמר *במפורש* (לא מדלגים על המטוס) — מבדיל "לא נראה"
+        # מ"נראה, מיקום משובש" (§7.1 במסמך התכנון). מטוס משובש עדיין נכנס
+        # לשורה עם alt/gs/track ששרדו את השיבוש, כמו ב-aircraft_snapshot.
+        ac_rows.append([reg, lat, lon, alt, trk, gs, rec["nic"]])
+    return {"t": round(time.time(), 1), "ac": ac_rows}
+
+
+def _append_track(row):
+    """מוסיף שורה אחת ל-track.jsonl (append גולמי, לא rewrite של הקובץ כולו).
+    כשל כתיבה (דיסק מלא/הרשאה) נבלע — buffer אפמרי, לא שווה להפיל עליו poll."""
+    try:
+        with open(TRACK_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        return
+    _S["track_appends"] += 1
+    if _S["track_appends"] >= TRACK_COMPACT_EVERY:
+        _compact_track()
+        _S["track_appends"] = 0
+
+
+def _compact_track():
+    """קורא את כל הבאפר, זורק שורות מעל TRACK_BUFFER_MIN דקות, וכותב מחדש
+    אטומית (tmp+fsync+rename) — הפעולה הנדירה היחידה שבאמת כותבת את כל
+    הקובץ, ולכן כאן כן משתלם fsync (בניגוד ל-_append_track)."""
+    cutoff = time.time() - TRACK_BUFFER_MIN * 60.0
+    try:
+        lines = TRACK_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return
+    kept = []
+    for ln in lines:
+        try:
+            t = json.loads(ln).get("t")
+        except ValueError:
+            continue                      # שורה פגומה (כתיבה שנקטעה) — מדלגים, לא כושלים
+        if isinstance(t, (int, float)) and t >= cutoff:
+            kept.append(ln)
+    text = "\n".join(kept) + ("\n" if kept else "")
+    tmp = TRACK_PATH.with_name(TRACK_PATH.name + f".tmp{os.getpid()}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, TRACK_PATH)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def read_track_buffer():
+    """מצב הבאפר הנוכחי מהדיסק, ל-GET /api/replay/buffer ב-app.py. קורא ישירות
+    מהקובץ (לא ממצב-בזיכרון) — הקובץ הוא מקור-האמת. לעולם לא זורק, כמו
+    snapshot()/session_series()."""
+    try:
+        lines = TRACK_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return {"t_oldest": None, "samples": 0, "gaps": []}
+    t_oldest = None
+    samples = 0
+    gaps = []
+    for ln in lines:
+        try:
+            row = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        t = row.get("t")
+        if not isinstance(t, (int, float)):
+            continue
+        if t_oldest is None or t < t_oldest:
+            t_oldest = t
+        if "gap" in row:
+            gaps.append({"t": t, "reason": row.get("gap"), "detail": row.get("detail")})
+        else:
+            samples += 1
+    return {"t_oldest": t_oldest, "samples": samples, "gaps": gaps}
+
+
 def _poll_once():
     try:
         name, data = _fetch(_S["src_idx"])
@@ -455,6 +577,8 @@ def _poll_once():
             if _S["fails"] >= FAILS_TO_SWITCH:   # מקור תקוע => עוברים לגיבוי
                 _S["src_idx"] = (_S["src_idx"] + 1) % len(SOURCES)
                 _S["fails"] = 0
+            gap_detail = _S["error"]
+        _append_track({"t": round(time.time(), 1), "gap": "no_adsb", "detail": gap_detail})
         return
     with _LOCK:
         _S["ac_count"] = process(data.get("ac") or [])
@@ -470,6 +594,8 @@ def _poll_once():
         ratio = round(g_bad / g_total, 4) if g_total >= GPS_MIN_SAMPLE else None
         rwy, _sec, _n, _age, _pos = _decide_runway("landing", time.monotonic())
         _S["session_series"].append((time.time(), ratio, rwy))
+        track_row = _build_track_row()
+    _append_track(track_row)
 
 
 def _loop():

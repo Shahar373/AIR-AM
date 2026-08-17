@@ -4221,6 +4221,27 @@ def api_airspace():
     return jsonify(adsb.snapshot())
 
 
+@app.route("/api/replay/buffer")
+def api_replay_buffer():
+    """מצב ה-buffer המתגלגל של מסלולי ADS-B (adsb.py, שלב 1 ב-
+    docs/session-replay-design.md) — לפני POST /api/sessions (שלב 2, טרם
+    מומש), כדי שה-UI יוכל לומר 'ניתן לשמור עד X דקות אחורה' ולהציג פערי-קליטה.
+    ‏`clips_available` נבדק *כאן* ולא ב-adsb.py: adsb.py לא מכיר את REC_DIR,
+    ורק app.py יודע לחפש גם ב-saved/ (`_iter_recordings`)."""
+    buf = adsb.read_track_buffer()
+    clips_available = False
+    if buf["t_oldest"] is not None:
+        for p in _iter_recordings():
+            try:
+                if p.stat().st_mtime >= buf["t_oldest"]:
+                    clips_available = True
+                    break
+            except OSError:
+                continue
+    return jsonify(ok=True, t_oldest=buf["t_oldest"], samples=buf["samples"],
+                   gaps=buf["gaps"], clips_available=clips_available)
+
+
 def _vcgencmd(*args):
     """מריץ vcgencmd ומחזיר stdout (או None אם לא Pi / לא מותקן / נכשל)."""
     try:
