@@ -95,10 +95,12 @@ webtune/
                             #   buffer מתגלגל לשחזור-סשן (docs/session-replay-design.md,
                             #   שלב 1). thread נפרד. ניתן להרצה ידנית: `python3 adsb.py [--selftest]`.
   static/
-    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~5200 שורות). PWA. 5 תצוגות:
+    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~5800 שורות). PWA. 5 תצוגות:
                             #   🏠 מרכז (בית/standby/scan, כולל דוח סשן+התראות) + קול + ACARS +
                             #   VDL2 + SATCOM. ACARS/VDL2/SATCOM שלושה מופעים סימטריים של אותו
                             #   פקטורי createDataView (ר' §7); מד השדה — פקטורי מקביל, שני.
+                            #   שחזור-סשן (רשימה+נגן, ר' §7) הוא "תצוגה" עצמאית נוספת שנפתחת
+                            #   מעל 🏠 — לא appMode/SDR, ולא נספרת בחמש התצוגות הנ"ל.
     manifest.webmanifest    # PWA manifest (התקנה כאפליקציה).
     sw.js                   # Service Worker (נדרש HTTPS).
     icon-*.png, apple-touch-icon.png
@@ -634,6 +636,27 @@ timeout (`NET_TIMEOUT_GET`=8s / `NET_TIMEOUT_POST`=45s — תואם את חסם 
 — מוזרם דרך `opts.onMessage` של שלושת מופעי `createDataView` — מציג התראה מקומית
 לכל הודעה עם `m.notable` (בקצב מוגבל, `NOTIFY_MIN_GAP_MS`=4s). מקומי (Notification
 API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ברקע.
+
+**שחזור-סשן: רשימה + נגן (`docs/session-replay-design.md`, שלב 3) — "תצוגה"
+עצמאית, לא `appMode`.** נפתחת מעל 🏠 מהכרטיס `.p-replay` (`openReplayList()`);
+כל מעבר-תצוגה אחר (`showView`, כולל בין קול/ACARS) סוגר אותה ועוצר נגינה/timers
+פעילים (`stopReplayPlayback()`) — כדי שלא יישארו שני "מסכים" גלויים בו-זמנית.
+כרטיס-הבית מציג רמז-זמינות מ-`GET /api/replay/buffer` (`loadReplayBuffer`) ומונה
+סשנים (`refreshReplaySessionsCount`), ושולח `POST /api/sessions` (`saveReplaySession`).
+מסך הרשימה (`loadSessionsList`/`buildSessionCard`) מציג כרטיס לכל סשן עם פתיחה/
+ייצוא/מחיקה (`deleteReplaySession`, עם `confirm()`). מסך הנגן (`initReplayPlayer`):
+מפה (Leaflet, אותו דפוס טעינה-עצלנית/`layerGroup` כמו ב-`createDataView`)
+מציגה את שורת-המסלול הכי-עדכנית שאינה מאוחרת מ-`playT` (`findReplayRowAt` —
+**לא** אינטרפולציה בין נקודות); מטוס עם מיקום משובש (`lat=null`, §7.1 בתכנון)
+מוצג כצ'יפ `.spoofed` ולא כסמן — לא ממציאים מיקום, לא מוחקים את המטוס מהרשימה.
+ציר-זמן (`buildReplayTimeline`) עם בלוקי קליפים (קליק=seek) ופערי-ADS-B
+**נקודתיים** (`.rt-gap` — §7.2: לא נמדד משך-פער בפועל). נגן: `<audio>` יחיד
+משותף לשני מצבי השמעה — **"דלג על שקט"** (`#replaySkipSilence`, ברירת מחדל;
+`onReplayClipEnded` קופץ לקליפ הבא כש-`ended`**או** `error` מגיע — קובץ פגום
+בודד לא תוקע את הנגן) מול **זמן-אמת** (`replayTick` מתקדם עם שעון-קיר אמיתי,
+`wallStartMs`/`wallStartPlayT`, ומשאיר שקט אמיתי בין קליפים). **נבדק ידנית
+בדפדפן** (Playwright מול שרת-dev עם סשנים מדומים, כולל MP3 מפוענח בפועל —
+לא רק מסלול-כשל).
 
 ---
 

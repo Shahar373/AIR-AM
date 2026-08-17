@@ -475,6 +475,79 @@
     .player-row { display: flex; gap: .5rem; margin-top: .6rem; }
     .player-row button, .player-row a { flex: 1; }
 
+    /* ---------- שחזור-סשן: כרטיס-בית + רשימה + נגן (docs/session-replay-design.md §9) ---------- */
+    .replay-save-row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+    .replay-save-row input[type=number] {
+      width: 4.5rem; font: inherit; font-variant-numeric: tabular-nums; text-align: center;
+      color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: var(--r-ctrl); padding: .5rem .4rem;
+    }
+    #replaySaveNote {
+      width: 100%; font: inherit; font-size: .85rem; color: var(--text);
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-ctrl);
+      padding: .55rem .7rem;
+    }
+
+    /* "תצוגה" נוספת, לא חלק ממתג ה-SDR (appMode) — נפתחת/נסגרת עצמאית מהבית,
+       ר' openReplayList/showView. */
+    #replayView { display: flex; flex-direction: column; gap: var(--sp-3); }
+    .replay-head { display: flex; align-items: center; gap: var(--sp-3); }
+    .replay-head .ttl { font-size: 1rem; font-weight: 700; margin: 0; }
+
+    .replay-sessions-list { display: flex; flex-direction: column; gap: var(--sp-2); }
+    .replay-sessions-list .nodata { font-size: .85rem; color: var(--text-faint); margin: 0; }
+    .replay-session-card {
+      display: flex; flex-direction: column; gap: .3rem;
+      padding: var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-ctrl);
+      background: var(--panel-2);
+    }
+    .rsc-head { display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; }
+    .rsc-range { font-family: var(--font-mono); font-variant-numeric: tabular-nums; direction: ltr;
+      font-weight: 600; font-size: .9rem; }
+    .rsc-note { color: var(--dim); font-size: .82rem; }
+    .rsc-meta { font-size: .78rem; color: var(--text-faint); }
+    .rsc-btns { display: flex; gap: .5rem; margin-top: .3rem; flex-wrap: wrap; }
+    .rsc-btns > * { flex: 1; min-width: 5.5rem; }
+
+    .replay-map { width: 100%; height: clamp(240px, 42vh, 420px); border-radius: var(--r-ctrl); overflow: hidden; }
+    .replay-aircraft { display: flex; flex-wrap: wrap; gap: .35rem; margin: .55rem 0 0; }
+    .replay-ac-chip {
+      font-size: .74rem; padding: .25rem .55rem; border-radius: 999px;
+      background: var(--wash); border: 1px solid var(--border); color: var(--dim);
+      font-family: var(--font-mono); direction: ltr;
+    }
+    /* מיקום משובש (§7.1) — לא מוצג כנקודה על המפה, רק כצ'יפ מסומן: לא ממציאים מיקום */
+    .replay-ac-chip.spoofed { color: var(--amber-fg); border-color: rgba(var(--amber-rgb),.4); }
+
+    .replay-timeline-wrap { margin-top: .8rem; }
+    .replay-timeline {
+      position: relative; height: 34px; border-radius: var(--r-sm);
+      background: var(--panel-2); border: 1px solid var(--border); overflow: hidden;
+    }
+    .rt-clips, .rt-gaps { position: absolute; inset: 0; }
+    .rt-clip {
+      position: absolute; top: 5px; bottom: 5px; min-width: 2px;
+      background: var(--accent); border-radius: 2px; opacity: .85; cursor: pointer;
+    }
+    /* פער קליטת ADS-B (§7.2) — סימון נקודתי, לא מרווח מומצא: לא נמדד משך הפער, רק זמן הדגימה שנכשלה */
+    .rt-gap {
+      position: absolute; top: 0; bottom: 0; width: 3px; margin-inline-start: -1px;
+      background: repeating-linear-gradient(45deg, var(--red), var(--red) 2px, transparent 2px, transparent 4px);
+      opacity: .75;
+    }
+    .rt-cursor {
+      position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--text);
+      box-shadow: 0 0 4px rgba(0,0,0,.4); pointer-events: none; transform: translateX(-1px);
+    }
+    .replay-seek { width: 100%; margin-top: .4rem; accent-color: var(--accent); }
+
+    .replay-player-controls { display: flex; align-items: center; gap: var(--sp-3); margin-top: .8rem; flex-wrap: wrap; }
+    .replay-player-controls .play-main { width: 52px; height: 52px; font-size: 1.25rem; }
+    .replay-time { font-family: var(--font-mono); font-variant-numeric: tabular-nums; direction: ltr;
+      color: var(--dim); font-size: .85rem; }
+    .replay-mode-toggle { display: flex; align-items: center; gap: .4rem; margin-inline-start: auto; cursor: pointer; }
+    .replay-mode-toggle input { accent-color: var(--accent); }
+
     /* ---------- כפתורים ----------
        סקאלה מהודקת: הכפתורים ירשו 1rem מהגוף וזה היה גדול מדי לפקדי-ממשק —
        גופן .9rem, משקל 600, padding קומפקטי. פקדים משניים (chips/SDR) קטנים עוד. */
@@ -1267,8 +1340,90 @@
     <div id="rosterList" class="roster-list"><p class="nodata">טוען…</p></div>
     </div><!-- /panel-bd -->
   </section>
+
+  <!-- שחזור-סשן: שמירת N הדקות האחרונות (מסלול ADS-B + הקלטות) לצפייה חוזרת
+       מאוחר יותר — מפה + ציר זמן + נגן (docs/session-replay-design.md, שלב 3).
+       מערכתי כמו הרוסטר — לא תלוי-מצב, פתוח גם ב-standby. -->
+  <section class="panel p-replay">
+    <div class="panel-hd"><p class="ttl">שחזור סשן</p></div>
+    <div class="panel-bd">
+      <p class="hint" style="margin:0 0 .6rem">שמור את הדקות האחרונות — מסלול ADS-B + הקלטות רלוונטיות —
+        לצפייה חוזרת עם מפה וציר זמן. <span id="replayBufHint">בודק זמינות…</span></p>
+      <div class="replay-save-row">
+        <input type="number" id="replaySaveMinutes" min="1" max="90" step="1" value="15" aria-label="דקות אחורה" />
+        <span class="hint">דקות אחורה</span>
+        <button type="button" class="primary" id="replaySaveBtn">💾 שמור סשן</button>
+      </div>
+      <input type="text" id="replaySaveNote" maxlength="200"
+             placeholder="הערה (אופציונלי) — למשל 'רצף נחיתות מסלול 26'" style="margin-top:.5rem" />
+      <div class="fm-btns" style="margin-top:.6rem">
+        <button type="button" class="ghost" id="replayOpenListBtn">
+          📼 הסשנים השמורים (<span id="replaySessionsCount">0</span>)</button>
+      </div>
+    </div><!-- /panel-bd -->
+  </section>
   </div><!-- /home-dash -->
   </div><!-- /homeView -->
+
+  <!-- ===================== שחזור-סשן: רשימה + נגן ===================== -->
+  <!-- לא "מצב" SDR — נפתחת/נסגרת עצמאית מעל מסך הבית (appMode נשאר "home").
+       כל מעבר-תצוגה אחר (showView) סוגר אותה אוטומטית. -->
+  <div id="replayView" class="hidden">
+    <div class="replay-head">
+      <button type="button" class="ghost" id="replayBackBtn">◀ חזרה</button>
+      <p class="ttl" id="replayScreenTitle">סשנים שמורים</p>
+    </div>
+
+    <!-- מסך רשימה -->
+    <div id="replayListScreen">
+      <section class="panel">
+        <div class="panel-hd"><p class="ttl">סשנים שמורים</p></div>
+        <div class="panel-bd">
+          <div id="replaySessionsList" class="replay-sessions-list"><p class="nodata">טוען…</p></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- מסך נגן: מפה + ציר זמן + נגן אודיו -->
+    <div id="replayPlayerScreen" class="hidden">
+      <section class="panel">
+        <div class="panel-hd">
+          <p class="ttl" id="replayPlayerTitle">סשן</p>
+          <div class="hd-end">
+            <a id="replayExportBtn" class="ghost" href="#"
+               title="הורדת הסשן (מפה+אודיו+מטא-דאטה) כ-ZIP">⬇ ייצוא</a>
+            <button type="button" class="ghost" id="replayDeleteBtn" title="מחיקת הסשן — בלתי הפיך">🗑 מחק</button>
+          </div>
+        </div>
+        <div class="panel-bd">
+          <p class="hint" id="replayPlayerMeta"></p>
+          <div id="replayMap" class="replay-map"></div>
+          <p class="acars-map-note hidden" id="replayMapNote"></p>
+          <div class="replay-aircraft" id="replayAircraftNow"></div>
+
+          <div class="replay-timeline-wrap">
+            <div class="replay-timeline" id="replayTimeline">
+              <div class="rt-clips" id="rtClips"></div>
+              <div class="rt-gaps" id="rtGaps"></div>
+              <div class="rt-cursor" id="rtCursor"></div>
+            </div>
+            <input type="range" id="replaySeek" class="replay-seek" min="0" max="1000" step="1" value="0"
+                   aria-label="מיקום בציר הזמן" />
+          </div>
+
+          <div class="replay-player-controls">
+            <button type="button" class="play-main" id="replayPlayBtn" aria-label="נגן / השהה">▶</button>
+            <div class="replay-time" id="replayTimeTxt">00:00 / 00:00</div>
+            <label class="replay-mode-toggle hint">
+              <input type="checkbox" id="replaySkipSilence" checked />
+              דלג על שקט
+            </label>
+          </div>
+          <p class="hint hidden" id="replayNoClipsHint"></p>
+        </div>
+      </section>
+    </div>
+  </div>
 
   <!-- ===================== תצוגת קול ===================== -->
   <div id="voiceView" class="hidden">
@@ -3532,9 +3687,14 @@
       $("acarsView").classList.toggle("hidden", mode !== "acars");
       $("vdl2View").classList.toggle("hidden", mode !== "vdl2");
       $("satcomView").classList.toggle("hidden", mode !== "satcom");
+      // שחזור-סשן הוא "תצוגה" נוספת שנפתחת מעל הבית, לא מצב SDR — כל מעבר-תצוגה
+      // (כולל בין קול/ACARS וכו') סוגר אותה ועוצר נגינה/timers פעילים.
+      $("replayView").classList.add("hidden");
+      stopReplayPlayback();
+      replayScreen = null;
       segSet("modeSeg", mode);
       renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acars/vdl2/satcom.active — עדכן בכל מעבר
-      if (mode === "home") { renderHome(); pollSession(); }
+      if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); }
       if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
       if (mode === "acars") acarsFm.poll();
       if (mode === "vdl2") vdl2Fm.poll();
@@ -3893,6 +4053,390 @@
       box.classList.remove("hidden");
       box.open = !!detail;
     }
+
+    /* ============================================================
+       שחזור-סשן: רשימה + נגן (מפה + ציר-זמן + אודיו)
+       docs/session-replay-design.md §9 — שלב 3. "תצוגה" עצמאית שנפתחת
+       מעל מסך הבית (לא appMode/SDR); ר' openReplayList ו-showView לעיל.
+       ============================================================ */
+    const REPLAY_MODE_LABEL = { voice: "📻 קול", acars: "📡 ACARS", vdl2: "🛰️ VDL2",
+                                 satcom: "📶 SATCOM", off: "⏻ כבוי", scan: "🔁 סריקה" };
+    let replayScreen = null;        // null | "list" | "player"
+    let replaySessions = [];        // מטמון רשימת הסשנים (מ-GET /api/sessions)
+    let rp = null;                  // מצב הנגן הפעיל — null כשלא בתצוגת נגן
+    let replayMapObj = null, replayMapIcon = null, replayLeafLoading = false, replayMarkersLayer = null;
+    const REPLAY_TICK_MS = 250;
+
+    function fmtClockDT(epoch) {
+      if (epoch == null) return "—";
+      return new Date(epoch * 1000).toLocaleString("he-IL",
+        { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+    }
+    function fmtReplayClock(sec) {   // mm:ss עם אפסים מובילים — לשעון הנגן (שונה מ-fmtDur הכללי: "1:23"/"5s")
+      sec = Math.max(0, Math.round(sec || 0));
+      const m = Math.floor(sec / 60), s = sec % 60;
+      return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+    }
+
+    /* ----- כרטיס-הבית: זמינות ה-buffer + מונה סשנים ----- */
+    async function loadReplayBuffer() {
+      try {
+        const b = await fetchJSON("/api/replay/buffer");
+        const hint = $("replayBufHint");
+        if (!b.ok || b.t_oldest == null) { hint.textContent = "אין עדיין נתוני מסלול לשמירה."; return; }
+        const minutesBack = Math.max(1, Math.round((Date.now() / 1000 - b.t_oldest) / 60));
+        hint.textContent = "ניתן לשמור עד " + minutesBack + " דק׳ אחורה"
+          + (b.clips_available ? "." : " (בלי הקלטות בטווח).");
+        const mEl = $("replaySaveMinutes");
+        if (!mEl.dataset.touched) mEl.value = Math.max(1, Math.min(minutesBack, 30));
+      } catch (e) { /* לא קריטי — נשאר "בודק זמינות…" */ }
+    }
+    async function refreshReplaySessionsCount() {
+      try {
+        const r = await fetchJSON("/api/sessions");
+        if (r.ok) $("replaySessionsCount").textContent = (r.sessions || []).length;
+      } catch (e) { /* לא קריטי */ }
+    }
+
+    /* ----- שמירת סשן ----- */
+    async function saveReplaySession() {
+      const raw = parseInt($("replaySaveMinutes").value, 10);
+      const minutes = Math.max(1, Math.min(90, Number.isFinite(raw) ? raw : 15));
+      const note = $("replaySaveNote").value.trim();
+      const btn = $("replaySaveBtn");
+      btn.disabled = true;
+      try {
+        const res = await apiSend("POST", "/api/sessions", { minutes, note: note || undefined });
+        const data = await res.json();
+        if (!data.ok) { showToast("שמירה נכשלה: " + (data.error || "שגיאה")); return; }
+        $("replaySaveNote").value = "";
+        showToast("✓ הסשן נשמר");
+        refreshReplaySessionsCount();
+        if (replayScreen === "list") loadSessionsList();
+      } catch (e) { showToast("שגיאת רשת — שמירה נכשלה"); }
+      finally { btn.disabled = false; }
+    }
+
+    /* ----- ניווט בין מסכי הרשימה/הנגן ----- */
+    function showReplayScreen(screen) {
+      replayScreen = screen;
+      $("replayListScreen").classList.toggle("hidden", screen !== "list");
+      $("replayPlayerScreen").classList.toggle("hidden", screen !== "player");
+      $("replayScreenTitle").textContent = screen === "player" ? (rp ? rp.title : "סשן") : "סשנים שמורים";
+    }
+    function openReplayList() {
+      $("homeView").classList.add("hidden");
+      $("replayView").classList.remove("hidden");
+      showReplayScreen("list");
+      loadSessionsList();
+    }
+
+    /* ----- רשימת הסשנים ----- */
+    async function loadSessionsList() {
+      try {
+        const r = await fetchJSON("/api/sessions");
+        replaySessions = r.ok ? (r.sessions || []) : [];
+      } catch (e) { replaySessions = []; }
+      $("replaySessionsCount").textContent = replaySessions.length;
+      renderSessionsList();
+    }
+    function renderSessionsList() {
+      const box = $("replaySessionsList");
+      box.textContent = "";
+      if (!replaySessions.length) { box.appendChild(mkSpan("nodata", "אין עדיין סשנים שמורים.")); return; }
+      for (const s of replaySessions) box.appendChild(buildSessionCard(s));
+    }
+    function buildSessionCard(s) {
+      const card = document.createElement("div");
+      card.className = "replay-session-card";
+      const head = document.createElement("div"); head.className = "rsc-head";
+      head.appendChild(mkSpan("rsc-range", fmtClockDT(s.t_start) + " – " + fmtClockDT(s.t_end)));
+      if (s.note) head.appendChild(mkSpan("rsc-note", s.note));
+      card.appendChild(head);
+      const counts = s.counts || {};
+      let metaTxt = "✈️ " + (counts.aircraft || 0) + " מטוסים · 🎙 " + (counts.clips || 0) + " הקלטות";
+      if (s.app_mode) metaTxt += " · " + (REPLAY_MODE_LABEL[s.app_mode] || s.app_mode);
+      if (counts.samples) metaTxt += " · " + counts.samples + " דגימות מסלול";
+      card.appendChild(mkSpan("rsc-meta", metaTxt));
+      const btns = document.createElement("div"); btns.className = "rsc-btns";
+      const openBtn = document.createElement("button");
+      openBtn.type = "button"; openBtn.className = "primary"; openBtn.textContent = "▶ פתח";
+      openBtn.onclick = () => openReplayPlayer(s.id);
+      const exportA = document.createElement("a");
+      exportA.className = "ghost"; exportA.textContent = "⬇ ייצוא";
+      exportA.href = "/api/sessions/" + encodeURIComponent(s.id) + "/export.zip";
+      const delBtn = document.createElement("button");
+      delBtn.type = "button"; delBtn.className = "ghost"; delBtn.textContent = "🗑 מחק";
+      delBtn.onclick = () => deleteReplaySession(s.id);
+      btns.append(openBtn, exportA, delBtn);
+      card.appendChild(btns);
+      return card;
+    }
+    async function deleteReplaySession(id) {
+      if (!confirm("למחוק את הסשן? הפעולה בלתי הפיכה.")) return;
+      try {
+        const res = await apiSend("DELETE", "/api/sessions/" + encodeURIComponent(id));
+        const data = await res.json();
+        if (!data.ok) { showToast("מחיקה נכשלה: " + (data.error || "שגיאה")); return; }
+        if (replayScreen === "player" && rp && rp.id === id) { stopReplayPlayback(); showReplayScreen("list"); }
+        loadSessionsList();
+      } catch (e) { showToast("שגיאת רשת — מחיקה נכשלה"); }
+    }
+
+    /* ----- מסך הנגן: טעינה ----- */
+    async function openReplayPlayer(id) {
+      showReplayScreen("player");
+      $("replayPlayerTitle").textContent = "טוען…";
+      $("replayPlayerMeta").textContent = "";
+      try {
+        const [mRes, tRes] = await Promise.all([
+          fetchJSON("/api/sessions/" + encodeURIComponent(id)),
+          fetchJSON("/api/sessions/" + encodeURIComponent(id) + "/track"),
+        ]);
+        if (!mRes.ok) throw new Error(mRes.error || "טעינת הסשן נכשלה");
+        initReplayPlayer(mRes.session, tRes.ok ? (tRes.rows || []) : []);
+      } catch (e) {
+        $("replayPlayerTitle").textContent = "שגיאה";
+        $("replayPlayerMeta").textContent = "טעינת הסשן נכשלה: " + e.message;
+      }
+    }
+    function initReplayPlayer(meta, track) {
+      stopReplayPlayback();
+      const clips = (meta.clips || []).slice().sort((a, b) => a.ts - b.ts);
+      const trackRows = track.slice().sort((a, b) => a.t - b.t);
+      rp = {
+        id: meta.id, meta, clips, trackRows,
+        t0: meta.t_start, t1: meta.t_end, playT: meta.t_start,
+        playing: false, skip: $("replaySkipSilence").checked,
+        audio: new Audio(), curClip: null,
+        wallStartMs: 0, wallStartPlayT: 0, timer: null, markers: {},
+        title: meta.note || meta.id,
+      };
+      rp.audio.addEventListener("ended", onReplayClipEnded);
+      rp.audio.addEventListener("error", onReplayClipEnded);   // קובץ שנכשל בטעינה — מדלגים, לא עוצרים הכול
+
+      $("replayScreenTitle").textContent = rp.title;
+      $("replayPlayerTitle").textContent = rp.title;
+      let metaTxt = fmtClockDT(meta.t_start) + " – " + fmtClockDT(meta.t_end)
+        + " · ✈️ " + (meta.aircraft || []).length + " מטוסים · 🎙 " + clips.length + " הקלטות";
+      if (meta.gaps && meta.gaps.length) metaTxt += " · ⚠ " + meta.gaps.length + " פערי קליטה";
+      $("replayPlayerMeta").textContent = metaTxt;
+      $("replayExportBtn").href = "/api/sessions/" + encodeURIComponent(meta.id) + "/export.zip";
+      $("replayDeleteBtn").onclick = () => deleteReplaySession(meta.id);
+      $("replayNoClipsHint").classList.toggle("hidden", clips.length > 0);
+      $("replayNoClipsHint").textContent = clips.length ? ""
+        : "אין הקלטות אודיו בסשן הזה — מוצג מסלול ADS-B בלבד.";
+      $("replaySkipSilence").disabled = clips.length === 0;
+
+      if (replayMarkersLayer) replayMarkersLayer.clearLayers();
+      buildReplayTimeline();
+      ensureReplayMap();
+      seekReplay(rp.t0);
+      $("replayPlayBtn").textContent = "▶";
+      $("replayPlayBtn").classList.remove("playing");
+    }
+    function buildReplayTimeline() {
+      const clipsBox = $("rtClips"); clipsBox.textContent = "";
+      const gapsBox = $("rtGaps"); gapsBox.textContent = "";
+      const dur = Math.max(1, rp.t1 - rp.t0);
+      for (const c of rp.clips) {
+        const el = document.createElement("div"); el.className = "rt-clip";
+        el.style.left = Math.max(0, (c.ts - rp.t0) / dur * 100) + "%";
+        el.style.width = Math.max(.3, (c.dur || 1) / dur * 100) + "%";
+        el.title = fmtClockDT(c.ts) + (c.freq != null ? " · " + c.freq.toFixed(3) + " MHz" : "");
+        el.onclick = () => seekAndContinue(c.ts);
+        clipsBox.appendChild(el);
+      }
+      // פער קליטת ADS-B (§7.2): נקודת-זמן שהדגימה נכשלה — לא מרווח מומצא, ר' CSS .rt-gap
+      for (const g of (rp.meta.gaps || [])) {
+        const el = document.createElement("div"); el.className = "rt-gap";
+        el.style.left = Math.max(0, (g.t - rp.t0) / dur * 100) + "%";
+        el.title = "אין קליטת ADS-B" + (g.detail ? " — " + g.detail : "");
+        gapsBox.appendChild(el);
+      }
+      const seek = $("replaySeek");
+      seek.min = 0; seek.max = Math.max(1, Math.round(dur)); seek.step = 1; seek.value = 0;
+    }
+
+    /* ----- מפה (Leaflet, טעינה עצלנית — אותו דפוס כמו createDataView) ----- */
+    function ensureReplayMap() {
+      if (replayMapObj) { setTimeout(() => replayMapObj.invalidateSize(), 50); renderReplayMapAt(rp.playT); return; }
+      if (replayLeafLoading) return;
+      if (window.L) { initReplayMap(); return; }
+      replayLeafLoading = true;
+      const s = document.createElement("script");
+      s.src = "/static/vendor/leaflet/leaflet.js";
+      s.onload = () => { replayLeafLoading = false; initReplayMap(); };
+      s.onerror = () => {
+        replayLeafLoading = false;
+        $("replayMap").classList.add("hidden");
+        const n = $("replayMapNote"); n.textContent = "המפה לא נטענה (אין חיבור?)"; n.classList.remove("hidden");
+      };
+      document.head.appendChild(s);
+    }
+    function initReplayMap() {
+      try {
+        replayMapObj = L.map("replayMap", { zoomControl: true }).setView([32.0114, 34.8867], 8);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+          { maxZoom: 12, attribution: "© OpenStreetMap" }).addTo(replayMapObj);
+        replayMarkersLayer = L.layerGroup().addTo(replayMapObj);
+        replayMapIcon = L.icon({
+          iconUrl: "/static/vendor/leaflet/images/marker-icon.png",
+          iconRetinaUrl: "/static/vendor/leaflet/images/marker-icon-2x.png",
+          shadowUrl: "/static/vendor/leaflet/images/marker-shadow.png",
+          iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41],
+        });
+        setTimeout(() => replayMapObj.invalidateSize(), 60);
+        if (window.ResizeObserver) {
+          new ResizeObserver(() => {
+            clearTimeout(initReplayMap._rt);
+            initReplayMap._rt = setTimeout(() => replayMapObj && replayMapObj.invalidateSize(), 120);
+          }).observe($("replayMap"));
+        }
+        renderReplayMapAt(rp.playT);
+      } catch (e) {
+        $("replayMap").classList.add("hidden");
+        const n = $("replayMapNote"); n.textContent = "שגיאה בטעינת המפה"; n.classList.remove("hidden");
+      }
+    }
+    function findReplayRowAt(playT) {
+      let best = null;
+      for (const row of rp.trackRows) { if (row.t <= playT) best = row; else break; }
+      return best || rp.trackRows[0] || null;
+    }
+    function renderReplayMapAt(playT) {
+      const chipBox = $("replayAircraftNow"); chipBox.textContent = "";
+      const row = findReplayRowAt(playT);
+      const acList = (row && row.ac) || [];
+      const seen = new Set();
+      for (const ac of acList) {
+        const reg = ac[0], lat = ac[1], lon = ac[2], alt = ac[3];
+        seen.add(reg);
+        const chip = document.createElement("span");
+        chip.className = "replay-ac-chip" + (lat == null ? " spoofed" : "");
+        chip.textContent = reg + (alt != null ? " · " + Math.round(alt) + "ft" : "") + (lat == null ? " · מיקום משובש" : "");
+        chipBox.appendChild(chip);
+        if (!replayMarkersLayer || lat == null || lon == null) {
+          if (rp.markers[reg]) { replayMarkersLayer && replayMarkersLayer.removeLayer(rp.markers[reg]); delete rp.markers[reg]; }
+          continue;
+        }
+        if (rp.markers[reg]) rp.markers[reg].setLatLng([lat, lon]);
+        else {
+          rp.markers[reg] = L.marker([lat, lon], replayMapIcon ? { icon: replayMapIcon } : undefined).bindTooltip(reg);
+          replayMarkersLayer.addLayer(rp.markers[reg]);
+        }
+      }
+      if (!acList.length)
+        chipBox.appendChild(mkSpan("hint", (row && row.gap) ? "⚠ אין קליטת ADS-B בזמן הזה" : "אין מטוסים ידועים כרגע"));
+      for (const reg in rp.markers) {
+        if (!seen.has(reg)) { replayMarkersLayer && replayMarkersLayer.removeLayer(rp.markers[reg]); delete rp.markers[reg]; }
+      }
+    }
+
+    /* ----- ציר הזמן/סקרבר ----- */
+    function updateReplayTimelineUI() {
+      const dur = Math.max(1, rp.t1 - rp.t0);
+      const pct = Math.max(0, Math.min(100, (rp.playT - rp.t0) / dur * 100));
+      $("rtCursor").style.left = pct + "%";
+      $("replaySeek").value = Math.round(rp.playT - rp.t0);
+      $("replayTimeTxt").textContent = fmtReplayClock(rp.playT - rp.t0) + " / " + fmtReplayClock(dur);
+    }
+    function seekReplay(t) {
+      rp.playT = Math.max(rp.t0, Math.min(rp.t1, t));
+      renderReplayMapAt(rp.playT);
+      updateReplayTimelineUI();
+    }
+    function seekAndContinue(t) {   // קליק על בלוק בציר הזמן — ממשיך לנגן אם היה מנגן
+      seekReplay(t);
+      if (rp.playing) { rp.audio.pause(); rp.curClip = null; playReplayFromCurrent(); }
+    }
+
+    /* ----- מנוע הנגינה: skip-silence (ברירת מחדל) מול זמן-אמת ----- */
+    function clipAtReplay(playT) {
+      for (const c of rp.clips) { if (playT >= c.ts && playT < c.ts + (c.dur || 0)) return c; }
+      return null;
+    }
+    function nextReplayClipAfter(playT) {
+      let best = null;
+      for (const c of rp.clips) { if (c.ts > playT && (!best || c.ts < best.ts)) best = c; }
+      return best;
+    }
+    function loadReplayClip(c, offset, play) {
+      if (rp.curClip !== c) {
+        rp.curClip = c;
+        rp.audio.src = "/api/sessions/" + encodeURIComponent(rp.id) + "/clips/" + encodeURIComponent(c.file);
+      }
+      rp.audio.currentTime = Math.max(0, offset || 0);
+      if (play) rp.audio.play().catch(() => {});
+    }
+    function playReplayFromCurrent() {
+      rp.skip = $("replaySkipSilence").checked;
+      const c = clipAtReplay(rp.playT);
+      if (c) loadReplayClip(c, rp.playT - c.ts, true);
+      else if (rp.skip) {
+        const nxt = nextReplayClipAfter(rp.playT);
+        if (nxt) { seekReplay(nxt.ts); loadReplayClip(nxt, 0, true); } else { pauseReplay(); return; }
+      }
+      rp.wallStartMs = Date.now();
+      rp.wallStartPlayT = rp.playT;
+    }
+    function onReplayClipEnded() {
+      if (!rp || !rp.playing) return;
+      if (rp.skip) {
+        const nxt = nextReplayClipAfter(rp.curClip ? rp.curClip.ts : rp.playT);
+        if (nxt) { seekReplay(nxt.ts); loadReplayClip(nxt, 0, true); rp.wallStartMs = Date.now(); rp.wallStartPlayT = rp.playT; }
+        else { seekReplay(rp.t1); pauseReplay(); }
+      } else {
+        rp.curClip = null;   // זמן-אמת: משאירים את ה-tick להמשיך להריץ playT דרך השקט האמיתי
+      }
+    }
+    function replayTick() {
+      if (!rp || !rp.playing) return;
+      if (rp.skip) {
+        if (rp.curClip && !rp.audio.paused) rp.playT = rp.curClip.ts + rp.audio.currentTime;
+        else if (!clipAtReplay(rp.playT)) {
+          const nxt = nextReplayClipAfter(rp.playT);
+          if (nxt) { seekReplay(nxt.ts); loadReplayClip(nxt, 0, true); } else { seekReplay(rp.t1); pauseReplay(); return; }
+        }
+      } else {
+        rp.playT = rp.wallStartPlayT + (Date.now() - rp.wallStartMs) / 1000;
+        if (rp.playT >= rp.t1) { seekReplay(rp.t1); pauseReplay(); return; }
+        const c = clipAtReplay(rp.playT);
+        if (c && rp.curClip !== c) loadReplayClip(c, rp.playT - c.ts, true);
+        else if (!c && rp.curClip) { rp.audio.pause(); rp.curClip = null; }
+      }
+      renderReplayMapAt(rp.playT);
+      updateReplayTimelineUI();
+    }
+    function playReplay() {
+      if (!rp) return;
+      rp.playing = true;
+      $("replayPlayBtn").textContent = "⏸"; $("replayPlayBtn").classList.add("playing");
+      playReplayFromCurrent();
+      rp.timer = setInterval(replayTick, REPLAY_TICK_MS);
+    }
+    function pauseReplay() {
+      if (!rp) return;
+      rp.playing = false;
+      $("replayPlayBtn").textContent = "▶"; $("replayPlayBtn").classList.remove("playing");
+      if (rp.timer) { clearInterval(rp.timer); rp.timer = null; }
+      rp.audio.pause();
+    }
+    function toggleReplayPlay() {
+      if (!rp) return;
+      if (rp.playing) { pauseReplay(); return; }
+      if (rp.playT >= rp.t1 - .25) seekReplay(rp.t0);   // הגיע לסוף — מתחילים מחדש
+      playReplay();
+    }
+    function stopReplayPlayback() {
+      if (rp) {
+        if (rp.timer) clearInterval(rp.timer);
+        rp.audio.pause(); rp.audio.src = "";
+        if (replayMarkersLayer) replayMarkersLayer.clearLayers();
+      }
+      rp = null;
+    }
+
     function fmtTime(epoch) {
       const d = epoch ? new Date(epoch * 1000) : new Date();
       return d.toLocaleTimeString("he-IL", { hour12: false });
@@ -4993,6 +5537,26 @@
     $("homeGoVdl2").onclick = () => applyMode("vdl2", vdl2.selFreqs ? { freqs: vdl2.selFreqs } : undefined);
     $("homeGoSatcom").onclick = enterSatcom;
     $("homeStopBtn").onclick = () => applyMode("off");
+
+    /* ----- שחזור-סשן: חיווט כפתורי הרשימה/הנגן ----- */
+    $("replaySaveBtn").onclick = saveReplaySession;
+    $("replaySaveMinutes").addEventListener("input", () => { $("replaySaveMinutes").dataset.touched = "1"; });
+    $("replayOpenListBtn").onclick = openReplayList;
+    $("replayBackBtn").onclick = () => {
+      if (replayScreen === "player") { stopReplayPlayback(); showReplayScreen("list"); loadSessionsList(); }
+      else showView("home");
+    };
+    $("replayPlayBtn").onclick = toggleReplayPlay;
+    $("replaySkipSilence").addEventListener("change", () => {
+      if (!rp) return;
+      rp.skip = $("replaySkipSilence").checked;
+      if (rp.playing) { rp.audio.pause(); rp.curClip = null; playReplayFromCurrent(); }
+    });
+    $("replaySeek").addEventListener("input", () => {
+      if (!rp) return;
+      seekAndContinue(rp.t0 + parseInt($("replaySeek").value, 10));
+    });
+
     $("homeScanAddLeg").onclick = () => {
       if (scanLegs.length >= 8) return;
       scanLegs.push({ mode: "acars", dwell_sec: 60 });
