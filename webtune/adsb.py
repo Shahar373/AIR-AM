@@ -567,6 +567,28 @@ def read_track_buffer():
     return {"t_oldest": t_oldest, "samples": samples, "gaps": gaps}
 
 
+def read_track_slice(t_start, t_end):
+    """כל שורות הבאפר (ac + gap) בטווח [t_start, t_end], ל-POST /api/sessions
+    ב-app.py (שלב 2). מחזיר את הרשומות המפוענחות כמו שהן — app.py אחראי על
+    gzip/כתיבה, לא adsb.py. שורה פגומה מדולגת בשקט, כמו read_track_buffer."""
+    try:
+        lines = TRACK_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    out = []
+    for ln in lines:
+        try:
+            row = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        t = row.get("t")
+        if isinstance(t, (int, float)) and t_start <= t <= t_end:
+            out.append(row)
+    return out
+
+
 def _poll_once():
     try:
         name, data = _fetch(_S["src_idx"])

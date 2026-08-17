@@ -12,12 +12,14 @@
 # ============================================================================
 import collections
 import csv
+import gzip
 import hmac
 import io
 import json
 import logging
 import os
 import re
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -319,6 +321,18 @@ ACTIVITY_PATH = Path("/var/lib/airam/activity.jsonl")
 ACTIVITY_KEEP = 500            # היומן שורד את מחיקת הקבצים (retention) - רק בלי נגינה
 ACTIVITY_RETURN = 50
 WATCH_INTERVAL = 10.0          # שניות בין סריקות של תיקיית ההקלטות
+
+# --- שחזור-סשן (שלב 2, docs/session-replay-design.md) -----------------------
+# תיקייה נפרדת מ-recordings/saved/ בכוונה: סשן הוא יחידה מורכבת (קליפים +
+# מסלולי ADS-B + מטא-דאטה), לא הקלטה בודדת. `_sweep_recordings` לא רואה אותה
+# מאותה סיבה בדיוק כמו saved/ — glob לא רקורסיבי.
+SESSIONS_DIR = Path("/var/lib/airam/sessions")
+SESSION_CLIPS_DIRNAME = "clips"
+# מזהה = תאריך-שעה קריא לאדם (YYYYMMDD-HHMM), עם סיומת מספרית בהתנגשות —
+# ולכן זו גם ההגנה מפני path traversal בראוטים עם <id>: אין בו נקודות/לוכסנים.
+SESSION_ID_RE = re.compile(r"^\d{8}-\d{4}(-\d+)?$")
+# ⚠ אין קבוע נפרד ל"כמה דקות אפשר לבקש" — נשען על adsb.TRACK_BUFFER_MIN
+# ישירות (בזמן הבקשה), לא על עותק מקומי שיכול להתפצל ממנו בשינוי עתידי.
 
 # --- תמלול ATC (whisper.cpp מקומי) -------------------------------------------
 # מודל ההפעלה **היברידי** (ר' §5/§12 ב-CLAUDE.md): לפי דרישה (כפתור ליד כל
@@ -3946,6 +3960,220 @@ def api_starred_zip():
         os.unlink(tmp.name)
         raise
     # הקובץ הזמני נמחק אחרי שהתשובה נשלחה במלואה (send_file משתמש ב-generator)
+    resp.call_on_close(lambda: os.path.exists(tmp.name) and os.unlink(tmp.name))
+    return resp
+
+
+# --- שחזור-סשן (שלב 2, docs/session-replay-design.md §4.3/§8) ----------------
+
+def _new_session_id():
+    """מזהה קריא-לאדם (YYYYMMDD-HHMM), עם סיומת מספרית בהתנגשות (שני שמירות
+    באותה דקה) — ראו SESSION_ID_RE להסבר למה זה גם ההגנה מפני path traversal."""
+    base = time.strftime("%Y%m%d-%H%M")
+    if not (SESSIONS_DIR / base).exists():
+        return base
+    n = 2
+    while (SESSIONS_DIR / f"{base}-{n}").exists():
+        n += 1
+    return f"{base}-{n}"
+
+
+def _session_dir(session_id):
+    """תיקיית הסשן, או None אם המזהה לא תקין (path traversal) או שהסשן לא קיים."""
+    if not SESSION_ID_RE.match(session_id or ""):
+        return None
+    d = SESSIONS_DIR / session_id
+    return d if d.is_dir() else None
+
+
+@app.route("/api/sessions", methods=["GET", "POST"])
+def api_sessions():
+    """GET — רשימת סשנים שמורים (חדש→ישן, ממוין לפי created_at ב-meta.json —
+    לא לפי שם-תיקייה, כדי לא להיתקל בסדר-מחרוזות מוזר בהתנגשות ‏-2/-3).
+    POST ‏{minutes, note?} — שומר את N הדקות האחרונות מה-buffer המתגלגל
+    (adsb.read_track_slice) + את ההקלטות שבחלון הזמן הזה. דרך _guard."""
+    if request.method == "GET":
+        sessions = []
+        if SESSIONS_DIR.is_dir():
+            for d in SESSIONS_DIR.iterdir():
+                if not d.is_dir() or not SESSION_ID_RE.match(d.name):
+                    continue
+                try:
+                    meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue          # תיקייה חצי-כתובה/פגומה — לא מפילים את הרשימה
+                sessions.append(meta)
+        sessions.sort(key=lambda m: m.get("created_at") or 0, reverse=True)
+        return jsonify(ok=True, sessions=sessions)
+
+    data = request.get_json(silent=True) or {}
+    try:
+        minutes = float(data.get("minutes", adsb.TRACK_BUFFER_MIN))
+    except (TypeError, ValueError):
+        return jsonify(ok=False, error="minutes לא תקין"), 400
+    if minutes <= 0:
+        return jsonify(ok=False, error="minutes לא תקין"), 400
+    # נחתך לגודל ה-buffer בפועל — אי אפשר לשמור מה שכבר נגזם מ-track.jsonl
+    minutes = min(minutes, adsb.TRACK_BUFFER_MIN)
+    note = str(data.get("note") or "").strip()[:200]
+
+    t_end = time.time()
+    t_start = t_end - minutes * 60
+    rows = adsb.read_track_slice(t_start, t_end)
+    if not rows:
+        return jsonify(ok=False, error="אין נתוני מסלול בטווח המבוקש — "
+                                        "ה-buffer ריק או שהחלון ישן מדי"), 400
+
+    session_id = _new_session_id()
+    sdir = SESSIONS_DIR / session_id
+    clips_dir = sdir / SESSION_CLIPS_DIRNAME
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    # קליפים בחלון הזמן: שמורה (★) מ*עתיקים* (שומרת על ההגנה ב-saved/ גם),
+    # לא-שמורה *מועברת* (משתמשת ב-_move_recording הקיים — משחררת מ-retention
+    # החי, בדיוק כמו §12: "מיקום הקובץ הוא המצב", אפס לוגיקת-פטור חדשה).
+    clips = []
+    for p in _iter_recordings():
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        if not (t_start <= mtime <= t_end):
+            continue
+        ev = _rec_event(p)
+        if _is_saved(p.name):
+            try:
+                shutil.copy2(p, clips_dir / p.name)
+                for s in _tx_sidecars(p):
+                    if s.exists():
+                        shutil.copy2(s, clips_dir / s.name)
+            except OSError:
+                continue
+        else:
+            try:
+                _move_recording(p, clips_dir)
+            except OSError:
+                continue
+        clips.append(ev)
+
+    aircraft = sorted({ac[0] for row in rows for ac in row.get("ac", [])})
+    gaps = [{"t": row["t"], "reason": row.get("gap"), "detail": row.get("detail")}
+            for row in rows if "gap" in row]
+
+    track_path = sdir / "track.jsonl.gz"
+    tmp = track_path.with_name(track_path.name + f".tmp{os.getpid()}")
+    try:
+        with gzip.open(tmp, "wt", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.replace(tmp, track_path)
+    except OSError as e:
+        shutil.rmtree(sdir, ignore_errors=True)
+        return jsonify(ok=False, error=f"שמירת מסלול נכשלה: {e}"), 500
+
+    # ⚠ app_mode/freq הם תמונת-מצב *נוכחית* בזמן השמירה, לא היסטוריה מלאה:
+    # אין ב-AIR-AM יומן מעברי-מצב (ר' docs/session-replay-design.md §4.3 —
+    # `modes` שם היה תכנון-אידיאלי; לממש אותו דורש מנגנון חדש לגמרי, לא רק
+    # קריאת state קיים). מתועד כאן כסטייה מכוונת, לא כשגיאה.
+    st = load_state()
+    meta = {
+        "id": session_id,
+        "t_start": t_start,
+        "t_end": t_end,
+        "created_at": time.time(),
+        "note": note,
+        "app_mode": st.get("app_mode"),
+        "freq": st.get("freq"),
+        "aircraft": aircraft,
+        "clips": clips,
+        "gaps": gaps,
+        "counts": {"clips": len(clips), "aircraft": len(aircraft), "samples": len(rows)},
+    }
+    try:
+        _atomic_write(sdir / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
+    except OSError as e:
+        shutil.rmtree(sdir, ignore_errors=True)
+        return jsonify(ok=False, error=f"שמירת מטא-דאטה נכשלה: {e}"), 500
+    return jsonify(ok=True, id=session_id, session=meta)
+
+
+@app.route("/api/sessions/<session_id>", methods=["GET", "DELETE"])
+def api_session_detail(session_id):
+    """GET — meta.json. DELETE — מחיקת הסשן כולו (קליפים+מסלול+מטא-דאטה).
+    ⚠ DELETE על סשן ששמר קליפ *לא-שמור* לא מחזיר אותו לחיים — הוא נמחק
+    יחד עם התיקייה, בדיוק כמו שמחיקת הקלטה רגילה בלתי-הפיכה."""
+    sdir = _session_dir(session_id)
+    if sdir is None:
+        return jsonify(ok=False, error="סשן לא נמצא"), 404
+    if request.method == "DELETE":
+        try:
+            shutil.rmtree(sdir)
+        except OSError as e:
+            return jsonify(ok=False, error=f"מחיקה נכשלה: {e}"), 500
+        return jsonify(ok=True, id=session_id)
+    try:
+        meta = json.loads((sdir / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return jsonify(ok=False, error="metadata של הסשן פגום"), 500
+    return jsonify(ok=True, session=meta)
+
+
+@app.route("/api/sessions/<session_id>/track")
+def api_session_track(session_id):
+    """מסלול ה-ADS-B של הסשן, מפוענח מ-track.jsonl.gz ל-JSON (שורות ac+gap
+    כמו שהן ב-adsb.read_track_slice — ה-UI מקבל אותו סכימה משני המקורות)."""
+    sdir = _session_dir(session_id)
+    if sdir is None:
+        return jsonify(ok=False, error="סשן לא נמצא"), 404
+    try:
+        with gzip.open(sdir / "track.jsonl.gz", "rt", encoding="utf-8") as f:
+            rows = [json.loads(ln) for ln in f if ln.strip()]
+    except (OSError, ValueError) as e:
+        return jsonify(ok=False, error=f"קריאת מסלול נכשלה: {e}"), 500
+    return jsonify(ok=True, rows=rows)
+
+
+@app.route("/api/sessions/<session_id>/clips/<name>")
+def api_session_clip(session_id, name):
+    """קליפ אודיו של סשן — route ייעודי (לא /recordings/<name>) כדי לא להוסיף
+    עוד מסלול-חיפוש לכל בקשת הקלטה רגילה, ר' docs/session-replay-design.md §4.4."""
+    sdir = _session_dir(session_id)
+    if sdir is None or not _REC_NAME_RE.match(name):
+        return jsonify(ok=False, error="לא נמצא"), 404
+    return send_from_directory(str(sdir / SESSION_CLIPS_DIRNAME), name)
+
+
+@app.route("/api/sessions/<session_id>/export.zip")
+def api_session_export(session_id):
+    """ייצוא סשן שלם (מטא-דאטה + מסלול + כל הקליפים) כ-ZIP — אותו דפוס בדיוק
+    כמו api_starred_zip (ZIP_STORED, קובץ זמני ולא BytesIO, ניקוי ב-call_on_close)."""
+    import zipfile
+    sdir = _session_dir(session_id)
+    if sdir is None:
+        return jsonify(ok=False, error="סשן לא נמצא"), 404
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as z:
+            meta_p = sdir / "meta.json"
+            if meta_p.is_file():
+                z.write(meta_p, "meta.json")
+            track_p = sdir / "track.jsonl.gz"
+            if track_p.is_file():
+                z.write(track_p, "track.jsonl.gz")
+            clips_dir = sdir / SESSION_CLIPS_DIRNAME
+            if clips_dir.is_dir():
+                for p in sorted(clips_dir.glob("*.mp3")):
+                    try:
+                        z.write(p, f"{SESSION_CLIPS_DIRNAME}/{p.name}")
+                    except OSError:
+                        continue
+        tmp.close()
+        resp = send_file(tmp.name, mimetype="application/zip", as_attachment=True,
+                         download_name=f"airam-session-{session_id}.zip")
+    except Exception:
+        tmp.close()
+        os.unlink(tmp.name)
+        raise
     resp.call_on_close(lambda: os.path.exists(tmp.name) and os.unlink(tmp.name))
     return resp
 

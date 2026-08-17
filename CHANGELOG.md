@@ -10,6 +10,26 @@
 ## [Unreleased]
 
 ### נוסף
+- **שחזור-סשן — שלב 2: שמירת סשן (`POST /api/sessions`) + פריסת אחסון
+  (בלי UI עדיין; ר' `docs/session-replay-design.md` §11).** כפתור "שמור N
+  דקות אחורה" (`{minutes, note?}`) חותך מ-`track.jsonl` את חלון-הזמן המבוקש
+  (נחתך ל-`adsb.TRACK_BUFFER_MIN` — אי אפשר לשמור מה שכבר נגזם מה-buffer),
+  ומעביר לתיקייה חדשה `/var/lib/airam/sessions/<id>/` (מזהה=תאריך-שעה,
+  `SESSION_ID_RE` הוא גם הגנת path-traversal): `meta.json` (אטומי), מסלול
+  ה-ADS-B כ-`track.jsonl.gz`, וההקלטות הרלוונטיות תחת `clips/`. **אפס
+  לוגיקת-פטור חדשה מ-`_sweep_recordings`** — אותו עיקרון בדיוק כמו `saved/`
+  (§12 ב-`CLAUDE.md`): מיקום הקובץ הוא המצב, לא רשומה במאגר-מצב. הקלטה
+  **שמורה (★) מ*עתיקה*** לסשן (המקור נשאר מוגן ב-`saved/`), לא-שמורה
+  **מ*ועברת*** (`_move_recording` הקיים — משתחררת מה-retention החי).
+  ‏`GET /api/sessions`/`GET|DELETE /api/sessions/<id>`/`GET .../track`/
+  ‏`GET .../clips/<name>`/`GET .../export.zip` (אותו דפוס כמו
+  `starred.zip` — `ZIP_STORED`, קובץ זמני, לא `BytesIO`).
+  ⚠ **שתי סטיות מכוונות מהתכנון המקורי, מתועדות ב-`session-replay-design.md`
+  §4.3:** (1) `meta.json` שומר תמונת-מצב *נוכחית* של `app_mode`/`freq` בזמן
+  השמירה, לא היסטוריית-מעברים מלאה (`modes`) — אין ב-AIR-AM יומן כזה, ובנייתו
+  היא מנגנון חדש שלא נדרש לשלב 2; (2) `aircraft` היא רשימת `reg` ייחודיים
+  ומחרוזות בלבד, לא אובייקטים עשירים (hex/flight/type) — `track.jsonl` שומר
+  ‏`reg` בלבד (ר' §4.1 בתכנון), ואין מקור אחר בזמן השמירה להעשיר ממנו.
 - **שחזור-סשן — שלב 1: buffer מתגלגל של ADS-B + `GET /api/replay/buffer`
   (בלי UI עדיין; ר' `docs/session-replay-design.md`).** כל poll של ADS-B
   (`adsb.py`) מוסיף שורה ל-`/var/lib/airam/track.jsonl` — תמונת-מצב פוזיציונית
