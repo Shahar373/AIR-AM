@@ -3489,8 +3489,15 @@ def _transcribe_file(mp3, lang="en"):
     if lang == "en":               # רמז ATC אנגלי — לא מטים בו תמלול עברי
         cmd += ["--prompt", WHISPER_PROMPT]
     try:
+        # ⚠ `-f wav` **חובה**: ffmpeg בוחר מכל (muxer) לפי *סיומת שם הקובץ*, לא
+        # לפי תוכן. שם הקובץ הזמני מסתיים ב-`.tmp` (`<name>.mp3.wav.tmp` —
+        # ר' `wav` למעלה), כך שבלי הדגל ffmpeg נכשל תמיד עם "Unable to choose
+        # an output format" — על *כל* הקלטה, בלי קשר לתוכן שלה (נצפה בשטח:
+        # ‏rc=234 מ-ffmpeg, לא מ-whisper-cli כפי שההודעה "Error opening..."
+        # הטעתה להניח בהתחלה). `-f wav` עוקף לגמרי את הניחוש-לפי-סיומת.
         subprocess.run(["nice", "-n", WHISPER_NICE, "ffmpeg", "-nostdin", "-y",
-                        "-i", str(mp3), "-ar", "16000", "-ac", "1", str(wav)],
+                        "-i", str(mp3), "-ar", "16000", "-ac", "1", "-f", "wav",
+                        str(wav)],
                        capture_output=True, timeout=TRANSCRIBE_TIMEOUT, check=True)
         out = subprocess.run(cmd, capture_output=True, text=True,
                              timeout=TRANSCRIBE_TIMEOUT, check=True)
