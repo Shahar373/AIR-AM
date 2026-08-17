@@ -294,7 +294,11 @@ SATCOM_LOG_KEEP = 5000                # retention על הדיסק (זנב נשמ
 REC_DIR = Path("/var/lib/airam/recordings")
 REC_BASENAME = "airam"         # filename_template ב-config וגם עוגן הפרסור של השמות
 REC_BYTES_PER_SEC = 6000       # CBR 48kbps (ה-patch ב-install.sh) => הערכת משך מגודל
-REC_MAX_FILES = 200            # retention (הקלטות *לא* מסומנות בלבד — ר' _sweep_recordings)
+# retention (הקלטות *לא* מסומנות בלבד — ר' _sweep_recordings). ⚠ 500 ולא 200:
+# 200 שידורים ≈ 17 דק' אודיו בלבד בתדר עמוס — פחות מהחלון הרטרואקטיבי שכפתור
+# "שמור סשן" (docs/session-replay-design.md) מבטיח. 500 מוסיף ~15MB בלבד
+# (ר' §5.5 שם) ונותן ~5 שעות שעון — תנאי מקדים לפיצ'ר, לא קשור לתוכנו.
+REC_MAX_FILES = 500
 REC_MAX_BYTES = 100 * 1024 * 1024
 # הקלטות שמורות (★) — **תת-תיקייה, לא רשימה בקובץ צד.**
 # ⚠ זו הייתה טעות עיצוב שתוקנה: הגרסה הראשונה ניהלה `starred.json` עם רשימת
