@@ -277,3 +277,66 @@ def test_export_zip_contains_meta_track_and_clips(client, paths):
 
 def test_export_zip_404_for_unknown_session(client, paths):
     assert client.get("/api/sessions/20260101-0000/export.zip").status_code == 404
+
+
+# --- תמלול של קליפי סשן (שלב 3+: "התמלול תחת הנגן") --------------------------
+
+def test_session_detail_exposes_live_transcript_from_sidecar(client, paths):
+    """⚠ התמלול נקרא **חי** מה-sidecar ולא מוקפא ל-meta.json: קליפ יכול
+    להתמלל *אחרי* שהסשן נשמר, וערך קפוא היה נשאר ריק לנצח."""
+    now = time.time()
+    _write_track([_ac_row(now - 30, [])])
+    _mk_rec(NAME1, age=30)
+    sid = client.post("/api/sessions", json={"minutes": 5}).get_json()["id"]
+    clip = app.SESSIONS_DIR / sid / app.SESSION_CLIPS_DIRNAME / NAME1
+    assert clip.is_file()
+    # לפני תמלול — "לא ניסינו" (none), לא היעדר שדה
+    r = client.get(f"/api/sessions/{sid}").get_json()
+    assert r["session"]["clips"][0]["tx"]["state"] == "none"
+    # התמלול נוצר *אחרי* השמירה — חייב להופיע בלי לגעת ב-meta.json
+    app._write_tx(clip, "ok", text="cleared to land", lang="en")
+    r = client.get(f"/api/sessions/{sid}").get_json()
+    tx = r["session"]["clips"][0]["tx"]
+    assert tx["state"] == "ok" and tx["text"] == "cleared to land"
+
+
+def test_session_clips_are_queued_for_transcription(client, paths):
+    """קליפ ש*הועבר* לסשן יצא מ-_iter_recordings — בלי _session_clip_paths הוא
+    לא היה מתומלל לעולם (הפיצ'ר 'תמלול תחת הנגן' היה ריד תמיד)."""
+    now = time.time()
+    _write_track([_ac_row(now - 30, [])])
+    _mk_rec(NAME1, age=30)
+    sid = client.post("/api/sessions", json={"minutes": 5}).get_json()["id"]
+    assert not (app.REC_DIR / NAME1).exists()      # הועבר, לא נשאר ביומן החי
+    target = app._tx_next_target(auto=False)       # auto כבוי — עדיין נבחר
+    assert target is not None and target.name == NAME1
+    assert app.SESSION_CLIPS_DIRNAME in target.parts
+
+
+def test_session_clip_pending_request_is_picked_first(client, paths):
+    now = time.time()
+    _write_track([_ac_row(now - 30, [])])
+    _mk_rec(NAME1, age=30)
+    sid = client.post("/api/sessions", json={"minutes": 5}).get_json()["id"]
+    clip = app.SESSIONS_DIR / sid / app.SESSION_CLIPS_DIRNAME / NAME1
+    app._write_tx(clip, "pending", lang="en")
+    target = app._tx_next_target(auto=False)
+    assert target is not None and target.name == NAME1
+
+
+def test_saving_new_session_does_not_steal_clips_from_existing_sessions(client, paths):
+    """⚠ regression guard: `_session_clip_paths` **חייב** להישאר נפרד
+    מ-`_iter_recordings`. אם קליפי-סשן היו נכנסים ל-_iter_recordings, שמירת
+    סשן חדש (שמשתמשת בו לבחירת קליפים) הייתה *מעבירה אליו* את הקליפים של
+    הסשנים הקיימים — אובדן נתונים שקט."""
+    now = time.time()
+    _write_track([_ac_row(now - 60, []), _ac_row(now - 30, [])])
+    _mk_rec(NAME1, age=60)
+    sid1 = client.post("/api/sessions", json={"minutes": 5}).get_json()["id"]
+    clip1 = app.SESSIONS_DIR / sid1 / app.SESSION_CLIPS_DIRNAME / NAME1
+    assert clip1.is_file()
+    # סשן שני על אותו חלון זמן — אסור שייקח את הקליפ של הראשון
+    _mk_rec(NAME2, age=30)
+    r2 = client.post("/api/sessions", json={"minutes": 5}).get_json()
+    assert clip1.is_file(), "הקליפ של הסשן הראשון נגנב ע\"י שמירת סשן חדש"
+    assert [c["file"] for c in r2["session"]["clips"]] == [NAME2]

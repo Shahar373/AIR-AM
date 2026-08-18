@@ -399,7 +399,11 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   לעברית; `None` כשאין מודל מתאים לשפה, לא ניחוש), `_whisper_ready`/`_tx_status`
   (זמינות **חיה**, כולל `langs` פר-שפה), **תור מבוסס-sidecar** (`state="pending"`,
   לא רשימה בזיכרון — שורד restart; `_tx_queue_len`/`_tx_busy_file`/`_TX_FAILS`),
-  `_tx_next_target` (סדר עדיפויות: `pending` → שמורות (★, תמיד) → הכול אם
+  `_session_clip_paths` (קליפי כל הסשנים השמורים — **בכוונה נפרד
+  מ-`_iter_recordings`**: זה משמש גם את `api_sessions` לבחירת קליפים לסשן
+  *חדש*, ואיחוד היה גורם לשמירת סשן לגנוב קליפים מסשנים קיימים; קיים כי
+  קליפ ש*הועבר* לסשן יצא מתור התמלול לצמיתות),
+  `_tx_next_target` (סדר עדיפויות: `pending` → שמורות (★) **וקליפי סשן**, תמיד → הכול אם
   `state["transcribe_auto"]`; מדלג על קובץ אחרי `TX_MAX_FAILS` כשלונות-כתיבה
   רצופים — מגן מלולאת whisper אינסופית כשהדיסק מלא), `_transcribe_file`
   (מחזיר `(state, text, err)`, `nice -n 19` על שני התהליכים — **לא סינון-תוכן**,
@@ -414,7 +418,9 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   נכתב עם `gzip.open`+`os.replace`, `meta.json` עם `_atomic_write`; `app_mode`/`freq`
   הם תמונת-מצב *נוכחית* (מ-`load_state()`), לא היסטוריית-מעברים — אין ל-AIR-AM
   יומן כזה, סטייה מתועדת מהתכנון המקורי), `api_session_detail` (dispatcher
-  ל-`GET`/`DELETE /api/sessions/<id>`), `api_session_track`
+  ל-`GET`/`DELETE /api/sessions/<id>` — ה-GET מעשיר כל קליף ב-`tx` **שנקרא
+  חי מה-sidecar**, לא מוקפא ל-`meta.json`: קליפ יכול להתמלל *אחרי* שהסשן
+  נשמר, וערך קפוא היה נשאר "אין תמלול" לנצח), `api_session_track`
   (מפענח `track.jsonl.gz` ל-JSON), `api_session_clip` (route ייעודי, לא הרחבת
   ‏`/recordings/<name>`), `api_session_export` (`GET .../export.zip`, אותו דפוס
   בדיוק כמו `api_starred_zip`). **בלי retention אוטומטי לסשנים** — מחיקה היא
@@ -644,19 +650,41 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 כרטיס-הבית מציג רמז-זמינות מ-`GET /api/replay/buffer` (`loadReplayBuffer`) ומונה
 סשנים (`refreshReplaySessionsCount`), ושולח `POST /api/sessions` (`saveReplaySession`).
 מסך הרשימה (`loadSessionsList`/`buildSessionCard`) מציג כרטיס לכל סשן עם פתיחה/
-ייצוא/מחיקה (`deleteReplaySession`, עם `confirm()`). מסך הנגן (`initReplayPlayer`):
-מפה (Leaflet, אותו דפוס טעינה-עצלנית/`layerGroup` כמו ב-`createDataView`)
-מציגה את שורת-המסלול הכי-עדכנית שאינה מאוחרת מ-`playT` (`findReplayRowAt` —
-**לא** אינטרפולציה בין נקודות); מטוס עם מיקום משובש (`lat=null`, §7.1 בתכנון)
-מוצג כצ'יפ `.spoofed` ולא כסמן — לא ממציאים מיקום, לא מוחקים את המטוס מהרשימה.
-ציר-זמן (`buildReplayTimeline`) עם בלוקי קליפים (קליק=seek) ופערי-ADS-B
-**נקודתיים** (`.rt-gap` — §7.2: לא נמדד משך-פער בפועל). נגן: `<audio>` יחיד
-משותף לשני מצבי השמעה — **"דלג על שקט"** (`#replaySkipSilence`, ברירת מחדל;
-`onReplayClipEnded` קופץ לקליפ הבא כש-`ended`**או** `error` מגיע — קובץ פגום
-בודד לא תוקע את הנגן) מול **זמן-אמת** (`replayTick` מתקדם עם שעון-קיר אמיתי,
-`wallStartMs`/`wallStartPlayT`, ומשאיר שקט אמיתי בין קליפים). **נבדק ידנית
-בדפדפן** (Playwright מול שרת-dev עם סשנים מדומים, כולל MP3 מפוענח בפועל —
-לא רק מסלול-כשל).
+ייצוא/מחיקה (`deleteReplaySession`, עם `confirm()`). מסך הנגן (`initReplayPlayer`) — **פריסה: מפה → סיכום-מטוסים מתקפל → רשימת
+תשדורות → סרגל-נגן דביק בתחתית** (`.replay-player-bar`, מכיל ציר-צפיפות +
+פקדים + תמלול). במסך רחב (≥1024px) המפה והרשימה זו-לצד-זו (`.replay-cols`).
+- **מפה** (Leaflet, אותו דפוס טעינה-עצלנית/`layerGroup` כמו ב-`createDataView`)
+  מציגה את שורת-המסלול הכי-עדכנית שאינה מאוחרת מ-`playT` (`findReplayRowAt` —
+  **לא** אינטרפולציה בין נקודות). ⚠ **מסננת לרדיוס-תצוגה** (`REPLAY_VIEW_NM`=40,
+  `nmFromArp`) עם מתג "הצג את כל הרדיוס" — **סינון-תצוגה, לא סינון-נתונים**:
+  ‏`RADIUS_NM`=250 של `adsb.py` נבחר לזיהוי שיבוש GPS ומתועד ב-§5.2 בתכנון
+  כ"לא לתצוגה", והצגת כולו נתנה 61 סיכות זהות בלתי-קריאות. הסמנים הם
+  `circleMarker` עם **היררכיה חזותית** (קרוב+נמוך = גדול ואטום), ו-`fitBounds`
+  ממקד על הנתונים בפתיחה. מטוס עם מיקום משובש (`lat=null`, §7.1) מוצג כצ'יפ
+  `.spoofed` ולא כסמן — לא ממציאים מיקום, לא מוחקים את המטוס מהרשימה.
+- **ציר-צפיפות** (`drawReplayDensity`, canvas כמו `rfSpark`/`drawSpectrum`) —
+  ⚠ **החליף ציר שבו כל קליף היה בלוק נפרד**: ב-45 דק'/77 תשדורות כל הבלוקים
+  נדחסו לרוחב המינימלי (2px) ונראו כברקוד אחיד — אי אפשר היה להבחין בין
+  תשדורת של 2ש' ל-6ש', בין קליפ לפער-קליטה, ולא ללחוץ עליהם בטלפון. הציר
+  מציג **צפיפות** (שניות-אודיו לדלי) ולכן קריא גם ב-7700 תשדורות; פערי-ADS-B
+  מסומנים **נקודתית** (§7.2: לא נמדד משך-פער בפועל). לחיצה = קפיצה בזמן.
+- **רשימת התשדורות** (`renderReplayTxList`) — **הניווט הראשי**: שעה, תדר, משך
+  וסימון-מצב-תמלול, כל שורה יעד-נגיעה של 40px. השורה המתנגנת מסומנת ונגללת
+  לתצוגה (`renderReplayNowTx`).
+- **תמלול** (`#replayNowTx`) — הטקסט של התשדורת המתנגנת, מ-`tx` שמגיע חי
+  מ-`GET /api/sessions/<id>`. מבחין בין חמשת מצבי ה-`tx.state` כמו יומן
+  השידורים (§12: "לא ניסינו" ≠ "ניסינו ונכשלנו"), ו-`dir` לפי `tx.lang`.
+- **נגן**: `<audio>` יחיד משותף לשני מצבי השמעה — **"דלג על שקט"**
+  (`#replaySkipSilence`, ברירת מחדל; `onReplayClipEnded` קופץ לקליפ הבא
+  כש-`ended` **או** `error` מגיע — קובץ פגום בודד לא תוקע את הנגן) מול
+  **זמן-אמת** (`replayTick` מתקדם עם שעון-קיר אמיתי, `wallStartMs`/
+  `wallStartPlayT`, ומשאיר שקט אמיתי בין קליפים). **שעון-קיר** (`fmtClockHM`,
+  "20:46") לצד המונה היחסי — בתעופה זה המידע שמעניין.
+
+**נבדק ידנית בדפדפן** (Playwright) **מול נתונים ריאליסטיים** (45 דק', 70
+מטוסים, 77 תשדורות) בשלושה רוחבי-מסך — ⚠ הבדיקה מול סשן-דמה קטן (2 מטוסים,
+2 קליפים) **החמיצה לגמרי** את שלוש הבעיות שלמעלה; עומס אמיתי הוא חלק מהבדיקה,
+לא פינוק.
 
 ---
 
@@ -697,7 +725,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/airspace` | מסלול פעיל + שיבוש GPS (מ-adsb.py) |
 | GET | `/api/replay/buffer` | מצב ה-buffer המתגלגל של ADS-B — `t_oldest`/`samples`/`gaps` (מ-`adsb.read_track_buffer`) + `clips_available` (יש הקלטה בתוך חלון הבאפר, נבדק כאן כי רק app.py מכיר את `REC_DIR`/`saved/`). שלב 1 ב-`docs/session-replay-design.md` |
 | GET/POST | `/api/sessions` | GET: רשימת סשנים שמורים (חדש→ישן). POST `{minutes, note?}`: שומר את N הדקות האחרונות (נחתך ל-`adsb.TRACK_BUFFER_MIN`) — מסלול ADS-B + הקלטות בחלון (שמורה מ*עתיקה*, לא-שמורה מ*ועברת*) ל-`sessions/<id>/`. שלב 2. דרך `_guard` (POST בלבד) |
-| GET/DELETE | `/api/sessions/<id>` | GET: `meta.json`. DELETE: מחיקת הסשן כולו (בלתי הפיך). דרך `_guard` (DELETE בלבד) |
+| GET/DELETE | `/api/sessions/<id>` | GET: `meta.json` + שדה `tx` לכל קליף (**נקרא חי מה-sidecar**, לא מוקפא בשמירה — קליף יכול להתמלל אחריה). DELETE: מחיקת הסשן כולו (בלתי הפיך). דרך `_guard` (DELETE בלבד) |
 | GET | `/api/sessions/<id>/track` | מסלול ה-ADS-B של הסשן, מפוענח מ-`track.jsonl.gz` |
 | GET | `/api/sessions/<id>/clips/<name>` | קליפ אודיו של הסשן — route ייעודי, לא הרחבת `/recordings/<name>` |
 | GET | `/api/sessions/<id>/export.zip` | ייצוא הסשן כולו (מטא-דאטה+מסלול+קליפים), אותו דפוס כמו `starred.zip` |

@@ -509,8 +509,22 @@
     .rsc-btns { display: flex; gap: .5rem; margin-top: .3rem; flex-wrap: wrap; }
     .rsc-btns > * { flex: 1; min-width: 5.5rem; }
 
-    .replay-map { width: 100%; height: clamp(240px, 42vh, 420px); border-radius: var(--r-ctrl); overflow: hidden; }
-    .replay-aircraft { display: flex; flex-wrap: wrap; gap: .35rem; margin: .55rem 0 0; }
+    /* ⚠ הגובה מכויל כך שסיכום-המטוסים ותחילת רשימת התשדורות מציצים מעל סרגל
+       הנגן הדביק — אחרת הרשימה (הניווט הראשי) נראית כאילו אינה קיימת. */
+    .replay-map { width: 100%; height: clamp(180px, 26vh, 320px); border-radius: var(--r-ctrl); overflow: hidden; }
+
+    /* סיכום מטוסים מתקפל — ר' ההערה ב-HTML ו-REPLAY_VIEW_NM ב-JS */
+    .replay-ac-summary { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-top: .55rem; }
+    .replay-ac-toggle {
+      font-size: .78rem; font-weight: 600; padding: .35rem .7rem; min-height: 32px;
+      display: inline-flex; align-items: center; gap: .35rem;
+    }
+    .replay-ac-toggle .rac-caret { transition: transform .15s ease; font-size: .7rem; }
+    .replay-ac-toggle[aria-expanded="true"] .rac-caret { transform: rotate(180deg); }
+    .replay-ac-all { display: flex; align-items: center; gap: .35rem; cursor: pointer; margin: 0; }
+    .replay-ac-all input { accent-color: var(--accent); }
+    .replay-aircraft { display: flex; flex-wrap: wrap; gap: .35rem; margin: .55rem 0 0;
+      max-height: 9rem; overflow-y: auto; }
     .replay-ac-chip {
       font-size: .74rem; padding: .25rem .55rem; border-radius: 999px;
       background: var(--wash); border: 1px solid var(--border); color: var(--dim);
@@ -519,34 +533,64 @@
     /* מיקום משובש (§7.1) — לא מוצג כנקודה על המפה, רק כצ'יפ מסומן: לא ממציאים מיקום */
     .replay-ac-chip.spoofed { color: var(--amber-fg); border-color: rgba(var(--amber-rgb),.4); }
 
-    .replay-timeline-wrap { margin-top: .8rem; }
-    .replay-timeline {
-      position: relative; height: 34px; border-radius: var(--r-sm);
-      background: var(--panel-2); border: 1px solid var(--border); overflow: hidden;
+    /* מסך רחב: מפה ורשימת-תשדורות זו לצד זו — אחרת המפה נמתחת לפס נמוך ורחב
+       והרשימה נראית דלילה. אותו עיקרון כמו .dl-map ב-ACARS/VDL2. */
+    @media (min-width: 1024px) {
+      .replay-cols { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+        gap: var(--sp-4); align-items: start; }
+      .replay-cols .replay-map { height: clamp(280px, 44vh, 480px); }
+      .replay-cols .replay-tx-head { margin-top: 0; }
+      .replay-cols .replay-tx-list { max-height: clamp(300px, 47vh, 520px); }
     }
-    .rt-clips, .rt-gaps { position: absolute; inset: 0; }
-    .rt-clip {
-      position: absolute; top: 5px; bottom: 5px; min-width: 2px;
-      background: var(--accent); border-radius: 2px; opacity: .85; cursor: pointer;
-    }
-    /* פער קליטת ADS-B (§7.2) — סימון נקודתי, לא מרווח מומצא: לא נמדד משך הפער, רק זמן הדגימה שנכשלה */
-    .rt-gap {
-      position: absolute; top: 0; bottom: 0; width: 3px; margin-inline-start: -1px;
-      background: repeating-linear-gradient(45deg, var(--red), var(--red) 2px, transparent 2px, transparent 4px);
-      opacity: .75;
-    }
-    .rt-cursor {
-      position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--text);
-      box-shadow: 0 0 4px rgba(0,0,0,.4); pointer-events: none; transform: translateX(-1px);
-    }
-    .replay-seek { width: 100%; margin-top: .4rem; accent-color: var(--accent); }
 
-    .replay-player-controls { display: flex; align-items: center; gap: var(--sp-3); margin-top: .8rem; flex-wrap: wrap; }
-    .replay-player-controls .play-main { width: 52px; height: 52px; font-size: 1.25rem; }
-    .replay-time { font-family: var(--font-mono); font-variant-numeric: tabular-nums; direction: ltr;
-      color: var(--dim); font-size: .85rem; }
+    /* רשימת התשדורות — הניווט הראשי (ציר-הזמן הוא סקירה בלבד) */
+    .replay-tx-head { display: flex; align-items: baseline; gap: var(--sp-2); margin: var(--sp-4) 0 .4rem; }
+    .replay-tx-head .ttl { font-size: .72rem; font-weight: 700; color: var(--dim); letter-spacing: .07em; margin: 0; }
+    .replay-tx-list { display: flex; flex-direction: column; gap: .2rem;
+      max-height: clamp(180px, 32vh, 340px); overflow-y: auto; }
+    .replay-tx-list .nodata { font-size: .82rem; color: var(--text-faint); margin: 0; }
+    .replay-tx-row {
+      display: flex; align-items: baseline; gap: .5rem; width: 100%; text-align: start;
+      padding: .45rem .55rem; border: 1px solid transparent; border-radius: var(--r-sm);
+      background: none; font-weight: 500; min-height: 40px;   /* יעד-נגיעה אמיתי, בניגוד ל-2px של הברקוד */
+    }
+    .replay-tx-row:hover { background: var(--hover); }
+    .replay-tx-row.on { background: rgba(var(--accent-rgb),.1); border-color: rgba(var(--accent-rgb),.4); }
+    .rtx-time { font-family: var(--font-mono); font-variant-numeric: tabular-nums; direction: ltr;
+      font-size: .82rem; color: var(--text); flex: none; }
+    .rtx-freq { font-family: var(--font-mono); font-size: .76rem; color: var(--dim); direction: ltr; flex: none; }
+    .rtx-dur { font-size: .72rem; color: var(--text-faint); flex: none; }
+    /* ⚠ בלי margin auto: על מסך רחב זה הדביק את ה-📝 לקצה הנגדי והשאיר
+       פער ריק ענק באמצע השורה. הסימון שייך לצד הנתונים. */
+    .rtx-mark { font-size: .72rem; flex: none; }
+
+    /* --- סרגל נגן דביק --- */
+    .replay-player-bar {
+      position: sticky; bottom: 0; z-index: 30;
+      background: var(--glass);
+      -webkit-backdrop-filter: saturate(1.6) blur(14px); backdrop-filter: saturate(1.6) blur(14px);
+      border-top: 1px solid var(--border);
+      border-radius: 0 0 var(--r-card) var(--r-card);
+      padding: .5rem var(--sp-4) calc(.6rem + env(safe-area-inset-bottom));
+    }
+    /* ציר-צפיפות: canvas (כמו rfSpark/drawSpectrum) — 77 קליפים או 7700, אותה קריאוּת */
+    .replay-density { display: block; width: 100%; height: 40px; cursor: pointer;
+      border-radius: var(--r-sm); background: var(--panel-2); border: 1px solid var(--border); }
+    .replay-player-controls { display: flex; align-items: center; gap: var(--sp-3); margin-top: .5rem; flex-wrap: wrap; }
+    .replay-player-controls .play-main { width: 48px; height: 48px; font-size: 1.15rem; flex: none; }
+    .replay-time { display: flex; flex-direction: column; line-height: 1.25;
+      font-family: var(--font-mono); font-variant-numeric: tabular-nums; direction: ltr; }
+    /* שעון-קיר גדול: בתעופה "20:46" הוא המידע, לא "07:30 מתחילת הסשן" */
+    .replay-time b { font-size: 1.05rem; color: var(--text); }
+    .replay-time span { font-size: .74rem; color: var(--text-faint); }
     .replay-mode-toggle { display: flex; align-items: center; gap: .4rem; margin-inline-start: auto; cursor: pointer; }
     .replay-mode-toggle input { accent-color: var(--accent); }
+    .replay-now-tx {
+      margin: .5rem 0 0; font-size: .88rem; line-height: 1.45; color: var(--text);
+      padding: .5rem .65rem; border-radius: var(--r-sm);
+      background: rgba(var(--accent-rgb),.08); border: 1px solid rgba(var(--accent-rgb),.22);
+    }
+    .replay-now-tx.muted { color: var(--text-faint); background: var(--wash); border-color: var(--border); }
 
     /* ---------- כפתורים ----------
        סקאלה מהודקת: הכפתורים ירשו 1rem מהגוף וזה היה גדול מדי לפקדי-ממשק —
@@ -1397,29 +1441,55 @@
         </div>
         <div class="panel-bd">
           <p class="hint" id="replayPlayerMeta"></p>
+          <div class="replay-cols">
+          <div>
           <div id="replayMap" class="replay-map"></div>
           <p class="acars-map-note hidden" id="replayMapNote"></p>
-          <div class="replay-aircraft" id="replayAircraftNow"></div>
 
-          <div class="replay-timeline-wrap">
-            <div class="replay-timeline" id="replayTimeline">
-              <div class="rt-clips" id="rtClips"></div>
-              <div class="rt-gaps" id="rtGaps"></div>
-              <div class="rt-cursor" id="rtCursor"></div>
-            </div>
-            <input type="range" id="replaySeek" class="replay-seek" min="0" max="1000" step="1" value="0"
-                   aria-label="מיקום בציר הזמן" />
+          <!-- סיכום מטוסים מתקפל: ברדיוס 250nm יש ~300 מטוסים, ורשימה פתוחה
+               שלהם דחקה את הנגן אל מתחת לקיפול. ר' REPLAY_VIEW_NM. -->
+          <div class="replay-ac-summary">
+            <button type="button" class="replay-ac-toggle" id="replayAcToggle" aria-expanded="false">
+              <span id="replayAcSummaryTxt">—</span><span class="rac-caret">▾</span>
+            </button>
+            <label class="replay-ac-all hint" title="ברירת המחדל מציגה רק את סביבת נתב״ג — הרדיוס המלא נועד לזיהוי שיבוש GPS, לא לתצוגה">
+              <input type="checkbox" id="replayShowAllAc" /> הצג את כל הרדיוס
+            </label>
+          </div>
+          <div class="replay-aircraft hidden" id="replayAircraftNow"></div>
           </div>
 
+          <div>
+          <!-- ניווט ראשי: רשימת התשדורות. ציר-הזמן הוא סקירה בלבד (סרגל הנגן). -->
+          <div class="replay-tx-head">
+            <p class="ttl">תשדורות</p>
+            <span class="hint" id="replayTxCount"></span>
+          </div>
+          <div class="replay-tx-list" id="replayTxList"></div>
+          <p class="hint hidden" id="replayNoClipsHint"></p>
+          </div>
+          </div><!-- /replay-cols -->
+        </div>
+
+        <!-- סרגל נגן דביק: ציר-צפיפות + פקדים + תמלול התשדורת המתנגנת.
+             דביק כדי שאפשר יהיה לעצור/לקפוץ בלי לגלול חזרה מהמפה/הרשימה. -->
+        <div class="replay-player-bar" id="replayPlayerBar">
+          <canvas id="replayDensity" class="replay-density"
+                  title="צפיפות תשדורות לאורך הסשן — לחץ כדי לקפוץ"></canvas>
           <div class="replay-player-controls">
             <button type="button" class="play-main" id="replayPlayBtn" aria-label="נגן / השהה">▶</button>
-            <div class="replay-time" id="replayTimeTxt">00:00 / 00:00</div>
+            <div class="replay-time">
+              <b id="replayClockTxt">--:--</b>
+              <span id="replayTimeTxt">00:00 / 00:00</span>
+            </div>
             <label class="replay-mode-toggle hint">
               <input type="checkbox" id="replaySkipSilence" checked />
               דלג על שקט
             </label>
           </div>
-          <p class="hint hidden" id="replayNoClipsHint"></p>
+          <!-- התמלול של התשדורת המתנגנת כרגע (נקרא חי מה-sidecar, ר' api_session_detail).
+               dir="auto" — התמלול יכול להיות אנגלית (ATC) או עברית, לפי tx.lang. -->
+          <p class="replay-now-tx hidden" id="replayNowTx" dir="auto"></p>
         </div>
       </section>
     </div>
@@ -4066,11 +4136,19 @@
     let rp = null;                  // מצב הנגן הפעיל — null כשלא בתצוגת נגן
     let replayMapObj = null, replayMapIcon = null, replayLeafLoading = false, replayMarkersLayer = null;
     const REPLAY_TICK_MS = 250;
+    // רדיוס *תצוגה* (NM מנתב״ג). ר' §5.2 בתכנון: RADIUS_NM=250 של adsb.py נבחר
+    // לזיהוי שיבוש GPS ומתועד שם במפורש כ"לא לתצוגה". מתג ב-UI מחזיר את הכול.
+    const REPLAY_VIEW_NM = 40;
 
     function fmtClockDT(epoch) {
       if (epoch == null) return "—";
       return new Date(epoch * 1000).toLocaleString("he-IL",
         { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+    }
+    function fmtClockHM(epoch) {     // שעון-קיר "20:46" — המידע שמעניין בתעופה
+      if (epoch == null) return "--:--";
+      return new Date(epoch * 1000).toLocaleTimeString("he-IL",
+        { hour12: false, hour: "2-digit", minute: "2-digit" });
     }
     function fmtReplayClock(sec) {   // mm:ss עם אפסים מובילים — לשעון הנגן (שונה מ-fmtDur הכללי: "1:23"/"5s")
       sec = Math.max(0, Math.round(sec || 0));
@@ -4211,6 +4289,7 @@
         audio: new Audio(), curClip: null,
         wallStartMs: 0, wallStartPlayT: 0, timer: null, markers: {},
         title: meta.note || meta.id,
+        rowEls: [], didFit: false,
       };
       rp.audio.addEventListener("ended", onReplayClipEnded);
       rp.audio.addEventListener("error", onReplayClipEnded);   // קובץ שנכשל בטעינה — מדלגים, לא עוצרים הכול
@@ -4228,34 +4307,92 @@
         : "אין הקלטות אודיו בסשן הזה — מוצג מסלול ADS-B בלבד.";
       $("replaySkipSilence").disabled = clips.length === 0;
 
-      if (replayMarkersLayer) replayMarkersLayer.clearLayers();
-      buildReplayTimeline();
+      // איפוס מצב-תצוגה בין סשנים: סשן חדש נפתח תמיד מקופל ובסינון ברירת-המחדל
+      $("replayAircraftNow").classList.add("hidden");
+      $("replayAcToggle").setAttribute("aria-expanded", "false");
+      $("replayShowAllAc").checked = false;
+      $("replayNowTx").classList.add("hidden");
+
+      if (replayMarkersLayer) { replayMarkersLayer.clearLayers(); }
+      renderReplayTxList();
+      drawReplayDensity();
       ensureReplayMap();
       seekReplay(rp.t0);
       $("replayPlayBtn").textContent = "▶";
       $("replayPlayBtn").classList.remove("playing");
     }
-    function buildReplayTimeline() {
-      const clipsBox = $("rtClips"); clipsBox.textContent = "";
-      const gapsBox = $("rtGaps"); gapsBox.textContent = "";
+
+    /* ----- רשימת התשדורות — הניווט הראשי -----
+       ⚠ החליפה ציר-זמן שבו כל קליף היה פס של 2px: ב-45 דק' עם 77 תשדורות כל
+       הפסים נדחסו לרוחב המינימלי, כך שלא היה אפשר להבחין בין תשדורת של 2ש'
+       ל-6ש', ולא בין קליפ לפער-קליטה — וגם לא ללחוץ עליהם בטלפון. */
+    function renderReplayTxList() {
+      const box = $("replayTxList");
+      box.textContent = "";
+      $("replayTxCount").textContent = rp.clips.length ? rp.clips.length + " תשדורות" : "";
+      if (!rp.clips.length) {
+        box.appendChild(mkSpan("nodata", "אין תשדורות אודיו בסשן הזה."));
+        return;
+      }
+      rp.rowEls = [];
+      rp.clips.forEach((c, i) => {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "replay-tx-row";
+        row.appendChild(mkSpan("rtx-time", fmtClockHM(c.ts)));
+        if (c.freq != null) row.appendChild(mkSpan("rtx-freq", c.freq.toFixed(3)));
+        row.appendChild(mkSpan("rtx-dur", Math.round(c.dur || 0) + "ש׳"));
+        // ⚠ הטקסט המלא מוצג תחת הנגן; כאן רק סימון שקיים/נכשל — "לא ניסינו"
+        // (state none) לא מקבל שום סימן, כדי לא להיראות כמו כישלון (§12).
+        const st = (c.tx || {}).state;
+        if (st === "ok") row.appendChild(mkSpan("rtx-mark", "📝"));
+        else if (st === "pending") row.appendChild(mkSpan("rtx-mark", "⏳"));
+        else if (st === "empty") row.appendChild(mkSpan("rtx-mark", "🔇"));
+        else if (st === "failed") row.appendChild(mkSpan("rtx-mark", "⚠"));
+        row.onclick = () => { seekAndContinue(c.ts); if (!rp.playing) playReplay(); };
+        box.appendChild(row);
+        rp.rowEls.push(row);
+      });
+    }
+
+    /* ----- ציר-צפיפות (canvas, כמו rfSpark/drawSpectrum) -----
+       מציג "איפה הייתה פעילות" ולא כל קליפ בנפרד — קריא גם ב-45 דק'/77 תשדורות
+       וגם בסשן ארוך פי כמה, בלי לחרוג מרוחב המסך. */
+    function drawReplayDensity() {
+      const cv = $("replayDensity");
+      if (!cv || !rp) return;
+      const dpr = window.devicePixelRatio || 1;
+      const w = cv.clientWidth || 300, h = cv.clientHeight || 40;
+      cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+      const ctx = cv.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
       const dur = Math.max(1, rp.t1 - rp.t0);
+      const buckets = Math.max(24, Math.min(160, Math.round(w / 4)));
+      const bw = w / buckets;
+      const secs = new Array(buckets).fill(0);
       for (const c of rp.clips) {
-        const el = document.createElement("div"); el.className = "rt-clip";
-        el.style.left = Math.max(0, (c.ts - rp.t0) / dur * 100) + "%";
-        el.style.width = Math.max(.3, (c.dur || 1) / dur * 100) + "%";
-        el.title = fmtClockDT(c.ts) + (c.freq != null ? " · " + c.freq.toFixed(3) + " MHz" : "");
-        el.onclick = () => seekAndContinue(c.ts);
-        clipsBox.appendChild(el);
+        const i = Math.min(buckets - 1, Math.max(0, Math.floor((c.ts - rp.t0) / dur * buckets)));
+        secs[i] += (c.dur || 1);
       }
-      // פער קליטת ADS-B (§7.2): נקודת-זמן שהדגימה נכשלה — לא מרווח מומצא, ר' CSS .rt-gap
+      const peak = Math.max(1, ...secs);
+      const css = getComputedStyle(document.documentElement);
+      ctx.fillStyle = (css.getPropertyValue("--accent") || "#6ea8fe").trim();
+      for (let i = 0; i < buckets; i++) {
+        if (!secs[i]) continue;
+        const bh = Math.max(3, secs[i] / peak * (h - 8));
+        ctx.fillRect(i * bw + .5, h - bh - 3, Math.max(1.5, bw - 1), bh);
+      }
+      // פערי קליטת ADS-B (§7.2) — נקודתיים, לא מרווח מומצא
+      ctx.fillStyle = (css.getPropertyValue("--red") || "#ec7b73").trim();
       for (const g of (rp.meta.gaps || [])) {
-        const el = document.createElement("div"); el.className = "rt-gap";
-        el.style.left = Math.max(0, (g.t - rp.t0) / dur * 100) + "%";
-        el.title = "אין קליטת ADS-B" + (g.detail ? " — " + g.detail : "");
-        gapsBox.appendChild(el);
+        const x = (g.t - rp.t0) / dur * w;
+        ctx.fillRect(x - 1, 0, 2, 5);
       }
-      const seek = $("replaySeek");
-      seek.min = 0; seek.max = Math.max(1, Math.round(dur)); seek.step = 1; seek.value = 0;
+      // סמן המיקום הנוכחי
+      ctx.fillStyle = (css.getPropertyValue("--text") || "#e8e8ea").trim();
+      const cx = (rp.playT - rp.t0) / dur * w;
+      ctx.fillRect(cx - 1, 0, 2, h);
     }
 
     /* ----- מפה (Leaflet, טעינה עצלנית — אותו דפוס כמו createDataView) ----- */
@@ -4304,42 +4441,121 @@
       for (const row of rp.trackRows) { if (row.t <= playT) best = row; else break; }
       return best || rp.trackRows[0] || null;
     }
+    /* מרחק ב-NM מנקודת הייחוס של נתב"ג (אותם ARP_LAT/ARP_LON כמו adsb.py).
+       קירוב מישורי — מספיק לחלוטין לסינון-תצוגה בטווח של עשרות מיילים. */
+    function nmFromArp(lat, lon) {
+      const dLat = (lat - 32.0114) * 60;
+      const dLon = (lon - 34.8867) * 60 * Math.cos(32.0114 * Math.PI / 180);
+      return Math.sqrt(dLat * dLat + dLon * dLon);
+    }
     function renderReplayMapAt(playT) {
       const chipBox = $("replayAircraftNow"); chipBox.textContent = "";
       const row = findReplayRowAt(playT);
       const acList = (row && row.ac) || [];
+      const showAll = $("replayShowAllAc").checked;
       const seen = new Set();
+      let shown = 0, spoofed = 0;
+      const pts = [];
       for (const ac of acList) {
         const reg = ac[0], lat = ac[1], lon = ac[2], alt = ac[3];
-        seen.add(reg);
-        const chip = document.createElement("span");
-        chip.className = "replay-ac-chip" + (lat == null ? " spoofed" : "");
-        chip.textContent = reg + (alt != null ? " · " + Math.round(alt) + "ft" : "") + (lat == null ? " · מיקום משובש" : "");
-        chipBox.appendChild(chip);
-        if (!replayMarkersLayer || lat == null || lon == null) {
+        // §7.1: מיקום משובש נשאר *ברשימה* (עם סימון) אבל לא מקבל נקודה על המפה
+        if (lat == null || lon == null) {
+          spoofed++;
+          chipBox.appendChild(mkChip(reg, alt, true));
           if (rp.markers[reg]) { replayMarkersLayer && replayMarkersLayer.removeLayer(rp.markers[reg]); delete rp.markers[reg]; }
           continue;
         }
-        if (rp.markers[reg]) rp.markers[reg].setLatLng([lat, lon]);
+        const nm = nmFromArp(lat, lon);
+        // ⚠ סינון-*תצוגה* בלבד, לא סינון-נתונים: הרדיוס הרחב (250nm) נועד
+        // לזיהוי שיבוש GPS ולא לתצוגה (§5.2 בתכנון), והצגת כולו הפכה את המפה
+        // לים של סיכות זהות. המתג "הצג את כל הרדיוס" מחזיר את כולם.
+        if (!showAll && nm > REPLAY_VIEW_NM) continue;
+        seen.add(reg); shown++;
+        pts.push([lat, lon]);
+        chipBox.appendChild(mkChip(reg, alt, false));
+        if (!replayMarkersLayer) continue;
+        // היררכיה חזותית: קרוב+נמוך = גדול ואטום (זה מה שרלוונטי לשדה),
+        // רחוק+גבוה = קטן ושקוף. circleMarker ולא סיכה — 60 סיכות זהות היו
+        // גוש בלתי-קריא.
+        const prox = Math.max(0, 1 - nm / (showAll ? 250 : REPLAY_VIEW_NM));
+        const low = alt != null ? Math.max(0, 1 - alt / 20000) : .5;
+        const rad = 3 + prox * 3 + low * 2;
+        const op = .35 + prox * .45;
+        const mk = rp.markers[reg];
+        if (mk) { mk.setLatLng([lat, lon]); mk.setStyle({ radius: rad, fillOpacity: op }); }
         else {
-          rp.markers[reg] = L.marker([lat, lon], replayMapIcon ? { icon: replayMapIcon } : undefined).bindTooltip(reg);
+          rp.markers[reg] = L.circleMarker([lat, lon], {
+            radius: rad, weight: 1, color: "#1d4ed8",
+            fillColor: "#4da3ff", fillOpacity: op,
+          }).bindTooltip(reg + (alt != null ? " · " + Math.round(alt) + "ft" : ""));
           replayMarkersLayer.addLayer(rp.markers[reg]);
         }
       }
-      if (!acList.length)
-        chipBox.appendChild(mkSpan("hint", (row && row.gap) ? "⚠ אין קליטת ADS-B בזמן הזה" : "אין מטוסים ידועים כרגע"));
       for (const reg in rp.markers) {
         if (!seen.has(reg)) { replayMarkersLayer && replayMarkersLayer.removeLayer(rp.markers[reg]); delete rp.markers[reg]; }
       }
+      // סיכום מתקפל במקום רשימה פתוחה של 70 צ'יפים (שדחקה את הנגן מהמסך)
+      const total = acList.length;
+      let summary;
+      if (!total) summary = (row && row.gap) ? "⚠ אין קליטת ADS-B בזמן הזה" : "אין מטוסים ידועים כרגע";
+      else {
+        summary = "✈️ " + shown + " מטוסים";
+        if (!showAll && total > shown) summary += " בסביבת נתב״ג (מתוך " + total + ")";
+        if (spoofed) summary += " · " + spoofed + " משובשים";
+      }
+      $("replayAcSummaryTxt").textContent = summary;
+      // מתמקדים על הנתונים פעם אחת — בלי זה המפה נפתחה בתצוגת ברירת-מחדל
+      // שלא בהכרח מכילה את המטוסים בכלל.
+      if (!rp.didFit && replayMapObj && pts.length) {
+        rp.didFit = true;
+        try { replayMapObj.fitBounds(L.latLngBounds(pts).pad(.2)); } catch (e) { /* גבולות לא תקינים — נשארים בתצוגה הנוכחית */ }
+      }
+    }
+    function mkChip(reg, alt, isSpoofed) {
+      const chip = document.createElement("span");
+      chip.className = "replay-ac-chip" + (isSpoofed ? " spoofed" : "");
+      chip.textContent = reg + (alt != null ? " · " + Math.round(alt) + "ft" : "")
+                       + (isSpoofed ? " · מיקום משובש" : "");
+      return chip;
     }
 
-    /* ----- ציר הזמן/סקרבר ----- */
+    /* ----- ציר הזמן / שעון / התשדורת הנוכחית ----- */
     function updateReplayTimelineUI() {
       const dur = Math.max(1, rp.t1 - rp.t0);
-      const pct = Math.max(0, Math.min(100, (rp.playT - rp.t0) / dur * 100));
-      $("rtCursor").style.left = pct + "%";
-      $("replaySeek").value = Math.round(rp.playT - rp.t0);
+      drawReplayDensity();
+      // שעון-קיר הוא המידע האמיתי בתעופה; המונה היחסי משני
+      $("replayClockTxt").textContent = fmtClockHM(rp.playT);
       $("replayTimeTxt").textContent = fmtReplayClock(rp.playT - rp.t0) + " / " + fmtReplayClock(dur);
+      renderReplayNowTx();
+    }
+    /* התמלול של התשדורת המתנגנת כרגע — ⚠ מבחין בין חמשת מצבי ה-tx בדיוק כמו
+       יומן השידורים (§12: "לא ניסינו" ≠ "ניסינו ונכשלנו"), ולא מציג שקט אחיד. */
+    function renderReplayNowTx() {
+      const el = $("replayNowTx");
+      const c = rp.curClip || clipAtReplay(rp.playT);
+      // סימון השורה הפעילה ברשימה + גלילה אליה
+      if (rp.rowEls) {
+        rp.clips.forEach((cc, i) => {
+          const on = cc === c;
+          const rowEl = rp.rowEls[i];
+          if (!rowEl) return;
+          if (on !== rowEl.classList.contains("on")) {
+            rowEl.classList.toggle("on", on);
+            if (on) rowEl.scrollIntoView({ block: "nearest" });
+          }
+        });
+      }
+      if (!c) { el.classList.add("hidden"); return; }
+      const tx = c.tx || { state: "none" };
+      el.classList.remove("hidden");
+      el.dir = tx.lang === "he" ? "rtl" : "ltr";
+      if (tx.state === "ok" && tx.text) { el.textContent = tx.text; el.classList.remove("muted"); return; }
+      el.classList.add("muted");
+      el.dir = "rtl";   // הודעות המצב הן עברית, לא תוכן התשדורת
+      el.textContent = tx.state === "pending" ? "⏳ ממתין לתמלול…"
+        : tx.state === "empty" ? "🔇 לא זוהה דיבור בתשדורת"
+        : tx.state === "failed" ? "⚠ התמלול נכשל" + (tx.err ? " — " + tx.err : "")
+        : "אין תמלול לתשדורת הזו";
     }
     function seekReplay(t) {
       rp.playT = Math.max(rp.t0, Math.min(rp.t1, t));
@@ -4379,6 +4595,7 @@
       }
       rp.wallStartMs = Date.now();
       rp.wallStartPlayT = rp.playT;
+      renderReplayNowTx();   // מיידי — בלי זה התמלול מתחלף רק בטיק הבא (רבע שנייה)
     }
     function onReplayClipEnded() {
       if (!rp || !rp.playing) return;
@@ -5552,10 +5769,25 @@
       rp.skip = $("replaySkipSilence").checked;
       if (rp.playing) { rp.audio.pause(); rp.curClip = null; playReplayFromCurrent(); }
     });
-    $("replaySeek").addEventListener("input", () => {
+    // קפיצה בלחיצה על ציר-הצפיפות (סקירה); הניווט המדויק הוא רשימת התשדורות
+    $("replayDensity").addEventListener("click", (ev) => {
       if (!rp) return;
-      seekAndContinue(rp.t0 + parseInt($("replaySeek").value, 10));
+      const r = ev.currentTarget.getBoundingClientRect();
+      if (!r.width) return;
+      seekAndContinue(rp.t0 + (ev.clientX - r.left) / r.width * (rp.t1 - rp.t0));
     });
+    $("replayShowAllAc").addEventListener("change", () => {
+      if (!rp) return;
+      rp.didFit = false;            // תחום התצוגה השתנה מהותית => למרכז מחדש
+      renderReplayMapAt(rp.playT);
+    });
+    $("replayAcToggle").onclick = () => {
+      const box = $("replayAircraftNow"), btn = $("replayAcToggle");
+      const open = box.classList.toggle("hidden") === false;
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+    };
+    // הציר מצויר ב-canvas => חייב ציור מחדש בשינוי רוחב (סיבוב מסך/חלון)
+    window.addEventListener("resize", () => { if (rp && replayScreen === "player") drawReplayDensity(); });
 
     $("homeScanAddLeg").onclick = () => {
       if (scanLegs.length >= 8) return;
