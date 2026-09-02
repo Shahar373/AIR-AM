@@ -906,6 +906,13 @@
     .aim-metric .aim-unit { font-size: .8rem; color: var(--text-faint); }
     .aim-spark { flex: 1; min-width: 0; height: 52px; display: block; }
     #satcomAimPanel .sdr-hint { margin: .5rem 0 0; font-size: .78rem; color: var(--dim); }
+    /* כיוון בשמיעה: כפתור-מתג + רמז. במצב "on" הכפתור מקבל את צבע-הנעילה הירוק
+       (אותם טוקנים כמו .pill.live) כדי לאותת חד-משמעית שהאודיו פעיל. */
+    .aim-audio-bar { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-top: .55rem; }
+    .aim-audio-bar .sdr-hint { margin: 0; flex: 1; min-width: 180px; }
+    .aim-audio-btn { flex: none; min-height: 40px; }
+    .aim-audio-btn.on { background: rgba(var(--green-rgb),.16); border-color: rgba(var(--green-rgb),.5);
+      color: var(--green-fg); }
     /* רשימת ערוצים: מונו + tabular כדי שהמספרים לא ירקדו בין רענונים (1 שנייה) */
     .aim-chans { margin-top: .55rem; display: flex; flex-direction: column; gap: .2rem; }
     .aim-chan { display: flex; align-items: center; gap: .5rem; direction: ltr;
@@ -2067,6 +2074,18 @@
         </div>
         <p class="sdr-hint" id="satcomAimHint">סובב את האנטנה לאט ועקוב אחרי הגרף — ככל שה-Eb/No גבוה יותר, הכיוון טוב יותר.</p>
 
+        <!-- ═══ כיוון בשמיעה — היד על האנטנה, לא על המסך ═══
+             מיפוי הערך שכבר חושב ב-pollSatcomHealth (best Eb/No + locked) לצליל:
+             גובה-טון וקצב עולים מונוטונית עם ה-Eb/No, וטון רציף מובחן בנעילה.
+             §12: זו סקאלת-תצוגה (כמו הגרף), לא סף "טוב/רע" מומצא — הצליל הרציף
+             היחיד קשור ל-lock (עובדה בינארית מהדמוד), בדיוק כמו צביעת הפאנל.
+             Wake Lock שומר על המסך דולק בזמן הכיוון; המשך ברקע (מסך כבוי/בכיס)
+             הוא best-effort ותלוי-פלטפורמה — לא מבטיחים אותו. -->
+        <div class="aim-audio-bar">
+          <button class="ghost aim-audio-btn" id="satcomAimAudioBtn" aria-pressed="false">🔊 כיוון בשמיעה</button>
+          <span class="sdr-hint" id="satcomAimAudioHint">צליל עולה עם ה-Eb/No, וטון רציף בנעילה — האוזן על האות, היד על האנטנה.</span>
+        </div>
+
         <!-- ═══ ספקטרום הערוץ — "יש RF בכלל?" ═══
              ⚠ זה החלק שעונה על השאלה ש-Eb/No *לא* יכול לענות עליה: אנטנה
              מנותקת, LNA בלי מתח, וכיוון שגוי — כולם נראים זהים ב-lock/ebno
@@ -2824,10 +2843,120 @@
       $("satcomAimChans").innerHTML = "";
       $("satcomAimHint").textContent = txt;
       $("satcomAimEbno").parentElement.classList.remove("locked");
+      aimAudio.feed(null, 0, true);   // אין דמוד/לא זמין => טיק-חיים שקט (אם האודיו דלוק)
       aimHist.length = 0;
       drawMiniSpark($("satcomAimSpark"), aimHist, AIM_HIST_N, "#5fce85", AIM_SCALE_DB);
       renderSpecIdle("—");
     }
+
+    /* ---------- כיוון בשמיעה (Web Audio) ----------
+       "גלאי-מתכות" לאנטנת ה-L-band: ממפה את הערכים ש-pollSatcomHealth כבר
+       מחשב כל שנייה (best Eb/No + locked) לצליל, כדי שאפשר לכוון עם שתי ידיים
+       על האנטנה בלי להסתכל במסך. §12: מיפוי מונוטוני של ערך-מדוד לגובה-טון
+       (סקאלת-תצוגה AIM_SCALE_DB, לא סף מומצא); הצליל הרציף היחיד = נעילה
+       (עובדה בינארית מהדמוד). אין backend חדש — עיבוד שני של דאטה שכבר זורמת.
+       Wake Lock שומר את המסך דולק בזמן כיוון פעיל; המשך ברקע best-effort. */
+    const aimAudio = (function () {
+      let ctx = null, osc = null, oscGain = null, timer = null, wake = null;
+      let enabled = false;
+      let latest = { best: null, locked: 0, noDemod: true };
+      const btn = () => $("satcomAimAudioBtn"), hintEl = () => $("satcomAimAudioHint");
+      const LOCK_HZ = 700, LOCK_VOL = 0.14;
+
+      function _ensureCtx() {
+        if (ctx) return true;
+        try {
+          const AC = window.AudioContext || window.webkitAudioContext;
+          if (!AC) return false;
+          ctx = new AC();
+          oscGain = ctx.createGain(); oscGain.gain.value = 0.0001;
+          osc = ctx.createOscillator(); osc.type = "sine"; osc.frequency.value = 220;
+          osc.connect(oscGain); oscGain.connect(ctx.destination); osc.start();
+          return true;
+        } catch (e) { ctx = null; return false; }
+      }
+      // צליל בודד עם עטיפת attack/decay (בלי קליקים) + החלקת-תדר (glide) — מרגיש
+      // כמו סקאלה רציפה כשמסובבים לאט, לא מדרגות.
+      function _beep(freq, durMs, vol) {
+        const t = ctx.currentTime;
+        osc.frequency.setTargetAtTime(freq, t, 0.02);
+        oscGain.gain.cancelScheduledValues(t);
+        oscGain.gain.setValueAtTime(Math.max(0.0001, oscGain.gain.value), t);
+        oscGain.gain.linearRampToValueAtTime(vol, t + 0.012);
+        oscGain.gain.setValueAtTime(vol, t + durMs / 1000);
+        oscGain.gain.linearRampToValueAtTime(0.0001, t + durMs / 1000 + 0.03);
+      }
+      function _lockTone() {
+        const t = ctx.currentTime;
+        osc.frequency.setTargetAtTime(LOCK_HZ, t, 0.03);
+        oscGain.gain.cancelScheduledValues(t);
+        oscGain.gain.setTargetAtTime(LOCK_VOL, t, 0.02);
+      }
+      function _tick() {
+        if (!enabled || !ctx) return;
+        const { best, locked, noDemod } = latest;
+        let nextMs;
+        if (locked > 0) {                       // נעילה — טון רציף מובחן
+          _lockTone(); nextMs = 400;
+        } else if (noDemod || best == null) {   // אין אות — טיק-חיים שקט ואיטי
+          _beep(180, 70, 0.05); nextMs = 1500;  // ("האודיו דלוק, פשוט אין עדיין")
+        } else {                                // יש אות, אין נעילה — גובה+קצב ∝ Eb/No
+          const f = Math.max(0, Math.min(AIM_SCALE_DB, best)) / AIM_SCALE_DB;  // 0..1
+          _beep(300 + f * 900, 90, 0.16);       // 300..1200Hz
+          nextMs = 520 - f * 400;               // מהיר יותר = טוב יותר (520..120ms)
+        }
+        timer = setTimeout(_tick, nextMs);
+      }
+      async function _acquireWake() {
+        try {
+          if ("wakeLock" in navigator) {
+            wake = await navigator.wakeLock.request("screen");
+            wake.addEventListener("release", () => { wake = null; });
+          }
+        } catch (e) { wake = null; }   // נדחה/לא נתמך — לא כשל, פשוט המסך עלול לכבות
+      }
+      function _releaseWake() { try { if (wake) { wake.release(); wake = null; } } catch (e) {} }
+      function _setBtn(on) {
+        const b = btn(); if (!b) return;
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-pressed", on ? "true" : "false");
+        b.textContent = on ? "🔊 כיוון בשמיעה · פעיל" : "🔊 כיוון בשמיעה";
+        const h = hintEl();
+        if (h) h.textContent = on
+          ? "צליל עולה = כיוון טוב יותר · טון רציף = נעילה. המסך יישאר דולק בזמן הכיוון."
+          : "צליל עולה עם ה-Eb/No, וטון רציף בנעילה — האוזן על האות, היד על האנטנה.";
+      }
+      function feed(best, locked, noDemod) { latest = { best, locked: locked || 0, noDemod: !!noDemod }; }
+      async function enable() {
+        if (enabled) return;
+        if (!_ensureCtx()) { const h = hintEl(); if (h) h.textContent = "האודיו לא נתמך בדפדפן הזה."; return; }
+        try { await ctx.resume(); } catch (e) {}
+        enabled = true; _setBtn(true); _acquireWake();
+        clearTimeout(timer); _tick();
+      }
+      function disable() {
+        if (!enabled && !timer) { _setBtn(false); return; }
+        enabled = false; clearTimeout(timer); timer = null;
+        if (ctx && oscGain) {
+          try {
+            const t = ctx.currentTime;
+            oscGain.gain.cancelScheduledValues(t);
+            oscGain.gain.setTargetAtTime(0.0001, t, 0.02);
+          } catch (e) {}
+        }
+        _releaseWake(); _setBtn(false);
+      }
+      function toggle() { enabled ? disable() : enable(); }
+      function active() { return enabled; }
+      // Wake Lock משתחרר אוטומטית כשהטאב מוסתר — לחדש בחזרה, ולהעיר את ה-ctx.
+      document.addEventListener("visibilitychange", () => {
+        if (enabled && document.visibilityState === "visible") {
+          _acquireWake(); if (ctx) ctx.resume().catch(() => {});
+        }
+      });
+      return { toggle, feed, stop: disable, active };
+    })();
+    if ($("satcomAimAudioBtn")) $("satcomAimAudioBtn").onclick = () => aimAudio.toggle();
 
     async function pollSatcomHealth() {
       if (satcomHealthInFlight) return;
@@ -2851,6 +2980,7 @@
 
         aimHist.push(best == null ? 0 : best);
         if (aimHist.length > AIM_HIST_N) aimHist.shift();
+        aimAudio.feed(best, locked, best == null);   // מזין את כיוון-בשמיעה (§12: אותו ערך גולמי)
 
         $("satcomAimEbno").textContent = best == null ? "—" : best.toFixed(1);
         $("satcomAimEbno").parentElement.classList.toggle("locked", locked > 0);
@@ -2985,8 +3115,13 @@
     // subprocess של systemctl — פולינג בקצב 1s בזמן עיון בהיסטוריה (SATCOM כבוי)
     // היה שורף fork בשנייה על ה-Pi בלי שום תמורה. זה בדיוק תקציב החשמל שאנחנו
     // מנסים לשמור עליו. הדלקה ממקום אחר נתפסת ב-pollGlobalState (ר' שם).
+    // ⚠ חריג מכוון לשומר document.hidden: כשכיוון-בשמיעה *פעיל* (aimAudio.active),
+    // ממשיכים לתשאל גם כשהטאב מוסתר — אחרת הצליל היה קופא על הערך האחרון ברגע
+    // שהמסך כבה. זו פעילות שדה מכוונת וקצרת-טווח (המשתמש מכוון עכשיו), לא ניטור-
+    // רקע-סרק — ומיד שהוא מכבה את האודיו, השומר חוזר לתוקף. (הדפדפן ממילא מווסת
+    // timers ברקע, ולכן זה best-effort ולא מובטח — ר' הרמז ליד הכפתור.)
     setInterval(() => {
-      if (!document.hidden && appMode === "satcom" && satcom && satcom.active) pollSatcomHealth();
+      if ((!document.hidden || aimAudio.active()) && appMode === "satcom" && satcom && satcom.active) pollSatcomHealth();
     }, 1000);
     // הספקטרום איטי יותר בכוונה (2ש'): מטען כבד פי כמה (256 ערכים) ומדד
     // "האם יש RF בכלל" משתנה לאט — בניגוד ל-Eb/No שמגיב לסיבוב אנטנה מיידית.
@@ -3771,6 +3906,7 @@
       if (mode === "acars") acars.show(); else acars.hide();   // תצוגת ACARS מנוהלת בפקטורי (כמו VDL2/SATCOM)
       if (mode === "vdl2") vdl2.show(); else vdl2.hide();
       if (mode === "satcom") satcom.show(); else satcom.hide();
+      if (mode !== "satcom") aimAudio.stop();   // כיוון-בשמיעה שייך רק ל-SATCOM — עוצרים ומשחררים wake-lock
       // רענון מיידי של מכשיר הכיוון — בלי זה הפאנל ריק עד לטיק הבא (שנייה),
       // ובכניסה חוזרת מוצגים נתונים ישנים לרגע. גם מיישר את שורת ההצעה.
       if (mode === "satcom") { pollSatcomHealth(); pollSatcomSpectrum(); renderPowerAdvice(); }
