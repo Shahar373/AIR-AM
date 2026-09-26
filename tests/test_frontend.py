@@ -112,6 +112,13 @@ def test_aim_audio_feeds_raw_ebno_not_a_threshold():
     # והמיפוי לגובה-טון נגזר מסקאלת-התצוגה AIM_SCALE_DB, לא מסף איכות קשיח
     assert "Math.min(AIM_SCALE_DB, best)" in js, \
         "מיפוי הצליל חייב להשתמש בסקאלת-התצוגה AIM_SCALE_DB (לא סף מומצא)"
+    # דאטה עבשה (בקשה תקועה / timers מווסתים ברקע / SATCOM שקרס) לא מוצגת כחיה:
+    # _tick חייב להפיל ל"אין אות" אחרי AIM_AUDIO_STALE_MS, לא לצפצף על הערך האחרון.
+    assert "AIM_AUDIO_STALE_MS" in js and "const stale = (Date.now() - latest.at)" in js, \
+        "aimAudio חייב להתייחס ל-feed ישן מ-AIM_AUDIO_STALE_MS כ'אין אות'"
+    # navigator.wakeLock קיים רק ב-HTTPS; "המסך יישאר דולק" מותר רק כשהנעילה נתפסה
+    assert "(דורשת HTTPS או דפדפן תומך)" in js, \
+        "הרמז חייב להודות במפורש כשנעילת-המסך לא נתפסה (§12: לא מבטיחים יכולת שאין)"
 
 
 def test_aim_audio_stops_when_leaving_satcom():
@@ -131,8 +138,12 @@ def test_satcom_health_poll_stays_guarded_but_allows_active_aiming():
     שהמסך כבה. שני התנאים חייבים להישאר יחד: גם `document.hidden` (השומר) וגם
     `aimAudio.active()` (החריג בזמן כיוון)."""
     js = _inline_js()
-    m = re.search(r"setInterval\(\(\) => \{\s*if \((.+?)\) pollSatcomHealth\(\);", js, re.S)
-    assert m, "לולאת pollSatcomHealth לא נמצאה — עודכן מבנהה?"
-    cond = m.group(1)
-    assert "document.hidden" in cond, "השומר document.hidden חייב להישאר (תקציב חשמל)"
-    assert "aimAudio.active()" in cond, "החריג לכיוון-בשמיעה פעיל חייב להתקיים"
+    # גוף בלי סוגריים-מסולסלים פנימיים => לא "בולע" לולאות שכנות (non-greedy על .*? עשה זאת)
+    blocks = [m.group(1) for m in re.finditer(r"setInterval\(\(\) => \{([^{}]*)\}, 1000\);", js, re.S)
+              if "pollSatcomHealth()" in m.group(1)]
+    assert len(blocks) == 1, f"ציפינו ללולאת pollSatcomHealth אחת (1s), נמצאו {len(blocks)}"
+    body = blocks[0]
+    assert "document.hidden" in body, "השומר document.hidden חייב להישאר (תקציב חשמל)"
+    assert "aimAudio.active()" in body, "החריג לכיוון-בשמיעה פעיל חייב להתקיים"
+    # SATCOM שנעצר/קרס בלי מעבר-תצוגה => הצליל לא ממשיך על הערך האחרון (§12)
+    assert "aimAudio.idle()" in body, "כש-SATCOM לא פעיל והאודיו דלוק חייבים להזין 'אין דאטה'"

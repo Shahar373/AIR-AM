@@ -361,3 +361,47 @@ def test_data_view_instances_are_isolated(page):
     page.click("#modeSeg button[data-v=vdl2]")
     expect(page.locator("#vdl2StTotal")).to_have_text("0")
     expect(page.locator("#satcomStTotal")).to_have_text("0")
+
+
+def test_aim_audio_toggle_is_honest_about_wake_lock_and_stops_on_view_change(page):
+    """כיוון-בשמיעה (SATCOM): המתג נדלק/נכבה, מעבר-תצוגה מכבה אותו — והרמז
+    כן לגבי נעילת-המסך. ⚠ הדף מוגש כאן ב-http://airam.test (לא secure
+    context), בדיוק כמו ברירת המחדל של AIR-AM (http://<IP>:8080): ב-HTTP
+    ‏navigator.wakeLock לא קיים בכלל, ולכן הרמז *חייב* להודות שהמסך עלול
+    לכבות — ולא להבטיח "המסך יישאר דולק" (§12: לא מבטיחים יכולת שלא נתפסה).
+    זו גם בדיקת-ריצה אמיתית של Web Audio ב-Chromium: AudioContext נוצר
+    מלחיצה (user gesture) ואסור שתיזרק חריגה (ה-fixture אוכף)."""
+    satcom_state = {**_default_api()["/api/state"], "app_mode": "satcom"}
+    health = {"ok": True, "app_mode": "satcom", "mode_ok": True, "stats_age": None,
+              "services": {"airam-satcom": "active", "sdrplay": "active",
+                           "rtl_airband": "inactive", "icecast2": "active",
+                           "airam-acars": "inactive", "airam-vdl2": "inactive"}}
+    _mount(page, overrides={
+        "/api/state": satcom_state, "/api/health": health,
+        "/api/satcom": {"ok": True, "active": True, "freqs": ["AF1"], "cursor": 0,
+                        "messages": []},
+        "/api/satcom/health": {"ok": True, "available": True, "spectrum": False,
+                               "channels": [{"ch": 0, "baud": 600, "msgs": 0, "age": 0,
+                                             "mse": 0.4, "ebno": 6.5, "lock": False}],
+                               "channels_locked": 0, "channels_total": 1},
+        "/api/satcom/spectrum": {"ok": True, "available": False},
+    })
+    page.click("#modeSeg button[data-v=satcom]")
+    btn = page.locator("#satcomAimAudioBtn")
+    expect(btn).to_be_visible()
+    expect(btn).to_have_attribute("aria-pressed", "false")
+    # http => אין wakeLock בכלל (secure-context בלבד) — מוודאים את הנחת הבדיקה
+    assert page.evaluate("'wakeLock' in navigator") is False
+
+    btn.click()
+    expect(btn).to_have_attribute("aria-pressed", "true")
+    expect(btn).to_have_class(re.compile(r"\bon\b"))
+    hint = page.locator("#satcomAimAudioHint")
+    expect(hint).to_contain_text("השאר את המסך דולק בעצמך")
+    expect(hint).not_to_contain_text("המסך יישאר דולק")
+
+    # מעבר-תצוגה (בית) חייב לכבות את האודיו — לא צליל ברקע אחרי שעזבנו את SATCOM
+    page.click("#modeSeg button[data-v=home]")
+    expect(btn).to_have_attribute("aria-pressed", "false")
+    expect(btn).not_to_have_class(re.compile(r"\bon\b"))
+

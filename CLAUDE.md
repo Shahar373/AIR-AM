@@ -515,9 +515,12 @@ ADS-B מ-`GET /api/aircraft`, כולל כשה-SDR ב-standby; כולל מקור 
 בפאנל שממפה את אותם `best`/`locked` ש-`pollSatcomHealth` כבר מחשב לצליל Web Audio
 (גובה-טון+קצב ∝ Eb/No, טון רציף מובחן בנעילה) — "גלאי-מתכות" לכיוון עם שתי ידיים
 על האנטנה. §12: סקאלת-תצוגה (`AIM_SCALE_DB`), לא סף; טון רציף רק ל-`lock`; חתימת
-"אין דמוד" ⇒ טיק-חיים שקט ("דלוק, אין עדיין" ≠ "כבוי"). `navigator.wakeLock` שומר
-מסך דולק בכיוון פעיל (מחודש ב-`visibilitychange`); רקע (מסך כבוי) best-effort
-ומתועד ככזה. `aimAudio.feed` נקרא בכל ענף של `pollSatcomHealth`+`renderAimIdle`;
+"אין דמוד" ⇒ טיק-חיים שקט ("דלוק, אין עדיין" ≠ "כבוי"); `feed` ישן מ-`AIM_AUDIO_STALE_MS`
+(5ש') ⇒ גם טיק-חיים — לא מצפצפים על ערך עבש. `navigator.wakeLock` שומר מסך דולק
+בכיוון פעיל (מחודש ב-`visibilitychange`) — ⚠ **secure-context בלבד (HTTPS)**, ולכן
+הרמז "המסך יישאר דולק" מוצג רק כשהנעילה נתפסה בפועל (ב-HTTP: "השאר את המסך דולק
+בעצמך"); רקע (מסך כבוי) best-effort ומתועד ככזה. `aimAudio.feed` נקרא בכל ענף של
+`pollSatcomHealth`, `aimAudio.idle()` ב-`renderAimIdle` ובלולאת ה-1ש' כש-SATCOM לא פעיל;
 `aimAudio.stop()` ב-`showView` (עוזבים SATCOM). ⚠ **חריג יחיד** לשומר `document.hidden`
 בלולאת ה-health: כשהאודיו פעיל (`aimAudio.active()`) ממשיכים לתשאל גם מוסתר —
 אחרת הצליל קופא (עדיין מכיל את `document.hidden` ⇒ עובר את בדיקת ה-poller-guard).
