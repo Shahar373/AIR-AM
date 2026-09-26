@@ -405,3 +405,53 @@ def test_aim_audio_toggle_is_honest_about_wake_lock_and_stops_on_view_change(pag
     expect(btn).to_have_attribute("aria-pressed", "false")
     expect(btn).not_to_have_class(re.compile(r"\bon\b"))
 
+
+
+def test_rflog_recorder_toggle_marks_and_download(page):
+    """רשם ניסוי הכיול (תצוגת קול): הפעלה חושפת את כפתורי הסימון, סימון שולח
+    את התווית המדויקת ומציג אישור גלוי, וקישור ההורדה מופיע כשיש הקלטה.
+    בשטח אין דרך אחרת לדעת שלחיצה נקלטה — האישור הוא חלק מהפיצ'ר."""
+    st = {"active": False, "rows": 0, "marks": 0, "size": 0, "until": None, "started_at": None}
+    sent = {"toggle": [], "mark": []}
+
+    def rflog(route, url):
+        req = route.request
+        if req.method == "POST":
+            body = json.loads(req.post_data or "{}")
+            sent["toggle"].append(body.get("active"))
+            st["active"] = bool(body.get("active"))
+            if st["active"]:
+                import time as _t
+                st.update(until=_t.time() + 7200, started_at=_t.time(), rows=3, size=512,
+                          remaining=7200)
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, **st}))
+
+    def mark(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        sent["mark"].append(body.get("label"))
+        st["marks"] += 1
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "label": body.get("label"), **st}))
+
+    _mount(page, overrides={"/api/rflog": rflog, "/api/rflog/mark": mark})
+    page.click("#modeSeg button[data-v=voice]")
+    btn = page.locator("#rflogBtn")
+    expect(btn).to_have_attribute("aria-pressed", "false")
+    expect(page.locator("#rflogMarks")).to_be_hidden()
+
+    btn.click()
+    expect(btn).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#rflogStatus")).to_contain_text("מקליט")
+    expect(page.locator("#rflogStatus")).to_contain_text("נותרו 2:00:00")
+    expect(page.locator("#rflogMarks")).to_be_visible()
+    expect(page.locator("#rflogDl")).to_be_visible()
+
+    page.click("#rflogMarks button[data-mark='מנותק']")
+    expect(page.locator("#rflogHint")).to_contain_text("✓ סומן: מנותק")
+    assert sent["mark"] == ["מנותק"]
+
+    btn.click()
+    expect(btn).to_have_attribute("aria-pressed", "false")
+    expect(page.locator("#rflogMarks")).to_be_hidden()
+    assert sent["toggle"] == [True, False]

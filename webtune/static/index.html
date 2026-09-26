@@ -402,6 +402,17 @@
       direction: ltr; display: inline-block; }
     .field-meter.stale .fm-main b { opacity: .5; }
     .field-meter .fm-hint { font-size: .72rem; color: var(--text-faint); margin: .35rem 0 0; }
+    /* רשם ניסוי כיול: מופרד בקו מהמד — כלי-ניסוי, לא חלק מהקריאה היומיומית */
+    .rflog { margin-top: .7rem; padding-top: .6rem; border-top: 1px dashed var(--border);
+      display: flex; flex-direction: column; gap: var(--sp-2); text-align: start; }
+    .rflog-hd { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+    .rflog-st { font-size: .76rem; color: var(--dim); font-variant-numeric: tabular-nums; }
+    .rflog-st.on { color: var(--green-fg); }
+    button.ghost#rflogBtn.on { background: rgba(var(--green-rgb),.16); border-color: rgba(var(--green-rgb),.5);
+      color: var(--green-fg); }
+    .rflog-marks { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+    .rflog-marks button { flex: 1; min-width: 6.5rem; min-height: 44px; font-size: .8rem; }
+    .rflog .fm-hint { font-size: .72rem; color: var(--text-faint); margin: 0; }
 
     /* --- דוח סשן: "מה קרה בזמן שלא הסתכלת" --- */
     .session-stats { font-size: .85rem; color: var(--text); margin: 0 0 .5rem; }
@@ -1588,6 +1599,22 @@
         <button type="button" class="ghost" id="voiceFmCalBtn">📏 כייל בסיס עכשיו</button>
       </div>
       <p class="fm-hint" id="voiceFmHint"></p>
+      <!-- ═══ רשם ניסוי כיול אנטנה (docs/antenna-calibration-experiment.md) ═══
+           ה-Pi רושם כל כתיבה של מדדי ה-RF + הקונפיג שבאמת רץ; הטלפון רק מסמן
+           אירועים פיזיים. ההקלטה ממשיכה גם כשהמסך כבוי (צד-שרת). -->
+      <div class="rflog" id="rflogBox">
+        <div class="rflog-hd">
+          <button type="button" class="ghost" id="rflogBtn" aria-pressed="false">🧪 הקלט ניסוי</button>
+          <span class="rflog-st" id="rflogStatus">כבוי</span>
+        </div>
+        <div class="rflog-marks hidden" id="rflogMarks">
+          <button type="button" class="ghost" data-mark="מחובר">🔌 מחובר</button>
+          <button type="button" class="ghost" data-mark="מנותק">✂️ מנותק</button>
+          <button type="button" class="ghost" data-mark="מסיים 50Ω">🔩 מסיים 50Ω</button>
+        </div>
+        <a class="ghost hidden" id="rflogDl" href="/api/rflog/export" download>⬇ הורד את ההקלטה</a>
+        <p class="fm-hint" id="rflogHint">לניסוי כיול האנטנה: ה-Pi רושם את מדדי ה-RF כל שנייה, אתה מסמן מתי חיברת/ניתקת.</p>
+      </div>
     </div>
     </div><!-- /panel-bd -->
   </section>
@@ -2809,6 +2836,63 @@
       else if (appMode === "vdl2") vdl2Fm.poll();
     }, 3000);
 
+    /* ---------- רשם ניסוי כיול אנטנה (GET/POST /api/rflog) ----------
+       ההקלטה עצמה בצד השרת — ממשיכה גם כשהמסך כבוי או כשעוברים תצוגה.
+       הטלפון רק מדליק/מכבה ומסמן אירועים פיזיים (חיבור/ניתוק). */
+    let rflogActive = false, rflogInFlight = false;
+    const fmtRflogLeft = (sec) => {   // "1:45:00" / "12:05" — לא fmtDur (שם כבר קיים, פורמט אחר)
+      sec = Math.max(0, Math.round(sec));
+      const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+      return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
+    };
+    function renderRflog(d) {
+      if (!d || !d.ok) return;
+      rflogActive = !!d.active;
+      const btn = $("rflogBtn"), st = $("rflogStatus");
+      btn.classList.toggle("on", rflogActive);
+      btn.setAttribute("aria-pressed", rflogActive ? "true" : "false");
+      btn.textContent = rflogActive ? "⏹ עצור הקלטה" : "🧪 הקלט ניסוי";
+      st.classList.toggle("on", rflogActive);
+      st.textContent = rflogActive
+        ? "מקליט · " + d.rows + " שורות · " + d.marks + " סימונים · נותרו " + fmtRflogLeft(d.remaining || 0)
+        : (d.size ? "כבוי · יש הקלטה שמורה" : "כבוי");
+      $("rflogMarks").classList.toggle("hidden", !rflogActive);
+      $("rflogDl").classList.toggle("hidden", !d.size);
+    }
+    async function pollRflog() {
+      if (rflogInFlight) return;
+      rflogInFlight = true;
+      try { renderRflog(await fetchJSON("/api/rflog")); }
+      catch (e) { /* המחזור הבא ינסה שוב */ }
+      finally { rflogInFlight = false; }
+    }
+    $("rflogBtn").onclick = async () => {
+      $("rflogBtn").disabled = true;
+      try {
+        const res = await apiSend("POST", "/api/rflog", { active: !rflogActive });
+        const d = await res.json();
+        if (d.auth) { $("rflogHint").textContent = d.error || "נדרש PIN"; return; }
+        renderRflog(d);
+        $("rflogHint").textContent = d.active
+          ? "מקליט. סמן כל פעולה פיזית *מיד אחריה*. שינויי תדר/רווח נרשמים לבד."
+          : "ההקלטה נעצרה — הורד את הקובץ ושלח אותו לניתוח.";
+      } catch (e) { $("rflogHint").textContent = "שגיאת רשת — נסה שוב."; }
+      finally { $("rflogBtn").disabled = false; }
+    };
+    document.querySelectorAll("#rflogMarks button").forEach((b) => {
+      b.onclick = async () => {
+        try {
+          const res = await apiSend("POST", "/api/rflog/mark", { label: b.dataset.mark });
+          const d = await res.json();
+          if (!d.ok) { $("rflogHint").textContent = d.error || "הסימון נכשל"; pollRflog(); return; }
+          renderRflog(d);
+          // אישור גלוי עם שעה — בשטח, בלי זה אי אפשר לדעת אם הלחיצה נקלטה
+          $("rflogHint").textContent = "✓ סומן: " + d.label + " · " + new Date().toLocaleTimeString("he-IL");
+        } catch (e) { $("rflogHint").textContent = "שגיאת רשת — הסימון לא נרשם, לחץ שוב."; }
+      };
+    });
+    setInterval(() => { if (!document.hidden && appMode === "voice") pollRflog(); }, 3000);
+
     /* ---------- אבחון SATCOM: נעילת דמודולטור (GET /api/satcom/health) ----------
        proxy מקומי ל---web dashboard המובנה של inmarsat-sniffer — lock=נעילת
        דמודולטור *גם* באפס הודעות מפוענחות, ההבדל בין "אין אנטנה"/"לא מכוון"
@@ -3985,7 +4069,7 @@
       segSet("modeSeg", mode);
       renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acars/vdl2/satcom.active — עדכן בכל מעבר
       if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); }
-      if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
+      if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); pollRflog(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
       if (mode === "acars") acarsFm.poll();
       if (mode === "vdl2") vdl2Fm.poll();
       if (mode === "acars") acars.show(); else acars.hide();   // תצוגת ACARS מנוהלת בפקטורי (כמו VDL2/SATCOM)

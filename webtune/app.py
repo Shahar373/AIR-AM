@@ -67,11 +67,29 @@ STATS_MAX_AGE = 5.0            # rtl_airband כותב כל ~1 שנייה; ~5 כ�
 ANTENNA_CHECK_SAMPLE_SEC = 3.0   # פולינג עד שדגימה טרייה לתדר הזה מופיעה ב-stats
 SIGNAL_LAST_MSG_MAX_AGE = 300.0  # מעל זה "הודעה אחרונה" מסומנת לא-טרייה (5 דק') — לא נעלמת, רק מסומנת
 # ירידה (dB) ברצפת הרעש מתחת לבסיס שהמשתמש כייל, שנחשבת חריגה. *לא* סף
-# "איכות אות" מומצא (§12 ב-CLAUDE.md אוסר את זה) — תצפית פיזיקלית: ניתוק
-# אנטנה מנתק את המקלט מרעש-הסביבה שקושר אותו לעולם ומשאיר את רעש-הפנים של
-# המקלט עצמו, שבד״כ נמוך בהרבה מ-10dB. פסק הדין תמיד מול הבסיס של המשתמש
-# עצמו, לעולם לא מול ערך מוחלט שניחשנו.
+# "איכות אות" מומצא (§12 ב-CLAUDE.md אוסר את זה) — פסק הדין תמיד מול הבסיס
+# של המשתמש עצמו, לעולם לא מול ערך מוחלט שניחשנו.
+# ⚠ **הנחה שטרם אומתה, לא "תצפית פיזיקלית"** (כך היא תועדה קודם — בלי מדידה
+# אחת מאחוריה). ניתוח מהמקור (rtl_airband v5.2.0 + SoapySDRPlay3, ר'
+# docs/antenna-calibration-experiment.md) מראה שהיא תלוית-תנאים: ב-VHF רעש-
+# הסביבה אינו "גבוה בהרבה" מרעש-הפנים בשטח שקט (ירידה צפויה 3–8dB גם ברווח
+# קבוע), ותחת AGC — כשיש נשא חזק בחלון ה-1.536MHz (ATIS של נתב"ג) — ה-AGC
+# מעלה רווח אחרי הניתוק ומוחק חלק/את כל הירידה. הניסוי המתועד שם (עם רשם
+# ה-RF למטה) יכריע; עד אז הקבוע נשאר כפי שהוא ולא "מתוקן" לפי ניחוש.
 DISCONNECT_DROP_DB = 10.0
+
+# --- רשם ניסוי RF (docs/antenna-calibration-experiment.md) -----------------
+# קובץ ה-stats של rtl_airband נדרס כל שנייה בלי היסטוריה, ובשטח אין SSH —
+# כלומר בדיוק מה שהניסוי צריך (השניות שאחרי restart, הדקה שאחרי ניתוק אנטנה)
+# לא ניתן לקריאה בעין מהטלפון. הרשם כותב שורה לכל כתיבה *חדשה* של ה-stats,
+# עם הקונפיג שבאמת רץ (airband.conf, לא state.json — בדיקת האנטנה לא כותבת
+# state), ו-mtime של שני הקבצים (כך אפשר לזהות בדיעבד קריאה של flush-יציאה
+# של התהליך *הקודם*). כבוי כברירת מחדל; thread רק כשמפעילים; כיבוי אוטומטי.
+RFLOG_PATH = Path("/var/lib/airam/rf_log.jsonl")
+RFLOG_MAX_SEC = 2 * 3600          # לא כותבים ל-SD לנצח אם שכחו לכבות
+RFLOG_POLL_SEC = 0.4              # rtl_airband כותב ~1Hz — דוגמים מהר יותר כדי לא לפספס כתיבה
+RFLOG_ROTATE_BYTES = 5_000_000    # בהפעלה: קובץ גדול מזה עובר ל-.prev (שעתיים ≈ 1.5MB)
+RFLOG_LABEL_MAX = 40
 
 # --- ACARS (מצב משולב: SDR אחד בהחלפה) ------------------------------------
 # מצב ACARS עוצר את rtl_airband (קול) ומריץ acarsdec על תדרי ה-ACARS. SDR אחד
@@ -4467,6 +4485,8 @@ def api_antenna_check():
             _restore_after_probe(prev, prev_live)
 
         if result is None:
+            _rflog_event({"ev": "probe", "freq": freq, "calibrate": calibrate,
+                          "already_voice": already_voice, "error": "no_fresh_stats"})
             return jsonify(ok=False, error="לא התקבלו מדדים מה-SDR בזמן — נסה שוב"), 504
 
         if calibrate:
@@ -4474,10 +4494,198 @@ def api_antenna_check():
             save_state({**load_state(), "signal_baseline": baseline})
         else:
             baseline = prev.get("signal_baseline")
+        verdict = _signal_verdict(result["noise"], baseline)
+        _rflog_event({"ev": "probe", "freq": freq, "calibrate": calibrate,
+                      "already_voice": already_voice, "noise": result["noise"],
+                      "signal": result["signal"], "verdict": verdict,
+                      "baseline_noise": (baseline or {}).get("noise")})
         return jsonify(ok=True, freq=freq, calibrated=calibrate, baseline=baseline,
-                       verdict=_signal_verdict(result["noise"], baseline), **result)
+                       verdict=verdict, **result)
     finally:
         TUNE_LOCK.release()
+
+
+# --- רשם ניסוי RF ------------------------------------------------------------
+_rflog_lock = threading.Lock()
+_rflog = {"active": False, "started_at": None, "until": None, "rows": 0,
+          "marks": 0, "thread": None, "stop": None}
+
+_CONF_FREQ_RE = re.compile(r"^\s*freq\s*=\s*([0-9.]+)\s*;", re.M)          # לא centerfreq
+_CONF_GAIN_RE = re.compile(r'^\s*gain\s*=\s*"IFGR=(\d+),RFGR=(\d+)"', re.M)
+_CONF_SQ_RE = re.compile(r"^\s*squelch_snr_threshold\s*=\s*(-?[0-9.]+)\s*;", re.M)
+_CONF_MOD_RE = re.compile(r'^\s*modulation\s*=\s*"(\w+)"', re.M)
+
+
+def _parse_airband_conf(text):
+    """הקונפיג *שבאמת רץ* מתוך airband.conf שכתב render_config. בלי שורת gain
+    = AGC (כך render_config מבקש אותו — ר' שם); squelch=None = אוטומטי."""
+    out = {}
+    m = _CONF_FREQ_RE.search(text)
+    if m:
+        try:
+            out["freq"] = float(m.group(1))
+        except ValueError:
+            pass
+    g = _CONF_GAIN_RE.search(text)
+    out["agc"] = g is None
+    out["ifgr"] = int(g.group(1)) if g else None
+    out["rfgr"] = int(g.group(2)) if g else None
+    q = _CONF_SQ_RE.search(text)
+    out["squelch_snr"] = float(q.group(1)) if q else None
+    mm = _CONF_MOD_RE.search(text)
+    out["mod"] = mm.group(1) if mm else None
+    return out
+
+
+def _rflog_sample(prev_sig):
+    """דגימה אחת: מחזיר (row, sig). row=None כשאין כתיבה חדשה של ה-stats או של
+    הקונפיג (אותה חתימת mtime) — כך כל שורה בקובץ היא מדידה חדשה, ובמצבים
+    שאינם קול (stats קפוא) לא נכתב כלום."""
+    try:
+        st = STATS_PATH.stat()
+        text = STATS_PATH.read_text()
+    except OSError:
+        return None, prev_sig
+    try:
+        cst = CONFIG_PATH.stat()
+        conf = _parse_airband_conf(CONFIG_PATH.read_text())
+    except OSError:
+        cst, conf = None, {}
+    sig = (st.st_mtime, cst.st_mtime if cst else None)
+    if sig == prev_sig:
+        return None, prev_sig
+    # ⚠ המדדים מתויגים לפי תדר: stats של תהליך קודם על תדר אחר => None, לא
+    # ערך "קרוב" (§12). על *אותו* תדר — הערך נכתב, ו-stats_mtime < conf_mtime
+    # הוא מה שמסגיר שזה flush-יציאה של התהליך הקודם.
+    vals = parse_stats(text, f"{conf['freq']:.3f}") if conf.get("freq") is not None else {}
+    row = {"t": round(time.time(), 2), "stats_mtime": round(st.st_mtime, 2),
+           "conf_mtime": round(cst.st_mtime, 2) if cst else None, **conf,
+           "signal": vals.get("channel_dbfs_signal_level"),
+           "noise": vals.get("channel_dbfs_noise_level")}
+    return row, sig
+
+
+def _rflog_write(obj):
+    """append + fsync. בניגוד ל-track.jsonl (buffer אפמרי, בלי fsync) — כאן זו
+    תוצאת ניסוי שדה, והתרחיש הסביר לאבדן הוא בדיוק power bank שקוטע (§12)."""
+    line = json.dumps(obj, ensure_ascii=False) + "\n"
+    with _rflog_lock:
+        RFLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(RFLOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
+        _rflog["rows"] += 1
+
+
+def _rflog_stop(reason):
+    """עוצר את הרשם (idempotent). לא עושה join כשנקרא מתוך ה-worker עצמו."""
+    with _rflog_lock:
+        if not _rflog["active"]:
+            return False
+        _rflog["active"] = False
+        evt, th = _rflog["stop"], _rflog["thread"]
+    if evt:
+        evt.set()
+    _rflog_write({"ev": "stop", "t": round(time.time(), 2), "reason": reason})
+    if th and th is not threading.current_thread():
+        th.join(timeout=2)
+    return True
+
+
+def _rflog_worker(stop_evt):
+    prev = None
+    while not stop_evt.is_set():
+        with _rflog_lock:
+            until = _rflog["until"]
+        if until is not None and time.time() >= until:
+            _rflog_stop("timeout")
+            return
+        try:
+            row, prev = _rflog_sample(prev)
+            if row:
+                _rflog_write(row)
+        except Exception:
+            log.warning("רשם RF: דגימה נכשלה", exc_info=True)   # לא מפילים את ה-thread על שורה אחת
+        stop_evt.wait(RFLOG_POLL_SEC)
+
+
+def _rflog_start():
+    with _rflog_lock:
+        if _rflog["active"]:
+            return False
+        try:
+            if RFLOG_PATH.exists() and RFLOG_PATH.stat().st_size > RFLOG_ROTATE_BYTES:
+                os.replace(RFLOG_PATH, RFLOG_PATH.with_suffix(".jsonl.prev"))
+        except OSError:
+            pass
+        now = time.time()
+        evt = threading.Event()
+        _rflog.update(active=True, started_at=now, until=now + RFLOG_MAX_SEC,
+                      rows=0, marks=0, stop=evt, thread=None)
+    _rflog_write({"ev": "start", "t": round(now, 2), "version": VERSION,
+                  "max_sec": RFLOG_MAX_SEC})
+    th = threading.Thread(target=_rflog_worker, args=(evt,), daemon=True)
+    with _rflog_lock:
+        _rflog["thread"] = th
+    th.start()
+    return True
+
+
+def _rflog_event(obj):
+    """אירוע מתויג (סימון משתמש / תוצאת בדיקת אנטנה) — רק כשהרשם פעיל."""
+    with _rflog_lock:
+        active = _rflog["active"]
+    if active:
+        _rflog_write({"t": round(time.time(), 2), **obj})
+    return active
+
+
+def _rflog_status():
+    with _rflog_lock:
+        st = {k: _rflog[k] for k in ("active", "started_at", "until", "rows", "marks")}
+    # "נותרו" מחושב כאן ולא בטלפון: שעון הטלפון ושעון ה-Pi לא בהכרח מסונכרנים בשטח
+    st["remaining"] = max(0, round(st["until"] - time.time())) if st["active"] and st["until"] else None
+    try:
+        st["size"] = RFLOG_PATH.stat().st_size
+    except OSError:
+        st["size"] = 0
+    return st
+
+
+@app.route("/api/rflog", methods=["GET", "POST"])
+def api_rflog():
+    """GET: מצב הרשם. POST {active: bool}: הפעלה/כיבוי (idempotent). דרך _guard."""
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        if bool(data.get("active")):
+            _rflog_start()
+        else:
+            _rflog_stop("user")
+    return jsonify(ok=True, **_rflog_status())
+
+
+@app.route("/api/rflog/mark", methods=["POST"])
+def api_rflog_mark():
+    """{label} — סימון אירוע פיזי ("מחובר"/"מנותק"/"מסיים 50Ω"). 409 כשהרשם כבוי:
+    סימון שלא נרשם לא יכול להיראות כאילו נרשם."""
+    data = request.get_json(silent=True) or {}
+    label = str(data.get("label") or "").strip()[:RFLOG_LABEL_MAX]
+    if not label:
+        return jsonify(ok=False, error="חסרה תווית"), 400
+    if not _rflog_event({"ev": "mark", "label": label}):
+        return jsonify(ok=False, error="הרשם כבוי — הפעל אותו קודם"), 409
+    with _rflog_lock:
+        _rflog["marks"] += 1
+    return jsonify(ok=True, label=label, **_rflog_status())
+
+
+@app.route("/api/rflog/export")
+def api_rflog_export():
+    if not RFLOG_PATH.exists():
+        return jsonify(ok=False, error="אין הקלטה עדיין"), 404
+    return send_file(str(RFLOG_PATH), mimetype="application/x-ndjson", as_attachment=True,
+                     download_name=f"airam-rflog-{time.strftime('%Y%m%d-%H%M')}.jsonl")
 
 
 @app.route("/api/airspace")
