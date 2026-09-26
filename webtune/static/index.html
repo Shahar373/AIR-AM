@@ -909,7 +909,7 @@
     /* כיוון בשמיעה: כפתור-מתג + רמז. במצב "on" הכפתור מקבל את צבע-הנעילה הירוק
        (אותם טוקנים כמו .pill.live) כדי לאותת חד-משמעית שהאודיו פעיל. */
     .aim-audio-bar { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-top: .55rem; }
-    .aim-audio-bar .sdr-hint { margin: 0; flex: 1; min-width: 180px; }
+    #satcomAimPanel .aim-audio-bar .sdr-hint { margin: 0; flex: 1; min-width: 180px; }   /* (1,2,0) > #satcomAimPanel .sdr-hint */
     button.aim-audio-btn { flex: none; min-height: 40px; }   /* button.X — כדי לנצח את min-height:34px של button.ghost */
     .aim-audio-btn.on { background: rgba(var(--green-rgb),.16); border-color: rgba(var(--green-rgb),.5);
       color: var(--green-fg); }
@@ -2843,7 +2843,7 @@
       $("satcomAimChans").innerHTML = "";
       $("satcomAimHint").textContent = txt;
       $("satcomAimEbno").parentElement.classList.remove("locked");
-      aimAudio.idle();   // אין דמוד/לא זמין => טיק-חיים שקט (אם האודיו דלוק)
+      aimAudio.dead();   // אין מפענח (כבוי/קרס/לוח האבחון לא עונה) => טיק כפול (אם האודיו דלוק)
       aimHist.length = 0;
       drawMiniSpark($("satcomAimSpark"), aimHist, AIM_HIST_N, "#5fce85", AIM_SCALE_DB);
       renderSpecIdle("—");
@@ -2857,15 +2857,25 @@
        (עובדה בינארית מהדמוד). אין backend חדש — עיבוד שני של דאטה שכבר זורמת.
        Wake Lock שומר את המסך דולק בזמן כיוון פעיל; המשך ברקע best-effort. */
     const aimAudio = (function () {
-      let ctx = null, osc = null, oscGain = null, timer = null, wake = null;
+      let ctx = null, osc = null, oscGain = null, timer = null, wake = null, suspendTimer = null;
       let enabled = false;
-      let latest = { best: null, locked: 0, noDemod: true, at: 0 };
+      let latest = { best: null, locked: 0, noDemod: true, dead: false, at: 0 };
+      let hiddenSince = 0, deadStreakHidden = 0, autoOffReason = "";
       const btn = () => $("satcomAimAudioBtn"), hintEl = () => $("satcomAimAudioHint");
-      const LOCK_HZ = 700, LOCK_VOL = 0.14;
+      const LOCK_HZ = 700, LOCK_VOL = 0.14, BEEP_MS = 90;
       // §12: דאטה עבשה לא מוצגת כחיה. ה-poll רץ כל שנייה; אם לא הגיע feed
-      // במשך AIM_AUDIO_STALE_MS (בקשה תקועה, טאב ברקע עם timers מווסתים,
-      // SATCOM שקרס) — הצליל נופל לטיק-חיים, לא ממשיך לצפצף על הערך האחרון.
-      const AIM_AUDIO_STALE_MS = 5000;
+      // במשך AIM_AUDIO_STALE_MS (בקשה תקועה עד ה-timeout, SATCOM שקרס) —
+      // הצליל נופל לטיק-חיים, לא ממשיך לצפצף על הערך האחרון. 3ש' = 3 דגימות
+      // שהוחמצו: ל"גלאי-מתכות" 5ש' של טון-נעילה כוזב הן עוד 5ש' של קיבוע
+      // האנטנה בכיוון שגוי.
+      const AIM_AUDIO_STALE_MS = 3000;
+      // ⚠ החריג ל-document.hidden (לולאת ה-health ממשיכה כשהאודיו פעיל) חייב
+      // גבול-זמן: Chrome פוטר דפים *שמיעים* מוויסות-timers (מקור משני), כלומר
+      // הצפצוף עצמו מבטל את הוויסות שאפשר היה לסמוך עליו — טלפון "שנשכח בכיס"
+      // היה ממשיך לתשאל /api/satcom/health (fork של systemctl) כל שנייה כל
+      // הלילה. כיבוי אוטומטי אחרי 10 דק' ברקע, או אחרי 15 דגימות רצופות של
+      // "אין מפענח" ברקע (SATCOM נעצר/קרס בזמן שהטלפון בכיס).
+      const AIM_AUDIO_BG_MAX_MS = 10 * 60 * 1000, AIM_AUDIO_BG_DEAD_MAX = 15;
 
       function _ensureCtx() {
         if (ctx) return true;
@@ -2876,6 +2886,7 @@
           oscGain = ctx.createGain(); oscGain.gain.value = 0.0001;
           osc = ctx.createOscillator(); osc.type = "sine"; osc.frequency.value = 220;
           osc.connect(oscGain); oscGain.connect(ctx.destination); osc.start();
+          ctx.onstatechange = _renderHint;   // "interrupted"/"suspended" (iOS) => הרמז אומר את זה, לא מסך "פעיל" בלי צליל
           return true;
         } catch (e) { ctx = null; return false; }
       }
@@ -2896,19 +2907,38 @@
         oscGain.gain.cancelScheduledValues(t);
         oscGain.gain.setTargetAtTime(LOCK_VOL, t, 0.02);
       }
+      // "אין מפענח" (SATCOM כבוי/קרס/לוח האבחון לא עונה) נשמע *אחרת* מ"מפענח
+      // חי, אין אות" — טיק כפול נמוך מול טיק בודד. העיניים על האנטנה, לא על המסך.
+      function _deadTick() {
+        _beep(150, 50, 0.06);
+        setTimeout(() => { if (enabled && ctx) _beep(150, 50, 0.06); }, 130);
+      }
+      function _autoOff(reason) { autoOffReason = reason; disable(); }
       function _tick() {
         if (!enabled || !ctx) return;
-        const { best, locked, noDemod } = latest;
+        if (document.hidden) {
+          if (hiddenSince && Date.now() - hiddenSince > AIM_AUDIO_BG_MAX_MS) {
+            _autoOff("כובה אוטומטית אחרי 10 דק' ברקע — הקש שוב כדי להמשיך לכוון."); return;
+          }
+          if (deadStreakHidden >= AIM_AUDIO_BG_DEAD_MAX) {
+            _autoOff("כובה אוטומטית — המפענח לא היה זמין ברקע (SATCOM נעצר?)."); return;
+          }
+        }
+        const { best, locked, noDemod, dead } = latest;
         const stale = (Date.now() - latest.at) > AIM_AUDIO_STALE_MS;
         let nextMs;
-        if (!stale && locked > 0) {             // נעילה — טון רציף מובחן
+        if (!stale && dead) {                   // אין מפענח — טיק כפול
+          _deadTick(); nextMs = 2000;
+        } else if (!stale && locked > 0) {      // נעילה — טון רציף מובחן
           _lockTone(); nextMs = 400;
         } else if (stale || noDemod || best == null) {   // אין אות (או דאטה עבשה) — טיק-חיים שקט ואיטי
           _beep(180, 70, 0.05); nextMs = 1500;  // ("האודיו דלוק, פשוט אין עדיין")
         } else {                                // יש אות, אין נעילה — גובה+קצב ∝ Eb/No
           const f = Math.max(0, Math.min(AIM_SCALE_DB, best)) / AIM_SCALE_DB;  // 0..1
-          _beep(300 + f * 900, 90, 0.16);       // 300..1200Hz
-          nextMs = 520 - f * 400;               // מהיר יותר = טוב יותר (520..120ms)
+          _beep(300 + f * 900, BEEP_MS, 0.16);  // 300..1200Hz
+          // מהיר יותר = טוב יותר (520..140ms). הרצפה = מעטפת הביפ (attack+גוף+decay
+          // ≈ 132ms) + מרווח — אחרת הביפ הבא חותך את ה-decay של הקודם (קליק).
+          nextMs = Math.max(BEEP_MS + 50, 520 - f * 400);
         }
         timer = setTimeout(_tick, nextMs);
       }
@@ -2917,10 +2947,14 @@
       // שהנעילה באמת נתפסה (§12: לא מבטיחים יכולת שלא קיימת); אחרת אומרים
       // למשתמש במפורש שעליו להשאיר את המסך דולק בעצמו.
       async function _acquireWake() {
+        if (wake) { _renderHint(); return true; }
         try {
           if ("wakeLock" in navigator) {
-            wake = await navigator.wakeLock.request("screen");
-            wake.addEventListener("release", () => { wake = null; _renderHint(); });
+            const lock = await navigator.wakeLock.request("screen");
+            // ה-await יכול להסתיים *אחרי* disable() (הקשה כפולה מהירה) — לא
+            // משאירים sentinel יתום שמחזיק את המסך דולק כשהאודיו כבר כבוי.
+            if (!enabled) { try { lock.release(); } catch (e) {} }
+            else { wake = lock; wake.addEventListener("release", () => { wake = null; _renderHint(); }); }
           }
         } catch (e) { wake = null; }   // נדחה/לא נתמך — לא כשל, פשוט המסך עלול לכבות
         _renderHint();
@@ -2929,10 +2963,19 @@
       function _releaseWake() { try { if (wake) { wake.release(); wake = null; } } catch (e) {} }
       function _renderHint() {
         const h = hintEl(); if (!h) return;
-        if (!enabled) { h.textContent = "צליל עולה עם ה-Eb/No, וטון רציף בנעילה — האוזן על האות, היד על האנטנה."; return; }
-        h.textContent = "צליל עולה = כיוון טוב יותר · טון רציף = נעילה. " + (wake
-          ? "המסך יישאר דולק בזמן הכיוון."
-          : "⚠ נעילת-מסך לא זמינה כאן (דורשת HTTPS או דפדפן תומך) — השאר את המסך דולק בעצמך.");
+        if (!enabled) {
+          h.textContent = autoOffReason
+            || "צליל עולה עם ה-Eb/No, וטון רציף בנעילה — האוזן על האות, היד על האנטנה.";
+          return;
+        }
+        if (ctx && ctx.state !== "running") {   // iOS "interrupted", או resume שנדחה מחוץ ל-user-gesture
+          h.textContent = "⚠ הדפדפן השהה את האודיו — הקש על הכפתור פעמיים (כיבוי והדלקה) כדי להמשיך.";
+          return;
+        }
+        h.textContent = "צליל עולה = כיוון טוב יותר · טון רציף = נעילה · טיק כפול = אין מפענח. "
+          + (wake ? "המסך יישאר דולק בזמן הכיוון."
+                  : "⚠ נעילת-מסך לא זמינה כאן (דורשת HTTPS או דפדפן תומך) — השאר את המסך דולק בעצמך.")
+          + " iPhone: ודא שמתג ההשתקה כבוי.";
       }
       function _setBtn(on) {
         const b = btn(); if (!b) return;
@@ -2941,18 +2984,29 @@
         b.textContent = on ? "🔊 כיוון בשמיעה · פעיל" : "🔊 כיוון בשמיעה";
         _renderHint();
       }
-      function feed(best, locked, noDemod) { latest = { best, locked: locked || 0, noDemod: !!noDemod, at: Date.now() }; }
-      function idle() { feed(null, 0, true); }   // "אין דאטה חיה" — טיק-חיים, לא צליל על ערך ישן
+      function feed(best, locked, noDemod) {
+        latest = { best, locked: locked || 0, noDemod: !!noDemod, dead: false, at: Date.now() };
+        deadStreakHidden = 0;
+      }
+      function idle() { feed(null, 0, true); }   // מפענח חי, אין אות — טיק בודד
+      function dead() {                          // אין מפענח בכלל — טיק כפול (ומונה ל-auto-off ברקע)
+        latest = { best: null, locked: 0, noDemod: true, dead: true, at: Date.now() };
+        if (document.hidden) deadStreakHidden++;
+      }
       async function enable() {
         if (enabled) return;
         if (!_ensureCtx()) { const h = hintEl(); if (h) h.textContent = "האודיו לא נתמך בדפדפן הזה."; return; }
+        // enabled=true *לפני* ה-await: הקשה שנייה תוך כדי resume() חייבת להגיע
+        // ל-disable(), לא להיכנס שוב ל-enable() (מרוץ שהשאיר wake-lock יתום).
+        enabled = true; autoOffReason = ""; deadStreakHidden = 0;
+        clearTimeout(suspendTimer); _setBtn(true);
         try { await ctx.resume(); } catch (e) {}
-        enabled = true; _setBtn(true);
+        if (!enabled) return;                 // כובה תוך כדי ה-await
         clearTimeout(timer); _tick();
-        await _acquireWake();   // מעדכן את הרמז לפי מה שבאמת נתפס
+        await _acquireWake();                 // מעדכן את הרמז לפי מה שבאמת נתפס
       }
       function disable() {
-        if (!enabled && !timer) { _setBtn(false); return; }
+        if (!enabled) return;
         enabled = false; clearTimeout(timer); timer = null;
         if (ctx && oscGain) {
           try {
@@ -2960,18 +3014,26 @@
             oscGain.gain.cancelScheduledValues(t);
             oscGain.gain.setTargetAtTime(0.0001, t, 0.02);
           } catch (e) {}
+          // אחרי ה-fade — משעים את ה-ctx: אוסילטור ב-gain 0.0001 עדיין מחזיק
+          // זרם-פלט פתוח (סוללה; ב-iOS ה-audio session נשאר חי).
+          clearTimeout(suspendTimer);
+          suspendTimer = setTimeout(() => { if (!enabled && ctx) ctx.suspend().catch(() => {}); }, 250);
         }
         _releaseWake(); _setBtn(false);
       }
       function toggle() { enabled ? disable() : enable(); }
       function active() { return enabled; }
-      // Wake Lock משתחרר אוטומטית כשהטאב מוסתר — לחדש בחזרה, ולהעיר את ה-ctx.
+      // Wake Lock משתחרר אוטומטית כשהטאב מוסתר — לחדש בחזרה, ולהעיר את ה-ctx;
+      // וגם: שעון ל-auto-off של "נשכח בכיס".
       document.addEventListener("visibilitychange", () => {
-        if (enabled && document.visibilityState === "visible") {
-          _acquireWake(); if (ctx) ctx.resume().catch(() => {});
+        if (document.visibilityState === "visible") {
+          hiddenSince = 0; deadStreakHidden = 0;
+          if (enabled) { _acquireWake(); if (ctx) ctx.resume().catch(() => {}); }
+        } else {
+          hiddenSince = Date.now();
         }
       });
-      return { toggle, feed, idle, stop: disable, active };
+      return { toggle, feed, idle, dead, stop: disable, active };
     })();
     if ($("satcomAimAudioBtn")) $("satcomAimAudioBtn").onclick = () => aimAudio.toggle();
 
@@ -3134,15 +3196,17 @@
     // מנסים לשמור עליו. הדלקה ממקום אחר נתפסת ב-pollGlobalState (ר' שם).
     // ⚠ חריג מכוון לשומר document.hidden: כשכיוון-בשמיעה *פעיל* (aimAudio.active),
     // ממשיכים לתשאל גם כשהטאב מוסתר — אחרת הצליל היה קופא על הערך האחרון ברגע
-    // שהמסך כבה. זו פעילות שדה מכוונת וקצרת-טווח (המשתמש מכוון עכשיו), לא ניטור-
-    // רקע-סרק — ומיד שהוא מכבה את האודיו, השומר חוזר לתוקף. (הדפדפן ממילא מווסת
-    // timers ברקע, ולכן זה best-effort ולא מובטח — ר' הרמז ליד הכפתור.)
+    // שהמסך כבה. ⚠ זה *לא* נשען על ויסות-timers של הדפדפן (Chrome פוטר דפים
+    // שמיעים ממנו) — הגבול נאכף בקוד: aimAudio מכבה את עצמו אחרי 10 דק' ברקע
+    // או אחרי 15 דגימות "אין מפענח" רצופות ברקע (ר' AIM_AUDIO_BG_*), ומיד
+    // שהאודיו נכבה השומר חוזר לתוקף.
     setInterval(() => {
       const satOn = appMode === "satcom" && satcom && satcom.active;
       if (satOn && (!document.hidden || aimAudio.active())) pollSatcomHealth();
-      // SATCOM נעצר/קרס (pollGlobalState עדכן satcom.active) בלי מעבר-תצוגה —
-      // הצליל לא ממשיך על הערך האחרון: מזינים "אין דאטה" => טיק-חיים.
-      else if (aimAudio.active()) aimAudio.idle();
+      // SATCOM נעצר/קרס (pollGlobalState/הפיד עדכנו satcom.active) בלי מעבר-תצוגה —
+      // גם המסך וגם האוזן חייבים לומר "אין מפענח" (renderAimIdle קורא aimAudio.dead()),
+      // לא להשאיר "6.5 dB · נעילה!" עבש על הפאנל בזמן שהאוזן כבר שומעת טיק כפול.
+      else if (aimAudio.active()) renderAimIdle("SATCOM לא פעיל — הפעל אותו כדי להמשיך לכוון.");
     }, 1000);
     // הספקטרום איטי יותר בכוונה (2ש'): מטען כבד פי כמה (256 ערכים) ומדד
     // "האם יש RF בכלל" משתנה לאט — בניגוד ל-Eb/No שמגיב לסיבוב אנטנה מיידית.

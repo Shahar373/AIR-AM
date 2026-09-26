@@ -144,6 +144,16 @@ def test_satcom_health_poll_stays_guarded_but_allows_active_aiming():
     assert len(blocks) == 1, f"ציפינו ללולאת pollSatcomHealth אחת (1s), נמצאו {len(blocks)}"
     body = blocks[0]
     assert "document.hidden" in body, "השומר document.hidden חייב להישאר (תקציב חשמל)"
-    assert "aimAudio.active()" in body, "החריג לכיוון-בשמיעה פעיל חייב להתקיים"
+    # ⚠ המחרוזת המילולית של התנאי, לא רק נוכחות aimAudio.active() בגוף — הביקורת
+    # האדוורסרית הוכיחה שמחיקת החריג מהתנאי עברה כי aimAudio.active() הופיע גם
+    # בענף ה-else של אותה לולאה (בדיקה חצי-ריקה).
+    assert "(!document.hidden || aimAudio.active())" in body, \
+        "החריג לכיוון-בשמיעה פעיל חייב להיות בתנאי הפולינג עצמו"
+    # והחריג חייב להיות מוגבל בזמן — Chrome פוטר דפים שמיעים מוויסות-timers,
+    # כך ש"נשכח בכיס" בלי גבול = fork של systemctl כל שנייה כל הלילה על ה-Pi.
+    js_all = _inline_js()
+    assert "AIM_AUDIO_BG_MAX_MS" in js_all and "AIM_AUDIO_BG_DEAD_MAX" in js_all, \
+        "aimAudio חייב לכבות את עצמו אחרי זמן/דגימות-מתות ברקע"
     # SATCOM שנעצר/קרס בלי מעבר-תצוגה => הצליל לא ממשיך על הערך האחרון (§12)
-    assert "aimAudio.idle()" in body, "כש-SATCOM לא פעיל והאודיו דלוק חייבים להזין 'אין דאטה'"
+    assert "renderAimIdle(" in body, \
+        "כש-SATCOM לא פעיל והאודיו דלוק גם הפאנל וגם האוזן חייבים לומר 'אין מפענח' (renderAimIdle => aimAudio.dead())"

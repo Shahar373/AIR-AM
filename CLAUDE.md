@@ -519,8 +519,14 @@ ADS-B מ-`GET /api/aircraft`, כולל כשה-SDR ב-standby; כולל מקור 
 (5ש') ⇒ גם טיק-חיים — לא מצפצפים על ערך עבש. `navigator.wakeLock` שומר מסך דולק
 בכיוון פעיל (מחודש ב-`visibilitychange`) — ⚠ **secure-context בלבד (HTTPS)**, ולכן
 הרמז "המסך יישאר דולק" מוצג רק כשהנעילה נתפסה בפועל (ב-HTTP: "השאר את המסך דולק
-בעצמך"); רקע (מסך כבוי) best-effort ומתועד ככזה. `aimAudio.feed` נקרא בכל ענף של
-`pollSatcomHealth`, `aimAudio.idle()` ב-`renderAimIdle` ובלולאת ה-1ש' כש-SATCOM לא פעיל;
+בעצמך"); רקע (מסך כבוי) best-effort ומתועד ככזה, ו**מוגבל בקוד** (`AIM_AUDIO_BG_MAX_MS`
+10 דק' / `AIM_AUDIO_BG_DEAD_MAX` 15 דגימות "אין מפענח" ⇒ כיבוי אוטומטי; Chrome פוטר
+דפים שמיעים מוויסות-timers, אז אין לסמוך על הדפדפן). שלושה צלילים: טון רציף=`lock`,
+טיק בודד=מפענח חי בלי אות (`idle()`), **טיק כפול=אין מפענח** (`dead()`, מ-`renderAimIdle`).
+iOS: מתג ההשתקה משתיק Web Audio — רמז בלבד; ה-workaround של `<audio loop>` שקט נדחה
+במכוון (חושף `nexttrack`⇒`stepPreset` במסך הנעול ⇒ מכוונן החוצה מ-SATCOM).
+`aimAudio.feed` נקרא בכל ענף-הצלחה של `pollSatcomHealth`, `renderAimIdle` (⇒`dead()`)
+בכשל/לא-זמין ובלולאת ה-1ש' כש-SATCOM לא פעיל (הפאנל והאוזן מסכימים);
 `aimAudio.stop()` ב-`showView` (עוזבים SATCOM). ⚠ **חריג יחיד** לשומר `document.hidden`
 בלולאת ה-health: כשהאודיו פעיל (`aimAudio.active()`) ממשיכים לתשאל גם מוסתר —
 אחרת הצליל קופא (עדיין מכיל את `document.hidden` ⇒ עובר את בדיקת ה-poller-guard).
