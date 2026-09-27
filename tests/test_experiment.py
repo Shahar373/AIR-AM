@@ -113,6 +113,13 @@ def fast(monkeypatch):
 
 @pytest.fixture
 def world(paths, fast, monkeypatch):
+    # ⚠ הבדיקה דוחסת זמן פי ~100 (חלונות של 0.2ש' במקום 30ש'), אבל latency של דיסק
+    # לא נדחס: עצירה נדירה של fsync (מאות ms על דיסק ענן ב-CI) רוקנה חלון שלם
+    # ונתנה drop=None — פעם אחת מתוך שתיים על אותו commit ב-CI, ושוחזר מקומית 8/8
+    # עם plugin שמדמה עצירות כאלה. בייצור (חלון 30ש') עצירה כזו מפילה דגימה אחת.
+    # מנטרלים *רק* את ה-fsync של הרשם (כינוי מודולרי, לא os.fsync הגלובלי);
+    # מסלול הכתיבה האמיתי, כולל fsync, נבדק ב-test_rflog.py.
+    monkeypatch.setattr(app, "_rflog_fsync", lambda fd: None)
     sdr = FakeSDR(paths)
     restored = []
     monkeypatch.setattr(app, "_enter_voice", sdr.enter_voice)
@@ -177,6 +184,10 @@ def test_full_run_two_prompts_summary_and_restore(client, world):
     assert st["running"] is False and st["error"] is None
     res = st["result"]
     by = {c["key"]: c for c in res["conditions"]}
+    # הודעת כשל מועילה: חלון ריק יאמר "אין דגימות" ולא None מסתורי בהשוואה
+    empty = [(k, ph) for k, c in by.items() for ph in ("p1", "p2") if not (c.get(ph) or {}).get("n")]
+    assert not empty, f"חלונות בלי דגימות (תזמון?): {empty}"
+
     # רווח קבוע: 12dB ירידה — הסף של המוצר (10dB) היה מזהה
     assert by["clean_f20"]["drop"] == pytest.approx(12.0) and by["clean_f20"]["detects"] is True
     # AGC עם ATIS בחלון: 2dB — הסף לא היה מזהה (בדיוק מה שהניסוי נועד לחשוף)

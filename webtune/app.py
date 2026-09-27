@@ -94,6 +94,10 @@ RFLOG_MAX_SEC = 2 * 3600          # לא כותבים ל-SD לנצח אם שכח
 RFLOG_POLL_SEC = 0.4              # rtl_airband כותב ~1Hz — דוגמים מהר יותר כדי לא לפספס כתיבה
 RFLOG_ROTATE_BYTES = 5_000_000    # בהפעלה: קובץ גדול מזה עובר ל-.prev (שעתיים ≈ 1.5MB)
 RFLOG_LABEL_MAX = 40
+# ה-fsync של הרשם דרך כינוי ברמת המודול — כך בדיקה שדוחסת זמן (test_experiment)
+# יכולה לנטרל *רק אותו*, בלי למקף את os.fsync הגלובלי (ר' no_sleep ב-CHANGELOG:
+# מיקוף גלובלי כבר הפך בדיקה בפרויקט לתלוית-מזל).
+_rflog_fsync = os.fsync
 
 # --- ACARS (מצב משולב: SDR אחד בהחלפה) ------------------------------------
 # מצב ACARS עוצר את rtl_airband (קול) ומריץ acarsdec על תדרי ה-ACARS. SDR אחד
@@ -4590,7 +4594,7 @@ def _rflog_write(obj):
             with open(RFLOG_PATH, "a", encoding="utf-8") as f:
                 f.write(line)
                 f.flush()
-                os.fsync(f.fileno())
+                _rflog_fsync(f.fileno())
         except OSError as e:
             _rflog["write_errors"] += 1
             if _rflog["write_errors"] in (1, 100):      # לא מציפים את היומן בכל שנייה
