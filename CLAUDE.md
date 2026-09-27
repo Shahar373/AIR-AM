@@ -152,6 +152,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_experiment.py       # ניסוי כיול אוטומטי מקצה לקצה עם SDR מדומה (כולל שתי הפעולות הפיזיות),
                            #   ביטול/timeout ושחזור מצב, תנאי-פתיחה (SATCOM/סריקה/נעילה), וניתוח
                            #   (_experiment_summary) — כולל זיהוי קריאה של התהליך הקודם מול proc_start.
+  test_sdr.py              # חיווי SDR (/api/sdr): פענוח lsusb/SoapySDRUtil, כל המצבים, צרכן שעלה באמצע
+                           #   ה-probe (=שלנו, לא זר), cache, ובקשה מקבילה שלא ממתינה ל-probe תקוע.
   test_session.py          # דוח סשן: _interest_score, /api/session, /api/session/ack, adsb.session_series.
   test_replay_buffer.py    # שחזור-סשן שלב 1: buffer מתגלגל (append/compaction/gap-rows,
                            #   מטוס משובש נשמר עם lat/lon=None ולא מדולג) + GET /api/replay/buffer.
@@ -404,6 +406,16 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   מבחין בין כתיבות התהליך הנוכחי ל-flush של הקודם — ⚠ השוואת `stats_mtime` ל-`conf_mtime`
   **לא** יכולה, כי ה-flush נכתב אחרי הקונפיג), `_experiment_summary` (פונקציה טהורה — חציונים,
   ירידה, "מזהה?" = הסף של המוצר עצמו; `None` כשחסר), `_read_rflog_run`.
+- **חיווי SDR — מזוהה? פנוי?** (`GET /api/sdr`, ליד `api_health`): `_sdr_usb` (lsusb 1df7 —
+  `None` כשאין lsusb, **בכוונה** שונה מ-`_sdr_present` שמניח True כהחלטת רולבק),
+  `_sdr_probe_api` (`SoapySDRUtil --find=driver=sdrplay`, אותו probe כמו `airam-wait-sdrplay`;
+  פלט `driver = sdrplay` ולא returncode; `sdrplay_api_Open` ב-stderr ⇒ `api_error`, לא "תפוס"),
+  `_sdr_suspects` (שמות תהליכים מ-`/proc/<pid>/comm` — רמז בלבד), `_sdr_holder`/`_sdr_status`.
+  **היסוד:** `sdrplay_api_GetDevices` לא מחזיר מכשיר שלקוח אחר כבר בחר (אומת במקור
+  SoapySDRPlay3 — `SoapySDRPlay_getClaimedSerials`), לכן "ב-USB + find ריק" = תוכנה אחרת
+  מחזיקה בו. ה-probe רץ **רק** כשאף צרכן שלנו לא במצב מחזיק (`active`/`activating`/…) ו-`TUNE_LOCK`
+  פנוי, עם cache `SDR_PROBE_TTL_SEC`=10 ונעילה לא-חוסמת (בקשה מקבילה מקבלת את האחרון או
+  `checking`); אחרי ה-probe בודקים שוב את הצרכנים — צרכן שעלה באמצע הוא "שלנו", לא זר.
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_sweep_recordings` (retention — **לא רואה `saved/` בכלל**, ר' למטה).
 - **הקלטות שמורות (★) + תמלול — שני פיצ'רים מחוברים:** הפטור מ-retention הוא
@@ -561,6 +573,10 @@ iOS: מתג ההשתקה משתיק Web Audio — רמז בלבד; ה-workaround
 המצב למציאות בלי לחטוף את הטאב. כפתורי עצירה ⇒ `applyMode("off")` (גם עצירת סריקה);
 כפתור ⏻ מחזיר את `prev_mode` (יכול להיות `"scan"`). עיצוב responsive (multi-column
 בטאבלט/דסקטופ; `.mode-cards` הוא `auto-fit` כדי לזרום נכון גם עם 5 כרטיסים).
+**חיווי SDR** (`#sdrChip` ברצועת הסטטוס — גלובלי, כמו `#connChip`; `#homeSdrTxt` במסך הבית):
+`pollSdr` (15ש' + `visibilitychange` + סוף כל `applyMode`), `sdrView` (מצב⇒צבע/טקסט/הסבר),
+נגיעה ⇒ `showToast` עם ההסבר המלא. טקסט דינמי (שמות תהליכים מ-`/proc`, תיאור USB, label)
+**רק** דרך `textContent` ועטוף ב-FSI/PDI (`bidi()`) — אחרת לטינית בתוך עברית נשברת בגלישת שורה.
 **רשם ניסוי כיול** (`#rflogBox`, בתוך `#rfPanel` בתצוגת הקול): `pollRflog` (3ש', קול בלבד +
 ‏`showView`), 🧪 הפעלה/עצירה, שלושה כפתורי סימון (44px — כפפות/שטח) עם אישור גלוי ושעה
 ("✓ סומן: מנותק · 10:31:05" — בשטח אין דרך אחרת לדעת שהלחיצה נקלטה), וקישור הורדה.
@@ -786,6 +802,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/sessions/<id>/track` | מסלול ה-ADS-B של הסשן, מפוענח מ-`track.jsonl.gz` |
 | GET | `/api/sessions/<id>/clips/<name>` | קליפ אודיו של הסשן — route ייעודי, לא הרחבת `/recordings/<name>` |
 | GET | `/api/sessions/<id>/export.zip` | ייצוא הסשן כולו (מטא-דאטה+מסלול+קליפים), אותו דפוס כמו `starred.zip` |
+| GET | `/api/sdr` | חיווי SDR: `state` (`missing`/`ours`/`switching`/`checking`/`api_down`/`api_error`/`free`/`busy`/`unavailable`/`unknown`), `usb`/`usb_desc`, `mode`+`service_state` כש-`ours`, `label` כש-`free`, `suspects` (לפי שם תהליך — רמז) כש-`busy`, `checked_age`. "פנוי" = ה-SDRplay API מציע אותו (`SoapySDRUtil --find`), נבדק רק כש-AIR-AM לא מחזיק בו |
 | GET | `/api/power` | מתח/טמפ' ה-Pi (`vcgencmd`), מוגש מ-cache בן ~2 שניות (`_POWER_TTL`) |
 | GET | `/api/metar` | METAR נתב"ג (LLBG) |
 | GET | `/api/health` | בריאות השירותים |

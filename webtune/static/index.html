@@ -319,6 +319,12 @@
     .pill.busy .dot { background: var(--amber); animation: pulse 1s ease-out infinite; }
     .pill.err { color: var(--red-fg); border-color: rgba(var(--red-rgb),.45); }
     .pill.err .dot { background: var(--red); }
+    .pill.ok { color: var(--green-fg); border-color: rgba(var(--green-rgb),.4); }
+    .pill.ok .dot { background: var(--green); }
+    /* חיווי ה-SDR הוא כפתור (נגיעה = הסבר מלא ב-toast) שנראה כמו שאר הנורות */
+    button.pill { font-size: .8rem; font-weight: 500; line-height: inherit; border-radius: 999px;
+                  padding: .3rem .8rem; min-height: 1.4rem; }
+    .home-sdr { font-size: .85rem; margin: calc(-1 * var(--sp-2)) 0 var(--sp-3); color: var(--dim); }
     @keyframes pulse {
       0% { box-shadow: 0 0 0 0 rgba(var(--green-rgb),.45); }
       100% { box-shadow: 0 0 0 .55rem rgba(var(--green-rgb),0); }
@@ -1306,6 +1312,9 @@
            לא "המצב לא רץ". מוסתר כברירת מחדל; ר' fetchTimeout/_updateConnChip. -->
       <span id="connChip" class="pill err hidden" title="לא התקבלה תשובה מהשרת בזמן סביר — הנתונים המוצגים עשויים להיות ישנים">
         <span class="dot"></span><span>אין קשר לשרת</span></span>
+      <!-- חיווי SDR: מזוהה ב-USB? פנוי (ה-API מציע אותו)? — GET /api/sdr, ר' pollSdr -->
+      <button type="button" id="sdrChip" class="pill hidden" title="מצב ה-SDR">
+        <span class="dot"></span><span id="sdrChipTxt">SDR…</span></button>
       <!-- חיווי מתח ל-Raspberry Pi (מוסתר עד /api/power) -->
       <div class="pwr hidden" id="pwrChip" title="מתח האספקה ל-Raspberry Pi">
         <span class="pdot"></span><span id="pwrText">בודק מתח…</span>
@@ -1330,6 +1339,7 @@
     </div>
     <div class="panel-bd">
       <p class="home-state" id="homeStateTxt">טוען…</p>
+      <p class="home-sdr hidden" id="homeSdrTxt"></p>
       <details class="err hidden" id="homeErrBox">
         <summary>פרטי שגיאה</summary>
         <pre id="homeErrDetail"></pre>
@@ -3566,6 +3576,72 @@
     setInterval(() => { if (!document.hidden) pollPower(); }, 5000);
     pollPower();
 
+    /* ---------- חיווי SDR: מזוהה? פנוי? (GET /api/sdr) ----------
+       "מזוהה" = ה-RSP ב-USB. "פנוי" = ה-SDRplay API מציע אותו עכשיו (API לא מחזיר
+       מכשיר שתוכנה אחרת כבר בחרה). השרת בודק את ה-API רק כש-AIR-AM עצמו לא מחזיק
+       במכשיר. §12: "לא נבדק" (unknown) מוצג ככזה — לא "פנוי" כברירת מחדל. */
+    const SDR_MODE_LABEL = { voice: "📻 קול", acars: "📡 ACARS", vdl2: "🛰️ VDL2", satcom: "📶 SATCOM" };
+    let sdrInFlight = false, sdrDetail = "";
+    // FSI…PDI: בידוד כיווני לטקסט לטיני בתוך משפט עברי (כמו <bdi>, אבל ב-textContent/toast)
+    const bidi = (x) => "\u2068" + x + "\u2069";
+    function sdrView(d) {
+      const usb = d.usb_desc ? " (" + bidi(d.usb_desc) + ")" : "";
+      // §12: "מזוהה" רק כש-lsusb באמת ראה אותו (usb===true), לא כשאין lsusb לבדוק
+      const seen = d.usb === true ? "מזוהה" + usb : "זיהוי ה-USB לא נבדק (אין lsusb)";
+      const m = SDR_MODE_LABEL[d.mode] || d.mode || "";
+      switch (d.state) {
+        case "missing": return ["err", "SDR לא מזוהה",
+          "ה-SDR לא מופיע ב-USB: lsusb לא מוצא התקן SDRplay. בדוק את הכבל ואת החיבור ל-Pi."];
+        case "ours": return d.service_state === "active"
+          ? ["live", "SDR · בשימוש: " + m, seen + ". בשימוש של AIR-AM במצב " + m + ". לשחרור: ⏻ עצור מקלט."]
+          : ["busy", "SDR · עולה: " + m, seen + ". AIR-AM מנסה להפעיל אותו במצב " + m
+             + " (השירות במצב " + bidi(d.service_state) + ")."];
+        case "switching": return ["busy", "SDR · מחליף מצב…", "AIR-AM מחליף מצב כרגע. החיווי יתעדכן בעוד רגע."];
+        case "checking": return ["busy", "SDR · בודק…", "בודק מול ה-SDRplay API אם ה-SDR פנוי."];
+        case "api_down": return ["err", "SDR · שירות ה-API כבוי",
+          "ה-SDR " + seen + ", אבל שירות sdrplay לא פעיל (" + bidi(d.api || "?") + "). בלעדיו אף תוכנה לא יכולה להשתמש בו."];
+        case "api_error": return ["err", "SDR · ה-API לא מגיב",
+          "ה-SDR " + seen + ", אבל שירות ה-SDRplay לא ענה: " + bidi(d.detail || "?")
+          + ". ניתוק וחיבור של ה-USB, או הפעלה מחדש של ה-Pi, בדרך כלל פותרים את זה."];
+        case "free": return ["ok", "SDR מזוהה · פנוי",
+          "מזוהה" + usb + " ופנוי: ה-API של SDRplay מציע אותו כרגע" + (d.label ? " (" + bidi(d.label) + ")" : "") + "."];
+        case "busy": {
+          const who = (d.suspects || []).map((p) => bidi(p.name + " (PID " + p.pid + ")")).join(", ");
+          return ["err", "SDR תפוס ע״י תוכנה אחרת",
+            "ה-SDR מזוהה" + usb + ", אבל ה-API לא מציע אותו: תוכנה אחרת מחזיקה בו כרגע. "
+            + (who ? "חשודים לפי שם תהליך: " + who + ". סגור אותה כדי ש-AIR-AM יוכל להשתמש בו."
+                   : "לא נמצא תהליך מוכר לפי שם — ייתכן שזו תוכנה אחרת על ה-Pi.")];
+        }
+        case "unavailable": return ["err", "SDR לא זמין",
+          "ה-API לא מציע אף מכשיר, ו-lsusb לא מותקן — אי אפשר לדעת אם ה-SDR בכלל מחובר."];
+        default: return ["", d.usb ? "SDR מזוהה · פנוי? לא ידוע" : "SDR · לא ידוע",
+          (d.usb ? "מזוהה" + usb + ", אבל " : "") + "SoapySDRUtil לא נמצא — אי אפשר לבדוק אם ה-SDR פנוי."];
+      }
+    }
+    function renderSdr(d) {
+      const [cls, chip, detail] = sdrView(d);
+      const age = typeof d.checked_age === "number" && d.checked_age >= 1 ? " · נבדק לפני " + Math.round(d.checked_age) + "ש׳" : "";
+      sdrDetail = detail + age;
+      const el = $("sdrChip");
+      el.className = "pill" + (cls ? " " + cls : "");
+      $("sdrChipTxt").textContent = chip;
+      el.title = sdrDetail;
+      // textContent בלבד: שמות התהליכים מגיעים מ-/proc — לא HTML
+      $("homeSdrTxt").textContent = "📟 " + sdrDetail;
+      $("homeSdrTxt").classList.remove("hidden");
+    }
+    async function pollSdr() {
+      if (sdrInFlight) return;
+      sdrInFlight = true;
+      try { renderSdr(await fetchJSON("/api/sdr")); }
+      catch (e) { /* השרת לא עונה — #connChip כבר מדווח על זה */ }
+      finally { sdrInFlight = false; }
+    }
+    $("sdrChip").onclick = () => { if (sdrDetail) showToast(sdrDetail); };
+    setInterval(() => { if (!document.hidden) pollSdr(); }, 15000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) pollSdr(); });
+    pollSdr();
+
     /* ---------- מפת המסלולים (SVG בקנה מידה) ---------- */
     // לשמור מסונכרן עם RUNWAYS ב-webtune/adsb.py: כיוון -> [thr lat, lon, קורס אמיתי]
     const AW_RWYS = {
@@ -4441,6 +4517,7 @@
       } finally {
         applyModeInFlight = false;
         _setModeButtons(false);             // שחרר כפתורים
+        pollSdr();                          // המעבר תפס/שחרר את המכשיר — מרעננים את החיווי מיד
       }
     }
     function _setModeButtons(disabled) {
@@ -4550,7 +4627,7 @@
       else if (live === "acars") txt.innerHTML = "המקלט במצב <b>📡 ACARS</b> — מאזין להודעות דאטה";
       else if (live === "vdl2") txt.innerHTML = "המקלט במצב <b>🛰️ VDL2</b> — מאזין להודעות דאטה";
       else if (live === "satcom") txt.innerHTML = "המקלט במצב <b>📶 SATCOM</b> — מאזין להודעות לוויין ‏(L-band)";
-      else txt.innerHTML = "המקלט בכיבוי <b>(Standby)</b> — ה-RSP1B פנוי ליישום SDR אחר. בחר מצב להפעלה:";
+      else txt.innerHTML = "המקלט בכיבוי <b>(Standby)</b> — AIR-AM שחרר את ה-SDR. בחר מצב להפעלה:";
       $("homeStopBtn").classList.toggle("hidden", sdrOff);
       // תת-שורות הכרטיסים: מה יופעל בלחיצה (התדר/הבנק השמורים)
       $("homeVoiceSub").textContent = Number.isFinite(Number(current)) ? Number(current).toFixed(3) + " MHz" : "—";
