@@ -402,6 +402,17 @@
       direction: ltr; display: inline-block; }
     .field-meter.stale .fm-main b { opacity: .5; }
     .field-meter .fm-hint { font-size: .72rem; color: var(--text-faint); margin: .35rem 0 0; }
+    /* רשם ניסוי כיול: מופרד בקו מהמד — כלי-ניסוי, לא חלק מהקריאה היומיומית */
+    .rflog { margin-top: .7rem; padding-top: .6rem; border-top: 1px dashed var(--border);
+      display: flex; flex-direction: column; gap: var(--sp-2); text-align: start; }
+    .rflog-hd { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+    .rflog-st { font-size: .76rem; color: var(--dim); font-variant-numeric: tabular-nums; }
+    .rflog-st.on { color: var(--green-fg); }
+    button.ghost#rflogBtn.on { background: rgba(var(--green-rgb),.16); border-color: rgba(var(--green-rgb),.5);
+      color: var(--green-fg); }
+    .rflog-marks { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+    .rflog-marks button { flex: 1; min-width: 6.5rem; min-height: 44px; font-size: .8rem; }
+    .rflog .fm-hint { font-size: .72rem; color: var(--text-faint); margin: 0; }
 
     /* --- דוח סשן: "מה קרה בזמן שלא הסתכלת" --- */
     .session-stats { font-size: .85rem; color: var(--text); margin: 0 0 .5rem; }
@@ -477,6 +488,42 @@
 
     /* ---------- שחזור-סשן: כרטיס-בית + רשימה + נגן (docs/session-replay-design.md §9) ---------- */
     .replay-save-row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+    /* --- ניסוי כיול אוטומטי: כרטיס בבית + סרגל גלובלי (בכל תצוגה) --- */
+    .exp-req { margin: 0 0 .7rem; padding-inline-start: 1.1rem; font-size: .82rem; color: var(--dim);
+      display: flex; flex-direction: column; gap: .2rem; }
+    .exp-msg { margin: .5rem 0 0; font-size: .8rem; color: var(--dim); }
+    .exp-msg.err { color: var(--red-fg); }
+    .exp-head { margin: 0 0 .6rem; padding: .6rem .75rem; border-radius: var(--r-sm);
+      background: var(--panel-2); border: 1px solid var(--border); font-size: .88rem; line-height: 1.5; }
+    .exp-head.good { border-color: rgba(var(--green-rgb),.5); background: rgba(var(--green-rgb),.1); }
+    .exp-head.bad { border-color: rgba(var(--red-rgb),.5); background: rgba(var(--red-rgb),.1); }
+    .exp-tbl-wrap { overflow-x: auto; margin: 0 0 .6rem; }
+    .exp-tbl { width: 100%; border-collapse: collapse; font-size: .78rem; }
+    .exp-tbl th { text-align: start; font-weight: 600; color: var(--text-faint); font-size: .7rem;
+      padding: .35rem .4rem; border-bottom: 1px solid var(--border-strong); white-space: nowrap; }
+    .exp-tbl td { padding: .4rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+    .exp-tbl td.num { font-variant-numeric: tabular-nums; direction: ltr; text-align: end; white-space: nowrap; }
+    .exp-tbl .yes { color: var(--green-fg); font-weight: 600; white-space: nowrap; }
+    .exp-tbl .no { color: var(--red-fg); font-weight: 600; white-space: nowrap; }
+    .exp-cap { margin: -.3rem 0 .6rem; font-size: .72rem; color: var(--text-faint); }
+    .exp-notes { margin: 0 0 .6rem; padding-inline-start: 1.1rem; font-size: .8rem; color: var(--dim);
+      display: flex; flex-direction: column; gap: .25rem; }
+    .exp-bar { position: fixed; inset-inline: 0; bottom: 0; z-index: 900;
+      background: var(--panel); border-top: 1px solid var(--border-strong); box-shadow: var(--sh-card);
+      padding: .6rem max(.9rem, env(safe-area-inset-left)) calc(.6rem + env(safe-area-inset-bottom)); }
+    body.exp-on { padding-bottom: 8.5rem; }
+    .exp-bar-main { display: flex; align-items: center; gap: var(--sp-2); max-width: 60rem; margin: 0 auto; }
+    .exp-bar-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .1rem; }
+    .exp-bar-txt b { font-size: .9rem; }
+    .exp-bar-txt span { font-size: .76rem; color: var(--dim); }
+    .exp-prog { height: 4px; border-radius: 2px; background: var(--panel-2); margin: .45rem auto 0;
+      max-width: 60rem; overflow: hidden; }
+    .exp-prog i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
+    .exp-prompt { max-width: 60rem; margin: .6rem auto 0; padding: .75rem; border-radius: var(--r-sm);
+      background: rgba(var(--amber-rgb),.14); border: 1px solid rgba(var(--amber-rgb),.55);
+      display: flex; flex-direction: column; gap: .55rem; }
+    .exp-prompt p { margin: 0; font-size: 1rem; font-weight: 600; color: var(--amber-fg); line-height: 1.45; }
+    .exp-prompt button { min-height: 52px; font-size: 1rem; }
     .replay-save-row input[type=number] {
       width: 4.5rem; font: inherit; font-variant-numeric: tabular-nums; text-align: center;
       color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
@@ -906,6 +953,13 @@
     .aim-metric .aim-unit { font-size: .8rem; color: var(--text-faint); }
     .aim-spark { flex: 1; min-width: 0; height: 52px; display: block; }
     #satcomAimPanel .sdr-hint { margin: .5rem 0 0; font-size: .78rem; color: var(--dim); }
+    /* כיוון בשמיעה: כפתור-מתג + רמז. במצב "on" הכפתור מקבל את צבע-הנעילה הירוק
+       (אותם טוקנים כמו .pill.live) כדי לאותת חד-משמעית שהאודיו פעיל. */
+    .aim-audio-bar { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-top: .55rem; }
+    #satcomAimPanel .aim-audio-bar .sdr-hint { margin: 0; flex: 1; min-width: 180px; }   /* (1,2,0) > #satcomAimPanel .sdr-hint */
+    button.aim-audio-btn { flex: none; min-height: 40px; }   /* button.X — כדי לנצח את min-height:34px של button.ghost */
+    .aim-audio-btn.on { background: rgba(var(--green-rgb),.16); border-color: rgba(var(--green-rgb),.5);
+      color: var(--green-fg); }
     /* רשימת ערוצים: מונו + tabular כדי שהמספרים לא ירקדו בין רענונים (1 שנייה) */
     .aim-chans { margin-top: .55rem; display: flex; flex-direction: column; gap: .2rem; }
     .aim-chan { display: flex; align-items: center; gap: .5rem; direction: ltr;
@@ -1406,6 +1460,29 @@
       </div>
     </div><!-- /panel-bd -->
   </section>
+
+  <!-- ═══ ניסוי כיול אנטנה אוטומטי (docs/antenna-calibration-experiment.md) ═══
+       ה-Pi מריץ את כל התנאים לבד; המשתמש רק מנתק פעם אחת ומחבר פעם אחת.
+       הסרגל הגלובלי (#expBar) מופיע בכל תצוגה בזמן הריצה. -->
+  <section class="panel p-exp" id="expCard">
+    <div class="panel-hd"><p class="ttl">🧪 ניסוי כיול אנטנה</p>
+      <div class="hd-end"><span id="expPill" class="pill"><span class="dot"></span><span id="expPillTxt">מוכן</span></span></div>
+    </div>
+    <div class="panel-bd">
+      <div id="expIdle">
+        <p class="hint" style="margin:0 0 .5rem">בודק אם "בדוק אנטנה" באמת מזהה אנטנה מנותקת.
+          ה-Pi מריץ הכול לבד כ-20 דקות. אתה רק <b>מנתק פעם אחת ומחבר פעם אחת</b>, כשתתבקש.</p>
+        <ul class="exp-req">
+          <li>אנטנת ה-VHF מחוברת, ואתה ליד ה-SDR</li>
+          <li>במקום שבו ה-ATIS של נתב"ג (132.500) נשמע</li>
+          <li>הדף פתוח — הבקשה לנתק תופיע כאן עם צפצוף</li>
+        </ul>
+        <button type="button" class="primary" id="expStartBtn">▶ התחל ניסוי</button>
+      </div>
+      <div id="expResult" class="hidden"></div>
+      <p class="exp-msg" id="expMsg"></p>
+    </div>
+  </section>
   </div><!-- /home-dash -->
   </div><!-- /homeView -->
 
@@ -1581,6 +1658,22 @@
         <button type="button" class="ghost" id="voiceFmCalBtn">📏 כייל בסיס עכשיו</button>
       </div>
       <p class="fm-hint" id="voiceFmHint"></p>
+      <!-- ═══ רשם ניסוי כיול אנטנה (docs/antenna-calibration-experiment.md) ═══
+           ה-Pi רושם כל כתיבה של מדדי ה-RF + הקונפיג שבאמת רץ; הטלפון רק מסמן
+           אירועים פיזיים. ההקלטה ממשיכה גם כשהמסך כבוי (צד-שרת). -->
+      <div class="rflog" id="rflogBox">
+        <div class="rflog-hd">
+          <button type="button" class="ghost" id="rflogBtn" aria-pressed="false">🧪 הקלט ניסוי</button>
+          <span class="rflog-st" id="rflogStatus">כבוי</span>
+        </div>
+        <div class="rflog-marks hidden" id="rflogMarks">
+          <button type="button" class="ghost" data-mark="מחובר">🔌 מחובר</button>
+          <button type="button" class="ghost" data-mark="מנותק">✂️ מנותק</button>
+          <button type="button" class="ghost" data-mark="מסיים 50Ω">🔩 מסיים 50Ω</button>
+        </div>
+        <a class="ghost hidden" id="rflogDl" href="/api/rflog/export" download>⬇ הורד את ההקלטה</a>
+        <p class="fm-hint" id="rflogHint">לניסוי כיול האנטנה: ה-Pi רושם את מדדי ה-RF כל שנייה, אתה מסמן מתי חיברת/ניתקת.</p>
+      </div>
     </div>
     </div><!-- /panel-bd -->
   </section>
@@ -2067,6 +2160,18 @@
         </div>
         <p class="sdr-hint" id="satcomAimHint">סובב את האנטנה לאט ועקוב אחרי הגרף — ככל שה-Eb/No גבוה יותר, הכיוון טוב יותר.</p>
 
+        <!-- ═══ כיוון בשמיעה — היד על האנטנה, לא על המסך ═══
+             מיפוי הערך שכבר חושב ב-pollSatcomHealth (best Eb/No + locked) לצליל:
+             גובה-טון וקצב עולים מונוטונית עם ה-Eb/No, וטון רציף מובחן בנעילה.
+             §12: זו סקאלת-תצוגה (כמו הגרף), לא סף "טוב/רע" מומצא — הצליל הרציף
+             היחיד קשור ל-lock (עובדה בינארית מהדמוד), בדיוק כמו צביעת הפאנל.
+             Wake Lock שומר על המסך דולק בזמן הכיוון; המשך ברקע (מסך כבוי/בכיס)
+             הוא best-effort ותלוי-פלטפורמה — לא מבטיחים אותו. -->
+        <div class="aim-audio-bar">
+          <button class="ghost aim-audio-btn" id="satcomAimAudioBtn" aria-pressed="false">🔊 כיוון בשמיעה</button>
+          <span class="sdr-hint" id="satcomAimAudioHint">צליל עולה עם ה-Eb/No, וטון רציף בנעילה — האוזן על האות, היד על האנטנה.</span>
+        </div>
+
         <!-- ═══ ספקטרום הערוץ — "יש RF בכלל?" ═══
              ⚠ זה החלק שעונה על השאלה ש-Eb/No *לא* יכול לענות עליה: אנטנה
              מנותקת, LNA בלי מתח, וכיוון שגוי — כולם נראים זהים ב-lock/ebno
@@ -2172,6 +2277,20 @@
   </section>
 
   </main>
+
+  <!-- סרגל ניסוי הכיול: גלובלי (לא תלוי תצוגה) — הבקשה לנתק/לחבר חייבת להופיע
+       בכל מסך שהמשתמש נמצא בו. גלוי רק בזמן ריצה. -->
+  <div id="expBar" class="exp-bar hidden" role="status" aria-live="polite">
+    <div class="exp-bar-main">
+      <div class="exp-bar-txt"><b id="expBarTitle">ניסוי כיול רץ</b><span id="expBarSub"></span></div>
+      <button type="button" class="ghost" id="expAbortBtn">⏹ עצור</button>
+    </div>
+    <div class="exp-prog"><i id="expProg"></i></div>
+    <div class="exp-prompt hidden" id="expPrompt">
+      <p id="expPromptTxt"></p>
+      <button type="button" class="primary" id="expConfirmBtn">✓ בוצע</button>
+    </div>
+  </div>
 
   <!-- טוסט כללי (כרגע: ביטול-מחיקה לפריסט) — מוסתר כברירת מחדל -->
   <div id="toast" class="toast hidden">
@@ -2790,6 +2909,206 @@
       else if (appMode === "vdl2") vdl2Fm.poll();
     }, 3000);
 
+    /* ---------- רשם ניסוי כיול אנטנה (GET/POST /api/rflog) ----------
+       ההקלטה עצמה בצד השרת — ממשיכה גם כשהמסך כבוי או כשעוברים תצוגה.
+       הטלפון רק מדליק/מכבה ומסמן אירועים פיזיים (חיבור/ניתוק). */
+    let rflogActive = false, rflogInFlight = false;
+    const fmtRflogLeft = (sec) => {   // "1:45:00" / "12:05" — לא fmtDur (שם כבר קיים, פורמט אחר)
+      sec = Math.max(0, Math.round(sec));
+      const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+      return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
+    };
+    function renderRflog(d) {
+      if (!d || !d.ok) return;
+      rflogActive = !!d.active;
+      const btn = $("rflogBtn"), st = $("rflogStatus");
+      btn.classList.toggle("on", rflogActive);
+      btn.setAttribute("aria-pressed", rflogActive ? "true" : "false");
+      btn.textContent = rflogActive ? "⏹ עצור הקלטה" : "🧪 הקלט ניסוי";
+      st.classList.toggle("on", rflogActive);
+      st.textContent = rflogActive
+        ? "מקליט · " + d.rows + " שורות · " + d.marks + " סימונים · נותרו " + fmtRflogLeft(d.remaining || 0)
+        : (d.size ? "כבוי · יש הקלטה שמורה" : "כבוי");
+      $("rflogMarks").classList.toggle("hidden", !rflogActive);
+      $("rflogDl").classList.toggle("hidden", !d.size);
+    }
+    async function pollRflog() {
+      if (rflogInFlight) return;
+      rflogInFlight = true;
+      try { renderRflog(await fetchJSON("/api/rflog")); }
+      catch (e) { /* המחזור הבא ינסה שוב */ }
+      finally { rflogInFlight = false; }
+    }
+    $("rflogBtn").onclick = async () => {
+      $("rflogBtn").disabled = true;
+      try {
+        const res = await apiSend("POST", "/api/rflog", { active: !rflogActive });
+        const d = await res.json();
+        if (d.auth) { $("rflogHint").textContent = d.error || "נדרש PIN"; return; }
+        renderRflog(d);
+        $("rflogHint").textContent = d.active
+          ? "מקליט. סמן כל פעולה פיזית *מיד אחריה*. שינויי תדר/רווח נרשמים לבד."
+          : "ההקלטה נעצרה — הורד את הקובץ ושלח אותו לניתוח.";
+      } catch (e) { $("rflogHint").textContent = "שגיאת רשת — נסה שוב."; }
+      finally { $("rflogBtn").disabled = false; }
+    };
+    document.querySelectorAll("#rflogMarks button").forEach((b) => {
+      b.onclick = async () => {
+        try {
+          const res = await apiSend("POST", "/api/rflog/mark", { label: b.dataset.mark });
+          const d = await res.json();
+          if (!d.ok) { $("rflogHint").textContent = d.error || "הסימון נכשל"; pollRflog(); return; }
+          renderRflog(d);
+          // אישור גלוי עם שעה — בשטח, בלי זה אי אפשר לדעת אם הלחיצה נקלטה
+          $("rflogHint").textContent = "✓ סומן: " + d.label + " · " + new Date().toLocaleTimeString("he-IL");
+        } catch (e) { $("rflogHint").textContent = "שגיאת רשת — הסימון לא נרשם, לחץ שוב."; }
+      };
+    });
+    setInterval(() => { if (!document.hidden && appMode === "voice") pollRflog(); }, 3000);
+
+    /* ---------- ניסוי כיול אוטומטי (GET/POST /api/experiment) ----------
+       ה-Pi מריץ את הניסוי לבד (צד-שרת); כאן רק מציגים התקדמות, מבקשים את שתי
+       הפעולות הפיזיות (ניתוק/חיבור) ומציגים את הסיכום שחושב על ה-Pi. */
+    let expState = null, expInFlight = false, expCtx = null, expPromptSince = null;
+    const expFmt = (v) => (typeof v === "number" ? v.toFixed(1) : "—");
+    // התוויות מגיעות מהשרת ומכילות מירכאות (נתב"ג) — escaping מפורש לפני innerHTML
+    const expEsc = (t) => String(t == null ? "" : t).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    const expMin = (sec) => Math.max(1, Math.round((sec || 0) / 60));
+    function expEnsureAudio() {      // נקרא רק מלחיצה (user gesture) — מדיניות autoplay
+      try { if (!expCtx) { const AC = window.AudioContext || window.webkitAudioContext; if (AC) expCtx = new AC(); }
+            if (expCtx) expCtx.resume().catch(() => {}); } catch (e) {}
+    }
+    function expAlert() {            // שלושה צפצופים + רטט (אנדרואיד) כשמופיעה בקשה פיזית
+      try { navigator.vibrate && navigator.vibrate([250, 120, 250, 120, 250]); } catch (e) {}
+      if (!expCtx) return;
+      try {
+        const t0 = expCtx.currentTime;
+        [0, 0.28, 0.56].forEach((d) => {
+          const o = expCtx.createOscillator(), g = expCtx.createGain();
+          o.frequency.value = 880; o.connect(g); g.connect(expCtx.destination);
+          g.gain.setValueAtTime(0.0001, t0 + d);
+          g.gain.linearRampToValueAtTime(0.25, t0 + d + 0.02);
+          g.gain.linearRampToValueAtTime(0.0001, t0 + d + 0.18);
+          o.start(t0 + d); o.stop(t0 + d + 0.2);
+        });
+      } catch (e) {}
+    }
+    function detectsCell(v) {
+      if (v === true) return '<span class="yes">✓ כן</span>';
+      if (v === false) return '<span class="no">✗ לא</span>';
+      return "—";
+    }
+    function renderExpResult(d) {
+      const box = $("expResult"), r = d.result;
+      if (!r) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+      const thr = r.threshold_db;
+      const prod = (r.probes || []).find((p) => p.key === "probe_product");
+      let head = "";
+      if (prod && typeof prod.drop === "number") {
+        head = '<div class="exp-head ' + (prod.detects ? "good" : "bad") + '">'
+          + "<b>בדיקת האנטנה של המוצר (" + prod.freq.toFixed(3) + "):</b> הרעש ירד ב-"
+          + prod.drop.toFixed(1) + " dB בניתוק — " + (prod.detects
+            ? "הסף של המוצר (" + thr + " dB) <b>היה מזהה</b> את הניתוק."
+            : "הסף של המוצר (" + thr + " dB) <b>לא היה מזהה</b> את הניתוק.") + "</div>";
+      }
+      const rows = (r.conditions || []).map((c) => "<tr><td>" + expEsc(c.label) + "</td>"
+        + '<td class="num">' + expFmt((c.p1 || {}).steady) + '</td><td class="num">' + expFmt((c.p2 || {}).steady)
+        + '</td><td class="num">' + expFmt(c.drop) + "</td><td>" + detectsCell(c.detects) + "</td></tr>")
+        .concat((r.probes || []).map((p) => "<tr><td>" + expEsc(p.label) + "</td>"
+        + '<td class="num">' + expFmt((p.p1 || {}).noise) + '</td><td class="num">' + expFmt((p.p2 || {}).noise)
+        + '</td><td class="num">' + expFmt(p.drop) + "</td><td>" + detectsCell(p.detects) + "</td></tr>"));
+      const notes = [];
+      const a = r.atis || {};
+      if (typeof a.drop === "number")
+        notes.push((a.gone === false ? "⚠ " : "") + "ה-ATIS ירד ב-" + a.drop.toFixed(1) + " dB בניתוק"
+          + (a.gone === false ? " — ייתכן שהאנטנה לא נותקה בפועל, והתוצאות לא אמינות." : " — הניתוק אומת."));
+      const ad = r.after_disconnect;
+      if (ad && typeof ad.rise === "number")
+        notes.push("אחרי הניתוק, ב-132.000 עם AGC: מיד אחריו " + expFmt(ad.instant) + " dBFS, אחרי דקה וחצי "
+          + expFmt(ad.after) + " dBFS — הרעש חזר למעלה " + ad.rise.toFixed(1) + " dB.");
+      if (r.stale_probes) notes.push("⚠ " + r.stale_probes + " בדיקות אנטנה קראו נתונים של התהליך הקודם (לפני ההפעלה מחדש).");
+      else if (r.stale_rows) notes.push(r.stale_rows + " קריאות של התהליך הקודם נרשמו אחרי הפעלות-מחדש (לא נכללו בחישוב).");
+      box.innerHTML = head
+        + '<div class="exp-tbl-wrap"><table class="exp-tbl"><thead><tr><th>תנאי</th><th>מחובר</th><th>מנותק</th>'
+        + "<th>ירידה</th><th>מזהה?</th></tr></thead><tbody>" + rows.join("") + "</tbody></table></div>"
+        + '<p class="exp-cap">רצפת רעש ב-dBFS. "מזהה?" = האם הסף של המוצר (' + thr
+        + " dB) היה מזהה את הניתוק בתנאי הזה.</p>"
+        + (notes.length ? '<ul class="exp-notes">' + notes.map((n) => "<li>" + expEsc(n) + "</li>").join("") + "</ul>" : "")
+        + '<div class="fm-btns"><a class="ghost" href="/api/rflog/export" download>⬇ הורד את הנתונים המלאים</a></div>';
+      box.classList.remove("hidden");
+    }
+    function renderExperiment(d) {
+      if (!d || !d.ok) return;
+      expState = d;
+      const running = !!d.running;
+      document.body.classList.toggle("exp-on", running);
+      $("expBar").classList.toggle("hidden", !running);
+      $("expStartBtn").disabled = running;
+      const pill = $("expPill");
+      pill.className = "pill" + (running ? " live" : (d.error ? " err" : ""));
+      $("expPillTxt").textContent = running ? "רץ" : (d.error ? "נעצר" : (d.result ? "הושלם" : "מוכן"));
+      if (running) {
+        const i = Math.max(0, d.step_index), n = d.steps_total || 1;
+        $("expProg").style.width = Math.round(100 * (i + (d.waiting ? 0 : 0.5)) / n) + "%";
+        const st = d.step || {};
+        $("expBarTitle").textContent = d.waiting ? "ממתין לך" : "ניסוי כיול רץ · שלב " + (i + 1) + "/" + n;
+        let sub = d.waiting ? "" : (st.label || "");
+        if (!d.waiting && typeof d.eta_sec === "number") sub += " · נותרו ~" + expMin(d.eta_sec) + " דק'";
+        if (!d.waiting && typeof d.eta_prompt_sec === "number")
+          sub += " · הבקשה הבאה בעוד ~" + expMin(d.eta_prompt_sec) + " דק'";
+        $("expBarSub").textContent = sub;
+        const w = d.waiting;
+        $("expPrompt").classList.toggle("hidden", !w);
+        if (w) {
+          const dis = w.action === "disconnect";
+          $("expPromptTxt").textContent = dis
+            ? "✂️ נתק עכשיו את כבל האנטנה בכניסה של ה-SDR (לא בקצה האנטנה), ואז לחץ."
+            : "🔌 חבר עכשיו חזרה את כבל האנטנה לכניסה של ה-SDR, ואז לחץ.";
+          $("expConfirmBtn").textContent = dis ? "✓ ניתקתי" : "✓ חיברתי";
+          if (expPromptSince !== w.since) { expPromptSince = w.since; expAlert(); }
+        }
+        $("expMsg").textContent = "הניסוי רץ — עקוב אחרי הסרגל בתחתית המסך. המקלט יחזור למצבו הקודם בסוף.";
+        $("expMsg").classList.remove("err");
+      } else {
+        expPromptSince = null;
+        if (d.error) { $("expMsg").textContent = "⚠ " + d.error; $("expMsg").classList.add("err"); }
+        else { $("expMsg").textContent = d.result ? "הניסוי הושלם והמקלט חזר למצבו הקודם." : ""; $("expMsg").classList.remove("err"); }
+      }
+      renderExpResult(d);
+    }
+    async function pollExperiment() {
+      if (expInFlight) return;
+      expInFlight = true;
+      try { renderExperiment(await fetchJSON("/api/experiment")); }
+      catch (e) { /* המחזור הבא ינסה שוב */ }
+      finally { expInFlight = false; }
+    }
+    async function expSend(body) {
+      try {
+        const res = await apiSend("POST", "/api/experiment", body);
+        const d = await res.json();
+        if (!d.ok) { $("expMsg").textContent = "⚠ " + (d.error || "הפעולה נכשלה"); $("expMsg").classList.add("err"); }
+        renderExperiment({ ...d, ok: true });
+      } catch (e) { $("expMsg").textContent = "⚠ שגיאת רשת — נסה שוב."; $("expMsg").classList.add("err"); }
+    }
+    $("expStartBtn").onclick = () => {
+      if (!confirm("הניסוי ישתלט על המקלט לכ-20 דקות (כוונון ומעבר מצבים יינעלו), "
+        + "ובסוף יחזיר אותו למצב שהיה. ודא שאנטנת ה-VHF מחוברת. להתחיל?")) return;
+      expEnsureAudio();
+      expSend({ action: "start" });
+    };
+    $("expConfirmBtn").onclick = () => { expEnsureAudio(); $("expConfirmBtn").disabled = true;
+      expSend({ action: "confirm" }).finally(() => { $("expConfirmBtn").disabled = false; }); };
+    $("expAbortBtn").onclick = () => {
+      if (confirm("לעצור את הניסוי? המקלט יחזור למצב הקודם, והנתונים שנאספו עד עכשיו יישמרו.")) expSend({ action: "abort" });
+    };
+    // רץ: עדכון כל 2ש' (הבקשה לנתק צריכה להופיע מהר). לא רץ: רק בבית, לאט —
+    // כדי לגלות ניסוי שהופעל מטלפון אחר. חזרה לטאב ⇒ רענון מיידי (אולי ממתינים לך).
+    setInterval(() => { if (!document.hidden && expState && expState.running) pollExperiment(); }, 2000);
+    setInterval(() => { if (!document.hidden && appMode === "home") pollExperiment(); }, 15000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) pollExperiment(); });
+
     /* ---------- אבחון SATCOM: נעילת דמודולטור (GET /api/satcom/health) ----------
        proxy מקומי ל---web dashboard המובנה של inmarsat-sniffer — lock=נעילת
        דמודולטור *גם* באפס הודעות מפוענחות, ההבדל בין "אין אנטנה"/"לא מכוון"
@@ -2824,10 +3143,199 @@
       $("satcomAimChans").innerHTML = "";
       $("satcomAimHint").textContent = txt;
       $("satcomAimEbno").parentElement.classList.remove("locked");
+      aimAudio.dead();   // אין מפענח (כבוי/קרס/לוח האבחון לא עונה) => טיק כפול (אם האודיו דלוק)
       aimHist.length = 0;
       drawMiniSpark($("satcomAimSpark"), aimHist, AIM_HIST_N, "#5fce85", AIM_SCALE_DB);
       renderSpecIdle("—");
     }
+
+    /* ---------- כיוון בשמיעה (Web Audio) ----------
+       "גלאי-מתכות" לאנטנת ה-L-band: ממפה את הערכים ש-pollSatcomHealth כבר
+       מחשב כל שנייה (best Eb/No + locked) לצליל, כדי שאפשר לכוון עם שתי ידיים
+       על האנטנה בלי להסתכל במסך. §12: מיפוי מונוטוני של ערך-מדוד לגובה-טון
+       (סקאלת-תצוגה AIM_SCALE_DB, לא סף מומצא); הצליל הרציף היחיד = נעילה
+       (עובדה בינארית מהדמוד). אין backend חדש — עיבוד שני של דאטה שכבר זורמת.
+       Wake Lock שומר את המסך דולק בזמן כיוון פעיל; המשך ברקע best-effort. */
+    const aimAudio = (function () {
+      let ctx = null, osc = null, oscGain = null, timer = null, wake = null, suspendTimer = null;
+      let enabled = false;
+      let latest = { best: null, locked: 0, noDemod: true, dead: false, at: 0 };
+      let hiddenSince = 0, deadStreakHidden = 0, autoOffReason = "";
+      const btn = () => $("satcomAimAudioBtn"), hintEl = () => $("satcomAimAudioHint");
+      const LOCK_HZ = 700, LOCK_VOL = 0.14, BEEP_MS = 90;
+      // §12: דאטה עבשה לא מוצגת כחיה. ה-poll רץ כל שנייה; אם לא הגיע feed
+      // במשך AIM_AUDIO_STALE_MS (בקשה תקועה עד ה-timeout, SATCOM שקרס) —
+      // הצליל נופל לטיק-חיים, לא ממשיך לצפצף על הערך האחרון. 3ש' = 3 דגימות
+      // שהוחמצו: ל"גלאי-מתכות" 5ש' של טון-נעילה כוזב הן עוד 5ש' של קיבוע
+      // האנטנה בכיוון שגוי.
+      const AIM_AUDIO_STALE_MS = 3000;
+      // ⚠ החריג ל-document.hidden (לולאת ה-health ממשיכה כשהאודיו פעיל) חייב
+      // גבול-זמן: Chrome פוטר דפים *שמיעים* מוויסות-timers (מקור משני), כלומר
+      // הצפצוף עצמו מבטל את הוויסות שאפשר היה לסמוך עליו — טלפון "שנשכח בכיס"
+      // היה ממשיך לתשאל /api/satcom/health (fork של systemctl) כל שנייה כל
+      // הלילה. כיבוי אוטומטי אחרי 10 דק' ברקע, או אחרי 15 דגימות רצופות של
+      // "אין מפענח" ברקע (SATCOM נעצר/קרס בזמן שהטלפון בכיס).
+      const AIM_AUDIO_BG_MAX_MS = 10 * 60 * 1000, AIM_AUDIO_BG_DEAD_MAX = 15;
+
+      function _ensureCtx() {
+        if (ctx) return true;
+        try {
+          const AC = window.AudioContext || window.webkitAudioContext;
+          if (!AC) return false;
+          ctx = new AC();
+          oscGain = ctx.createGain(); oscGain.gain.value = 0.0001;
+          osc = ctx.createOscillator(); osc.type = "sine"; osc.frequency.value = 220;
+          osc.connect(oscGain); oscGain.connect(ctx.destination); osc.start();
+          ctx.onstatechange = _renderHint;   // "interrupted"/"suspended" (iOS) => הרמז אומר את זה, לא מסך "פעיל" בלי צליל
+          return true;
+        } catch (e) { ctx = null; return false; }
+      }
+      // צליל בודד עם עטיפת attack/decay (בלי קליקים) + החלקת-תדר (glide) — מרגיש
+      // כמו סקאלה רציפה כשמסובבים לאט, לא מדרגות.
+      function _beep(freq, durMs, vol) {
+        const t = ctx.currentTime;
+        osc.frequency.setTargetAtTime(freq, t, 0.02);
+        oscGain.gain.cancelScheduledValues(t);
+        oscGain.gain.setValueAtTime(Math.max(0.0001, oscGain.gain.value), t);
+        oscGain.gain.linearRampToValueAtTime(vol, t + 0.012);
+        oscGain.gain.setValueAtTime(vol, t + durMs / 1000);
+        oscGain.gain.linearRampToValueAtTime(0.0001, t + durMs / 1000 + 0.03);
+      }
+      function _lockTone() {
+        const t = ctx.currentTime;
+        osc.frequency.setTargetAtTime(LOCK_HZ, t, 0.03);
+        oscGain.gain.cancelScheduledValues(t);
+        oscGain.gain.setTargetAtTime(LOCK_VOL, t, 0.02);
+      }
+      // "אין מפענח" (SATCOM כבוי/קרס/לוח האבחון לא עונה) נשמע *אחרת* מ"מפענח
+      // חי, אין אות" — טיק כפול נמוך מול טיק בודד. העיניים על האנטנה, לא על המסך.
+      function _deadTick() {
+        _beep(150, 50, 0.06);
+        setTimeout(() => { if (enabled && ctx) _beep(150, 50, 0.06); }, 130);
+      }
+      function _autoOff(reason) { autoOffReason = reason; disable(); }
+      function _tick() {
+        if (!enabled || !ctx) return;
+        if (document.hidden) {
+          if (hiddenSince && Date.now() - hiddenSince > AIM_AUDIO_BG_MAX_MS) {
+            _autoOff("כובה אוטומטית אחרי 10 דק' ברקע — הקש שוב כדי להמשיך לכוון."); return;
+          }
+          if (deadStreakHidden >= AIM_AUDIO_BG_DEAD_MAX) {
+            _autoOff("כובה אוטומטית — המפענח לא היה זמין ברקע (SATCOM נעצר?)."); return;
+          }
+        }
+        const { best, locked, noDemod, dead } = latest;
+        const stale = (Date.now() - latest.at) > AIM_AUDIO_STALE_MS;
+        let nextMs;
+        if (!stale && dead) {                   // אין מפענח — טיק כפול
+          _deadTick(); nextMs = 2000;
+        } else if (!stale && locked > 0) {      // נעילה — טון רציף מובחן
+          _lockTone(); nextMs = 400;
+        } else if (stale || noDemod || best == null) {   // אין אות (או דאטה עבשה) — טיק-חיים שקט ואיטי
+          _beep(180, 70, 0.05); nextMs = 1500;  // ("האודיו דלוק, פשוט אין עדיין")
+        } else {                                // יש אות, אין נעילה — גובה+קצב ∝ Eb/No
+          const f = Math.max(0, Math.min(AIM_SCALE_DB, best)) / AIM_SCALE_DB;  // 0..1
+          _beep(300 + f * 900, BEEP_MS, 0.16);  // 300..1200Hz
+          // מהיר יותר = טוב יותר (520..140ms). הרצפה = מעטפת הביפ (attack+גוף+decay
+          // ≈ 132ms) + מרווח — אחרת הביפ הבא חותך את ה-decay של הקודם (קליק).
+          nextMs = Math.max(BEEP_MS + 50, 520 - f * 400);
+        }
+        timer = setTimeout(_tick, nextMs);
+      }
+      // ⚠ navigator.wakeLock קיים רק ב-secure context (HTTPS) — וברירת המחדל של
+      // AIR-AM היא http://<IP>:8080. לכן הרמז "המסך יישאר דולק" מותר *רק* אחרי
+      // שהנעילה באמת נתפסה (§12: לא מבטיחים יכולת שלא קיימת); אחרת אומרים
+      // למשתמש במפורש שעליו להשאיר את המסך דולק בעצמו.
+      async function _acquireWake() {
+        if (wake) { _renderHint(); return true; }
+        try {
+          if ("wakeLock" in navigator) {
+            const lock = await navigator.wakeLock.request("screen");
+            // ה-await יכול להסתיים *אחרי* disable() (הקשה כפולה מהירה) — לא
+            // משאירים sentinel יתום שמחזיק את המסך דולק כשהאודיו כבר כבוי.
+            if (!enabled) { try { lock.release(); } catch (e) {} }
+            else { wake = lock; wake.addEventListener("release", () => { wake = null; _renderHint(); }); }
+          }
+        } catch (e) { wake = null; }   // נדחה/לא נתמך — לא כשל, פשוט המסך עלול לכבות
+        _renderHint();
+        return !!wake;
+      }
+      function _releaseWake() { try { if (wake) { wake.release(); wake = null; } } catch (e) {} }
+      function _renderHint() {
+        const h = hintEl(); if (!h) return;
+        if (!enabled) {
+          h.textContent = autoOffReason
+            || "צליל עולה עם ה-Eb/No, וטון רציף בנעילה — האוזן על האות, היד על האנטנה.";
+          return;
+        }
+        if (ctx && ctx.state !== "running") {   // iOS "interrupted", או resume שנדחה מחוץ ל-user-gesture
+          h.textContent = "⚠ הדפדפן השהה את האודיו — הקש על הכפתור פעמיים (כיבוי והדלקה) כדי להמשיך.";
+          return;
+        }
+        h.textContent = "צליל עולה = כיוון טוב יותר · טון רציף = נעילה · טיק כפול = אין מפענח. "
+          + (wake ? "המסך יישאר דולק בזמן הכיוון."
+                  : "⚠ נעילת-מסך לא זמינה כאן (דורשת HTTPS או דפדפן תומך) — השאר את המסך דולק בעצמך.")
+          + " iPhone: ודא שמתג ההשתקה כבוי.";
+      }
+      function _setBtn(on) {
+        const b = btn(); if (!b) return;
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-pressed", on ? "true" : "false");
+        b.textContent = on ? "🔊 כיוון בשמיעה · פעיל" : "🔊 כיוון בשמיעה";
+        _renderHint();
+      }
+      function feed(best, locked, noDemod) {
+        latest = { best, locked: locked || 0, noDemod: !!noDemod, dead: false, at: Date.now() };
+        deadStreakHidden = 0;
+      }
+      function idle() { feed(null, 0, true); }   // מפענח חי, אין אות — טיק בודד
+      function dead() {                          // אין מפענח בכלל — טיק כפול (ומונה ל-auto-off ברקע)
+        latest = { best: null, locked: 0, noDemod: true, dead: true, at: Date.now() };
+        if (document.hidden) deadStreakHidden++;
+      }
+      async function enable() {
+        if (enabled) return;
+        if (!_ensureCtx()) { const h = hintEl(); if (h) h.textContent = "האודיו לא נתמך בדפדפן הזה."; return; }
+        // enabled=true *לפני* ה-await: הקשה שנייה תוך כדי resume() חייבת להגיע
+        // ל-disable(), לא להיכנס שוב ל-enable() (מרוץ שהשאיר wake-lock יתום).
+        enabled = true; autoOffReason = ""; deadStreakHidden = 0;
+        clearTimeout(suspendTimer); _setBtn(true);
+        try { await ctx.resume(); } catch (e) {}
+        if (!enabled) return;                 // כובה תוך כדי ה-await
+        clearTimeout(timer); _tick();
+        await _acquireWake();                 // מעדכן את הרמז לפי מה שבאמת נתפס
+      }
+      function disable() {
+        if (!enabled) return;
+        enabled = false; clearTimeout(timer); timer = null;
+        if (ctx && oscGain) {
+          try {
+            const t = ctx.currentTime;
+            oscGain.gain.cancelScheduledValues(t);
+            oscGain.gain.setTargetAtTime(0.0001, t, 0.02);
+          } catch (e) {}
+          // אחרי ה-fade — משעים את ה-ctx: אוסילטור ב-gain 0.0001 עדיין מחזיק
+          // זרם-פלט פתוח (סוללה; ב-iOS ה-audio session נשאר חי).
+          clearTimeout(suspendTimer);
+          suspendTimer = setTimeout(() => { if (!enabled && ctx) ctx.suspend().catch(() => {}); }, 250);
+        }
+        _releaseWake(); _setBtn(false);
+      }
+      function toggle() { enabled ? disable() : enable(); }
+      function active() { return enabled; }
+      // Wake Lock משתחרר אוטומטית כשהטאב מוסתר — לחדש בחזרה, ולהעיר את ה-ctx;
+      // וגם: שעון ל-auto-off של "נשכח בכיס".
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+          hiddenSince = 0; deadStreakHidden = 0;
+          if (enabled) { _acquireWake(); if (ctx) ctx.resume().catch(() => {}); }
+        } else {
+          hiddenSince = Date.now();
+        }
+      });
+      return { toggle, feed, idle, dead, stop: disable, active };
+    })();
+    if ($("satcomAimAudioBtn")) $("satcomAimAudioBtn").onclick = () => aimAudio.toggle();
 
     async function pollSatcomHealth() {
       if (satcomHealthInFlight) return;
@@ -2851,6 +3359,7 @@
 
         aimHist.push(best == null ? 0 : best);
         if (aimHist.length > AIM_HIST_N) aimHist.shift();
+        aimAudio.feed(best, locked, best == null);   // מזין את כיוון-בשמיעה (§12: אותו ערך גולמי)
 
         $("satcomAimEbno").textContent = best == null ? "—" : best.toFixed(1);
         $("satcomAimEbno").parentElement.classList.toggle("locked", locked > 0);
@@ -2985,8 +3494,19 @@
     // subprocess של systemctl — פולינג בקצב 1s בזמן עיון בהיסטוריה (SATCOM כבוי)
     // היה שורף fork בשנייה על ה-Pi בלי שום תמורה. זה בדיוק תקציב החשמל שאנחנו
     // מנסים לשמור עליו. הדלקה ממקום אחר נתפסת ב-pollGlobalState (ר' שם).
+    // ⚠ חריג מכוון לשומר document.hidden: כשכיוון-בשמיעה *פעיל* (aimAudio.active),
+    // ממשיכים לתשאל גם כשהטאב מוסתר — אחרת הצליל היה קופא על הערך האחרון ברגע
+    // שהמסך כבה. ⚠ זה *לא* נשען על ויסות-timers של הדפדפן (Chrome פוטר דפים
+    // שמיעים ממנו) — הגבול נאכף בקוד: aimAudio מכבה את עצמו אחרי 10 דק' ברקע
+    // או אחרי 15 דגימות "אין מפענח" רצופות ברקע (ר' AIM_AUDIO_BG_*), ומיד
+    // שהאודיו נכבה השומר חוזר לתוקף.
     setInterval(() => {
-      if (!document.hidden && appMode === "satcom" && satcom && satcom.active) pollSatcomHealth();
+      const satOn = appMode === "satcom" && satcom && satcom.active;
+      if (satOn && (!document.hidden || aimAudio.active())) pollSatcomHealth();
+      // SATCOM נעצר/קרס (pollGlobalState/הפיד עדכנו satcom.active) בלי מעבר-תצוגה —
+      // גם המסך וגם האוזן חייבים לומר "אין מפענח" (renderAimIdle קורא aimAudio.dead()),
+      // לא להשאיר "6.5 dB · נעילה!" עבש על הפאנל בזמן שהאוזן כבר שומעת טיק כפול.
+      else if (aimAudio.active()) renderAimIdle("SATCOM לא פעיל — הפעל אותו כדי להמשיך לכוון.");
     }, 1000);
     // הספקטרום איטי יותר בכוונה (2ש'): מטען כבד פי כמה (256 ערכים) ומדד
     // "האם יש RF בכלל" משתנה לאט — בניגוד ל-Eb/No שמגיב לסיבוב אנטנה מיידית.
@@ -3764,13 +4284,14 @@
       replayScreen = null;
       segSet("modeSeg", mode);
       renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acars/vdl2/satcom.active — עדכן בכל מעבר
-      if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); }
-      if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
+      if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); pollExperiment(); }
+      if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); pollRflog(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
       if (mode === "acars") acarsFm.poll();
       if (mode === "vdl2") vdl2Fm.poll();
       if (mode === "acars") acars.show(); else acars.hide();   // תצוגת ACARS מנוהלת בפקטורי (כמו VDL2/SATCOM)
       if (mode === "vdl2") vdl2.show(); else vdl2.hide();
       if (mode === "satcom") satcom.show(); else satcom.hide();
+      if (mode !== "satcom") aimAudio.stop();   // כיוון-בשמיעה שייך רק ל-SATCOM — עוצרים ומשחררים wake-lock
       // רענון מיידי של מכשיר הכיוון — בלי זה הפאנל ריק עד לטיק הבא (שנייה),
       // ובכניסה חוזרת מוצגים נתונים ישנים לרגע. גם מיישר את שורת ההצעה.
       if (mode === "satcom") { pollSatcomHealth(); pollSatcomSpectrum(); renderPowerAdvice(); }

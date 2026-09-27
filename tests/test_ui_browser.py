@@ -361,3 +361,166 @@ def test_data_view_instances_are_isolated(page):
     page.click("#modeSeg button[data-v=vdl2]")
     expect(page.locator("#vdl2StTotal")).to_have_text("0")
     expect(page.locator("#satcomStTotal")).to_have_text("0")
+
+
+def test_aim_audio_toggle_is_honest_about_wake_lock_and_stops_on_view_change(page):
+    """כיוון-בשמיעה (SATCOM): המתג נדלק/נכבה, מעבר-תצוגה מכבה אותו — והרמז
+    כן לגבי נעילת-המסך. ⚠ הדף מוגש כאן ב-http://airam.test (לא secure
+    context), בדיוק כמו ברירת המחדל של AIR-AM (http://<IP>:8080): ב-HTTP
+    ‏navigator.wakeLock לא קיים בכלל, ולכן הרמז *חייב* להודות שהמסך עלול
+    לכבות — ולא להבטיח "המסך יישאר דולק" (§12: לא מבטיחים יכולת שלא נתפסה).
+    זו גם בדיקת-ריצה אמיתית של Web Audio ב-Chromium: AudioContext נוצר
+    מלחיצה (user gesture) ואסור שתיזרק חריגה (ה-fixture אוכף)."""
+    satcom_state = {**_default_api()["/api/state"], "app_mode": "satcom"}
+    health = {"ok": True, "app_mode": "satcom", "mode_ok": True, "stats_age": None,
+              "services": {"airam-satcom": "active", "sdrplay": "active",
+                           "rtl_airband": "inactive", "icecast2": "active",
+                           "airam-acars": "inactive", "airam-vdl2": "inactive"}}
+    _mount(page, overrides={
+        "/api/state": satcom_state, "/api/health": health,
+        "/api/satcom": {"ok": True, "active": True, "freqs": ["AF1"], "cursor": 0,
+                        "messages": []},
+        "/api/satcom/health": {"ok": True, "available": True, "spectrum": False,
+                               "channels": [{"ch": 0, "baud": 600, "msgs": 0, "age": 0,
+                                             "mse": 0.4, "ebno": 6.5, "lock": False}],
+                               "channels_locked": 0, "channels_total": 1},
+        "/api/satcom/spectrum": {"ok": True, "available": False},
+    })
+    page.click("#modeSeg button[data-v=satcom]")
+    btn = page.locator("#satcomAimAudioBtn")
+    expect(btn).to_be_visible()
+    expect(btn).to_have_attribute("aria-pressed", "false")
+    # http => אין wakeLock בכלל (secure-context בלבד) — מוודאים את הנחת הבדיקה
+    assert page.evaluate("'wakeLock' in navigator") is False
+
+    btn.click()
+    expect(btn).to_have_attribute("aria-pressed", "true")
+    expect(btn).to_have_class(re.compile(r"\bon\b"))
+    hint = page.locator("#satcomAimAudioHint")
+    expect(hint).to_contain_text("השאר את המסך דולק בעצמך")
+    expect(hint).not_to_contain_text("המסך יישאר דולק")
+
+    # מעבר-תצוגה (בית) חייב לכבות את האודיו — לא צליל ברקע אחרי שעזבנו את SATCOM
+    page.click("#modeSeg button[data-v=home]")
+    expect(btn).to_have_attribute("aria-pressed", "false")
+    expect(btn).not_to_have_class(re.compile(r"\bon\b"))
+
+
+
+def test_rflog_recorder_toggle_marks_and_download(page):
+    """רשם ניסוי הכיול (תצוגת קול): הפעלה חושפת את כפתורי הסימון, סימון שולח
+    את התווית המדויקת ומציג אישור גלוי, וקישור ההורדה מופיע כשיש הקלטה.
+    בשטח אין דרך אחרת לדעת שלחיצה נקלטה — האישור הוא חלק מהפיצ'ר."""
+    st = {"active": False, "rows": 0, "marks": 0, "size": 0, "until": None, "started_at": None}
+    sent = {"toggle": [], "mark": []}
+
+    def rflog(route, url):
+        req = route.request
+        if req.method == "POST":
+            body = json.loads(req.post_data or "{}")
+            sent["toggle"].append(body.get("active"))
+            st["active"] = bool(body.get("active"))
+            if st["active"]:
+                import time as _t
+                st.update(until=_t.time() + 7200, started_at=_t.time(), rows=3, size=512,
+                          remaining=7200)
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, **st}))
+
+    def mark(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        sent["mark"].append(body.get("label"))
+        st["marks"] += 1
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "label": body.get("label"), **st}))
+
+    _mount(page, overrides={"/api/rflog": rflog, "/api/rflog/mark": mark})
+    page.click("#modeSeg button[data-v=voice]")
+    btn = page.locator("#rflogBtn")
+    expect(btn).to_have_attribute("aria-pressed", "false")
+    expect(page.locator("#rflogMarks")).to_be_hidden()
+
+    btn.click()
+    expect(btn).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#rflogStatus")).to_contain_text("מקליט")
+    expect(page.locator("#rflogStatus")).to_contain_text("נותרו 2:00:00")
+    expect(page.locator("#rflogMarks")).to_be_visible()
+    expect(page.locator("#rflogDl")).to_be_visible()
+
+    page.click("#rflogMarks button[data-mark='מנותק']")
+    expect(page.locator("#rflogHint")).to_contain_text("✓ סומן: מנותק")
+    assert sent["mark"] == ["מנותק"]
+
+    btn.click()
+    expect(btn).to_have_attribute("aria-pressed", "false")
+    expect(page.locator("#rflogMarks")).to_be_hidden()
+    assert sent["toggle"] == [True, False]
+
+
+def test_experiment_flow_prompt_confirm_and_results(page):
+    """ניסוי הכיול האוטומטי מקצה לקצה בדפדפן: התחלה מהבית, סרגל גלובלי עם בקשת
+    ניתוק (גלויה גם בתצוגה אחרת), אישור שנשלח לשרת, וטבלת סיכום בסוף. התוויות
+    מכילות מירכאות (נתב"ג) — הטבלה נבנית ב-innerHTML, אז גם ה-escaping נבדק כאן."""
+    phase = {"n": "idle"}
+    sent = []
+    result = {
+        "threshold_db": 10.0,
+        "conditions": [
+            {"key": "clean_f20", "label": 'רווח קבוע · אין נתב"ג בחלון', "p1": {"steady": -60.0},
+             "p2": {"steady": -72.0}, "drop": 12.0, "detects": True},
+            {"key": "atiswin_agc", "label": "132.000 · ATIS בחלון · AGC", "p1": {"steady": -58.0},
+             "p2": {"steady": -60.0}, "drop": 2.0, "detects": False}],
+        "probes": [{"key": "probe_product", "label": "בדיקת האנטנה של המוצר · 130.450",
+                    "freq": 130.45, "p1": {"noise": -61.0}, "p2": {"noise": -63.5},
+                    "drop": 2.5, "detects": False}],
+        "atis": {"drop": 53.0, "gone": True},
+        "after_disconnect": {"instant": -70.0, "after": -61.0, "rise": 9.0},
+        "stale_rows": 0, "stale_probes": 1,
+    }
+
+    def status():
+        base = {"ok": True, "running": False, "steps_total": 22, "step_index": -1, "waiting": None,
+                "step": None, "eta_sec": None, "eta_prompt_sec": None, "error": None, "result": None}
+        if phase["n"] == "running":
+            base.update(running=True, step_index=3, eta_sec=900, eta_prompt_sec=300,
+                        step={"label": "122.600 · AGC"})
+        elif phase["n"] == "waiting":
+            base.update(running=True, step_index=8, eta_sec=700,
+                        waiting={"action": "disconnect", "since": 1000.0})
+        elif phase["n"] == "done":
+            base.update(result=result)
+        return base
+
+    def exp(route, url):
+        req = route.request
+        if req.method == "POST":
+            body = json.loads(req.post_data or "{}")
+            sent.append(body.get("action"))
+            phase["n"] = {"start": "running", "confirm": "done"}.get(body.get("action"), phase["n"])
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(status()))
+
+    _mount(page, overrides={"/api/experiment": exp})
+    page.evaluate("window.confirm = () => true")
+    page.click("#modeSeg button[data-v=home]")
+    page.click("#expStartBtn")
+    expect(page.locator("#expBar")).to_be_visible()
+    expect(page.locator("#expBarSub")).to_contain_text("הבקשה הבאה בעוד ~5 דק'")
+
+    # הבקשה הפיזית חייבת להופיע גם כשהמשתמש בתצוגה אחרת (הסרגל גלובלי)
+    page.click("#modeSeg button[data-v=voice]")
+    phase["n"] = "waiting"
+    expect(page.locator("#expPrompt")).to_be_visible(timeout=6000)
+    expect(page.locator("#expPromptTxt")).to_contain_text("נתק עכשיו")
+    expect(page.locator("#expConfirmBtn")).to_have_text("✓ ניתקתי")
+
+    page.click("#expConfirmBtn")
+    expect(page.locator("#expBar")).to_be_hidden()
+    assert sent == ["start", "confirm"]
+
+    page.click("#modeSeg button[data-v=home]")
+    res = page.locator("#expResult")
+    expect(res).to_be_visible()
+    expect(res.locator(".exp-head")).to_contain_text("לא היה מזהה")
+    expect(res.locator("table")).to_contain_text('אין נתב"ג בחלון')     # escaping תקין, לא שבור
+    expect(res.locator(".exp-notes")).to_contain_text("קראו נתונים של התהליך הקודם")
+    expect(page.locator("#expPillTxt")).to_have_text("הושלם")

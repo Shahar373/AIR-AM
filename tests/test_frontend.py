@@ -97,3 +97,63 @@ def test_auth_failure_does_not_fake_standby_in_applyMode():
     auth_at = js.index("if (data.auth) {")
     back_at = js.index('const back = (data.state && data.state.app_mode)')
     assert auth_at < back_at, "בדיקת data.auth חייבת לקדום לגזירת back"
+
+
+# --- כיוון-בשמיעה (SATCOM) --------------------------------------------------
+
+def test_aim_audio_feeds_raw_ebno_not_a_threshold():
+    """§12: כיוון-בשמיעה חייב להיזון מה-`best` הגולמי (אותו ערך שמוזן לגרף),
+    ולא מערך שעבר סף/פסק-דין מומצא. אם מישהו יחליף את המיפוי בסף בוליאני
+    ("חזק/חלש") — זו בדיוק ההמצאה ש-§12 אוסר. הבדיקה מאמתת ש-`aimAudio.feed`
+    נקרא עם `best` ממש (כמו `aimHist.push(best...)` שכבר קיים)."""
+    js = _inline_js()
+    assert "aimAudio.feed(best, locked, best == null)" in js, \
+        "pollSatcomHealth חייב להזין את aimAudio מה-best הגולמי"
+    # והמיפוי לגובה-טון נגזר מסקאלת-התצוגה AIM_SCALE_DB, לא מסף איכות קשיח
+    assert "Math.min(AIM_SCALE_DB, best)" in js, \
+        "מיפוי הצליל חייב להשתמש בסקאלת-התצוגה AIM_SCALE_DB (לא סף מומצא)"
+    # דאטה עבשה (בקשה תקועה / timers מווסתים ברקע / SATCOM שקרס) לא מוצגת כחיה:
+    # _tick חייב להפיל ל"אין אות" אחרי AIM_AUDIO_STALE_MS, לא לצפצף על הערך האחרון.
+    assert "AIM_AUDIO_STALE_MS" in js and "const stale = (Date.now() - latest.at)" in js, \
+        "aimAudio חייב להתייחס ל-feed ישן מ-AIM_AUDIO_STALE_MS כ'אין אות'"
+    # navigator.wakeLock קיים רק ב-HTTPS; "המסך יישאר דולק" מותר רק כשהנעילה נתפסה
+    assert "(דורשת HTTPS או דפדפן תומך)" in js, \
+        "הרמז חייב להודות במפורש כשנעילת-המסך לא נתפסה (§12: לא מבטיחים יכולת שאין)"
+
+
+def test_aim_audio_stops_when_leaving_satcom():
+    """כיוון-בשמיעה שייך רק ל-SATCOM: מעבר-תצוגה חייב לעצור אותו (ולשחרר את
+    ה-Wake Lock), אחרת האודיו ממשיך לצפצף — ומחזיק את המסך דולק — גם אחרי
+    שהמשתמש עבר לקול/בית. אותו דפוס בדיוק כמו stopReplayPlayback ב-showView."""
+    js = _inline_js()
+    body = re.search(r"function showView\(mode\) \{(.*?)\n    \}", js, re.S)
+    assert body, "showView לא נמצא — עודכן שמו/מבנהו?"
+    assert 'mode !== "satcom"' in body.group(1) and "aimAudio.stop()" in body.group(1), \
+        "showView חייב לעצור את aimAudio כשעוזבים את SATCOM"
+
+
+def test_satcom_health_poll_stays_guarded_but_allows_active_aiming():
+    """הפולינג של /api/satcom/health שומר על שער document.hidden (תקציב חשמל),
+    אבל מאפשר חריג מכוון כשכיוון-בשמיעה *פעיל* — אחרת הצליל היה קופא ברגע
+    שהמסך כבה. שני התנאים חייבים להישאר יחד: גם `document.hidden` (השומר) וגם
+    `aimAudio.active()` (החריג בזמן כיוון)."""
+    js = _inline_js()
+    # גוף בלי סוגריים-מסולסלים פנימיים => לא "בולע" לולאות שכנות (non-greedy על .*? עשה זאת)
+    blocks = [m.group(1) for m in re.finditer(r"setInterval\(\(\) => \{([^{}]*)\}, 1000\);", js, re.S)
+              if "pollSatcomHealth()" in m.group(1)]
+    assert len(blocks) == 1, f"ציפינו ללולאת pollSatcomHealth אחת (1s), נמצאו {len(blocks)}"
+    body = blocks[0]
+    assert "document.hidden" in body, "השומר document.hidden חייב להישאר (תקציב חשמל)"
+    # ⚠ המחרוזת המילולית של התנאי, לא רק נוכחות aimAudio.active() בגוף — הביקורת
+    # האדוורסרית הוכיחה שמחיקת החריג מהתנאי עברה כי aimAudio.active() הופיע גם
+    # בענף ה-else של אותה לולאה (בדיקה חצי-ריקה).
+    assert "(!document.hidden || aimAudio.active())" in body, \
+        "החריג לכיוון-בשמיעה פעיל חייב להיות בתנאי הפולינג עצמו"
+    # והחריג חייב להיות מוגבל בזמן — Chrome פוטר דפים שמיעים מוויסות-timers,
+    # כך ש"נשכח בכיס" בלי גבול = fork של systemctl כל שנייה כל הלילה על ה-Pi.
+    js_all = _inline_js()
+    assert "AIM_AUDIO_BG_MAX_MS" in js_all and "AIM_AUDIO_BG_DEAD_MAX" in js_all, \
+        "aimAudio חייב לכבות את עצמו אחרי זמן/דגימות-מתות ברקע"
+    # SATCOM שנעצר/קרס בלי מעבר-תצוגה => הצליל לא ממשיך על הערך האחרון (§12)
+    assert "renderAimIdle(" in body, \
+        "כש-SATCOM לא פעיל והאודיו דלוק גם הפאנל וגם האוזן חייבים לומר 'אין מפענח' (renderAimIdle => aimAudio.dead())"

@@ -147,6 +147,11 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
                            #   שפות/מודלים, fallback מודל, retention עמיד ל-stat שנכשל).
   test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
   test_signal.py           # מד שדה: _signal_verdict, /api/signal (voice/acars/vdl2/satcom/off), /api/antenna/check.
+  test_rflog.py            # רשם ניסוי RF: פענוח airband.conf, דגימה רק על כתיבה חדשה, start/mark/stop/
+                           #   export, כיבוי אוטומטי, רישום בדיקת-אנטנה.
+  test_experiment.py       # ניסוי כיול אוטומטי מקצה לקצה עם SDR מדומה (כולל שתי הפעולות הפיזיות),
+                           #   ביטול/timeout ושחזור מצב, תנאי-פתיחה (SATCOM/סריקה/נעילה), וניתוח
+                           #   (_experiment_summary) — כולל זיהוי קריאה של התהליך הקודם מול proc_start.
   test_session.py          # דוח סשן: _interest_score, /api/session, /api/session/ack, adsb.session_series.
   test_replay_buffer.py    # שחזור-סשן שלב 1: buffer מתגלגל (append/compaction/gap-rows,
                            #   מטוס משובש נשמר עם lat/lon=None ולא מדולג) + GET /api/replay/buffer.
@@ -158,6 +163,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 docs/                       # מסמכי תכנון/החלטות. מתעדים *למה* — ומה נדחה ועל סמך מה.
   field-station-roadmap.md  # מפת הדרכים שהובילה למד השדה, דוח הסשן ורוסטר המטוסים.
   satcom-feasibility.md     # היתכנות ואפיון מצב SATCOM (מומש).
+  antenna-calibration-experiment.md  # ניסוי: האם "בדוק אנטנה" מזהה ניתוק ב-VHF תחת AGC? מה ידוע
+                            #   מהמקור (rtl_airband/SoapySDRPlay3), נוהל ליד נתב"ג, והחלטות לפי תוצאה.
   session-replay-design.md  # ★ תכנון "שחזור סשן" (מפה+אודיו על ציר זמן). שלבים 0–2 בוצעו
                             #   (buffer מתגלגל + POST /api/sessions) — ר' §11 למימוש שנותר (UI).
 
@@ -192,6 +199,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | `/var/lib/airam/recordings/saved/` | הקלטות **שמורות** (★) — **תת-תיקייה, לא רשימה בקובץ צד**. עד 100 קבצים / 100MB, פטורות לגמרי מ-`_sweep_recordings` (‏`glob("*.mp3")` אינו רקורסיבי — הפטור מגיע ב*אפס* שורות לוגיקה, ר' §5/§12) | app.py (`/api/recordings/star`) |
 | `/var/lib/airam/sessions/<id>/` | סשן שמור (שחזור-סשן שלב 2) — `meta.json` (אטומי), `track.jsonl.gz` (חתך `track.jsonl` בטווח), `clips/*.mp3` (הקלטות רלוונטיות — שמורה מ*עתיקה*, לא-שמורה מ*ועברת*). אין retention אוטומטי — מחיקה היא `DELETE /api/sessions/<id>` בלבד | app.py (`POST /api/sessions`) |
 | `/run/rtl_airband_stats.txt` | מדדי RF (tmpfs, ~1Hz) | rtl_airband |
+| `/var/lib/airam/rf_log.jsonl` | רשם ניסוי RF — שורה לכל כתיבה חדשה של המדדים + הקונפיג שרץ + סימוני משתמש + תוצאות בדיקת-אנטנה. **רק כשמופעל** (כבוי כברירת מחדל, כיבוי אוטומטי אחרי שעתיים); append+`fsync` (תוצאת ניסוי שדה); מעל 5MB בהפעלה ⇒ `.prev` | app.py (`/api/rflog`) |
 
 ---
 
@@ -376,10 +384,26 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   ["last_session_view_at"]`; idempotent, ה-ack הוא הפעולה היחידה שמקדם אותו).
 - **מד שדה מאוחד + בדיקת אנטנה** (ר' docs/field-station-roadmap.md): `_read_voice_metrics`
   (חולץ מ-`api_metrics`, משותף גם ל-`GET /api/signal` במצב voice), `_signal_verdict`
-  (פסק דין *רק* מול `state["signal_baseline"]` — `DISCONNECT_DROP_DB`=10dB הוא
-  תצפית פיזיקלית על ניתוק אנטנה, לא סף "איכות" מומצא, ר' §12), `_sample_probe_stats`+
+  (פסק דין *רק* מול `state["signal_baseline"]` — `DISCONNECT_DROP_DB`=10dB אינו סף
+  "איכות" מומצא, אבל ⚠ גם **אינו "תצפית פיזיקלית"** כפי שתועד כאן בעבר: הנחה שטרם
+  אומתה, ר' §12 ו-`docs/antenna-calibration-experiment.md`), `_sample_probe_stats`+
   `_restore_after_probe` (הלב של `POST /api/antenna/check`: מעבר זמני לקול,
   מדידה, שחזור המצב הקודם — best-effort גם בכישלון, לא נוגע ב-`state["app_mode"]`).
+  **רשם ניסוי RF** (`docs/antenna-calibration-experiment.md`): `_rflog_start`/`_rflog_stop`/
+  `_rflog_worker` (thread רק כשמופעל, `stop_evt.wait` ולא sleep), `_rflog_sample` (שורה רק
+  כשחתימת ה-mtime של stats/conf השתנתה), `_parse_airband_conf` (הקונפיג *שבאמת רץ* — לא
+  state, כי ה-probe לא כותב state), `_rflog_event` (סימונים + תוצאת כל `/api/antenna/check`,
+  רק כשפעיל).
+  **ניסוי כיול אוטומטי** (אותו מסמך): `_experiment_plan` (22 צעדים — מחזור מחובר, בקשת ניתוק,
+  מחזור מנותק, בקשת חיבור, מחזור אימות; **שתי פעולות פיזיות בלבד**), `_experiment_start`
+  (מסרב ל-SATCOM חי/סריקה/`TUNE_LOCK` תפוס; מפעיל את הרשם אם כבוי), `_experiment_run`
+  (thread שמחזיק את `TUNE_LOCK` **לכל אורך הניסוי** ומשחרר ב-`finally` אחרי
+  `_restore_after_probe` — תמיד, גם בביטול/timeout/שגיאה; בדיקות האנטנה דרך `_probe_params`+
+  `_sample_probe_stats` — המסלול של המוצר, **בלי לדרוס את `signal_baseline`**),
+  `_rtl_airband_start_wall` (`systemctl show ExecMainStartTimestampMonotonic` ⇒ זמן-קיר;
+  מבחין בין כתיבות התהליך הנוכחי ל-flush של הקודם — ⚠ השוואת `stats_mtime` ל-`conf_mtime`
+  **לא** יכולה, כי ה-flush נכתב אחרי הקונפיג), `_experiment_summary` (פונקציה טהורה — חציונים,
+  ירידה, "מזהה?" = הסף של המוצר עצמו; `None` כשחסר), `_read_rflog_run`.
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_sweep_recordings` (retention — **לא רואה `saved/` בכלל**, ר' למטה).
 - **הקלטות שמורות (★) + תמלול — שני פיצ'רים מחוברים:** הפטור מ-retention הוא
@@ -511,6 +535,25 @@ ADS-B מ-`GET /api/aircraft`, כולל כשה-SDR ב-standby; כולל מקור 
 נגזרת-מהנתונים (סקאלה קבועה הייתה מסתירה בדיוק את מה שמחפשים — תזוזת הרצפה),
 וכפתור **📜 לוג המפענח** (`GET /api/satcom/log`, על דרישה בלבד). צביעה **לפי `lock` בלבד** (לא סף Eb/No מומצא — ר' §12); `ebno=0 &&
 !lock && mse≈1.0` (חתימת "אין דמודולטור" מהמקור) מוצג כ-"—" ולא כ-"0.0 dB" מטעה.
+**כיוון בשמיעה (🔊, `aimAudio` — closure ליד `pollSatcomHealth`):** כפתור-מתג
+בפאנל שממפה את אותם `best`/`locked` ש-`pollSatcomHealth` כבר מחשב לצליל Web Audio
+(גובה-טון+קצב ∝ Eb/No, טון רציף מובחן בנעילה) — "גלאי-מתכות" לכיוון עם שתי ידיים
+על האנטנה. §12: סקאלת-תצוגה (`AIM_SCALE_DB`), לא סף; טון רציף רק ל-`lock`; חתימת
+"אין דמוד" ⇒ טיק-חיים שקט ("דלוק, אין עדיין" ≠ "כבוי"); `feed` ישן מ-`AIM_AUDIO_STALE_MS`
+(5ש') ⇒ גם טיק-חיים — לא מצפצפים על ערך עבש. `navigator.wakeLock` שומר מסך דולק
+בכיוון פעיל (מחודש ב-`visibilitychange`) — ⚠ **secure-context בלבד (HTTPS)**, ולכן
+הרמז "המסך יישאר דולק" מוצג רק כשהנעילה נתפסה בפועל (ב-HTTP: "השאר את המסך דולק
+בעצמך"); רקע (מסך כבוי) best-effort ומתועד ככזה, ו**מוגבל בקוד** (`AIM_AUDIO_BG_MAX_MS`
+10 דק' / `AIM_AUDIO_BG_DEAD_MAX` 15 דגימות "אין מפענח" ⇒ כיבוי אוטומטי; Chrome פוטר
+דפים שמיעים מוויסות-timers, אז אין לסמוך על הדפדפן). שלושה צלילים: טון רציף=`lock`,
+טיק בודד=מפענח חי בלי אות (`idle()`), **טיק כפול=אין מפענח** (`dead()`, מ-`renderAimIdle`).
+iOS: מתג ההשתקה משתיק Web Audio — רמז בלבד; ה-workaround של `<audio loop>` שקט נדחה
+במכוון (חושף `nexttrack`⇒`stepPreset` במסך הנעול ⇒ מכוונן החוצה מ-SATCOM).
+`aimAudio.feed` נקרא בכל ענף-הצלחה של `pollSatcomHealth`, `renderAimIdle` (⇒`dead()`)
+בכשל/לא-זמין ובלולאת ה-1ש' כש-SATCOM לא פעיל (הפאנל והאוזן מסכימים);
+`aimAudio.stop()` ב-`showView` (עוזבים SATCOM). ⚠ **חריג יחיד** לשומר `document.hidden`
+בלולאת ה-health: כשהאודיו פעיל (`aimAudio.active()`) ממשיכים לתשאל גם מוסתר —
+אחרת הצליל קופא (עדיין מכיל את `document.hidden` ⇒ עובר את בדיקת ה-poller-guard).
 `pollPower` (בכל תצוגה) מזין גם **הגנת מתח**: `confirmSatcomAntenna()` מוסיף אזהרה
 כשזוהתה צניחת מתח/throttling, ושורת הצעה לא-חוסמת בתצוגת SATCOM מציעה בנקישה אחת
 לסמן "הזנת LNA חיצונית" — אזהרה/הצעה בלבד, לעולם לא חסימה (ר' §12).
@@ -518,6 +561,16 @@ ADS-B מ-`GET /api/aircraft`, כולל כשה-SDR ב-standby; כולל מקור 
 המצב למציאות בלי לחטוף את הטאב. כפתורי עצירה ⇒ `applyMode("off")` (גם עצירת סריקה);
 כפתור ⏻ מחזיר את `prev_mode` (יכול להיות `"scan"`). עיצוב responsive (multi-column
 בטאבלט/דסקטופ; `.mode-cards` הוא `auto-fit` כדי לזרום נכון גם עם 5 כרטיסים).
+**רשם ניסוי כיול** (`#rflogBox`, בתוך `#rfPanel` בתצוגת הקול): `pollRflog` (3ש', קול בלבד +
+‏`showView`), 🧪 הפעלה/עצירה, שלושה כפתורי סימון (44px — כפפות/שטח) עם אישור גלוי ושעה
+("✓ סומן: מנותק · 10:31:05" — בשטח אין דרך אחרת לדעת שהלחיצה נקלטה), וקישור הורדה.
+ההקלטה בצד השרת — ממשיכה כשהמסך כבוי.
+**ניסוי כיול אוטומטי** (`#expCard` במסך הבית + `#expBar` — סרגל **גלובלי** קבוע בתחתית, מחוץ
+ל-`<main>`, כי הבקשה לנתק/לחבר חייבת להופיע בכל תצוגה): `pollExperiment` (2ש' בזמן ריצה, 15ש'
+בבית כשלא רץ, ומיד ב-`visibilitychange` — חוזרים לטאב ואולי ממתינים לך), `renderExperiment`
+(התקדמות, ETA לבקשה הבאה, בקשה עם כפתור 52px + `expAlert`: שלושה צפצופים Web Audio + רטט;
+ה-AudioContext נוצר רק מלחיצה), `renderExpResult` (טבלה ב-`innerHTML` — ⚠ דרך `expEsc`, כי
+התוויות מהשרת מכילות מירכאות; נבדקה ב-360px).
 **אין build step** — עורכים את הקובץ ישירות. Leaflet vendored תחת `static/vendor/`
 (בלי CDN, עובד גם בלי אינטרנט).
 
@@ -714,6 +767,10 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/session` | דוח סשן ("מה קרה בזמן שלא הסתכלת"): כמות הודעות/מטוסים (וחדשים), עד `SESSION_HIGHLIGHTS_MAX` הודעות `notable` (ר' `_interest_score`), ומסלול פעיל/שיבוש GPS מתוך `adsb.session_series`. קורא מהדיסק (jsonl), לא מהזיכרון — עקבי עם `?day=`. `?since=<epoch>` דורס את הסמן השמור; `GET` idempotent — לא מקדם אותו |
 | POST | `/api/session/ack` | מקדם את הסמן (`state["last_session_view_at"]`) ל"עכשיו" — הפעולה המפורשת היחידה שמקדמת אותו. דרך `_guard` |
 | GET | `/api/signal` | מד שדה מאוחד למצב שרץ *בפועל* כרגע: רציף בקול (`_read_voice_metrics`), "הודעה אחרונה בלבד" ב-ACARS/VDL2 (`level`+`snr` — ACARS לעולם בלי `snr`, ר' §12), הפניה ל-`/api/satcom/health` ב-SATCOM. `verdict` (`ok`/`below_baseline`/`no_baseline`/`unknown`) תמיד מול `state["signal_baseline"]` בלבד — לעולם לא סף מומצא |
+| GET/POST | `/api/rflog` | רשם ניסוי RF: GET מצב (`active`/`until`/`rows`/`marks`/`size`); POST `{active}` הפעלה/עצירה (idempotent). דרך `_guard` (POST). ר' `docs/antenna-calibration-experiment.md` |
+| POST | `/api/rflog/mark` | `{label}` (עד 40 תווים) — סימון אירוע פיזי. **409 כשהרשם כבוי** (סימון שלא נרשם לא נראה כאילו נרשם). דרך `_guard` |
+| GET | `/api/rflog/export` | הורדת `rf_log.jsonl` (404 כשאין) |
+| GET/POST | `/api/experiment` | ניסוי כיול אוטומטי. GET: מצב (`running`/`step`/`step_index`/`steps_total`/`waiting`/`eta_sec`/`eta_prompt_sec`/`error`/`result`). POST `{action}`: `start` (409 כש-SATCOM חי/סריקה/`TUNE_LOCK` תפוס/כבר רץ), `confirm` (הפעולה הפיזית בוצעה; 409 כשאין בקשה ממתינה), `abort`. מחזיק את `TUNE_LOCK` לכל אורכו. דרך `_guard` (POST) |
 | POST | `/api/antenna/check` | בדיקת אנטנה בת ~3 שניות: מעבר זמני לקול (AGC, סקוולץ' פתוח) בתדר המבוקש, מדידת רצפת רעש אמיתית (`_sample_probe_stats`), וחזרה למצב הקודם (`_restore_after_probe`, גם בכישלון). `calibrate:true` שומר את התוצאה כ-`signal_baseline`. לא נוגע ב-`state["app_mode"]` — פעולת אבחון, לא מעבר-מצב. סריאלי תחת `TUNE_LOCK`; 409 כשתפוס |
 | GET | `/api/activity` | יומן שידורים. כל אירוע כולל `exists`, `starred`, ו-`tx` (‏`{state, text, err?, raw?, filtered?}` — ר' §12). `?starred=1` => רק ההקלטות המסומנות, **מ-`starred.json` ולא מהיומן** (שורדות את קיצוץ `ACTIVITY_KEEP`) |
 | POST | `/api/recordings/star` | `{file, starred}` — שמירה/ביטול (★, מעביר ל/מ-`saved/`, `os.replace` אטומי תחת `_STAR_LOCK`). שמורה פטורה מ-retention. 409 כשהמכסה מלאה (**לא מוחקים שמורה ותיקה**), 404 כשההקלטה כבר לא קיימת. דרך `_guard` |
@@ -944,10 +1001,13 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   את אותו עיקרון על פסק-דין, לא רק על ערך:** `_signal_verdict` משווה **רק** מול
   `state["signal_baseline"]` — מדידה שהמשתמש עצמו ביצע (`POST /api/antenna/check
   {calibrate:true}`) — ולעולם לא מול סף dBFS מוחלט שניחשנו. בלי כיול מפורש,
-  התוצאה היא `"no_baseline"`, לא ניחוש. `DISCONNECT_DROP_DB`=10dB (הפער מהבסיס
-  שנחשב חריג) אינו יוצא-דופן לכלל — הוא לא סף "איכות" אלא תצפית פיזיקלית
-  (ניתוק אנטנה מנתק מרעש-סביבה ומשאיר רעש-פנים נמוך בהרבה), בדיוק כמו
-  ‏`OVERLOAD_DBFS`.
+  התוצאה היא `"no_baseline"`, לא ניחוש. ⚠ **`DISCONNECT_DROP_DB`=10dB (הפער מהבסיס
+  שנחשב חריג) תועד כאן בעבר כ"תצפית פיזיקלית" — בלי מדידה אחת מאחוריו.** ניתוח
+  מהמקור (`docs/antenna-calibration-experiment.md`) מראה שהוא תלוי-תנאים: ב-VHF
+  בשטח שקט הירידה הפיזיקלית קטנה מ-10dB גם ברווח קבוע, ותחת AGC — נשא חזק בחלון
+  ה-1.536MHz (ATIS) גורם ל-AGC להעלות רווח אחרי הניתוק ולמחוק את הירידה. **זו אותה
+  טעות שהסעיף הזה מזהיר מפניה, בכיוון ההפוך: הצגת הנחה כעובדה.** הקבוע נשאר עד
+  שהניסוי שם יכריע — לא "מתוקן" לפי ניחוש אחר.
 - **"לא ניסינו" ≠ "ניסינו ונכשלנו" — גם זו לא-המצאה, בכיוון ההפוך.** `_libacars_decode`
   (SATCOM+VDL2 מסלול B) מבחין ביניהם: כש-`inmarsat-sniffer`/`libacars` עצמו ניסה
   לפענח יישום מקונן (CPDLC/ADS-C) והחזיר `"err":true` בפנים (גם כש-CRC של המעטפת
