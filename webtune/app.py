@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import socket
+import statistics
 import subprocess
 import tempfile
 import threading
@@ -83,8 +84,11 @@ DISCONNECT_DROP_DB = 10.0
 # כלומר בדיוק מה שהניסוי צריך (השניות שאחרי restart, הדקה שאחרי ניתוק אנטנה)
 # לא ניתן לקריאה בעין מהטלפון. הרשם כותב שורה לכל כתיבה *חדשה* של ה-stats,
 # עם הקונפיג שבאמת רץ (airband.conf, לא state.json — בדיקת האנטנה לא כותבת
-# state), ו-mtime של שני הקבצים (כך אפשר לזהות בדיעבד קריאה של flush-יציאה
-# של התהליך *הקודם*). כבוי כברירת מחדל; thread רק כשמפעילים; כיבוי אוטומטי.
+# state), ו-mtime של שני הקבצים. ⚠ השוואת שני ה-mtime **לא** מזהה flush-יציאה
+# של התהליך הקודם: ה-flush נכתב בזמן העצירה — *אחרי* כתיבת הקונפיג — ולכן
+# stats_mtime שלו גדול מ-conf_mtime. ההבחנה האמינה היא מול זמן ההפעלה של
+# התהליך (`_rtl_airband_start_wall`), שהניסוי האוטומטי רושם אחרי כל הפעלה.
+# כבוי כברירת מחדל; thread רק כשמפעילים; כיבוי אוטומטי.
 RFLOG_PATH = Path("/var/lib/airam/rf_log.jsonl")
 RFLOG_MAX_SEC = 2 * 3600          # לא כותבים ל-SD לנצח אם שכחו לכבות
 RFLOG_POLL_SEC = 0.4              # rtl_airband כותב ~1Hz — דוגמים מהר יותר כדי לא לפספס כתיבה
@@ -4373,16 +4377,19 @@ def _sample_probe_stats(freq, timeout_sec):
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         try:
-            age = time.time() - STATS_PATH.stat().st_mtime
+            mtime = STATS_PATH.stat().st_mtime
+            age = time.time() - mtime
             text = STATS_PATH.read_text()
         except OSError:
-            age, text = None, ""
+            mtime, age, text = None, None, ""
         if text:
             vals = parse_stats(text, want)
             noise = vals.get("channel_dbfs_noise_level")
             if age is not None and age <= STATS_MAX_AGE and noise is not None:
                 sig = vals.get("channel_dbfs_signal_level")
-                return {"signal": sig, "noise": noise,
+                # stats_mtime: איזו כתיבה נקראה בפועל — הניסוי האוטומטי משווה אותו
+                # לזמן ההפעלה של rtl_airband כדי לזהות קריאה של התהליך *הקודם*.
+                return {"signal": sig, "noise": noise, "stats_mtime": round(mtime, 2),
                         "snr": round(sig - noise, 1) if sig is not None else None}
         time.sleep(0.3)
     return None
@@ -4432,6 +4439,13 @@ def _restore_after_probe(prev_state, prev_live):
         log.warning("בדיקת אנטנה: שחזור המצב הקודם (%s) נכשל", prev_live, exc_info=True)
 
 
+def _probe_params(freq):
+    """תנאי המדידה של בדיקת האנטנה (AGC, סקוולץ' פתוח, AM) — מקור-אמת יחיד
+    ל-/api/antenna/check ולניסוי האוטומטי, כדי שהניסוי יבדוק *את* המסלול של המוצר."""
+    return {"freq": freq, "mod": "am", "agc": True, "if_gain": IF_GAIN_DEFAULT,
+            "rf_gain": RF_GAIN_DEFAULT, "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}
+
+
 @app.route("/api/antenna/check", methods=["POST"])
 def api_antenna_check():
     """בדיקת אנטנה בת ~3 שניות: נכנס זמנית לקול (AGC, סקוולץ' פתוח) בתדר
@@ -4468,9 +4482,7 @@ def api_antenna_check():
                          and bool(prev.get("agc")) is True
                          and prev.get("squelch_mode") == "open")
         if not already_voice:
-            params = {"freq": freq, "mod": "am", "agc": True, "if_gain": IF_GAIN_DEFAULT,
-                      "rf_gain": RF_GAIN_DEFAULT, "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}
-            err, detail, _sdr_down = _enter_voice(params)
+            err, detail, _sdr_down = _enter_voice(_probe_params(freq))
             if err:
                 # שלב ההכנה כבר עצר את הצרכן הקודם (peer של _enter_acars/_enter_vdl2)
                 # לפני שקול עצמו נכשל לעלות => מנסים best-effort להחזיר את מה שהיה,
@@ -4555,8 +4567,8 @@ def _rflog_sample(prev_sig):
     if sig == prev_sig:
         return None, prev_sig
     # ⚠ המדדים מתויגים לפי תדר: stats של תהליך קודם על תדר אחר => None, לא
-    # ערך "קרוב" (§12). על *אותו* תדר — הערך נכתב, ו-stats_mtime < conf_mtime
-    # הוא מה שמסגיר שזה flush-יציאה של התהליך הקודם.
+    # ערך "קרוב" (§12). על *אותו* תדר הערך נכתב — וההבחנה אם הוא של התהליך
+    # הקודם נעשית בניתוח, מול proc_start (ר' _experiment_summary), לא כאן.
     vals = parse_stats(text, f"{conf['freq']:.3f}") if conf.get("freq") is not None else {}
     row = {"t": round(time.time(), 2), "stats_mtime": round(st.st_mtime, 2),
            "conf_mtime": round(cst.st_mtime, 2) if cst else None, **conf,
@@ -4661,6 +4673,11 @@ def api_rflog():
         if bool(data.get("active")):
             _rflog_start()
         else:
+            with _exp_lock:
+                exp_running = _exp["running"]
+            if exp_running:
+                return jsonify(ok=False, error="הניסוי האוטומטי רץ ומשתמש ברשם — עצור את הניסוי קודם",
+                               **_rflog_status()), 409
             _rflog_stop("user")
     return jsonify(ok=True, **_rflog_status())
 
@@ -4686,6 +4703,444 @@ def api_rflog_export():
         return jsonify(ok=False, error="אין הקלטה עדיין"), 404
     return send_file(str(RFLOG_PATH), mimetype="application/x-ndjson", as_attachment=True,
                      download_name=f"airam-rflog-{time.strftime('%Y%m%d-%H%M')}.jsonl")
+
+
+# --- ניסוי כיול אוטומטי (docs/antenna-calibration-experiment.md) -----------
+# ה-Pi מריץ לבד את כל התנאים (תדר × רווח קבוע/AGC × בדיקת-האנטנה של המוצר)
+# פעם עם אנטנה מחוברת ופעם מנותקת. המשתמש מבצע **שתי פעולות פיזיות בלבד**
+# (לנתק, לחבר) — במקום ניתוק/חיבור לכל תנאי. הנתונים נרשמים ברשם ה-RF,
+# והסיכום מחושב על ה-Pi (_experiment_summary). הניסוי מחזיק את TUNE_LOCK לכל
+# אורכו: כוונון/מעבר-מצב מהטלפון מקבלים 409, ו-_mode_reconcile_once מדלג.
+EXP_ATIS_FREQ = 132.5        # ה-ATIS עצמו: אימות שהניתוק/החיבור באמת קרו (הנשא נעלם/חוזר)
+EXP_CLEAN_FREQ = 122.6       # חלון 122.13–123.67: אף תדר של נתב"ג בחלון ה-AGC
+EXP_ATISWIN_FREQ = 132.0     # חלון 131.53–133.07: ה-ATIS 0.2MHz ממרכזו
+EXP_FIXED_GAINS = ((20, 0), (35, 0))   # (IFGR, RFGR): מקסימום ("AGC על המסילה"), ועוד אחד לזיהוי רוויה
+EXP_REF_SEC = 30
+EXP_FIXED_SEC = 45           # רווח קבוע: גשש-הרעש מתכנס תוך ~0.2ש' (אין הליכת AGC)
+EXP_AGC_SEC = 90             # AGC: כל restart מתחיל מ-gRdB=50 — צריך זמן לראות אם/איך מתכנס
+EXP_AFTER_PROMPT_SEC = 90    # אחרי ניתוק/חיבור: הזחילה האיטית של הגשש (משטר C)
+EXP_FINAL_AGC_SEC = 60
+EXP_PROMPT_TIMEOUT_SEC = 600
+EXP_RESTART_EST_SEC = 6      # הערכה ל-ETA בלבד, לא ללוגיקה
+# חלונות הניתוח (ר' _experiment_summary)
+EXP_FIXED_SETTLE_SEC = 10
+EXP_AGC_TAIL_SEC = 30
+EXP_EARLY_SEC = 3            # "מה שבדיקת האנטנה רואה": 3 השניות שאחרי שה-restart אומת
+EXP_CREEP_HEAD_SEC = 5
+EXP_CREEP_TAIL_SEC = 15
+EXP_REF_SETTLE_SEC = 5       # ATIS: מדלגים על השניות הראשונות אחרי ה-restart
+EXP_STALE_WINDOW_SEC = 5     # כמה זמן אחרי restart מחפשים כתיבה של התהליך הקודם
+# mtime של הקרנל נלקח משעון גס (מפגר מילישניות אחרי time.time()) ו-stats_mtime
+# מעוגל ל-10ms. בין flush-היציאה של התהליך הקודם להפעלת החדש עוברות לפחות מאות
+# מילישניות (עצירה + airam-wait-sdrplay), כך ש-50ms הם מרווח בטוח לשני הכיוונים.
+EXP_MTIME_TOL_SEC = 0.05
+# ⚠ יוריסטיקת-שלמות *של הניסוי*, לא פסק-דין של המוצר: נשא ATIS חזק שלא ירד
+# לפחות בזה בניתוק => כנראה שהאנטנה לא נותקה בפועל (או שדולף הרבה). מוצג
+# עם המספר הגולמי, כדי שאפשר יהיה לשפוט אחרת.
+EXP_ATIS_GONE_DB = 20.0
+
+_exp_lock = threading.Lock()
+_exp = {"running": False, "id": None, "started_at": None, "finished_at": None,
+        "plan": [], "i": -1, "step_started_at": None, "waiting": None, "error": None,
+        "result": None, "stop": None, "confirm": None, "thread": None}
+
+
+def _rtl_airband_start_wall():
+    """זמן-קיר שבו התהליך הראשי הנוכחי של rtl_airband הופעל, או None.
+    ExecMainStartTimestampMonotonic הוא CLOCK_MONOTONIC במיקרו-שניות — אותו שעון
+    כמו time.monotonic() בלינוקס, כך שההמרה מדויקת בלי לפענח מחרוזת תאריך.
+    ‏`systemctl show` קורא בלבד — לא דורש sudo."""
+    try:
+        r = subprocess.run(["systemctl", "show", "-p", "ExecMainStartTimestampMonotonic",
+                            "--value", "rtl_airband"], capture_output=True, text=True, timeout=5)
+        us = int((r.stdout or "0").strip() or 0)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if us <= 0:
+        return None
+    return round(time.time() - (time.monotonic() - us / 1e6), 2)
+
+
+def _experiment_plan(probe_freq):
+    """תוכנית הניסוי: מחזור מלא עם אנטנה מחוברת, בקשת ניתוק, אותו מחזור מנותק,
+    בקשת חיבור, ומחזור קצר לאימות. כל מחזור מסתיים על 132.000 AGC מתכנס — כך
+    הניתוק/החיבור קורים בדיוק במצב שבו ה-AGC אמור להסתיר (משטר B), והדקה שאחריהם
+    מתעדת את הזחילה (משטר C)."""
+    def dwell(phase, key, label, freq, agc, gains=(None, None), sec=None):
+        return {"kind": "dwell", "phase": phase, "key": key, "label": label, "freq": freq,
+                "agc": agc, "ifgr": gains[0], "rfgr": gains[1],
+                "sec": sec if sec is not None else (EXP_AGC_SEC if agc else EXP_FIXED_SEC)}
+
+    def probe(phase, key, label, freq):
+        return {"kind": "probe", "phase": phase, "key": key, "label": label, "freq": freq}
+
+    def cycle(phase):
+        steps = [dwell(phase, "atis", "ATIS 132.500 — אימות", EXP_ATIS_FREQ, True, sec=EXP_REF_SEC)]
+        for freq, fk, fl in ((EXP_CLEAN_FREQ, "clean", "122.600 · אין נתב\"ג בחלון"),
+                             (EXP_ATISWIN_FREQ, "atiswin", "132.000 · ATIS בחלון")):
+            for ifgr, rfgr in EXP_FIXED_GAINS:
+                steps.append(dwell(phase, f"{fk}_f{ifgr}", f"{fl} · רווח קבוע IFGR {ifgr}",
+                                   freq, False, (ifgr, rfgr)))
+            if fk == "atiswin":
+                steps.append(probe(phase, "probe_product", f"בדיקת האנטנה של המוצר · {probe_freq:.3f}",
+                                   probe_freq))
+                steps.append(probe(phase, "probe_atiswin", "בדיקת האנטנה · 132.000", EXP_ATISWIN_FREQ))
+            steps.append(dwell(phase, f"{fk}_agc", f"{fl} · AGC", freq, True))
+        return steps
+
+    plan = cycle(1)
+    plan.append({"kind": "prompt", "phase": 2, "key": "after_disconnect", "action": "disconnect",
+                 "label": "נתק את האנטנה בכניסת ה-SDR", "sec": EXP_AFTER_PROMPT_SEC})
+    plan += cycle(2)
+    plan.append({"kind": "prompt", "phase": 3, "key": "after_reconnect", "action": "reconnect",
+                 "label": "חבר חזרה את האנטנה", "sec": EXP_AFTER_PROMPT_SEC})
+    plan.append(dwell(3, "atis", "ATIS 132.500 — אימות", EXP_ATIS_FREQ, True, sec=EXP_REF_SEC))
+    plan.append(dwell(3, "clean_agc", "122.600 · אין נתב\"ג בחלון · AGC", EXP_CLEAN_FREQ, True,
+                      sec=EXP_FINAL_AGC_SEC))
+    for i, st in enumerate(plan):
+        st["i"] = i
+    return plan
+
+
+def _exp_step_est(st):
+    if st["kind"] == "dwell":
+        return st["sec"] + EXP_RESTART_EST_SEC
+    if st["kind"] == "probe":
+        return EXP_RESTART_EST_SEC + ANTENNA_CHECK_SAMPLE_SEC
+    return st["sec"]          # prompt: רק ההקלטה שאחרי האישור (זמן התגובה שלך לא ידוע)
+
+
+def _experiment_status():
+    with _exp_lock:
+        e = dict(_exp)
+    plan, i = e["plan"], e["i"]
+    st = {k: e[k] for k in ("running", "id", "started_at", "finished_at", "error", "result")}
+    st["steps_total"] = len(plan)
+    st["step_index"] = i
+    st["waiting"] = e["waiting"]
+    cur = plan[i] if 0 <= i < len(plan) else None
+    st["step"] = ({k: cur.get(k) for k in ("kind", "phase", "key", "label", "freq", "agc", "ifgr", "action")}
+                  if cur else None)
+    eta = eta_prompt = None
+    if e["running"] and plan:
+        elapsed = time.time() - e["step_started_at"] if e["step_started_at"] else 0
+        cur_left = max(0.0, _exp_step_est(cur) - elapsed) if cur and not e["waiting"] else 0.0
+        rest = plan[i + 1:] if i >= 0 else plan
+        eta = round(cur_left + sum(_exp_step_est(s) for s in rest))
+        nxt = next((s for s in rest if s["kind"] == "prompt"), None)
+        if cur and cur["kind"] == "prompt" and e["waiting"]:
+            eta_prompt = 0
+        elif nxt is not None:
+            eta_prompt = round(cur_left + sum(_exp_step_est(s) for s in rest[:rest.index(nxt)]))
+    st["eta_sec"] = eta
+    st["eta_prompt_sec"] = eta_prompt
+    return st
+
+
+def _exp_voice_params(st):
+    return {"freq": st["freq"], "mod": "am", "agc": st["agc"],
+            "if_gain": st["ifgr"] if st["ifgr"] is not None else IF_GAIN_DEFAULT,
+            "rf_gain": st["rfgr"] if st["rfgr"] is not None else RF_GAIN_DEFAULT,
+            "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}
+
+
+def _exp_meta(st):
+    return {k: st.get(k) for k in ("i", "kind", "phase", "key", "label", "freq", "agc",
+                                    "ifgr", "rfgr", "sec", "action")}
+
+
+def _experiment_run(run_id, prev, prev_live, plan, stop_evt, confirm_evt, own_rflog):
+    """ה-thread של הניסוי. מחזיק את TUNE_LOCK (נתפס ב-_experiment_start) ומשחרר
+    אותו תמיד ב-finally, אחרי שחזור המצב הקודם — בדיוק כמו /api/antenna/check."""
+    err = None
+    proc_start = None
+    try:
+        for st in plan:
+            if stop_evt.is_set():
+                err = "הניסוי בוטל"
+                break
+            with _exp_lock:
+                _exp["i"] = st["i"]
+                _exp["step_started_at"] = time.time()
+            if st["kind"] in ("dwell", "probe"):
+                t_enter = time.time()
+                params = _exp_voice_params(st) if st["kind"] == "dwell" else _probe_params(st["freq"])
+                e, _detail, _down = _enter_voice(params)
+                t_ready = time.time()
+                proc_start = _rtl_airband_start_wall()
+                if e:
+                    _rflog_event({"ev": "step", "exp": run_id, **_exp_meta(st), "t_enter": t_enter,
+                                  "t_ready": t_ready, "proc_start": proc_start, "error": e})
+                    err = f"המעבר לקול נכשל ({st['label']}): {e}"
+                    break
+                if st["kind"] == "dwell":
+                    _rflog_event({"ev": "step", "exp": run_id, **_exp_meta(st), "t_enter": t_enter,
+                                  "t_ready": t_ready, "proc_start": proc_start})
+                    if stop_evt.wait(st["sec"]):
+                        err = "הניסוי בוטל"
+                        break
+                    _rflog_event({"ev": "step_end", "exp": run_id, "i": st["i"]})
+                else:
+                    res = _sample_probe_stats(st["freq"], ANTENNA_CHECK_SAMPLE_SEC)
+                    _rflog_event({"ev": "probe", "exp": run_id, **_exp_meta(st), "t_enter": t_enter,
+                                  "t_ready": t_ready, "proc_start": proc_start,
+                                  "noise": (res or {}).get("noise"), "signal": (res or {}).get("signal"),
+                                  "stats_mtime": (res or {}).get("stats_mtime"),
+                                  "error": None if res else "no_fresh_stats"})
+            else:   # prompt: פעולה פיזית — ממתינים לאישור מהטלפון, בלי לשנות קונפיג
+                confirm_evt.clear()
+                with _exp_lock:
+                    _exp["waiting"] = {"action": st["action"], "label": st["label"], "since": time.time()}
+                _rflog_event({"ev": "prompt", "exp": run_id, **_exp_meta(st)})
+                deadline = time.time() + EXP_PROMPT_TIMEOUT_SEC
+                confirmed = False
+                while not stop_evt.is_set() and time.time() < deadline:
+                    if confirm_evt.wait(0.5):
+                        confirmed = True
+                        break
+                with _exp_lock:
+                    _exp["waiting"] = None
+                    _exp["step_started_at"] = time.time()
+                if not confirmed:
+                    err = ("הניסוי בוטל" if stop_evt.is_set()
+                           else f"לא התקבל אישור לפעולה הפיזית תוך {EXP_PROMPT_TIMEOUT_SEC // 60} דקות — הניסוי נעצר")
+                    break
+                t_c = time.time()
+                _rflog_event({"ev": "mark", "exp": run_id, "label":
+                              "מנותק" if st["action"] == "disconnect" else "מחובר", "prompted": True})
+                _rflog_event({"ev": "step", "exp": run_id, **_exp_meta(st), "kind": "after_prompt",
+                              "freq": EXP_ATISWIN_FREQ, "agc": True, "ifgr": None,
+                              "t_enter": t_c, "t_ready": t_c, "proc_start": proc_start})
+                if stop_evt.wait(st["sec"]):
+                    err = "הניסוי בוטל"
+                    break
+                _rflog_event({"ev": "step_end", "exp": run_id, "i": st["i"]})
+    except Exception as ex:                       # לא משאירים את ה-SDR תקוע בגלל באג בניסוי
+        log.warning("ניסוי כיול: שגיאה פנימית", exc_info=True)
+        err = f"שגיאה פנימית: {ex}"
+    finally:
+        try:
+            _restore_after_probe(prev, prev_live)
+        except Exception:
+            log.warning("ניסוי כיול: שחזור המצב הקודם נכשל", exc_info=True)
+        TUNE_LOCK.release()
+        _rflog_event({"ev": "exp_end", "exp": run_id, "error": err})
+        result = None
+        try:
+            result = _experiment_summary(_read_rflog_run(run_id))
+            _rflog_event({"ev": "summary", "exp": run_id, "result": result})
+        except Exception:
+            log.warning("ניסוי כיול: חישוב הסיכום נכשל", exc_info=True)
+        if own_rflog:
+            _rflog_stop("experiment")
+        with _exp_lock:
+            _exp.update(running=False, finished_at=time.time(), error=err, result=result,
+                        waiting=None, stop=None, confirm=None)
+
+
+def _experiment_start():
+    """מחזיר (payload, status)."""
+    with _exp_lock:
+        if _exp["running"]:
+            return {"ok": False, "error": "הניסוי כבר רץ"}, 409
+    with _scan_lock:
+        scanning = _scan_thread is not None and _scan_thread.is_alive()
+    if scanning:
+        return {"ok": False, "error": "עצור את הסריקה לפני הניסוי"}, 409
+    prev_live = _live_mode()
+    if prev_live == "satcom":
+        return {"ok": False, "error": "SATCOM פעיל — עצור אותו וחבר את אנטנת ה-VHF לפני הניסוי"}, 409
+    if not TUNE_LOCK.acquire(blocking=False):
+        return {"ok": False, "error": "פעולה אחרת מתבצעת כרגע — נסה שוב בעוד רגע"}, 409
+    try:
+        prev = load_state()
+        acars = prev.get("acars_freqs") or ACARS_FREQS_DEFAULT
+        try:
+            probe_freq = float(acars[0])
+        except (TypeError, ValueError, IndexError):
+            probe_freq = float(ACARS_FREQS_DEFAULT[0])
+        plan = _experiment_plan(probe_freq)
+        own_rflog = _rflog_start()          # False => המשתמש כבר הקליט; לא נכבה אותו בסוף
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+        stop_evt, confirm_evt = threading.Event(), threading.Event()
+        with _exp_lock:
+            _exp.update(running=True, id=run_id, started_at=time.time(), finished_at=None,
+                        plan=plan, i=-1, step_started_at=None, waiting=None, error=None,
+                        result=None, stop=stop_evt, confirm=confirm_evt)
+        _rflog_event({"ev": "exp_start", "exp": run_id, "version": VERSION, "prev_live": prev_live,
+                      "probe_freq": probe_freq, "steps": len(plan)})
+        th = threading.Thread(target=_experiment_run, daemon=True,
+                              args=(run_id, prev, prev_live, plan, stop_evt, confirm_evt, own_rflog))
+        with _exp_lock:
+            _exp["thread"] = th
+        th.start()
+    except Exception:
+        TUNE_LOCK.release()
+        with _exp_lock:
+            _exp["running"] = False
+        raise
+    return {"ok": True, **_experiment_status()}, 200
+
+
+def _read_rflog_run(run_id):
+    """כל שורות הרשם בין exp_start ל-exp_end של ריצה מסוימת (שורה פגומה מדולגת)."""
+    rows, inside = [], False
+    try:
+        lines = RFLOG_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return rows
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(r, dict):
+            continue
+        if r.get("ev") == "exp_start" and r.get("exp") == run_id:
+            inside = True
+        if inside:
+            rows.append(r)
+        if r.get("ev") == "exp_end" and r.get("exp") == run_id:
+            break
+    return rows
+
+
+def _med(vals):
+    vals = [v for v in vals if isinstance(v, (int, float))]
+    return round(statistics.median(vals), 1) if vals else None
+
+
+def _experiment_summary(rows):
+    """מספרים גולמיים בלבד (§12): חציוני רצפת-רעש לכל תנאי, מחובר מול מנותק.
+    'detects' = האם *הסף של המוצר עצמו* (DISCONNECT_DROP_DB) היה מזהה את הניתוק
+    בתנאי הזה — לא סף חדש. None בכל מקום שאין מספיק נתונים, לא ניחוש."""
+    data = [r for r in rows if "ev" not in r and "noise" in r]
+    steps, ends = {}, {}
+    for r in rows:
+        if r.get("ev") == "step":
+            steps[r["i"]] = r
+        elif r.get("ev") == "step_end":
+            ends[r["i"]] = r["t"]
+
+    def match(st, r):
+        if r.get("freq") is None or abs(r["freq"] - st["freq"]) > 5e-4:
+            return False
+        if bool(r.get("agc")) != bool(st.get("agc")):
+            return False
+        if not st.get("agc") and r.get("ifgr") != st.get("ifgr"):
+            return False
+        ps = st.get("proc_start")
+        # רק כתיבות של התהליך הנוכחי — flush-יציאה של הקודם נספר בנפרד (stale)
+        return ps is None or (r.get("stats_mtime") or 0) >= ps - EXP_MTIME_TOL_SEC
+
+    def vals(st, a, b, key="noise"):
+        return [r[key] for r in data if a <= r["t"] <= b and match(st, r) and r.get(key) is not None]
+
+    cond, atis, prompts = {}, {}, {}
+    stale_rows = 0
+    for i, st in steps.items():
+        t_end = ends.get(i)
+        if t_end is None:
+            continue                      # צעד שלא הושלם (ביטול) — לא מנתחים חלקי
+        ps = st.get("proc_start")
+        if ps is not None:
+            stale_rows += sum(1 for r in data
+                              if st["t_enter"] <= r["t"] <= st["t_ready"] + EXP_STALE_WINDOW_SEC
+                              and r.get("freq") is not None and abs(r["freq"] - st["freq"]) <= 5e-4
+                              and r.get("noise") is not None
+                              and (r.get("stats_mtime") or 0) < ps - EXP_MTIME_TOL_SEC)
+        if st["kind"] == "after_prompt":
+            head = vals(st, st["t_ready"], st["t_ready"] + EXP_CREEP_HEAD_SEC)
+            tail = vals(st, t_end - EXP_CREEP_TAIL_SEC, t_end)
+            inst = round(min(head), 1) if head else None
+            after = _med(tail)
+            prompts[st["key"]] = {"instant": inst, "after": after,
+                                  "rise": round(after - inst, 1) if after is not None and inst is not None else None}
+            continue
+        if st["kind"] != "dwell":
+            continue
+        if st["key"] == "atis":
+            atis[st["phase"]] = _med(vals(st, st["t_ready"] + EXP_REF_SETTLE_SEC, t_end, "signal"))
+            continue
+        if st["agc"]:
+            steady = vals(st, t_end - EXP_AGC_TAIL_SEC, t_end)
+        else:
+            steady = vals(st, st["t_ready"] + EXP_FIXED_SETTLE_SEC, t_end)
+        early = vals(st, st["t_ready"], st["t_ready"] + EXP_EARLY_SEC)
+        c = cond.setdefault(st["key"], {"key": st["key"], "label": st["label"], "freq": st["freq"],
+                                        "agc": st["agc"], "ifgr": st.get("ifgr")})
+        c[f"p{st['phase']}"] = {"steady": _med(steady), "early": _med(early), "n": len(steady)}
+
+    def drop(a, b):
+        return round(a - b, 1) if a is not None and b is not None else None
+
+    conditions = []
+    for c in cond.values():
+        p1, p2 = c.get("p1", {}), c.get("p2", {})
+        d = drop(p1.get("steady"), p2.get("steady"))
+        c["drop"] = d
+        c["drop_early"] = drop(p1.get("early"), p2.get("early"))
+        c["detects"] = None if d is None else d >= DISCONNECT_DROP_DB
+        conditions.append(c)
+
+    probes = {}
+    stale_probes = 0
+    for r in rows:
+        if r.get("ev") != "probe":
+            continue
+        p = probes.setdefault(r["key"], {"key": r["key"], "label": r["label"], "freq": r["freq"]})
+        stale = (r.get("stats_mtime") is not None and r.get("proc_start") is not None
+                 and r["stats_mtime"] < r["proc_start"] - EXP_MTIME_TOL_SEC)
+        stale_probes += int(stale)
+        p[f"p{r['phase']}"] = {"noise": r.get("noise"), "stale": stale, "error": r.get("error")}
+    for p in probes.values():
+        d = drop((p.get("p1") or {}).get("noise"), (p.get("p2") or {}).get("noise"))
+        p["drop"] = d
+        p["detects"] = None if d is None else d >= DISCONNECT_DROP_DB
+
+    atis_drop = drop(atis.get(1), atis.get(2))
+    clean_agc = cond.get("clean_agc", {})
+    p3 = clean_agc.get("p3") or {}
+    return {
+        "threshold_db": DISCONNECT_DROP_DB,
+        "conditions": conditions,
+        "probes": list(probes.values()),
+        "atis": {"p1": atis.get(1), "p2": atis.get(2), "p3": atis.get(3), "drop": atis_drop,
+                 "gone": None if atis_drop is None else atis_drop >= EXP_ATIS_GONE_DB,
+                 "back": drop(atis.get(3), atis.get(1))},
+        "after_disconnect": prompts.get("after_disconnect"),
+        "after_reconnect": prompts.get("after_reconnect"),
+        "drift_clean_agc": drop(p3.get("steady"), (clean_agc.get("p1") or {}).get("steady")),
+        "stale_rows": stale_rows,
+        "stale_probes": stale_probes,
+    }
+
+
+@app.route("/api/experiment", methods=["GET", "POST"])
+def api_experiment():
+    """GET: מצב הניסוי (+ result כשהסתיים). POST {action}: start / confirm (הפעולה
+    הפיזית בוצעה) / abort. דרך _guard (POST)."""
+    if request.method == "GET":
+        return jsonify(ok=True, **_experiment_status())
+    action = (request.get_json(silent=True) or {}).get("action")
+    if action == "start":
+        payload, code = _experiment_start()
+        return jsonify(**payload), code
+    with _exp_lock:
+        running, stop_evt, confirm_evt, waiting = (_exp["running"], _exp["stop"],
+                                                   _exp["confirm"], _exp["waiting"])
+    if action == "confirm":
+        if not running or not waiting:
+            # ⚠ הסטטוס כבר מכיל error (של הריצה האחרונה) — מיזוג, לא kwargs כפולים
+            return jsonify({**_experiment_status(), "ok": False,
+                            "error": "אין פעולה שממתינה לאישור כרגע"}), 409
+        confirm_evt.set()
+        return jsonify(ok=True, **_experiment_status())
+    if action == "abort":
+        if running and stop_evt:
+            stop_evt.set()
+        return jsonify(ok=True, **_experiment_status())
+    return jsonify(ok=False, error="action לא מוכר"), 400
 
 
 @app.route("/api/airspace")

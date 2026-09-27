@@ -455,3 +455,72 @@ def test_rflog_recorder_toggle_marks_and_download(page):
     expect(btn).to_have_attribute("aria-pressed", "false")
     expect(page.locator("#rflogMarks")).to_be_hidden()
     assert sent["toggle"] == [True, False]
+
+
+def test_experiment_flow_prompt_confirm_and_results(page):
+    """ניסוי הכיול האוטומטי מקצה לקצה בדפדפן: התחלה מהבית, סרגל גלובלי עם בקשת
+    ניתוק (גלויה גם בתצוגה אחרת), אישור שנשלח לשרת, וטבלת סיכום בסוף. התוויות
+    מכילות מירכאות (נתב"ג) — הטבלה נבנית ב-innerHTML, אז גם ה-escaping נבדק כאן."""
+    phase = {"n": "idle"}
+    sent = []
+    result = {
+        "threshold_db": 10.0,
+        "conditions": [
+            {"key": "clean_f20", "label": 'רווח קבוע · אין נתב"ג בחלון', "p1": {"steady": -60.0},
+             "p2": {"steady": -72.0}, "drop": 12.0, "detects": True},
+            {"key": "atiswin_agc", "label": "132.000 · ATIS בחלון · AGC", "p1": {"steady": -58.0},
+             "p2": {"steady": -60.0}, "drop": 2.0, "detects": False}],
+        "probes": [{"key": "probe_product", "label": "בדיקת האנטנה של המוצר · 130.450",
+                    "freq": 130.45, "p1": {"noise": -61.0}, "p2": {"noise": -63.5},
+                    "drop": 2.5, "detects": False}],
+        "atis": {"drop": 53.0, "gone": True},
+        "after_disconnect": {"instant": -70.0, "after": -61.0, "rise": 9.0},
+        "stale_rows": 0, "stale_probes": 1,
+    }
+
+    def status():
+        base = {"ok": True, "running": False, "steps_total": 22, "step_index": -1, "waiting": None,
+                "step": None, "eta_sec": None, "eta_prompt_sec": None, "error": None, "result": None}
+        if phase["n"] == "running":
+            base.update(running=True, step_index=3, eta_sec=900, eta_prompt_sec=300,
+                        step={"label": "122.600 · AGC"})
+        elif phase["n"] == "waiting":
+            base.update(running=True, step_index=8, eta_sec=700,
+                        waiting={"action": "disconnect", "since": 1000.0})
+        elif phase["n"] == "done":
+            base.update(result=result)
+        return base
+
+    def exp(route, url):
+        req = route.request
+        if req.method == "POST":
+            body = json.loads(req.post_data or "{}")
+            sent.append(body.get("action"))
+            phase["n"] = {"start": "running", "confirm": "done"}.get(body.get("action"), phase["n"])
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(status()))
+
+    _mount(page, overrides={"/api/experiment": exp})
+    page.evaluate("window.confirm = () => true")
+    page.click("#modeSeg button[data-v=home]")
+    page.click("#expStartBtn")
+    expect(page.locator("#expBar")).to_be_visible()
+    expect(page.locator("#expBarSub")).to_contain_text("הבקשה הבאה בעוד ~5 דק'")
+
+    # הבקשה הפיזית חייבת להופיע גם כשהמשתמש בתצוגה אחרת (הסרגל גלובלי)
+    page.click("#modeSeg button[data-v=voice]")
+    phase["n"] = "waiting"
+    expect(page.locator("#expPrompt")).to_be_visible(timeout=6000)
+    expect(page.locator("#expPromptTxt")).to_contain_text("נתק עכשיו")
+    expect(page.locator("#expConfirmBtn")).to_have_text("✓ ניתקתי")
+
+    page.click("#expConfirmBtn")
+    expect(page.locator("#expBar")).to_be_hidden()
+    assert sent == ["start", "confirm"]
+
+    page.click("#modeSeg button[data-v=home]")
+    res = page.locator("#expResult")
+    expect(res).to_be_visible()
+    expect(res.locator(".exp-head")).to_contain_text("לא היה מזהה")
+    expect(res.locator("table")).to_contain_text('אין נתב"ג בחלון')     # escaping תקין, לא שבור
+    expect(res.locator(".exp-notes")).to_contain_text("קראו נתונים של התהליך הקודם")
+    expect(page.locator("#expPillTxt")).to_have_text("הושלם")

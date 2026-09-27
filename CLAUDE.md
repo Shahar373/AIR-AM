@@ -147,8 +147,11 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
                            #   שפות/מודלים, fallback מודל, retention עמיד ל-stat שנכשל).
   test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
   test_signal.py           # מד שדה: _signal_verdict, /api/signal (voice/acars/vdl2/satcom/off), /api/antenna/check.
-  test_rflog.py            # רשם ניסוי RF: פענוח airband.conf, דגימה רק על כתיבה חדשה, mtime-ים שחושפים
-                           #   flush של תהליך קודם, start/mark/stop/export, כיבוי אוטומטי, רישום בדיקת-אנטנה.
+  test_rflog.py            # רשם ניסוי RF: פענוח airband.conf, דגימה רק על כתיבה חדשה, start/mark/stop/
+                           #   export, כיבוי אוטומטי, רישום בדיקת-אנטנה.
+  test_experiment.py       # ניסוי כיול אוטומטי מקצה לקצה עם SDR מדומה (כולל שתי הפעולות הפיזיות),
+                           #   ביטול/timeout ושחזור מצב, תנאי-פתיחה (SATCOM/סריקה/נעילה), וניתוח
+                           #   (_experiment_summary) — כולל זיהוי קריאה של התהליך הקודם מול proc_start.
   test_session.py          # דוח סשן: _interest_score, /api/session, /api/session/ack, adsb.session_series.
   test_replay_buffer.py    # שחזור-סשן שלב 1: buffer מתגלגל (append/compaction/gap-rows,
                            #   מטוס משובש נשמר עם lat/lon=None ולא מדולג) + GET /api/replay/buffer.
@@ -391,6 +394,16 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   כשחתימת ה-mtime של stats/conf השתנתה), `_parse_airband_conf` (הקונפיג *שבאמת רץ* — לא
   state, כי ה-probe לא כותב state), `_rflog_event` (סימונים + תוצאת כל `/api/antenna/check`,
   רק כשפעיל).
+  **ניסוי כיול אוטומטי** (אותו מסמך): `_experiment_plan` (22 צעדים — מחזור מחובר, בקשת ניתוק,
+  מחזור מנותק, בקשת חיבור, מחזור אימות; **שתי פעולות פיזיות בלבד**), `_experiment_start`
+  (מסרב ל-SATCOM חי/סריקה/`TUNE_LOCK` תפוס; מפעיל את הרשם אם כבוי), `_experiment_run`
+  (thread שמחזיק את `TUNE_LOCK` **לכל אורך הניסוי** ומשחרר ב-`finally` אחרי
+  `_restore_after_probe` — תמיד, גם בביטול/timeout/שגיאה; בדיקות האנטנה דרך `_probe_params`+
+  `_sample_probe_stats` — המסלול של המוצר, **בלי לדרוס את `signal_baseline`**),
+  `_rtl_airband_start_wall` (`systemctl show ExecMainStartTimestampMonotonic` ⇒ זמן-קיר;
+  מבחין בין כתיבות התהליך הנוכחי ל-flush של הקודם — ⚠ השוואת `stats_mtime` ל-`conf_mtime`
+  **לא** יכולה, כי ה-flush נכתב אחרי הקונפיג), `_experiment_summary` (פונקציה טהורה — חציונים,
+  ירידה, "מזהה?" = הסף של המוצר עצמו; `None` כשחסר), `_read_rflog_run`.
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_sweep_recordings` (retention — **לא רואה `saved/` בכלל**, ר' למטה).
 - **הקלטות שמורות (★) + תמלול — שני פיצ'רים מחוברים:** הפטור מ-retention הוא
@@ -552,6 +565,12 @@ iOS: מתג ההשתקה משתיק Web Audio — רמז בלבד; ה-workaround
 ‏`showView`), 🧪 הפעלה/עצירה, שלושה כפתורי סימון (44px — כפפות/שטח) עם אישור גלוי ושעה
 ("✓ סומן: מנותק · 10:31:05" — בשטח אין דרך אחרת לדעת שהלחיצה נקלטה), וקישור הורדה.
 ההקלטה בצד השרת — ממשיכה כשהמסך כבוי.
+**ניסוי כיול אוטומטי** (`#expCard` במסך הבית + `#expBar` — סרגל **גלובלי** קבוע בתחתית, מחוץ
+ל-`<main>`, כי הבקשה לנתק/לחבר חייבת להופיע בכל תצוגה): `pollExperiment` (2ש' בזמן ריצה, 15ש'
+בבית כשלא רץ, ומיד ב-`visibilitychange` — חוזרים לטאב ואולי ממתינים לך), `renderExperiment`
+(התקדמות, ETA לבקשה הבאה, בקשה עם כפתור 52px + `expAlert`: שלושה צפצופים Web Audio + רטט;
+ה-AudioContext נוצר רק מלחיצה), `renderExpResult` (טבלה ב-`innerHTML` — ⚠ דרך `expEsc`, כי
+התוויות מהשרת מכילות מירכאות; נבדקה ב-360px).
 **אין build step** — עורכים את הקובץ ישירות. Leaflet vendored תחת `static/vendor/`
 (בלי CDN, עובד גם בלי אינטרנט).
 
@@ -751,6 +770,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET/POST | `/api/rflog` | רשם ניסוי RF: GET מצב (`active`/`until`/`rows`/`marks`/`size`); POST `{active}` הפעלה/עצירה (idempotent). דרך `_guard` (POST). ר' `docs/antenna-calibration-experiment.md` |
 | POST | `/api/rflog/mark` | `{label}` (עד 40 תווים) — סימון אירוע פיזי. **409 כשהרשם כבוי** (סימון שלא נרשם לא נראה כאילו נרשם). דרך `_guard` |
 | GET | `/api/rflog/export` | הורדת `rf_log.jsonl` (404 כשאין) |
+| GET/POST | `/api/experiment` | ניסוי כיול אוטומטי. GET: מצב (`running`/`step`/`step_index`/`steps_total`/`waiting`/`eta_sec`/`eta_prompt_sec`/`error`/`result`). POST `{action}`: `start` (409 כש-SATCOM חי/סריקה/`TUNE_LOCK` תפוס/כבר רץ), `confirm` (הפעולה הפיזית בוצעה; 409 כשאין בקשה ממתינה), `abort`. מחזיק את `TUNE_LOCK` לכל אורכו. דרך `_guard` (POST) |
 | POST | `/api/antenna/check` | בדיקת אנטנה בת ~3 שניות: מעבר זמני לקול (AGC, סקוולץ' פתוח) בתדר המבוקש, מדידת רצפת רעש אמיתית (`_sample_probe_stats`), וחזרה למצב הקודם (`_restore_after_probe`, גם בכישלון). `calibrate:true` שומר את התוצאה כ-`signal_baseline`. לא נוגע ב-`state["app_mode"]` — פעולת אבחון, לא מעבר-מצב. סריאלי תחת `TUNE_LOCK`; 409 כשתפוס |
 | GET | `/api/activity` | יומן שידורים. כל אירוע כולל `exists`, `starred`, ו-`tx` (‏`{state, text, err?, raw?, filtered?}` — ר' §12). `?starred=1` => רק ההקלטות המסומנות, **מ-`starred.json` ולא מהיומן** (שורדות את קיצוץ `ACTIVITY_KEEP`) |
 | POST | `/api/recordings/star` | `{file, starred}` — שמירה/ביטול (★, מעביר ל/מ-`saved/`, `os.replace` אטומי תחת `_STAR_LOCK`). שמורה פטורה מ-retention. 409 כשהמכסה מלאה (**לא מוחקים שמורה ותיקה**), 404 כשההקלטה כבר לא קיימת. דרך `_guard` |

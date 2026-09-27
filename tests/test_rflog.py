@@ -96,9 +96,10 @@ def test_sample_other_freq_stats_are_none_not_guessed(paths):
     assert row["freq"] == 131.55 and row["noise"] is None and row["signal"] is None
 
 
-def test_sample_exposes_previous_process_flush_via_mtimes(paths):
-    """אותו תדר, stats שנכתב *לפני* הקונפיג הנוכחי => חשוד כ-flush-יציאה של
-    התהליך הקודם. הרשם לא מסנן — הוא חושף את שני ה-mtime כדי שהניתוח יכריע."""
+def test_sample_records_both_mtimes_without_filtering(paths):
+    """הרשם לא מסנן ולא מפרש — הוא רושם את שני ה-mtime כמו שהם. ⚠ ההשוואה
+    ביניהם *לא* מזהה flush-יציאה של התהליך הקודם (הוא נכתב אחרי הקונפיג, בזמן
+    העצירה); הזיהוי נעשה בניתוח מול proc_start — ר' test_experiment.py."""
     _write_stats(paths, 121.5, -40.0, -61.5, mtime=1000.0)
     _write_conf(paths, 121.5, agc=True)
     os.utime(paths / "airband.conf", (1005.0, 1005.0))

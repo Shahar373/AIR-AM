@@ -488,6 +488,42 @@
 
     /* ---------- שחזור-סשן: כרטיס-בית + רשימה + נגן (docs/session-replay-design.md §9) ---------- */
     .replay-save-row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+    /* --- ניסוי כיול אוטומטי: כרטיס בבית + סרגל גלובלי (בכל תצוגה) --- */
+    .exp-req { margin: 0 0 .7rem; padding-inline-start: 1.1rem; font-size: .82rem; color: var(--dim);
+      display: flex; flex-direction: column; gap: .2rem; }
+    .exp-msg { margin: .5rem 0 0; font-size: .8rem; color: var(--dim); }
+    .exp-msg.err { color: var(--red-fg); }
+    .exp-head { margin: 0 0 .6rem; padding: .6rem .75rem; border-radius: var(--r-sm);
+      background: var(--panel-2); border: 1px solid var(--border); font-size: .88rem; line-height: 1.5; }
+    .exp-head.good { border-color: rgba(var(--green-rgb),.5); background: rgba(var(--green-rgb),.1); }
+    .exp-head.bad { border-color: rgba(var(--red-rgb),.5); background: rgba(var(--red-rgb),.1); }
+    .exp-tbl-wrap { overflow-x: auto; margin: 0 0 .6rem; }
+    .exp-tbl { width: 100%; border-collapse: collapse; font-size: .78rem; }
+    .exp-tbl th { text-align: start; font-weight: 600; color: var(--text-faint); font-size: .7rem;
+      padding: .35rem .4rem; border-bottom: 1px solid var(--border-strong); white-space: nowrap; }
+    .exp-tbl td { padding: .4rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+    .exp-tbl td.num { font-variant-numeric: tabular-nums; direction: ltr; text-align: end; white-space: nowrap; }
+    .exp-tbl .yes { color: var(--green-fg); font-weight: 600; white-space: nowrap; }
+    .exp-tbl .no { color: var(--red-fg); font-weight: 600; white-space: nowrap; }
+    .exp-cap { margin: -.3rem 0 .6rem; font-size: .72rem; color: var(--text-faint); }
+    .exp-notes { margin: 0 0 .6rem; padding-inline-start: 1.1rem; font-size: .8rem; color: var(--dim);
+      display: flex; flex-direction: column; gap: .25rem; }
+    .exp-bar { position: fixed; inset-inline: 0; bottom: 0; z-index: 900;
+      background: var(--panel); border-top: 1px solid var(--border-strong); box-shadow: var(--sh-card);
+      padding: .6rem max(.9rem, env(safe-area-inset-left)) calc(.6rem + env(safe-area-inset-bottom)); }
+    body.exp-on { padding-bottom: 8.5rem; }
+    .exp-bar-main { display: flex; align-items: center; gap: var(--sp-2); max-width: 60rem; margin: 0 auto; }
+    .exp-bar-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .1rem; }
+    .exp-bar-txt b { font-size: .9rem; }
+    .exp-bar-txt span { font-size: .76rem; color: var(--dim); }
+    .exp-prog { height: 4px; border-radius: 2px; background: var(--panel-2); margin: .45rem auto 0;
+      max-width: 60rem; overflow: hidden; }
+    .exp-prog i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
+    .exp-prompt { max-width: 60rem; margin: .6rem auto 0; padding: .75rem; border-radius: var(--r-sm);
+      background: rgba(var(--amber-rgb),.14); border: 1px solid rgba(var(--amber-rgb),.55);
+      display: flex; flex-direction: column; gap: .55rem; }
+    .exp-prompt p { margin: 0; font-size: 1rem; font-weight: 600; color: var(--amber-fg); line-height: 1.45; }
+    .exp-prompt button { min-height: 52px; font-size: 1rem; }
     .replay-save-row input[type=number] {
       width: 4.5rem; font: inherit; font-variant-numeric: tabular-nums; text-align: center;
       color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
@@ -1424,6 +1460,29 @@
       </div>
     </div><!-- /panel-bd -->
   </section>
+
+  <!-- ═══ ניסוי כיול אנטנה אוטומטי (docs/antenna-calibration-experiment.md) ═══
+       ה-Pi מריץ את כל התנאים לבד; המשתמש רק מנתק פעם אחת ומחבר פעם אחת.
+       הסרגל הגלובלי (#expBar) מופיע בכל תצוגה בזמן הריצה. -->
+  <section class="panel p-exp" id="expCard">
+    <div class="panel-hd"><p class="ttl">🧪 ניסוי כיול אנטנה</p>
+      <div class="hd-end"><span id="expPill" class="pill"><span class="dot"></span><span id="expPillTxt">מוכן</span></span></div>
+    </div>
+    <div class="panel-bd">
+      <div id="expIdle">
+        <p class="hint" style="margin:0 0 .5rem">בודק אם "בדוק אנטנה" באמת מזהה אנטנה מנותקת.
+          ה-Pi מריץ הכול לבד כ-20 דקות. אתה רק <b>מנתק פעם אחת ומחבר פעם אחת</b>, כשתתבקש.</p>
+        <ul class="exp-req">
+          <li>אנטנת ה-VHF מחוברת, ואתה ליד ה-SDR</li>
+          <li>במקום שבו ה-ATIS של נתב"ג (132.500) נשמע</li>
+          <li>הדף פתוח — הבקשה לנתק תופיע כאן עם צפצוף</li>
+        </ul>
+        <button type="button" class="primary" id="expStartBtn">▶ התחל ניסוי</button>
+      </div>
+      <div id="expResult" class="hidden"></div>
+      <p class="exp-msg" id="expMsg"></p>
+    </div>
+  </section>
   </div><!-- /home-dash -->
   </div><!-- /homeView -->
 
@@ -2219,6 +2278,20 @@
 
   </main>
 
+  <!-- סרגל ניסוי הכיול: גלובלי (לא תלוי תצוגה) — הבקשה לנתק/לחבר חייבת להופיע
+       בכל מסך שהמשתמש נמצא בו. גלוי רק בזמן ריצה. -->
+  <div id="expBar" class="exp-bar hidden" role="status" aria-live="polite">
+    <div class="exp-bar-main">
+      <div class="exp-bar-txt"><b id="expBarTitle">ניסוי כיול רץ</b><span id="expBarSub"></span></div>
+      <button type="button" class="ghost" id="expAbortBtn">⏹ עצור</button>
+    </div>
+    <div class="exp-prog"><i id="expProg"></i></div>
+    <div class="exp-prompt hidden" id="expPrompt">
+      <p id="expPromptTxt"></p>
+      <button type="button" class="primary" id="expConfirmBtn">✓ בוצע</button>
+    </div>
+  </div>
+
   <!-- טוסט כללי (כרגע: ביטול-מחיקה לפריסט) — מוסתר כברירת מחדל -->
   <div id="toast" class="toast hidden">
     <span id="toastMsg"></span>
@@ -2892,6 +2965,149 @@
       };
     });
     setInterval(() => { if (!document.hidden && appMode === "voice") pollRflog(); }, 3000);
+
+    /* ---------- ניסוי כיול אוטומטי (GET/POST /api/experiment) ----------
+       ה-Pi מריץ את הניסוי לבד (צד-שרת); כאן רק מציגים התקדמות, מבקשים את שתי
+       הפעולות הפיזיות (ניתוק/חיבור) ומציגים את הסיכום שחושב על ה-Pi. */
+    let expState = null, expInFlight = false, expCtx = null, expPromptSince = null;
+    const expFmt = (v) => (typeof v === "number" ? v.toFixed(1) : "—");
+    // התוויות מגיעות מהשרת ומכילות מירכאות (נתב"ג) — escaping מפורש לפני innerHTML
+    const expEsc = (t) => String(t == null ? "" : t).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    const expMin = (sec) => Math.max(1, Math.round((sec || 0) / 60));
+    function expEnsureAudio() {      // נקרא רק מלחיצה (user gesture) — מדיניות autoplay
+      try { if (!expCtx) { const AC = window.AudioContext || window.webkitAudioContext; if (AC) expCtx = new AC(); }
+            if (expCtx) expCtx.resume().catch(() => {}); } catch (e) {}
+    }
+    function expAlert() {            // שלושה צפצופים + רטט (אנדרואיד) כשמופיעה בקשה פיזית
+      try { navigator.vibrate && navigator.vibrate([250, 120, 250, 120, 250]); } catch (e) {}
+      if (!expCtx) return;
+      try {
+        const t0 = expCtx.currentTime;
+        [0, 0.28, 0.56].forEach((d) => {
+          const o = expCtx.createOscillator(), g = expCtx.createGain();
+          o.frequency.value = 880; o.connect(g); g.connect(expCtx.destination);
+          g.gain.setValueAtTime(0.0001, t0 + d);
+          g.gain.linearRampToValueAtTime(0.25, t0 + d + 0.02);
+          g.gain.linearRampToValueAtTime(0.0001, t0 + d + 0.18);
+          o.start(t0 + d); o.stop(t0 + d + 0.2);
+        });
+      } catch (e) {}
+    }
+    function detectsCell(v) {
+      if (v === true) return '<span class="yes">✓ כן</span>';
+      if (v === false) return '<span class="no">✗ לא</span>';
+      return "—";
+    }
+    function renderExpResult(d) {
+      const box = $("expResult"), r = d.result;
+      if (!r) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+      const thr = r.threshold_db;
+      const prod = (r.probes || []).find((p) => p.key === "probe_product");
+      let head = "";
+      if (prod && typeof prod.drop === "number") {
+        head = '<div class="exp-head ' + (prod.detects ? "good" : "bad") + '">'
+          + "<b>בדיקת האנטנה של המוצר (" + prod.freq.toFixed(3) + "):</b> הרעש ירד ב-"
+          + prod.drop.toFixed(1) + " dB בניתוק — " + (prod.detects
+            ? "הסף של המוצר (" + thr + " dB) <b>היה מזהה</b> את הניתוק."
+            : "הסף של המוצר (" + thr + " dB) <b>לא היה מזהה</b> את הניתוק.") + "</div>";
+      }
+      const rows = (r.conditions || []).map((c) => "<tr><td>" + expEsc(c.label) + "</td>"
+        + '<td class="num">' + expFmt((c.p1 || {}).steady) + '</td><td class="num">' + expFmt((c.p2 || {}).steady)
+        + '</td><td class="num">' + expFmt(c.drop) + "</td><td>" + detectsCell(c.detects) + "</td></tr>")
+        .concat((r.probes || []).map((p) => "<tr><td>" + expEsc(p.label) + "</td>"
+        + '<td class="num">' + expFmt((p.p1 || {}).noise) + '</td><td class="num">' + expFmt((p.p2 || {}).noise)
+        + '</td><td class="num">' + expFmt(p.drop) + "</td><td>" + detectsCell(p.detects) + "</td></tr>"));
+      const notes = [];
+      const a = r.atis || {};
+      if (typeof a.drop === "number")
+        notes.push((a.gone === false ? "⚠ " : "") + "ה-ATIS ירד ב-" + a.drop.toFixed(1) + " dB בניתוק"
+          + (a.gone === false ? " — ייתכן שהאנטנה לא נותקה בפועל, והתוצאות לא אמינות." : " — הניתוק אומת."));
+      const ad = r.after_disconnect;
+      if (ad && typeof ad.rise === "number")
+        notes.push("אחרי הניתוק, ב-132.000 עם AGC: מיד אחריו " + expFmt(ad.instant) + " dBFS, אחרי דקה וחצי "
+          + expFmt(ad.after) + " dBFS — הרעש חזר למעלה " + ad.rise.toFixed(1) + " dB.");
+      if (r.stale_probes) notes.push("⚠ " + r.stale_probes + " בדיקות אנטנה קראו נתונים של התהליך הקודם (לפני ההפעלה מחדש).");
+      else if (r.stale_rows) notes.push(r.stale_rows + " קריאות של התהליך הקודם נרשמו אחרי הפעלות-מחדש (לא נכללו בחישוב).");
+      box.innerHTML = head
+        + '<div class="exp-tbl-wrap"><table class="exp-tbl"><thead><tr><th>תנאי</th><th>מחובר</th><th>מנותק</th>'
+        + "<th>ירידה</th><th>מזהה?</th></tr></thead><tbody>" + rows.join("") + "</tbody></table></div>"
+        + '<p class="exp-cap">רצפת רעש ב-dBFS. "מזהה?" = האם הסף של המוצר (' + thr
+        + " dB) היה מזהה את הניתוק בתנאי הזה.</p>"
+        + (notes.length ? '<ul class="exp-notes">' + notes.map((n) => "<li>" + expEsc(n) + "</li>").join("") + "</ul>" : "")
+        + '<div class="fm-btns"><a class="ghost" href="/api/rflog/export" download>⬇ הורד את הנתונים המלאים</a></div>';
+      box.classList.remove("hidden");
+    }
+    function renderExperiment(d) {
+      if (!d || !d.ok) return;
+      expState = d;
+      const running = !!d.running;
+      document.body.classList.toggle("exp-on", running);
+      $("expBar").classList.toggle("hidden", !running);
+      $("expStartBtn").disabled = running;
+      const pill = $("expPill");
+      pill.className = "pill" + (running ? " live" : (d.error ? " err" : ""));
+      $("expPillTxt").textContent = running ? "רץ" : (d.error ? "נעצר" : (d.result ? "הושלם" : "מוכן"));
+      if (running) {
+        const i = Math.max(0, d.step_index), n = d.steps_total || 1;
+        $("expProg").style.width = Math.round(100 * (i + (d.waiting ? 0 : 0.5)) / n) + "%";
+        const st = d.step || {};
+        $("expBarTitle").textContent = d.waiting ? "ממתין לך" : "ניסוי כיול רץ · שלב " + (i + 1) + "/" + n;
+        let sub = d.waiting ? "" : (st.label || "");
+        if (!d.waiting && typeof d.eta_sec === "number") sub += " · נותרו ~" + expMin(d.eta_sec) + " דק'";
+        if (!d.waiting && typeof d.eta_prompt_sec === "number")
+          sub += " · הבקשה הבאה בעוד ~" + expMin(d.eta_prompt_sec) + " דק'";
+        $("expBarSub").textContent = sub;
+        const w = d.waiting;
+        $("expPrompt").classList.toggle("hidden", !w);
+        if (w) {
+          const dis = w.action === "disconnect";
+          $("expPromptTxt").textContent = dis
+            ? "✂️ נתק עכשיו את כבל האנטנה בכניסה של ה-SDR (לא בקצה האנטנה), ואז לחץ."
+            : "🔌 חבר עכשיו חזרה את כבל האנטנה לכניסה של ה-SDR, ואז לחץ.";
+          $("expConfirmBtn").textContent = dis ? "✓ ניתקתי" : "✓ חיברתי";
+          if (expPromptSince !== w.since) { expPromptSince = w.since; expAlert(); }
+        }
+        $("expMsg").textContent = "הניסוי רץ — עקוב אחרי הסרגל בתחתית המסך. המקלט יחזור למצבו הקודם בסוף.";
+        $("expMsg").classList.remove("err");
+      } else {
+        expPromptSince = null;
+        if (d.error) { $("expMsg").textContent = "⚠ " + d.error; $("expMsg").classList.add("err"); }
+        else { $("expMsg").textContent = d.result ? "הניסוי הושלם והמקלט חזר למצבו הקודם." : ""; $("expMsg").classList.remove("err"); }
+      }
+      renderExpResult(d);
+    }
+    async function pollExperiment() {
+      if (expInFlight) return;
+      expInFlight = true;
+      try { renderExperiment(await fetchJSON("/api/experiment")); }
+      catch (e) { /* המחזור הבא ינסה שוב */ }
+      finally { expInFlight = false; }
+    }
+    async function expSend(body) {
+      try {
+        const res = await apiSend("POST", "/api/experiment", body);
+        const d = await res.json();
+        if (!d.ok) { $("expMsg").textContent = "⚠ " + (d.error || "הפעולה נכשלה"); $("expMsg").classList.add("err"); }
+        renderExperiment({ ...d, ok: true });
+      } catch (e) { $("expMsg").textContent = "⚠ שגיאת רשת — נסה שוב."; $("expMsg").classList.add("err"); }
+    }
+    $("expStartBtn").onclick = () => {
+      if (!confirm("הניסוי ישתלט על המקלט לכ-20 דקות (כוונון ומעבר מצבים יינעלו), "
+        + "ובסוף יחזיר אותו למצב שהיה. ודא שאנטנת ה-VHF מחוברת. להתחיל?")) return;
+      expEnsureAudio();
+      expSend({ action: "start" });
+    };
+    $("expConfirmBtn").onclick = () => { expEnsureAudio(); $("expConfirmBtn").disabled = true;
+      expSend({ action: "confirm" }).finally(() => { $("expConfirmBtn").disabled = false; }); };
+    $("expAbortBtn").onclick = () => {
+      if (confirm("לעצור את הניסוי? המקלט יחזור למצב הקודם, והנתונים שנאספו עד עכשיו יישמרו.")) expSend({ action: "abort" });
+    };
+    // רץ: עדכון כל 2ש' (הבקשה לנתק צריכה להופיע מהר). לא רץ: רק בבית, לאט —
+    // כדי לגלות ניסוי שהופעל מטלפון אחר. חזרה לטאב ⇒ רענון מיידי (אולי ממתינים לך).
+    setInterval(() => { if (!document.hidden && expState && expState.running) pollExperiment(); }, 2000);
+    setInterval(() => { if (!document.hidden && appMode === "home") pollExperiment(); }, 15000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) pollExperiment(); });
 
     /* ---------- אבחון SATCOM: נעילת דמודולטור (GET /api/satcom/health) ----------
        proxy מקומי ל---web dashboard המובנה של inmarsat-sniffer — lock=נעילת
@@ -4068,7 +4284,7 @@
       replayScreen = null;
       segSet("modeSeg", mode);
       renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acars/vdl2/satcom.active — עדכן בכל מעבר
-      if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); }
+      if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); pollExperiment(); }
       if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); pollRflog(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
       if (mode === "acars") acarsFm.poll();
       if (mode === "vdl2") vdl2Fm.poll();
