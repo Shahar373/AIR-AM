@@ -93,6 +93,9 @@ def _default_api():
         "/api/signal": {"ok": True, "mode": "voice", "fresh": True, "snr": 20.0,
                         "level": -30.0, "verdict": "no_baseline"},
         "/api/satcom/health": {"ok": True, "available": False},
+        "/api/sdr": {"ok": True, "state": "ours", "mode": "voice", "service_state": "active",
+                     "usb": True, "usb_desc": "SDRplay RSP1B", "api": "active",
+                     "label": None, "detail": None, "suspects": [], "checked_age": None},
         "/api/acars": {"ok": True, "active": False, "freqs": [], "cursor": 0,
                        "messages": [], "adsb": {}},
         "/api/vdl2": {"ok": True, "active": False, "freqs": [], "cursor": 0,
@@ -524,3 +527,33 @@ def test_experiment_flow_prompt_confirm_and_results(page):
     expect(res.locator("table")).to_contain_text('אין נתב"ג בחלון')     # escaping תקין, לא שבור
     expect(res.locator(".exp-notes")).to_contain_text("קראו נתונים של התהליך הקודם")
     expect(page.locator("#expPillTxt")).to_have_text("הושלם")
+
+
+def test_sdr_chip_reports_detected_busy_and_free(page):
+    """חיווי ה-SDR: "תפוס ע״י תוכנה אחרת" עם החשודים לפי שם, ומעבר ל"פנוי".
+    שמות התהליכים מגיעים מ-/proc — ודא שהם מוצגים כטקסט, לא כ-HTML."""
+    sdr = {"ok": True, "state": "busy", "mode": None, "service_state": None, "usb": True,
+           "usb_desc": "SDRplay RSP1B", "api": "active", "label": None, "detail": None,
+           "suspects": [{"pid": 4242, "name": "<b>sdrpp</b>"}], "checked_age": 3.0}
+
+    def handler(route, url):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(sdr))
+
+    _mount(page, overrides={"/api/sdr": handler})
+    chip = page.locator("#sdrChip")
+    expect(chip).to_have_text("SDR תפוס ע״י תוכנה אחרת")
+    expect(chip).to_have_class(re.compile(r"\berr\b"))
+    chip.click()
+    expect(page.locator("#toastMsg")).to_contain_text("<b>sdrpp</b> (PID 4242)")
+    page.click("#modeSeg button[data-v=home]")
+    expect(page.locator("#homeSdrTxt")).to_contain_text("תוכנה אחרת מחזיקה בו")
+
+    sdr.update(state="free", suspects=[], label="SDRplay Dev0 RSP1B 2305012345")
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    expect(chip).to_have_text("SDR מזוהה · פנוי")
+    expect(chip).to_have_class(re.compile(r"\bok\b"))
+    expect(page.locator("#homeSdrTxt")).to_contain_text("2305012345")
+
+    sdr.update(state="missing", usb=False, usb_desc=None, label=None)
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    expect(chip).to_have_text("SDR לא מזוהה")

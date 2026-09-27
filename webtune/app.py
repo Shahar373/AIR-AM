@@ -3245,6 +3245,179 @@ def api_presets():
     return jsonify(ok=True, presets=cleaned)
 
 
+# --- חיווי SDR: מזוהה? פנוי? (GET /api/sdr) ---------------------------------
+# שתי שאלות נפרדות, כל אחת עם מקור-אמת משלה:
+#   "מזוהה" — ה-RSP נוכח ב-USB (lsusb, vendor 1df7), בלי לפתוח אותו.
+#   "פנוי"  — ה-SDRplay API מוכן למסור אותו *עכשיו*. sdrplay_api_GetDevices לא
+#             מחזיר מכשיר שלקוח אחר כבר בחר (SelectDevice) — אומת במקור של
+#             SoapySDRPlay3: ‏findSDRPlay מוסיף ידנית את המכשירים שהתהליך *שלו*
+#             תפס (SoapySDRPlay_getClaimedSerials), והערה ב-Settings.cpp מתארת
+#             "probe for an absent or already-claimed device" כמקרה של "no
+#             sdrplay device matches". כלומר USB נוכח + find ריק = מישהו אחר מחזיק.
+# ה-probe הוא אותו `SoapySDRUtil --find` שהשער airam-wait-sdrplay כבר מריץ לפני כל
+# צרכן: Open+LockDeviceApi+GetDevices+Unlock — בלי SelectDevice, כך שהוא לא תופס
+# את המכשיר בעצמו. רץ רק כשאף צרכן שלנו לא פעיל (אחרת התשובה ידועה: שלנו),
+# לא תחת TUNE_LOCK (מעבר-מצב באמצע), ועם cache קצר — כי יש בו fork וטעינת מודולים.
+SDR_PROBE_TTL_SEC = 10.0
+SDR_PROBE_TIMEOUT_SEC = 12
+SDR_API_SERVICE = "sdrplay"
+SDR_CONSUMERS = ("rtl_airband", ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE)
+_SDR_CONSUMER_MODE = {svc: m for m, svc in MODE_SERVICE.items()}
+# מצבי systemd שבהם הצרכן שלנו מחזיק (או מנסה להחזיק) את המכשיר: "activating"
+# כולל לולאת auto-restart של Restart=always — ה-SDR לא פנוי לאחרים גם אז.
+_SDR_HOLDING_STATES = ("active", "activating", "reloading", "deactivating")
+# תוכנות SDR מוכרות, לפי /proc/<pid>/comm (15 תווים לכל היותר — לכן "inmarsat-sniffe").
+# ⚠ רמז לפי שם בלבד, לא הוכחה: comm קריא לכל משתמש, אבל /proc/<pid>/maps של
+# תהליך root לא קריא ל-airam, אז אין דרך לבדוק מי באמת טען את ה-API.
+SDR_SUSPECT_NAMES = frozenset({
+    "rtl_airband", "acarsdec", "dumpvdl2", "inmarsat-sniffe", "sdrpp", "SDRconnect",
+    "CubicSDR", "gqrx", "SoapySDRServer", "rx_sdr", "rx_fm", "rx_tools", "dump1090",
+    "dump1090-fa", "readsb", "jaero", "welle-cli", "GNURadio", "gnuradio-compan"})
+_sdr_probe_cache = {"t": 0.0, "result": None}
+_SDR_PROBE_LOCK = threading.Lock()
+
+
+def _sdr_usb():
+    """(present, desc): present=None כשאי אפשר לבדוק (אין lsusb) — לא ניחוש.
+    ⚠ בכוונה שונה מ-_sdr_present שמניח True בכשל: שם זו החלטת רולבק, כאן זה
+    חיווי למשתמש, ו"מזוהה" שלא נבדק הוא בדיוק ההמצאה ש-§12 אוסר."""
+    try:
+        r = subprocess.run(["lsusb", "-d", "1df7:"], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None, None
+    if r.returncode != 0:
+        return False, None
+    line = (r.stdout.splitlines() or [""])[0]
+    m = re.search(r"ID\s+([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\s*(.*)", line)
+    return True, ((m.group(2).strip() or m.group(1)) if m else line.strip() or None)
+
+
+def _sdr_probe_api():
+    """שואל את ה-API אם יש מכשיר SDRplay פנוי. מחזיר dict עם result:
+    found (+label) / none / api_error (+detail) / timeout / no_tool."""
+    try:
+        r = subprocess.run(["SoapySDRUtil", "--find=driver=sdrplay"],
+                           capture_output=True, text=True, timeout=SDR_PROBE_TIMEOUT_SEC)
+    except FileNotFoundError:
+        return {"result": "no_tool"}
+    except subprocess.TimeoutExpired:
+        return {"result": "timeout"}
+    except OSError as e:
+        return {"result": "api_error", "detail": str(e)}
+    out, err = r.stdout or "", r.stderr or ""
+    # לא לפי returncode: הגרסה הארוזה ב-Debian עשויה להיות ישנה מזו שנבדקה;
+    # הפלט "driver = sdrplay" הוא אותו תנאי בדיוק כמו ב-airam-wait-sdrplay.
+    if "driver = sdrplay" in out:
+        m = re.search(r"^\s*label\s*=\s*(.+)$", out, re.M)
+        return {"result": "found", "label": m.group(1).strip() if m else None}
+    # sdrplay_api_Open נכשל (daemon תקוע/לא עונה) — SoapySDRPlay3 רושם אותו ב-stderr
+    # וזורק; enumerate תופס. זו תקלת API, לא "תפוס" — חייבים להבדיל ביניהם.
+    if re.search(r"sdrplay_api_Open|ApiVersion|ServiceNotResponding", err):
+        lines = [l.strip() for l in err.splitlines() if "sdrplay" in l.lower()]
+        return {"result": "api_error", "detail": (lines[-1] if lines else err.strip())[:200]}
+    return {"result": "none"}
+
+
+def _sdr_suspects(proc="/proc"):
+    """תהליכים שהשם שלהם תואם תוכנת SDR מוכרת (רמז בלבד, ר' SDR_SUSPECT_NAMES)."""
+    out = []
+    me = os.getpid()
+    try:
+        entries = os.listdir(proc)
+    except OSError:
+        return out
+    for pid in entries:
+        if not pid.isdigit() or int(pid) == me:
+            continue
+        try:
+            with open(f"{proc}/{pid}/comm", encoding="utf-8", errors="replace") as f:
+                name = f.read().strip()
+        except OSError:
+            continue                   # התהליך הסתיים בינתיים / hidepid
+        if name in SDR_SUSPECT_NAMES:
+            out.append({"pid": int(pid), "name": name})
+    return sorted(out, key=lambda p: p["pid"])[:10]
+
+
+def _sdr_holder(services):
+    """הצרכן שלנו שמחזיק את ה-SDR כרגע: (mode, state) או (None, None)."""
+    for svc in SDR_CONSUMERS:
+        st = services.get(svc)
+        if st in _SDR_HOLDING_STATES:
+            return _SDR_CONSUMER_MODE.get(svc), st
+    return None, None
+
+
+def _sdr_status():
+    """מצב ה-SDR למשתמש. state:
+    missing — לא ב-USB · ours — צרכן של AIR-AM מחזיק בו · switching — מעבר-מצב
+    באמצע · api_down — שירות sdrplay לא פעיל · api_error — ה-API לא עונה ·
+    free — ה-API מציע אותו · busy — ב-USB אבל ה-API לא מציע: תוכנה אחרת מחזיקה ·
+    unavailable — ה-API לא מציע, ואין lsusb לדעת אם הוא בכלל מחובר ·
+    checking — probe ראשון עוד רץ (בקשה מקבילה) ·
+    unknown — אין כלי לבדוק "פנוי" (SoapySDRUtil חסר) — לא ממציאים תשובה."""
+    usb, desc = _sdr_usb()
+    res = {"ok": True, "usb": usb, "usb_desc": desc, "state": None, "mode": None,
+           "service_state": None, "api": None, "label": None, "detail": None,
+           "suspects": [], "checked_age": None}
+    if usb is False:
+        res["state"] = "missing"
+        return res
+    services = _services_status((SDR_API_SERVICE, *SDR_CONSUMERS))
+    res["api"] = services.get(SDR_API_SERVICE)
+    mode, sst = _sdr_holder(services)
+    if mode:
+        res.update(state="ours", mode=mode, service_state=sst)
+        return res
+    if res["api"] != "active":
+        res["state"] = "api_down"
+        return res
+    if TUNE_LOCK.locked():
+        res["state"] = "switching"
+        return res
+    # probe אחד בכל רגע. טלפון שני שמגיע באמצע מקבל את התשובה האחרונה במקום
+    # להמתין עד SDR_PROBE_TIMEOUT_SEC (ה-UI מוותר אחרי 8ש' — NET_TIMEOUT_GET).
+    if _SDR_PROBE_LOCK.acquire(blocking=False):
+        try:
+            cached = _sdr_probe_cache["result"]
+            if cached is None or time.monotonic() - _sdr_probe_cache["t"] >= SDR_PROBE_TTL_SEC:
+                cached = _sdr_probe_api()
+                _sdr_probe_cache.update(t=time.monotonic(), result=cached)
+        finally:
+            _SDR_PROBE_LOCK.release()
+    else:
+        cached = _sdr_probe_cache["result"]
+        if cached is None:
+            res["state"] = "checking"
+            return res
+    res["checked_age"] = round(time.monotonic() - _sdr_probe_cache["t"], 1)
+    # צרכן שלנו עלה *בזמן* ה-probe (מעבר מצב מטלפון אחר) => "לא נמצא" שלו הוא
+    # אנחנו, לא תוכנה זרה. בודקים שוב לפני שמאשימים מישהו.
+    mode, sst = _sdr_holder(_services_status(SDR_CONSUMERS))
+    if mode:
+        res.update(state="ours", mode=mode, service_state=sst, checked_age=None)
+        return res
+    kind = cached["result"]
+    if kind == "found":
+        res.update(state="free", label=cached.get("label"))
+    elif kind == "none":
+        # בלי lsusb לא ידוע אם המכשיר בכלל מחובר — "לא מוצע" בלבד, לא "תפוס".
+        res["state"] = "busy" if usb else "unavailable"
+        res["suspects"] = _sdr_suspects()
+    elif kind in ("api_error", "timeout"):
+        res.update(state="api_error",
+                   detail=cached.get("detail") or "ה-API לא ענה תוך %d ש׳" % SDR_PROBE_TIMEOUT_SEC)
+    else:
+        res["state"] = "unknown"
+    return res
+
+
+@app.route("/api/sdr")
+def api_sdr():
+    """חיווי SDR: מזוהה ב-USB? פנוי (ה-API מציע אותו)? ומי מחזיק בו אם לא."""
+    return jsonify(_sdr_status())
+
+
 @app.route("/api/health")
 def api_health():
     """סטטוס המערכת — מאפשר ל-UI להבדיל בין "אין שידור" ל"משהו נפל"."""
