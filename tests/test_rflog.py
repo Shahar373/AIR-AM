@@ -29,7 +29,10 @@ def client(paths):
 
 
 @pytest.fixture(autouse=True)
-def _rflog_clean():
+def _rflog_clean(paths):
+    # ⚠ תלוי ב-paths בכוונה: כך הניקוי מתפרק *לפני* ש-monkeypatch מחזיר את
+    # RFLOG_PATH לנתיב האמיתי. בלי זה, שורת ה-stop של הניקוי נכתבה ל-
+    # /var/lib/airam — עבר בשקט כ-root, ונכשל ב-CI (PermissionError).
     yield
     app._rflog_stop("test-teardown")
     with app._rflog_lock:
@@ -206,3 +209,15 @@ def test_antenna_check_not_logged_when_off(client, paths, monkeypatch):
     monkeypatch.setattr(app, "_enter_acars", lambda freqs: (None, None))
     client.post("/api/antenna/check", json={"freq": 131.55})
     assert _rows(paths) == []
+
+
+def test_write_failure_is_counted_not_raised(client, paths, monkeypatch):
+    """כרטיס SD מלא / הרשאה: הרשם לא זורק לתוך מי שקרא לו — סופר ומדווח.
+    (בגרסה הראשונה הוא זרק, וזה השאיר את הניסוי האוטומטי "רץ" לנצח.)"""
+    blocker = paths / "not-a-dir"
+    blocker.write_text("x")                        # קובץ, לא תיקייה => mkdir נכשל
+    monkeypatch.setattr(app, "RFLOG_PATH", blocker / "rf_log.jsonl")
+    assert app._rflog_write({"ev": "x"}) is False
+    r = client.post("/api/rflog", json={"active": True})
+    assert r.status_code == 200 and r.get_json()["write_errors"] >= 1
+

@@ -30,7 +30,9 @@ def client(paths):
 
 
 @pytest.fixture(autouse=True)
-def _clean():
+def _clean(paths):
+    # ⚠ תלוי ב-paths — הניקוי חייב להתפרק לפני ש-monkeypatch מחזיר את הנתיבים
+    # האמיתיים (ר' _rflog_clean ב-test_rflog.py: אחרת כותבים ל-/var/lib/airam).
     yield
     with app._exp_lock:
         th, stop = app._exp["thread"], app._exp["stop"]
@@ -282,3 +284,19 @@ def test_summary_empty_is_all_none():
     res = app._experiment_summary([])
     assert res["conditions"] == [] and res["probes"] == []
     assert res["atis"]["drop"] is None and res["atis"]["gone"] is None
+
+
+def test_unwritable_log_does_not_leave_experiment_stuck_running(client, world, paths, monkeypatch):
+    """⚠ רגרסיה: כשל כתיבה לרשם בתוך ה-finally דילג על סימון הסיום — הניסוי
+    נשאר running=True לנצח, וכל התחלה חדשה קיבלה 409 "כבר רץ"."""
+    blocker = paths / "not-a-dir"
+    blocker.write_text("x")
+    monkeypatch.setattr(app, "RFLOG_PATH", blocker / "rf_log.jsonl")
+    monkeypatch.setattr(app, "EXP_PROMPT_TIMEOUT_SEC", 0.3)
+    assert client.post("/api/experiment", json={"action": "start"}).status_code == 200
+    app._exp["thread"].join(timeout=30)
+    st = client.get("/api/experiment").get_json()
+    assert st["running"] is False and st["error"]
+    assert world.restored
+    assert not app.TUNE_LOCK.locked()
+

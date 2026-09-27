@@ -4520,7 +4520,7 @@ def api_antenna_check():
 # --- רשם ניסוי RF ------------------------------------------------------------
 _rflog_lock = threading.Lock()
 _rflog = {"active": False, "started_at": None, "until": None, "rows": 0,
-          "marks": 0, "thread": None, "stop": None}
+          "marks": 0, "write_errors": 0, "thread": None, "stop": None}
 
 _CONF_FREQ_RE = re.compile(r"^\s*freq\s*=\s*([0-9.]+)\s*;", re.M)          # לא centerfreq
 _CONF_GAIN_RE = re.compile(r'^\s*gain\s*=\s*"IFGR=(\d+),RFGR=(\d+)"', re.M)
@@ -4579,15 +4579,25 @@ def _rflog_sample(prev_sig):
 
 def _rflog_write(obj):
     """append + fsync. בניגוד ל-track.jsonl (buffer אפמרי, בלי fsync) — כאן זו
-    תוצאת ניסוי שדה, והתרחיש הסביר לאבדן הוא בדיוק power bank שקוטע (§12)."""
+    תוצאת ניסוי שדה, והתרחיש הסביר לאבדן הוא בדיוק power bank שקוטע (§12).
+    ⚠ לעולם לא זורק: כשל כתיבה (כרטיס SD מלא, הרשאה) נספר ב-write_errors
+    ומוחזר False. בגרסה הראשונה הוא זרק — ובתוך ה-finally של _experiment_run
+    זה דילג על סימון הסיום, כך שהניסוי נשאר "רץ" לנצח וסירב להתחיל מחדש."""
     line = json.dumps(obj, ensure_ascii=False) + "\n"
     with _rflog_lock:
-        RFLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(RFLOG_PATH, "a", encoding="utf-8") as f:
-            f.write(line)
-            f.flush()
-            os.fsync(f.fileno())
+        try:
+            RFLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(RFLOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+        except OSError as e:
+            _rflog["write_errors"] += 1
+            if _rflog["write_errors"] in (1, 100):      # לא מציפים את היומן בכל שנייה
+                log.warning("רשם RF: כתיבה ל-%s נכשלה: %s", RFLOG_PATH, e)
+            return False
         _rflog["rows"] += 1
+    return True
 
 
 def _rflog_stop(reason):
@@ -4634,7 +4644,7 @@ def _rflog_start():
         now = time.time()
         evt = threading.Event()
         _rflog.update(active=True, started_at=now, until=now + RFLOG_MAX_SEC,
-                      rows=0, marks=0, stop=evt, thread=None)
+                      rows=0, marks=0, write_errors=0, stop=evt, thread=None)
     _rflog_write({"ev": "start", "t": round(now, 2), "version": VERSION,
                   "max_sec": RFLOG_MAX_SEC})
     th = threading.Thread(target=_rflog_worker, args=(evt,), daemon=True)
@@ -4655,7 +4665,7 @@ def _rflog_event(obj):
 
 def _rflog_status():
     with _rflog_lock:
-        st = {k: _rflog[k] for k in ("active", "started_at", "until", "rows", "marks")}
+        st = {k: _rflog[k] for k in ("active", "started_at", "until", "rows", "marks", "write_errors")}
     # "נותרו" מחושב כאן ולא בטלפון: שעון הטלפון ושעון ה-Pi לא בהכרח מסונכרנים בשטח
     st["remaining"] = max(0, round(st["until"] - time.time())) if st["active"] and st["until"] else None
     try:
