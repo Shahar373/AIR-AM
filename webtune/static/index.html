@@ -419,6 +419,16 @@
     .rflog-marks { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
     .rflog-marks button { flex: 1; min-width: 6.5rem; min-height: 44px; font-size: .8rem; }
     .rflog .fm-hint { font-size: .72rem; color: var(--text-faint); margin: 0; }
+    .rfc { margin-top: .7rem; padding-top: .6rem; border-top: 1px dashed var(--border); }
+    .rfc-hd { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+    .rfc-hd button { min-height: 44px; font-size: .8rem; }
+    .rfc-st { font-size: .74rem; color: var(--text-faint); }
+    .rfc .fm-hint { font-size: .72rem; color: var(--text-faint); margin: .4rem 0 0; }
+    .rfc table { width: 100%; border-collapse: collapse; font-size: .74rem; margin-top: .5rem; }
+    .rfc th, .rfc td { padding: .25rem .35rem; border-bottom: 1px solid var(--border); text-align: start; }
+    .rfc tr.rec td { font-weight: 700; background: var(--hover); }
+    .rfc .rfc-rec { margin-top: .5rem; font-size: .8rem; }
+    .rfc .rfc-rec button { margin-top: .4rem; min-height: 44px; }
 
     /* --- דוח סשן: "מה קרה בזמן שלא הסתכלת" --- */
     .session-stats { font-size: .85rem; color: var(--text); margin: 0 0 .5rem; }
@@ -1703,6 +1713,17 @@
         <a class="ghost hidden" id="rflogDl" href="/api/rflog/export" download>⬇ הורד את ההקלטה</a>
         <p class="fm-hint" id="rflogHint">לניסוי כיול האנטנה: ה-Pi רושם את מדדי ה-RF כל שנייה, אתה מסמן מתי חיברת/ניתקת.</p>
       </div>
+    </div>
+    <!-- 🩺 בדיקת RF: מעבר על מצבי LNA מעל ATIS (docs/voice-rf-quality-plan.md, PR 2).
+         מחוץ ל-#rfPanel כדי ש-.stale (אין מדדים) לא יעמעם אותה. -->
+    <div class="rfc" id="rfcBox">
+      <div class="rfc-hd">
+        <button type="button" class="ghost" id="rfcBtn">🩺 בדיקת RF</button>
+        <span class="rfc-st" id="rfcStatus"></span>
+      </div>
+      <p class="fm-hint" id="rfcHint">עובר על מצבי LNA ומודד SNR ועומס על ATIS ‏132.5 (נשא רציף — אין שקט בין שידורים).
+        השמע ייפסק בזמן הבדיקה ויחזור בסופה. הנחה: סביבת ה-RF דומה לזו של תדר המגדל.</p>
+      <div id="rfcResult"></div>
     </div>
     </div><!-- /panel-bd -->
   </section>
@@ -3136,6 +3157,112 @@
     });
     setInterval(() => { if (!document.hidden && appMode === "voice") pollRflog(); }, 3000);
 
+    /* ---------- 🩺 בדיקת RF: מעבר על מצבי LNA מעל ATIS (PR 2) ----------
+       השרת מחזיק את ה-SDR לכל הבדיקה ותמיד משחזר את מה שרץ קודם; כאן רק תצוגה.
+       עומס null = "לא ידוע" (לעולם לא ירוק — §12). */
+    let rfcRunning = false, rfcInFlight = false, rfcTick = 0, rfcWasPlaying = false;
+    const RFC_REASON = {
+      no_data: "לא התקבלו מדידות — בדוק שהאנטנה מחוברת ונסה שוב.",
+      all_overloaded: "בכל מצבי ה-LNA נמדד עומס — שקול מנחת חיצוני (10–20dB) או מסנן FM, ובדוק שוב.",
+    };
+    function rfcCell(tr, text) { const td = document.createElement("td"); td.textContent = text; tr.appendChild(td); }
+    function rfcTable(rows, recLna) {
+      const t = document.createElement("table");
+      const hd = document.createElement("tr");
+      ["LNA", "SNR", "עומס"].forEach(h => { const th = document.createElement("th"); th.textContent = h; hd.appendChild(th); });
+      t.appendChild(hd);
+      rows.forEach(r => {
+        const tr = document.createElement("tr");
+        if (r.lna === recLna) tr.className = "rec";
+        rfcCell(tr, bidi(lnaStep(r.lna) + "/9"));
+        rfcCell(tr, r.error ? "✗ " + r.error
+          : r.snr == null ? "—"
+          : bidi(r.snr.toFixed(1) + " dB" + (r.snr_spread != null ? " ±" + r.snr_spread.toFixed(1) : "")));
+        rfcCell(tr, r.overload === true ? "⚠ עומס" + (r.overload_events ? " ×" + r.overload_events : "")
+          : r.overload === false ? "✓ אין" : "? לא ידוע");
+        t.appendChild(tr);
+      });
+      return t;
+    }
+    function renderRfcheck(d) {
+      const was = rfcRunning;
+      rfcRunning = !!d.running;
+      const btn = $("rfcBtn"), st = $("rfcStatus"), box = $("rfcResult");
+      btn.textContent = rfcRunning ? "⏹ עצור בדיקה" : "🩺 בדיקת RF (~" + (d.est_sec || 50) + " שניות)";
+      box.replaceChildren();
+      if (rfcRunning) {
+        const i = d.step == null ? 0 : d.step, n = (d.states || []).length;
+        const lna = (d.states || [])[i];
+        st.textContent = "בודק " + (lna != null ? bidi("LNA " + lnaStep(lna) + "/9") : "") + " · " + (i + 1) + "/" + n + "…";
+        if ((d.rows || []).length) box.appendChild(rfcTable(d.rows, null));
+        return;
+      }
+      st.textContent = d.error ? "⚠ " + d.error : "";
+      if (was) {
+        // השרת שיחזר את מה שרץ קודם — הסטרים חזר; ממשיכים לנגן רק אם ניגן קודם
+        if (rfcWasPlaying) reloadStream();
+        fetchJSON("/api/state").then(applyGainState).catch(() => {});
+      }
+      const r = d.result;
+      if (!r) return;
+      const rec = r.recommendation || {};
+      box.appendChild(rfcTable(r.rows || [], rec.rf_gain));
+      const p = document.createElement("div");
+      p.className = "rfc-rec";
+      const when = new Date(r.ts * 1000).toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" });
+      if (rec.rf_gain == null) {
+        p.textContent = (RFC_REASON[rec.reason] || "אין המלצה.") + " (נבדק ב-" + when + ")";
+      } else {
+        let t = "מומלץ: " + bidi("LNA " + lnaStep(rec.rf_gain) + "/9");
+        if (rec.reason === "tie_more_attenuation") t += " — ההפרש מה-SNR המיטבי קטן מפיזור המדידה, לכן נבחרה יותר הנחתה (מרווח מעומס).";
+        if (rec.confidence === "partial") t += " ⚠ חיווי העומס לא היה זמין בחלק מהמצבים — ההמלצה לפי SNR בלבד.";
+        p.textContent = t + " (נבדק ב-" + when + ")";
+        const cur = lastGainState && lastGainState.rf_gain;
+        if (cur !== rec.rf_gain) {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = "✓ החל " + bidi("LNA " + lnaStep(rec.rf_gain) + "/9");
+          b.onclick = async () => {
+            b.disabled = true;
+            try {
+              const res = await apiSend("POST", "/api/rfcheck", { action: "apply" });
+              const j = await res.json();
+              if (!j.ok) { showToast(j.error || "ההחלה נכשלה"); b.disabled = false; return; }
+              applyGainState(await fetchJSON("/api/state"));
+              showToast(j.note || "הוחל");
+              pollRfcheck();
+            } catch (e) { showToast("שגיאת רשת"); b.disabled = false; }
+          };
+          p.appendChild(document.createElement("br"));
+          p.appendChild(b);
+        }
+      }
+      box.appendChild(p);
+    }
+    async function pollRfcheck() {
+      if (rfcInFlight) return;
+      rfcInFlight = true;
+      try { renderRfcheck(await fetchJSON("/api/rfcheck")); }
+      catch (e) { /* שרת ישן/אין רשת — הכפתור נשאר כמו שהוא */ }
+      finally { rfcInFlight = false; }
+    }
+    $("rfcBtn").addEventListener("click", async () => {
+      const action = rfcRunning ? "abort" : "start";
+      if (action === "start") rfcWasPlaying = !player.paused;
+      try {
+        const res = await apiSend("POST", "/api/rfcheck", { action });
+        const j = await res.json();
+        if (!j.ok) showToast(j.error || "הפעולה נכשלה");
+        else renderRfcheck(j);
+      } catch (e) { showToast("שגיאת רשת"); }
+    });
+    // בזמן ריצה — כל שנייה; אחרת כל 15ש' ורק בתצוגת הקול
+    setInterval(() => {
+      if (document.hidden) return;
+      rfcTick = (rfcTick + 1) % 15;
+      if (rfcRunning || (appMode === "voice" && rfcTick === 0)) pollRfcheck();
+    }, 1000);
+
     /* ---------- ניסוי כיול אוטומטי (GET/POST /api/experiment) ----------
        ה-Pi מריץ את הניסוי לבד (צד-שרת); כאן רק מציגים התקדמות, מבקשים את שתי
        הפעולות הפיזיות (ניתוק/חיבור) ומציגים את הסיכום שחושב על ה-Pi. */
@@ -4523,6 +4650,8 @@
       if (document.hidden || applyModeInFlight) return;
       try {
         const h = await fetchJSON("/api/health");
+        // 🩺 בדיקת RF רצה: rtl_airband עולה/יורד בין מצבי LNA בכוונה — לא מיישרים חיוויים לפיו
+        if (h.rf_check) return;
         // הדגלים משקפים את השירות שרץ *בפועל* (לא את הכוונה השמורה) — מצב שקרס
         // לא מוצג כ"מאזין"; h.app_mode (מציאות-או-כוונה) משמש רק להודעת התקלה.
         const s = h.services || {};
@@ -4579,7 +4708,7 @@
       segSet("modeSeg", mode);
       renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acars/vdl2/satcom.active — עדכן בכל מעבר
       if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); pollExperiment(); }
-      if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); pollRflog(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
+      if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); pollRflog(); pollRfcheck(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
       if (mode === "acars") acarsFm.poll();
       if (mode === "vdl2") vdl2Fm.poll();
       if (mode === "acars") acars.show(); else acars.hide();   // תצוגת ACARS מנוהלת בפקטורי (כמו VDL2/SATCOM)

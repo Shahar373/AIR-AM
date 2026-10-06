@@ -801,3 +801,60 @@ def test_tune_omits_fm_notch_when_state_never_loaded(page):
                              r.value = 3; r.dispatchEvent(new Event('change')); }""")
     expect(page.locator("#status")).not_to_contain_text("מכוונן…", timeout=10000)
     assert sent and "fm_notch" not in sent[-1], sent
+
+
+# --- 🩺 בדיקת RF (PR 2, הגרסה הפשוטה) ----------------------------------------
+
+def _rfc_result(rec=2, confidence="full"):
+    rows = [{"lna": 0, "snr": 28.0, "snr_spread": 0.8, "overload": True, "overload_events": 3,
+             "error": None},
+            {"lna": 2, "snr": 26.5, "snr_spread": 0.6, "overload": False, "overload_events": 0,
+             "error": None},
+            {"lna": 4, "snr": 24.0, "snr_spread": 0.5, "overload": None, "overload_events": None,
+             "error": None}]
+    return {"ok": True, "running": False, "step": None, "rows": [], "error": None,
+            "states": [0, 2, 4, 6, 8], "est_sec": 50, "freq": 132.5,
+            "result": {"ts": 1_700_000_000, "freq": 132.5, "rows": rows,
+                       "recommendation": {"rf_gain": rec, "reason": "best_snr",
+                                          "confidence": confidence, "overloaded": [0]}}}
+
+
+def test_rfcheck_result_shows_unknown_and_apply_at_360px(page):
+    """הטבלה מבדילה עומס / אין / לא ידוע (null לעולם לא ירוק), ההמלצה בשפת הסליידר
+    (‏9−state), ו"החל" שולח action=apply. בלי גלילה אופקית בטלפון."""
+    _phone(page)
+    sent = []
+
+    def rfcheck(route, url):
+        if route.request.method == "POST":
+            sent.append(json.loads(route.request.post_data or "{}"))
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True}))
+            return
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps(_rfc_result()))
+
+    st = {**_default_api()["/api/state"], "rf_gain": 4}
+    _mount(page, overrides={"/api/state": st, "/api/rfcheck": rfcheck})
+    page.click("#modeSeg button[data-v=voice]")
+    box = page.locator("#rfcResult")
+    expect(box).to_contain_text("⚠ עומס ×3")
+    expect(box).to_contain_text("✓ אין")
+    expect(box).to_contain_text("? לא ידוע")
+    expect(box).to_contain_text(re.compile(r"מומלץ:.*LNA.*7/9"))   # state 2 ⇒ 9−2 (עטוף ב-FSI/PDI)
+    _no_hscroll(page)
+    page.click("#rfcResult button")
+    expect(page.locator("#toast")).to_contain_text("הוחל")    # התשובה עובדה ⇒ הבקשה נשלחה
+    assert sent and sent[-1].get("action") == "apply", sent
+
+
+def test_rfcheck_running_shows_progress_and_stop(page):
+    _phone(page)
+    running = {**_rfc_result(), "running": True, "step": 1, "result": None,
+               "rows": [{"lna": 0, "snr": 20.0, "snr_spread": 0.4, "overload": True,
+                         "overload_events": 1, "error": None}]}
+    _mount(page, overrides={"/api/rfcheck": running})
+    page.click("#modeSeg button[data-v=voice]")
+    expect(page.locator("#rfcBtn")).to_have_text("⏹ עצור בדיקה")
+    expect(page.locator("#rfcStatus")).to_contain_text("2/5")
+    expect(page.locator("#rfcResult")).to_contain_text("⚠ עומס")

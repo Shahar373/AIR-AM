@@ -3557,7 +3557,13 @@ def api_health():
         mode = active or saved
         ok = (voice_ok if mode == "voice" else acars_ok if mode == "acars"
               else vdl2_ok if mode == "vdl2" else satcom_ok if mode == "satcom" else off_ok)
-    return jsonify(ok=ok, app_mode=mode,
+    # 🩺 בדיקת RF רצה: rtl_airband עולה ויורד בין מצבי ה-LNA — זו פעולה מתוכננת, לא
+    # תקלה; ה-UI מקבל rf_check=True ומציג "בדיקת RF" במקום "תקלה"/"קול".
+    with _rfc_lock:
+        rf_check = _rfc["running"]
+    if rf_check:
+        ok = True
+    return jsonify(ok=ok, app_mode=mode, rf_check=rf_check,
                    services=services, sdr_present=_sdr_present(), stats_age=stats_age)
 
 
@@ -5333,6 +5339,234 @@ def api_antenna_check():
                        **result)
     finally:
         TUNE_LOCK.release()
+
+
+# --- 🩺 בדיקת RF: מעבר על מצבי LNA מעל ATIS -----------------------------------
+# docs/voice-rf-quality-plan.md (PR 2, הגרסה הפשוטה). השאלה: "יש עומס? באיזה LNA
+# לשים?". נמדד על ATIS נתב"ג — נשא *רציף*: אין שקט בין שידורים ואין "דוברים שונים"
+# בין המצבים, כך שהשוואת SNR בין מצבי LNA משווה את אותו אות. העומס (אם יש) נגרם
+# מסביבת ה-RF — כל החלון והחזית, לא הערוץ עצמו — ולכן ⚠ ההנחה (מוצהרת גם ב-UI) היא
+# שסביבת ה-RF ב-132.5 דומה לזו של תדר המגדל, ‏2MHz משם. אותו מסלול כמו בדיקת
+# האנטנה (_probe_params/_enter_voice/_restore_after_probe), בלי שירות/תלות חדשים.
+RFCHECK_FREQ = 132.5               # ATIS נתב"ג (= ברירת המחדל של config/airband.conf)
+RFCHECK_STATES = (0, 2, 4, 6, 8)   # מצבי LNA (0 = רווח מרבי ... 8 = ‎57dB הנחתה ב-RSP1B)
+RFCHECK_SETTLE_SEC = 2.0           # אחרי הדגימה הראשונה — ה-AGC של ה-IF מתייצב
+RFCHECK_MEASURE_SEC = 5.0          # חלון המדידה לכל מצב (~5 כתיבות stats, ‏1Hz)
+RFCHECK_START_TIMEOUT_SEC = 15.0   # עד שדגימה של התהליך *החדש* מופיעה ב-stats
+
+_rfc_lock = threading.Lock()
+_rfc = {"running": False, "started_at": None, "finished_at": None, "step": None,
+        "rows": [], "error": None, "stop": None}
+
+
+def _read_stats_snapshot(want):
+    """(mtime, vals) של קובץ ה-stats לתדר want, או (None, {}) כשאין קובץ."""
+    try:
+        mtime = STATS_PATH.stat().st_mtime
+        text = STATS_PATH.read_text()
+    except OSError:
+        return None, {}
+    return mtime, parse_stats(text, want)
+
+
+def _spread(vals):
+    """פיזור המדידות (IQR; עם פחות מ-4 דגימות — max−min). זה ה"שוויון" של ההמלצה:
+    הפרש SNR קטן מהרעש של המדידה עצמה אינו הבדל — נגזר מהנתונים, לא סף מומצא (§12)."""
+    if len(vals) < 2:
+        return None
+    s = sorted(vals)
+    if len(s) < 4:
+        return round(s[-1] - s[0], 1)
+    q = statistics.quantiles(s, n=4, method="inclusive")   # exclusive ב-5 דגימות נותן לחריג לנפח את ה-IQR
+    return round(q[2] - q[0], 1)
+
+
+def _rfcheck_measure(lna, fm_notch, stop_evt):
+    """מצב LNA אחד: כניסה לקול על ATIS (AGC, סקוולץ' פתוח), המתנה לדגימה של התהליך
+    החדש, התייצבות, ואז חלון מדידה. שורה עם SNR (חציון) ועומס מהטלמטריה של PR 1
+    (None = לא ידוע — לעולם לא "תקין" בהיעדר ראיה)."""
+    row = {"lna": lna, "snr": None, "snr_spread": None, "signal": None, "noise": None,
+           "samples": 0, "overload": None, "overload_events": None,
+           "ifgr_min": None, "ifgr_max": None, "error": None}
+    err, _detail, _sdr_down = _enter_voice(_probe_params(RFCHECK_FREQ, lna, fm_notch))
+    if err:
+        row["error"] = err
+        return row
+    want = f"{RFCHECK_FREQ:.3f}"
+    # ⚠ לא כל דגימה טרייה: ה-flush של התהליך *הקודם* נכתב אחרי הקונפיג החדש (ר'
+    # _rtl_airband_start_wall). מקבלים רק כתיבות מאחרי עליית התהליך הנוכחי.
+    born = _rtl_airband_start_wall() or time.time()
+    deadline = time.time() + RFCHECK_START_TIMEOUT_SEC
+    while time.time() < deadline and not stop_evt.is_set():
+        mtime, vals = _read_stats_snapshot(want)
+        if mtime is not None and mtime > born and vals.get("channel_dbfs_noise_level") is not None:
+            break
+        stop_evt.wait(0.3)
+    else:
+        if not stop_evt.is_set():
+            row["error"] = "לא התקבלו מדדים מה-SDR בזמן"
+        return row
+    if stop_evt.wait(RFCHECK_SETTLE_SEC):
+        return row
+    t0 = time.time()
+    seen, snrs, sigs, noises = None, [], [], []
+    while time.time() - t0 < RFCHECK_MEASURE_SEC and not stop_evt.is_set():
+        mtime, vals = _read_stats_snapshot(want)
+        if mtime is not None and mtime != seen and mtime > born:
+            seen = mtime
+            sig = vals.get("channel_dbfs_signal_level")
+            noise = vals.get("channel_dbfs_noise_level")
+            if sig is not None and noise is not None:
+                sigs.append(sig)
+                noises.append(noise)
+                snrs.append(sig - noise)
+        stop_evt.wait(0.3)
+    t1 = time.time()
+    if snrs:
+        row.update(snr=round(statistics.median(snrs), 1), snr_spread=_spread(snrs),
+                   signal=round(statistics.median(sigs), 1),
+                   noise=round(statistics.median(noises), 1), samples=len(snrs))
+    tele = _rf_window_summary(t0, t1)   # None = העוקב לא כיסה את החלון => לא ידוע
+    if tele:
+        row.update(overload=tele["overload"], overload_events=tele["overload_events"],
+                   ifgr_min=tele["ifgr_min"], ifgr_max=tele["ifgr_max"])
+    return row
+
+
+def _rfcheck_recommend(rows):
+    """המלצה מהשורות — פונקציה טהורה. הכלל (אושר ע"י המשתמש): עומס *מוכח* פוסל
+    מצב; מבין השאר — SNR הגבוה ביותר; כשההפרש מהמיטבי קטן מפיזור המדידה (שוויון)
+    — בוחרים את המצב עם *יותר* הנחתה (מרווח מעומס, ליד שדה תעופה). עומס לא-ידוע
+    (None) לא פוסל, אבל מוריד את ההמלצה ל-"partial" — לא טוענים "אין עומס" בלי ראיה."""
+    valid = [r for r in rows if r.get("snr") is not None and not r.get("error")]
+    if not valid:
+        return {"rf_gain": None, "reason": "no_data", "confidence": None}
+    clean = [r for r in valid if r.get("overload") is not True]
+    if not clean:
+        return {"rf_gain": None, "reason": "all_overloaded", "confidence": "full"}
+    best = max(clean, key=lambda r: r["snr"])
+
+    def tie(r):
+        tol = max(best.get("snr_spread") or 0.0, r.get("snr_spread") or 0.0)
+        return best["snr"] - r["snr"] <= tol
+
+    rec = max((r for r in clean if tie(r)), key=lambda r: r["lna"])
+    known = all(r.get("overload") is not None for r in valid)
+    overloaded = sorted(r["lna"] for r in valid if r.get("overload") is True)
+    return {"rf_gain": rec["lna"], "reason": "tie_more_attenuation" if rec is not best else "best_snr",
+            "confidence": "full" if known else "partial", "best_snr_lna": best["lna"],
+            "overloaded": overloaded}
+
+
+def _rfcheck_run(prev, prev_live, stop_evt):
+    """thread: מחזיק את TUNE_LOCK לכל אורך הבדיקה (כמו הניסוי האוטומטי); תמיד משחזר
+    את מה שרץ קודם ומשחרר ב-finally — גם בביטול/שגיאה."""
+    rows, err = [], None
+    lna0, fm_notch = _probe_frontend(prev)
+    try:
+        for i, lna in enumerate(RFCHECK_STATES):
+            if stop_evt.is_set():
+                break
+            with _rfc_lock:
+                _rfc["step"] = i
+            rows.append(_rfcheck_measure(lna, fm_notch, stop_evt))
+            with _rfc_lock:
+                _rfc["rows"] = list(rows)
+    except Exception:
+        log.warning("🩺 בדיקת RF נכשלה", exc_info=True)
+        err = "הבדיקה נכשלה — ר' journalctl -u airam-web"
+    finally:
+        aborted = stop_evt.is_set()
+        try:
+            _restore_after_probe(prev, prev_live)
+            if not aborted and not err:
+                result = {"ts": time.time(), "freq": RFCHECK_FREQ, "fm_notch": fm_notch,
+                          "lna_before": lna0, "agc": bool(prev.get("agc", True)),
+                          "rows": rows, "recommendation": _rfcheck_recommend(rows)}
+                save_state({**load_state(), "rf_check_last": result})
+                _rflog_event({"ev": "rfcheck", **result})
+        except Exception:
+            log.warning("🩺 בדיקת RF: שחזור/שמירה נכשלו", exc_info=True)
+            err = err or "שחזור המצב הקודם נכשל — היכנס למצב ידנית"
+        finally:
+            TUNE_LOCK.release()
+            with _rfc_lock:
+                _rfc.update(running=False, finished_at=time.time(), step=None,
+                            error=("בוטל" if aborted and not err else err))
+
+
+def _rfcheck_status():
+    with _rfc_lock:
+        s = {k: _rfc[k] for k in ("running", "started_at", "finished_at", "step", "rows", "error")}
+    s.update(freq=RFCHECK_FREQ, states=list(RFCHECK_STATES),
+             est_sec=int(len(RFCHECK_STATES) * (4 + RFCHECK_SETTLE_SEC + RFCHECK_MEASURE_SEC)),
+             result=load_state().get("rf_check_last"))
+    return s
+
+
+@app.route("/api/rfcheck", methods=["GET", "POST"])
+def api_rfcheck():
+    """GET: מצב/תוצאה. POST {action}: start | abort | apply. דרך _guard (POST)."""
+    if request.method == "GET":
+        return jsonify(ok=True, **_rfcheck_status())
+    action = (request.get_json(silent=True) or {}).get("action")
+    if action == "abort":
+        with _rfc_lock:
+            if _rfc["running"] and _rfc["stop"]:
+                _rfc["stop"].set()
+        return jsonify(ok=True, **_rfcheck_status())
+    if action == "apply":
+        return _rfcheck_apply()
+    if action != "start":
+        return jsonify(ok=False, error="פעולה לא מוכרת"), 400
+    with _rfc_lock:
+        if _rfc["running"]:
+            return jsonify(ok=False, error="הבדיקה כבר רצה"), 409
+    with _exp_lock:
+        if _exp["running"]:
+            return jsonify(ok=False, error="ניסוי הכיול רץ — המתן לסיומו"), 409
+    with _scan_lock:
+        if _scan_thread is not None and _scan_thread.is_alive():
+            return jsonify(ok=False, error="עצור את הסריקה לפני הבדיקה"), 409
+    prev_live = _live_mode()
+    if prev_live == "satcom":
+        return jsonify(ok=False, error="SATCOM פעיל — עצור אותו וחבר את אנטנת ה-VHF"), 409
+    if not TUNE_LOCK.acquire(blocking=False):
+        return jsonify(ok=False, error="פעולה אחרת מתבצעת כרגע — נסה שוב בעוד רגע"), 409
+    try:
+        stop_evt = threading.Event()
+        with _rfc_lock:
+            _rfc.update(running=True, started_at=time.time(), finished_at=None, step=0,
+                        rows=[], error=None, stop=stop_evt)
+        threading.Thread(target=_rfcheck_run, args=(load_state(), prev_live, stop_evt),
+                         daemon=True).start()
+    except Exception:
+        TUNE_LOCK.release()
+        with _rfc_lock:
+            _rfc["running"] = False
+        raise
+    return jsonify(ok=True, **_rfcheck_status())
+
+
+def _rfcheck_apply():
+    """מחיל את ה-LNA המומלץ. בקול חי — דרך _voice_tune (אותו חוזה ורולבק כמו /api/tune);
+    אחרת רק נשמר ב-state ויחול בכניסה הבאה לקול."""
+    st = load_state()
+    rec = ((st.get("rf_check_last") or {}).get("recommendation") or {}).get("rf_gain")
+    if rec is None:
+        return jsonify(ok=False, error="אין המלצה להחיל"), 409
+    with _rfc_lock:
+        if _rfc["running"]:
+            return jsonify(ok=False, error="הבדיקה עדיין רצה"), 409
+    if int(st.get("rf_gain", RF_GAIN_DEFAULT)) == int(rec):
+        return jsonify(ok=False, error="ההמלצה כבר בתוקף"), 409
+    if st.get("app_mode") == "voice" and _live_mode() == "voice":
+        params = {k: st[k] for k in ("freq", "mod", "agc", "if_gain", "squelch_mode", "squelch_snr")}
+        params.update(rf_gain=int(rec), fm_notch=bool(st.get("fm_notch", False)))
+        payload, status = _voice_tune(params)
+        return jsonify(payload), status
+    save_state({**st, "rf_gain": int(rec)})
+    return jsonify(ok=True, applied=int(rec), note="נשמר — יחול בכניסה הבאה לקול")
 
 
 # --- רשם ניסוי RF ------------------------------------------------------------
