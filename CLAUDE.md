@@ -90,12 +90,12 @@ CLAUDE.md                   # ← המסמך הזה: ארכיטקטורה + פי
 webtune/
   app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, SATCOM, סריקה,
                             #   רוסטר מאוחד, מד שדה + בדיקת אנטנה, דוח סשן, REST API, יומן,
-                            #   הקלטות, תמלול, METAR, מדדי RF, מעבר מצבים, ארכיון חיפוש. ~5200 שורות.
+                            #   הקלטות, תמלול, METAR, מדדי RF + טלמטריית עומס מהחומרה, מעבר מצבים, ארכיון חיפוש. ~7000 שורות.
   adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS + סדרת סשן +
                             #   buffer מתגלגל לשחזור-סשן (docs/session-replay-design.md,
                             #   שלב 1). thread נפרד. ניתן להרצה ידנית: `python3 adsb.py [--selftest]`.
   static/
-    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~5800 שורות). PWA. 5 תצוגות:
+    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~6800 שורות). PWA. 5 תצוגות:
                             #   🏠 מרכז (בית/standby/scan, כולל דוח סשן+התראות) + קול + ACARS +
                             #   VDL2 + SATCOM. ACARS/VDL2/SATCOM שלושה מופעים סימטריים של אותו
                             #   פקטורי createDataView (ר' §7); מד השדה — פקטורי מקביל, שני.
@@ -108,6 +108,8 @@ webtune/
 
 config/
   airband.conf             # קונפיג ברירת-מחדל ל-rtl_airband (ATIS 132.5). ⚠ נדרס ע"י app.py בכל tune.
+                           #   חייב להיות זהה לפלט render_config(DEFAULT_STATE) (נבדק) — כולל
+                           #   device_string עם rfnotch_ctrl+rfgain_sel (ר' §5, _device_string).
   acars.env               # ברירת-מחדל ל-acarsdec (EnvironmentFile). ⚠ נדרס ע"י app.py בכל מעבר ACARS.
   vdl2.env                # ברירת-מחדל ל-dumpvdl2 (EnvironmentFile). ⚠ נדרס ע"י app.py בכל מעבר VDL2.
                           #   ⚠ התדרים ב-Hz (dumpvdl2), בעוד state/UI ב-MHz.
@@ -117,11 +119,21 @@ config/
 systemd/
   sdrplay.service          # שירות SDRplay API. enabled.
   rtl_airband.service      # קול. Requires=sdrplay, בלי [Install] — *לא* enabled. root. Restart=always.
+                           #   ‏`-F` (חזית בלי waterfall) ולא `-f` — ה-waterfall היה מלכלך את זרם
+                           #   ה-journald ששורות AIRAM_RF מגיעות בו (ר' §12).
   airam-acars.service      # ACARS. Conflicts=rtl_airband. *לא* enabled. root.
   airam-vdl2.service       # VDL2 (dumpvdl2). Conflicts=rtl_airband+airam-acars. *לא* enabled. root.
   airam-satcom.service     # SATCOM (inmarsat-sniffer). Conflicts=שלושת האחרים. *לא* enabled. root.
                            #   אף צרכן SDR לא עולה באתחול — airam-web (המתזמר) משחזר את המצב השמור.
   airam-web.service        # שרת הווב + המתזמר. enabled. User=airam (לא-root). Restart=always.
+
+patches/
+  soapysdrplay3-airam-rf.patch  # ★ patch מקומי ל-SoapySDRPlay3 (נעוץ ל-SOAPYSDRPLAY_COMMIT): רושם
+                           #   אירועי overload/GainChange של ה-API (שה-upstream בולע) כ-"AIRAM_RF ..."
+                           #   ל-stderr => journald, ו-"AIRAM_RF stream=start" לפני sdrplay_api_Init
+                           #   (גבול-סשן + הוכחת-חיים). הוספות בלבד: Streaming.cpp (INFO, gain מוגבל-קצב)
+                           #   + Settings.cpp (streamActive=false בתחילת הבנאי — UB ב-kwargs loop).
+                           #   מוחל ע"י install.sh שלב 3 (ר' §10); כשל => בנייה בלעדיו, בלי marker.
 
 scripts/
   airam-wait-sdrplay       # שער מוכנות (ExecStartPre): מחכה שה-API *באמת* יענה, ומרים
@@ -146,7 +158,19 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
                            #   תמלול (5 מצבי tx.state, תור מבוסס-sidecar ששורד restart, שתי
                            #   שפות/מודלים, fallback מודל, retention עמיד ל-stat שנכשל).
   test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
-  test_signal.py           # מד שדה: _signal_verdict, /api/signal (voice/acars/vdl2/satcom/off), /api/antenna/check.
+  test_signal.py           # מד שדה: _signal_verdict, /api/signal (voice/acars/vdl2/satcom/off), /api/antenna/check,
+                           #   תיוג הבסיס ב-LNA/מסנן (verdict_reason), בדיקה בקצה-הקדמי השמור.
+  test_rf_telemetry.py     # טלמטריית RF (PR 1 ב-docs/voice-rf-quality-plan.md): פענוח שורות AIRAM_RF,
+                           #   stream=start כראיה היחידה ל"אין עומס" (עוקב "עיוור" => לא ידוע), unknown_reason,
+                           #   עוקב journalctl (Popen מזויף — אף פעם לא אמיתי), /api/metrics.rf בכל המצבים,
+                           #   sidecar ‏.rf.json (חלון, כיסוי, שעה כפולה ב-DST, post_stats) ונסיעתו עם ההקלטה
+                           #   (★/retention/סשן/ZIP), sweep מול ★ מקביל (_STAR_LOCK), סדר sidecar⇒יומן בלולאה.
+  test_install_soapy.py    # install.sh שלב 3 סטטית: נעיצת SoapySDRPlay3, חתימת בנייה, סדר marker, ה-patch
+                           #   כ-unified diff תקין (INFO, ack נשמר, rate-limit); git apply אמיתי רק עם
+                           #   SOAPYSDRPLAY3_SRC.
+  test_rf_contract.py      # ★ חוזה חוצה-רכיבים: מחרוזות הפורמט נשלפות *מה-patch*, מרונדרות (עם/בלי
+                           #   [INFO]/[WARNING]/ANSI/זבל קודם) ומוזנות למפענח; marker install.sh==app.py;
+                           #   ExecStart ‏-F; שדות rf.* שה-UI קורא ⊆ מה שה-backend מחזיר.
   test_rflog.py            # רשם ניסוי RF: פענוח airband.conf, דגימה רק על כתיבה חדשה, start/mark/stop/
                            #   export, כיבוי אוטומטי, רישום בדיקת-אנטנה.
   test_experiment.py       # ניסוי כיול אוטומטי מקצה לקצה עם SDR מדומה (כולל שתי הפעולות הפיזיות),
@@ -167,6 +191,8 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   satcom-feasibility.md     # היתכנות ואפיון מצב SATCOM (מומש).
   antenna-calibration-experiment.md  # ניסוי: האם "בדוק אנטנה" מזהה ניתוק ב-VHF תחת AGC? מה ידוע
                             #   מהמקור (rtl_airband/SoapySDRPlay3), נוהל ליד נתב"ג, והחלטות לפי תוצאה.
+  voice-rf-quality-plan.md  # ★ איכות ההאזנה בקול: ממצאים מהמקור (LNA תקוע תחת AGC, חיווי עומס עיוור,
+                            #   היסט bin), החלטות ו-PR 1–5. PR 1 (v2.26.0) מומש — ממתין לאימות שטח.
   session-replay-design.md  # ★ תכנון "שחזור סשן" (מפה+אודיו על ציר זמן). שלבים 0–2 בוצעו
                             #   (buffer מתגלגל + POST /api/sessions) — ר' §11 למימוש שנותר (UI).
 
@@ -190,17 +216,18 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
 | `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain (`--sdrplay-gain=N` או ריק=AGC), bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain — `if_gain`, ו-`rf_gain` = מצב LNA 0–9 שחל **גם תחת AGC** מאז v2.26.0, squelch, `fm_notch` (bool, ברירת מחדל False; היעדרו מסמן state מלפני v2.26.0 ⇒ הגירת `rf_gain`, ר' §12), app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline` — `{noise, freq, ts, lna, fm_notch, agc}` מאז v2.26.0; בלי `lna`/`fm_notch` = מלפני v2.26.0 ⇒ `baseline_untagged`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
 | `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
 | `/var/lib/airam/satcom.jsonl` | היסטוריית SATCOM (שורדת restart, retention 5000) | _satcom_listener |
 | `/var/lib/airam/activity.jsonl` | יומן שידורים (retention 500) | _activity_watcher |
 | `/var/lib/airam/track.jsonl` | buffer מתגלגל של ADS-B ל-שחזור-סשן (90 דק', append גולמי + compaction נדיר — **לא** כתיבה-אטומית-על-כל-שורה, ר' §6) | adsb.py |
-| `/var/lib/airam/recordings/` | הקלטות MP3 (500 קבצים / 100MB) + sidecar תמלול `<file>.mp3.tx.json` | rtl_airband, נמחק ע"י app.py |
+| `/var/lib/airam/recordings/` | הקלטות MP3 (500 קבצים / 100MB) + sidecar תמלול `<file>.mp3.tx.json` + sidecar טלמטריית RF `<file>.mp3.rf.json` (קונפיג שרץ, עומס/IFGR בחלון השידור — `None` כשלא ידוע; `post_stats` = תמונת stats אחת *אחרי* סוף השידור, מקוננת בכוונה — לא ה-SNR של השידור; `start_precision_s`; נוסע עם ההקלטה דרך `_rec_sidecars`) | rtl_airband; sidecars ע"י app.py (`_activity_watcher`); נמחק ע"י app.py (`_sweep_recordings`, תחת `_STAR_LOCK`) |
 | `/var/lib/airam/recordings/saved/` | הקלטות **שמורות** (★) — **תת-תיקייה, לא רשימה בקובץ צד**. עד 100 קבצים / 100MB, פטורות לגמרי מ-`_sweep_recordings` (‏`glob("*.mp3")` אינו רקורסיבי — הפטור מגיע ב*אפס* שורות לוגיקה, ר' §5/§12) | app.py (`/api/recordings/star`) |
 | `/var/lib/airam/sessions/<id>/` | סשן שמור (שחזור-סשן שלב 2) — `meta.json` (אטומי), `track.jsonl.gz` (חתך `track.jsonl` בטווח), `clips/*.mp3` (הקלטות רלוונטיות — שמורה מ*עתיקה*, לא-שמורה מ*ועברת*). אין retention אוטומטי — מחיקה היא `DELETE /api/sessions/<id>` בלבד | app.py (`POST /api/sessions`) |
 | `/run/rtl_airband_stats.txt` | מדדי RF (tmpfs, ~1Hz) | rtl_airband |
+| `/usr/local/share/airam/soapysdrplay3.build-sig` | סימן-בנייה = **החוזה "יש טלמטריית RF"** (`SOAPY_RF_MARK`): קיים <=> SoapySDRPlay3 הנעוץ נבנה *עם* ה-patch המאומת. נמחק בתחילת כל בנייה מחדש | install.sh (שלב 3) |
 | `/var/lib/airam/rf_log.jsonl` | רשם ניסוי RF — שורה לכל כתיבה חדשה של המדדים + הקונפיג שרץ + סימוני משתמש + תוצאות בדיקת-אנטנה. **רק כשמופעל** (כבוי כברירת מחדל, כיבוי אוטומטי אחרי שעתיים); append+`fsync` (תוצאת ניסוי שדה); מעל 5MB בהפעלה ⇒ `.prev` | app.py (`/api/rflog`) |
 
 ---
@@ -209,14 +236,21 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 
 הקובץ מאורגן בבלוקים מסומנים `# --- ... ---`. נקודות עיקריות:
 
-- **קבועים (ל~145):** נתיבים, gain של SDRplay (IFGR 20–59 / RFGR 0–9, **קטן=רווח גדול**),
+- **קבועים (ל~145):** נתיבים, gain של SDRplay (IFGR 20–59 / RFGR 0–9, **קטן=רווח גדול**;
+  ⚠ `OVERLOAD_DBFS` **הוסר** ב-v2.26.0 — ר' §12),
   ספי squelch, קבועי ACARS, מילוני `ACARS_LABELS` ו-`_ACARS_DIR_BY_LABEL` (חלקם
   התווספו רק מקליטת שטח אמיתית — למשל `A0`/`1B`/`4P`/`2F`, לייבלים שנצפו
   בקליטת SATCOM ראשונה מוצלחת ולא היו מתועדים קודם; ר' §12), הקלטות, whisper.
 - **`_guard` (before_request):** אכיפת אבטחה לכל בקשה משנת-מצב — בדיקת `Origin==Host`
   (CSRF/DNS-rebind) + PIN אופציונלי. **כל route שמשנה מצב חייב לעבור דרכו.**
 - **בניית קונפיג קול:** `render_config` → `write_config` (כתיבה אטומית), `_squelch_line`
-  (מקור-אמת יחיד לשורת ה-squelch). תמיד ערוץ יחיד ממורכז (centerfreq מוסט ב-DC_OFFSET).
+  (מקור-אמת יחיד לשורת ה-squelch), `_device_string(agc, rf_gain, fm_notch)` (מקור-אמת יחיד
+  ל-`device_string`: `rfnotch_ctrl=<bool>` תמיד, `rfgain_sel=<rf_gain>` **רק תחת AGC** — ברווח
+  ידני ה-LNA הוא `RFGR` בשורת `gain`; ר' §12 *למה*, ו-docstring עם file:line מהמקור).
+  `fm_notch` (state, ברירת מחדל False) עובר בכל מסלול שכותב קונפיג קול (tune, `_enter_voice`,
+  `_rollback`, `_restore_after_probe`, boot/reconcile, רגלי סריקה, probe, ניסוי). `_parse_bool`
+  (‏`"false"` טקסטואלי ≠ True — משותף ל-`agc`/`fm_notch`). `_config_stale` מסמן גם קונפיג בלי
+  `rfnotch_ctrl` או AGC בלי `rfgain_sel` (שדרוג ⇒ `_boot_restore` משכתב). תמיד ערוץ יחיד ממורכז (centerfreq מוסט ב-DC_OFFSET).
 - **restart מאומת + רולבק:** `_restart_and_verify` בודק שה-SDR נוכח ושהשירות עלה;
   `_rollback` מחזיר לקונפיג קודם אם נכשל **ומאומת** (מחזיר bool; כישלון ⇒ `_fail_to_off`).
   כיוונון אחד בכל רגע (`TUNE_LOCK`).
@@ -416,6 +450,30 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   מחזיקה בו. ה-probe רץ **רק** כשאף צרכן שלנו לא במצב מחזיק (`active`/`activating`/…) ו-`TUNE_LOCK`
   פנוי, עם cache `SDR_PROBE_TTL_SEC`=10 ונעילה לא-חוסמת (בקשה מקבילה מקבלת את האחרון או
   `checking`); אחרי ה-probe בודקים שוב את הצרכנים — צרכן שעלה באמצע הוא "שלנו", לא זר.
+- **טלמטריית RF מהחומרה** (PR 1 ב-`docs/voice-rf-quality-plan.md`): `SOAPY_RF_MARK`/
+  `_rf_telemetry_available` (סימן-הבנייה של install.sh — ר' §4), `_rf_follower_loop` (thread
+  מ-`__main__`: `journalctl -f -u rtl_airband -o cat -n 0` **אחד** ארוך-חיים — `RF_JOURNAL_CMD`;
+  רדום בלי marker, backoff מעריכי, **לעולם לא מת**), `_rf_follow_once`, `_rf_handle_line`
+  (regex **לא מעוגן** — `[INFO] ` של SoapySDR), `_RF_START_RE`/`_rf_stream_start` (‏"AIRAM_RF
+  stream=start" — גבול הסשן **והראיה היחידה** שמעבירה `overload` מ-None ל-False; שורת האתחול של
+  rtl_airband **אינה** גבול — syslog, בלי הבטחת סדר מול ה-stderr, ר' §12), `_rf_session_reset`
+  (restart שאנחנו יוזמים — `_restart_and_verify`/`_rollback` — ⇒ None, **לא** False), `_rf` (מצב
+  תחת `_rf_lock`) + `_rf_events` (deque ‏`RF_EVENTS_MAX`; ‏`reset`/`start`/`follow`/`ovl`/`gain`),
+  `_rf_metrics` (‏`rf` ב-`/api/metrics`: `overload`/`ifgr`/`lna_grdb` = **None** כשאין marker / הקול
+  לא רץ / העוקב לא קורא / אין ראיה מהדרייבר — לעולם לא False מומצא) + `_rf_unknown_reason` (*למה*:
+  ‏`no_telemetry`/`voice_not_live`/`follower_down`/`joined_mid_session`/`no_driver_evidence`),
+  `_rf_window_summary` (טלמטריה בחלון שידור; None כשאין כיסוי רציף מלפני start או שהאירועים
+  נדחקו; עוגן `reset` ⇒ מצב-התחלה None, רק `start` ⇒ False; קצה `overload=0` בחלון ⇒ True).
+  **sidecar להקלטה:** `_build_rf_sidecar`/`_write_rf_sidecar` (idempotent, `_atomic_write`) מ-
+  `_write_rf_sidecars` ב-`_activity_watcher` *לפני* שורת היומן, תחת `_STAR_LOCK`; `_rec_start_ts`
+  (חלון: שם-הקובץ → mtime, מאומת מ-`output.cpp`; בשעה החוזרת של סוף שעון הקיץ מכריע לפי ה-mtime
+  ו-`REC_MAX_SPAN_SEC`, אחרת None), `_read_rf`, `_rec_sidecars` (= `_tx_sidecars` + `.rf.json` —
+  מקור-אמת יחיד ל-★/retention/סשן; ה-ZIP-ים כותבים אותו מפורשות). `_sweep_recordings` כולו תחת
+  `_STAR_LOCK` (מעבר-היתומים מחק קובצי-צד *באמצע* ★ — `_move_recording` מעביר אותם לפני ה-mp3). **בסיס מתויג:** `_baseline_tag`/
+  `_verdict_reason` (`no_reading`/`no_baseline`/`baseline_untagged`/`baseline_config_mismatch`;
+  ‏`manual_gain` ב-`api_signal`), `_probe_frontend` (בדיקת האנטנה והניסוי מודדים ב-LNA/מסנן
+  **השמורים של הקול**, לא בקבוע), `_conf_device_kwargs` (פענוח `device_string` — `_parse_airband_conf`
+  מחזיר גם `lna`/`fm_notch`; קונפיג ישן תחת AGC ⇒ lna=0, ברירת המחדל של ה-API).
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_sweep_recordings` (retention — **לא רואה `saved/` בכלל**, ר' למטה).
 - **הקלטות שמורות (★) + תמלול — שני פיצ'רים מחוברים:** הפטור מ-retention הוא
@@ -469,7 +527,8 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   `sdrplay.service` שההפעלה-מחדש הפנימית שלה, כקריסה עצמית ולא כ-restart job
   מפורש, לא בהכרח מופצת דרך `PartOf=` לצרכן שהיה פעיל; `off`/`scan`/`satcom`
   לא בטיפולו — scan יש לו thread ייעודי, satcom לא משוחזר אוטומטית בכוונה) +
-  threads (activity, acars, **vdl2**, **satcom**, transcribe, adsb),
+  threads (**rf follower** — לפני activity, כדי שה-sidecar הראשון יהיה מכוסה —, activity, acars,
+  **vdl2**, **satcom**, transcribe, adsb),
   `app.run(threaded=True)` — threaded **חובה** כי `/stream` הוא חיבור ארוך-טווח.
 
 ---
@@ -693,6 +752,27 @@ timeout (`NET_TIMEOUT_GET`=8s / `NET_TIMEOUT_POST`=45s — תואם את חסם 
 טווח, Pi שנתקע) הייתה מקפיאה פיד/כפתור בלי הגבלת זמן ובלי שום חיווי — בדיוק המצב
 שבו הדף נראה "תקין" בשטח כשהוא לא.
 
+**בקרת רווח הקול — LNA, מסנן FM, עומס חומרה (v2.26.0).** סליידר ה-LNA (`#rfGain`, תווית
+"LNA") **פעיל גם תחת AGC** — רק `#ifGain` מושבת (`renderGainUI`); סקאלת התצוגה נשארה "רווח"
+(ימינה = יותר, ערך = ‎9 − rf_gain, ה-LNA state הגולמי ב-tooltip) — **בכל מקום** שמוצג LNA (סליידר,
+שורת ה-RF, שורות היומן, הבסיס) אותה סקאלה `x/9` (`lnaStep`). `#fmNotch` מאותחל מ-`/api/state`
+**בטעינת הדף** דרך `applyGainState(st)` (לא בכניסה לתצוגת הקול — כל כיוונון, כולל "האזן
+למגדל", שולח `fm_notch`). `retune` ו-`towerTune` שולחים `rf_gain` תמיד ו-`...fmNotchField()` —
+‏`fm_notch` **רק** אחרי ש-`/api/state` אתחל את המתג (אחרת השרת שומר את הערך השמור). כיוונון
+שנכשל ⇒ `applyGainState(data.state)` (או `lastGainState` בכשל רשת) מיישר את המתג והסליידרים.
+⚠ סליידרי הרווח (`.gain-slider input[type=range]`) הם `direction: ltr` — בדף RTL טווח יורש rtl,
+כלומר *שמאלה* = רווח מרבי, בניגוד ל"ימינה = יותר"; ההוראות עצמן מנוסחות בלי כיוון ("הורד את
+ה-LNA"). `renderRfHw(m.rf)` (`#rfHw` + צ'יפ `#overload`) מציג **שלושה מצבים, לא שניים**:
+‏`rf.overload===true` אדום, `false` ירוק "(לפי החומרה)", `null` ניטרלי — עם הסיבה מ-
+`RF_UNKNOWN_TEXT[rf.unknown_reason]`; `telemetry===false` ⇒ "לא זמין — `sudo ./install.sh`";
+תגובה בלי `rf` (שרת ישן/כשל) ⇒ "לא ידוע". "ה-AGC בחר IFGR" רק בטווח ה-spec (`ifgrPlausible`,
+20–59), מחוצה לו "gRdB גולמי (לא מאומת)". מצויר גם כשה-stats לא טריים (העומס לא תלוי בהם).
+ביומן, `rfMetaNode(ev)` (`.act-rf`, מתחת לשורה) מציג מ-`ev.rf`: "LNA x/9 · AGC" רק כש-
+`config_known`, "⚠ עומס RF ×N"/"ללא עומס"/"עומס: ?" (גלוי — §12), ו-IFGR min–max; **לא**
+מציג את `post_stats` של ה-sidecar (תמונה ברגע הזיהוי, אחרי סוף השידור — ייחוס לישות
+הלא-נכונה). `renderExpResult` מציג גם את הקצה הקדמי של ריצת הניסוי (`r.lna`/`r.fm_notch`). מד השדה (`verdictInfo(v, reason)`) מסביר `baseline_config_mismatch`/
+`baseline_untagged`/`manual_gain`, ושורת הבסיס מציגה את ה-LNA/מסנן שבהם נמדד.
+
 **מד שדה מאוחד: `createFieldMeter(mode, prefix, opts)`.** פקטורי שני (לצד
 `createDataView`) לשלושה מופעים — `voiceFm` (`{compact:true}`, נספח ל-`#rfPanel`
 הקיים: רק בסיס/פסק-דין/כפתור כיול, כי המדדים הרציפים כבר שם), `acarsFm`, `vdl2Fm`
@@ -765,9 +845,9 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/<path>` | נכסים סטטיים |
 | GET | `/live.m3u` | playlist לנגן חיצוני |
 | GET | `/stream` | proxy same-origin ל-Icecast (נדרש כש-HTTPS, mixed-content) |
-| GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `scan_plan`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`) |
+| GET | `/api/state` | המצב הנוכחי (תדר, mod, gain — `agc`/`if_gain`/`rf_gain`, `fm_notch`, squelch, app_mode, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `scan_plan`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`). ה-UI מאתחל ממנו את בקרי הרווח ומתג ה-FM בטעינה (`applyGainState`) |
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
-| POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
+| POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. ‏`rf_gain` (מצב LNA 0–9) נקלט ונשמר **גם כש-`agc=true`**; ‏`fm_notch` (bool, עמיד ל-`"false"` טקסטואלי) — **לפי נוכחות המפתח**: חסר ⇒ נשאר כפי שנשמר (לקוח ישן/curl לא מכבה מסנן בשקט); `null` מפורש ⇒ כבוי. שאר השדות — החלפה מלאה (חסר ⇒ ברירת מחדל) |
 | POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית), `skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12), `spectrum` (bool אופציונלי — `false` לכיבוי האבחון, ר' §9/§12) ו-`gain` (‏`null`=AGC (ברירת מחדל) או מספר=gRdB ידני 20–59, נחתך; ר' §12). לכולם: ברירת מחדל = הבחירה השמורה. ⚠ ב-`gain` בלבד `null` הוא **ערך משמעותי** (AGC מפורש) ולא היעדר — הזיהוי הוא לפי נוכחות המפתח בגוף הבקשה. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
 | GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור) |
 | GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון; `?day=YYYY-MM-DD` ארכיון מהדיסק, snapshot סטטי) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט; לא ב-`?day=`). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
@@ -782,19 +862,19 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/aircraft` | רוסטר מטוסים מאוחד — היתוך ACARS+VDL2+SATCOM+ADS-B לפי זהות (רישום/icao/טיסה). חי בכל מצב |
 | GET | `/api/session` | דוח סשן ("מה קרה בזמן שלא הסתכלת"): כמות הודעות/מטוסים (וחדשים), עד `SESSION_HIGHLIGHTS_MAX` הודעות `notable` (ר' `_interest_score`), ומסלול פעיל/שיבוש GPS מתוך `adsb.session_series`. קורא מהדיסק (jsonl), לא מהזיכרון — עקבי עם `?day=`. `?since=<epoch>` דורס את הסמן השמור; `GET` idempotent — לא מקדם אותו |
 | POST | `/api/session/ack` | מקדם את הסמן (`state["last_session_view_at"]`) ל"עכשיו" — הפעולה המפורשת היחידה שמקדמת אותו. דרך `_guard` |
-| GET | `/api/signal` | מד שדה מאוחד למצב שרץ *בפועל* כרגע: רציף בקול (`_read_voice_metrics`), "הודעה אחרונה בלבד" ב-ACARS/VDL2 (`level`+`snr` — ACARS לעולם בלי `snr`, ר' §12), הפניה ל-`/api/satcom/health` ב-SATCOM. `verdict` (`ok`/`below_baseline`/`no_baseline`/`unknown`) תמיד מול `state["signal_baseline"]` בלבד — לעולם לא סף מומצא |
+| GET | `/api/signal` | מד שדה מאוחד למצב שרץ *בפועל* כרגע: רציף בקול (`_read_voice_metrics`), "הודעה אחרונה בלבד" ב-ACARS/VDL2 (`level`+`snr` — ACARS לעולם בלי `snr`, ר' §12), הפניה ל-`/api/satcom/health` ב-SATCOM. `verdict` (`ok`/`below_baseline`/`no_baseline`/`unknown`) תמיד מול `state["signal_baseline"]` בלבד — לעולם לא סף מומצא. `verdict_reason` מסביר `no_baseline`/`unknown` (`no_reading`/`no_baseline`/`baseline_untagged`/`baseline_config_mismatch`/`manual_gain`); בקול גם `frontend` (`{lna, fm_notch, agc}` שמולו הבסיס חייב להתאים) |
 | GET/POST | `/api/rflog` | רשם ניסוי RF: GET מצב (`active`/`until`/`rows`/`marks`/`size`); POST `{active}` הפעלה/עצירה (idempotent). דרך `_guard` (POST). ר' `docs/antenna-calibration-experiment.md` |
 | POST | `/api/rflog/mark` | `{label}` (עד 40 תווים) — סימון אירוע פיזי. **409 כשהרשם כבוי** (סימון שלא נרשם לא נראה כאילו נרשם). דרך `_guard` |
 | GET | `/api/rflog/export` | הורדת `rf_log.jsonl` (404 כשאין) |
 | GET/POST | `/api/experiment` | ניסוי כיול אוטומטי. GET: מצב (`running`/`step`/`step_index`/`steps_total`/`waiting`/`eta_sec`/`eta_prompt_sec`/`error`/`result`). POST `{action}`: `start` (409 כש-SATCOM חי/סריקה/`TUNE_LOCK` תפוס/כבר רץ), `confirm` (הפעולה הפיזית בוצעה; 409 כשאין בקשה ממתינה), `abort`. מחזיק את `TUNE_LOCK` לכל אורכו. דרך `_guard` (POST) |
-| POST | `/api/antenna/check` | בדיקת אנטנה בת ~3 שניות: מעבר זמני לקול (AGC, סקוולץ' פתוח) בתדר המבוקש, מדידת רצפת רעש אמיתית (`_sample_probe_stats`), וחזרה למצב הקודם (`_restore_after_probe`, גם בכישלון). `calibrate:true` שומר את התוצאה כ-`signal_baseline`. לא נוגע ב-`state["app_mode"]` — פעולת אבחון, לא מעבר-מצב. סריאלי תחת `TUNE_LOCK`; 409 כשתפוס |
-| GET | `/api/activity` | יומן שידורים. כל אירוע כולל `exists`, `starred`, ו-`tx` (‏`{state, text, err?, raw?, filtered?}` — ר' §12). `?starred=1` => רק ההקלטות המסומנות, **מ-`starred.json` ולא מהיומן** (שורדות את קיצוץ `ACTIVITY_KEEP`) |
+| POST | `/api/antenna/check` | בדיקת אנטנה בת ~3 שניות: מעבר זמני לקול (AGC, סקוולץ' פתוח) בתדר המבוקש, מדידת רצפת רעש אמיתית (`_sample_probe_stats`), וחזרה למצב הקודם (`_restore_after_probe`, גם בכישלון). מודדת ב-LNA/מסנן ה-FM **השמורים של הקול** (`_probe_frontend`) ומחזירה גם `lna`/`fm_notch`/`verdict_reason`. `calibrate:true` שומר את התוצאה כ-`signal_baseline` **מתויגת** (`{noise, freq, ts, lna, fm_notch, agc}`). לא נוגע ב-`state["app_mode"]` — פעולת אבחון, לא מעבר-מצב. סריאלי תחת `TUNE_LOCK`; 409 כשתפוס |
+| GET | `/api/activity` | יומן שידורים. כל אירוע כולל `exists`, `starred`, `tx` (‏`{state, text, err?, raw?, filtered?}` — ר' §12), ו-`rf` (תוכן ה-sidecar ‏`.rf.json`, נקרא חי; `null` = אין רשומה — הקלטה ישנה, לא "תקין"). גם קליפי `GET /api/sessions/<id>` מקבלים `rf`. `?starred=1` => רק ההקלטות המסומנות, **מתיקיית `saved/`** (‏`_rec_event` מהקובץ עצמו) ולא מהיומן (שורדות את קיצוץ `ACTIVITY_KEEP`) |
 | POST | `/api/recordings/star` | `{file, starred}` — שמירה/ביטול (★, מעביר ל/מ-`saved/`, `os.replace` אטומי תחת `_STAR_LOCK`). שמורה פטורה מ-retention. 409 כשהמכסה מלאה (**לא מוחקים שמורה ותיקה**), 404 כשההקלטה כבר לא קיימת. דרך `_guard` |
 | POST | `/api/recordings/transcribe` | `{file, lang?}` — תמלול שידור בודד לפי דרישה (כותב sidecar `state="pending"` — שורד restart, לא תור-בזיכרון). 501 עם פקודת ההתקנה כשwhisper/המודל לשפה חסר. דרך `_guard` |
 | GET | `/api/recordings/starred.zip` | ZIP של כל ההקלטות השמורות + תמלוליהן (`ZIP_STORED`, ללא דחיסה — MP3 כבר דחוס). 404 כשאין שמורות. הדרך להוציא את השמורות לפני מוות של כרטיס SD |
 | GET/POST | `/api/transcribe` | GET: מצב המנגנון (`available`/`model_name`/`lang`/`langs`/`auto`/`queue`/`install_hint`) — זה מה שמאפשר ל-UI לומר "לא מותקן, הנה הפקודה". POST `{auto?, lang?}`: מתג "תמלל הכול" ו/או שפת תמלול (שניהם ב-state). דרך `_guard` |
 | GET | `/recordings/<name>` | קובץ הקלטה MP3 — מחפש בתיקייה החיה ואז ב-`saved/` |
-| GET | `/api/metrics` | מדדי RF (SNR/signal/noise מ-stats_filepath) |
+| GET | `/api/metrics` | מדדי RF (SNR/signal/noise מ-stats_filepath) + `rf: {telemetry, overload, overload_events, last_overload_age, ifgr, lna_grdb, lna_state, fm_notch, agc, unknown_reason}` מטלמטריית החומרה. `overload` העליון = `rf.overload` (`true`/`false` מראיה חיובית מהדרייבר — `false` רק אחרי `stream=start` של הסשן — **`null` = לא ידוע**, ו-`unknown_reason` אומר למה). `overload_events` תמיד int — משמעותי רק כש-`overload !== null`. `overload_dbfs` **הוסר** |
 | GET | `/api/airspace` | מסלול פעיל + שיבוש GPS (מ-adsb.py) |
 | GET | `/api/replay/buffer` | מצב ה-buffer המתגלגל של ADS-B — `t_oldest`/`samples`/`gaps` (מ-`adsb.read_track_buffer`) + `clips_available` (יש הקלטה בתוך חלון הבאפר, נבדק כאן כי רק app.py מכיר את `REC_DIR`/`saved/`). שלב 1 ב-`docs/session-replay-design.md` |
 | GET/POST | `/api/sessions` | GET: רשימת סשנים שמורים (חדש→ישן). POST `{minutes, note?}`: שומר את N הדקות האחרונות (נחתך ל-`adsb.TRACK_BUFFER_MIN`) — מסלול ADS-B + הקלטות בחלון (שמורה מ*עתיקה*, לא-שמורה מ*ועברת*) ל-`sessions/<id>/`. שלב 2. דרך `_guard` (POST בלבד) |
@@ -859,7 +939,13 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 
 1. תלויות מערכת (Python/Flask, `libglib2.0-dev` ל-dumpvdl2 וכו'). 2. **SDRplay API**
 (הורדת `.run`, חילוץ והתקנה ללא אישור רישיון ידני — `SDRPLAY_VER` בראש הקובץ).
-3. בניית `SoapySDRPlay3`. 4. בניית `rtl_airband` (4b: `libacars` ≥2.1.0 + `acarsdec`
+3. בניית `SoapySDRPlay3` — **נעוץ** ל-`SOAPYSDRPLAY_COMMIT` (‏48bd8b4 = tag ‏`soapy-sdrplay3-AI-0.6.0`,
+נעוץ לפי SHA) + **`patches/soapysdrplay3-airam-rf.patch`** (`git apply --check && git apply`, ואז grep
+של ארבע מחרוזות החוזה). חתימת בנייה = sha256(commit + sha256 של ה-patch + דגלי cmake); דילוג רק
+כשהמודול נטען **וגם** ה-marker תואם. ה-marker (`/usr/local/share/airam/soapysdrplay3.build-sig`)
+נמחק בתחילת כל בנייה ונכתב **רק** אחרי patch מאומת + בנייה מוצלחת — patch שנכשל ⇒ בנייה בלעדיו,
+בלי marker (רדיו עובד, טלמטריה "לא זמינה"). clone לתיקייה זמנית ⇒ בלי רשת מקור/מודול קיים נשארים
+(ובלי מודול כלל — die). ‏`checkout -f` מנקה patch מריצה קודמת. 4. בניית `rtl_airband` (4b: `libacars` ≥2.1.0 + `acarsdec`
 ל-ACARS — הגייט בודק גם `command -v decode_acars_apps` (כלי ה-CLI הרשמי, מותקן
 ללא-תנאי ע"י `examples/CMakeLists.txt` של libacars) לצד `pkg-config`, כי
 `_decode_libacars_app` ב-`app.py` תלוי בו לפענוח SATCOM CPDLC/ADS-C בכיוון הנכון
@@ -1174,6 +1260,40 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   (supervisory, ACK ריקים, **GSIF squitters** שמשודרים כל כמה שניות), ושומר acars +
   x25-data (CPDLC/ADS-C) + xid. `_normalize_vdl2` עדיין סובל כל סוג פריים (הסינון קונפיג, לא הבטחה).
 - **gain של SDRplay הפוך:** ערך **קטן יותר = רווח גדול יותר** (IFGR/RFGR הן *הפחתות*).
+- **⚠ ה-AGC של SDRplay לא שולט ב-LNA — ועד v2.26.0 ה-LNA תחת AGC היה תקוע ברווח מרבי.**
+  ה-AGC של ה-API מזיז רק `gRdB` (IF) — אין שדה LNA ב-`sdrplay_api_AgcT`
+  (`sdrplay_api_control.h:36-45`). בלי שורת `gain` (מצב AGC) אף אחד לא כתב `LNAstate`, ולכן
+  הוא נשאר 0 (ברירת המחדל, `sdrplay_api_tuner.h:63`) — רוויה ב-LNA/ADC *לפני* ה-AGC, שאינה
+  הפיכה (ב-AM הדיבור *הוא* שינויי העוצמה). `RF_GAIN_DEFAULT=4` לא נאכף שם בכלל. עכשיו
+  `rfgain_sel` ב-`device_string` (ר' `_device_string` — כל קישור בשרשרת אומת מהמקור). **אל
+  תסיר אותו "כי AGC מטפל ברווח"** — AGC מטפל רק ב-IF. ⚠ 4 הוא הקבוע הקיים, **לא ערך מכויל** —
+  🩺 בדיקת ה-RF (PR 2) תכריע לכל מקום. ⚠ **הגירה ב-`load_state`:** state מלפני v2.26.0 (בלי
+  ‏`fm_notch`) תחת AGC ⇒ `rf_gain=RF_GAIN_DEFAULT` — הערך שנשמר שם היה ה-RFGR הידני האחרון,
+  חסר-השפעה תחת AGC עד אז; בלי ההגירה השדרוג היה מחיל אותו בשקט (עד RFGR=9).
+- **⚠ חיווי "עומס יתר" לפי ‎-3dBFS הוסר — ולמה לא להחזיר דומה לו.** `OVERLOAD_DBFS` השווה את
+  רמת *הערוץ* מה-stats לסף: אחרי ה-AGC, בתוך bin FFT אחד. הוא לא רואה את ה-ADC/LNA, ולכן שתק
+  בדיוק ברוויה שעיוותה את המגדל (ועלול היה להתריע בלי עומס). חיווי עומס בא **רק** מאירועי
+  החומרה (`AIRAM_RF`, ה-patch ל-SoapySDRPlay3). **לא ידוע ≠ תקין, גם כאן:** בלי marker, כשהקול
+  לא רץ, כשהעוקב לא קורא, כשהצטרף באמצע סשן, **או כשהסשן עוד לא שלח `stream=start`** —
+  `overload=None`, וה-UI אומר "לא ידוע" (עם הסיבה), לא ירוק. ⚠ **עוקב מחובר אינו ראיה**: גרסה
+  קודמת קבעה `False` ברגע שה-journalctl רץ, ועוקב "עיוור" (מודול לא-מתוקן שזכה ברישום, רמת log,
+  הרשאות יומן) היה מציג "אין עומס" ירוק לנצח. `False` רק אחרי `stream=start` — הוכחה בזמן ריצה
+  שהמודול המתוקן טעון ושה-log שלו מגיע (ה-marker מוכיח רק *בנייה*).
+- **⚠ שורות `AIRAM_RF` עוברות דרך journald של rtl_airband — שמור על הזרם נקי.** rtl_airband
+  רץ ב-`-F`, לא `-f`: ה-waterfall של `-f` כותב ל-stdout קודי ESC בלי `\n`, באותו זרם journald
+  כמו ה-stderr (‏`rtl_airband.cpp:657-667`), כך שהשורה הייתה נדבקת לגוש זבל. ה-patch רושם ב-
+  `SOAPY_SDR_INFO` (ב-WARNING ומעלה SoapySDR עוטף ב-ANSI, ו-`journalctl -o json` בלי `--all`
+  מציג `[blob data]`); `SOAPY_SDR_LOG_LEVEL` מעל INFO בסביבת השירות מעלים את הטלמטריה — ה-UI
+  יראה "לא ידוע — הדרייבר עוד לא אישר שהוא מדווח" (אין `stream=start`), לא "אין עומס" — אל
+  תגדיר אותו. **גבול הסשן הוא `stream=start` ולא שורת האתחול של rtl_airband:** האחרונה עוברת
+  ב-syslog (`do_syslog=1`, `rtl_airband.cpp:747,876-878`) ⇒ `/dev/log`, בעוד `AIRAM_RF` עוברות
+  ב-stderr ⇒ ה-stream socket; journald לא מבטיח סדר בין שני מקורות. ‏`stream=start` נרשמת
+  ב-`activateStream` לפני `sdrplay_api_Init` ⇒ באותו זרם ולפני כל אירוע של הסשן. המפענח משתמש
+  ב-`search` לא-מעוגן, ו-`tests/test_rf_contract.py` שולף את מחרוזות הפורמט מה-patch עצמו.
+- **בסיס מד השדה מתויג ב-LNA/מסנן — לא משווים בין קצוות-קדמיים.** רצפת הרעש ב-dBFS נמדדת אחרי
+  ה-LNA; בסיס מקונפיגורציה אחרת (או ישן, בלי תיוג) ⇒ `no_baseline` + `verdict_reason`, לעולם לא
+  השוואה. לכן הבדיקה/הניסוי מודדים ב-LNA/מסנן *השמורים של הקול* (`_probe_frontend`), ושינוי שלהם
+  מבטל את הבסיס בגלוי. אחרי שדרוג ל-v2.26.0 כל בסיס קיים דורש כיול מחדש.
 - **בידוד מקורות חיצוניים:** כל קריאת רשת (ADS-B, METAR) חייבת לרוץ ב-thread ולהיכשל
   חיננית — **הרדיו לעולם לא תלוי באינטרנט.**
 - **כתיבה אטומית + עמידה בניתוק חשמל** לקבצי קונפיג/state (`_atomic_write`) — אסור

@@ -1,0 +1,225 @@
+AIR-AM: טלמטריית RF מהחומרה ל-SoapySDRPlay3 (AIRAM_RF)
+
+נעוץ ל-commit ‏48bd8b41072534018de1d74deb3dea5874d9e0e0 של
+pothosware/SoapySDRPlay3 (ר' SOAPYSDRPLAY_COMMIT ב-install.sh). מוחל ע"י
+install.sh עם "git apply"; כשל החלה => בנייה בלי ה-patch ובלי סימן-בנייה
+(הטלמטריה מוצגת כ"לא זמינה" — לא כ"תקין").
+
+מה ה-patch עושה (Streaming.cpp, ותיקון UB אחד ב-Settings.cpp):
+  * activateStream, לפני sdrplay_api_Init => "AIRAM_RF stream=start"
+    (גבול-סשן באותו זרם stderr כמו שאר השורות + הוכחה שהמודול המתוקן
+    טעון ושה-log שלו מגיע; בלעדיה airam-web לא מציג "אין עומס")
+  * sdrplay_api_Overload_Detected  => "AIRAM_RF overload=1"
+  * sdrplay_api_Overload_Corrected => "AIRAM_RF overload=0"
+    (קריאות OverloadMsgAck של upstream נשמרות כמות שהן, לפני הרישום)
+  * sdrplay_api_GainChange => "AIRAM_RF gain grdb=<uint> lna_grdb=<uint>",
+    מוגבל-קצב (רק בשינוי, לכל היותר פעם בשנייה, הערך האחרון של פרץ
+    נרשם מ-readStream() כשהחלון נגמר).
+הכול ב-SOAPY_SDR_INFO (ברירת המחדל של SoapySDR; בלי קודי ANSI) ל-stderr
+=> journald של rtl_airband. airam-web מחפש את הטוקנים ב-regex לא-מעוגן.
+Settings.cpp: streamActive=false בתחילת הבנאי — לולאת ה-kwargs (שדרכה
+rfgain_sel/rfnotch_ctrl של AIR-AM מגיעים) קראה אותו לפני שאותחל (UB).
+
+נבדק: git apply --check + קומפילציה של כל קובצי ה-module (g++ -std=c++11)
+מול כותרות SDRplay API 3.15 ו-libsoapysdr-dev 0.8.1, ו-harness שמפעיל את
+ev_callback ו-activateStream-start ומאמת את הפלט ואת מגבלת הקצב.
+
+diff --git a/Settings.cpp b/Settings.cpp
+index 86f8b66..326c7e2 100644
+--- a/Settings.cpp
++++ b/Settings.cpp
+@@ -83,6 +83,14 @@ SoapySDRPlay::SoapySDRPlay(const SoapySDR::Kwargs &args)
+ {
+     if (args.count("serial") == 0) throw std::runtime_error("no available RSP devices found");
+ 
++    // AIR-AM: streamActive (std::atomic_bool, SoapySDRPlay.hpp:309) אינו מאותחל עד
++    // ההשמה בסוף הבנאי, אבל לולאת ה-kwargs למטה קוראת writeSetting — ו-rfgain_sel/
++    // rfnotch_ctrl (שהגיעו מה-device_string של AIR-AM) בודקים "if (streamActive)"
++    // (Settings.cpp:1630, 1778 ב-upstream). ב-C++11 (CMakeLists.txt:26) הבנאי של atomic משאיר ערך
++    // לא-מוגדר באובייקט מה-heap (Registration.cpp:179) => UB, ובזבל לא-אפס
++    // sdrplay_api_Update לפני Init. ההשמה המקורית למטה נשארת.
++    streamActive = false;
++
+     selectDevice(args.at("serial"),
+                  args.count("mode") ? args.at("mode") : "",
+                  args.count("antenna") ? args.at("antenna") : "");
+diff --git a/Streaming.cpp b/Streaming.cpp
+index 689c14c..3393492 100644
+--- a/Streaming.cpp
++++ b/Streaming.cpp
+@@ -26,6 +26,127 @@
+ 
+ #include "SoapySDRPlay.hpp"
+ #include <iostream>
++#include <chrono>
++
++/*******************************************************************
++ * AIR-AM: טלמטריית RF מהחומרה (AIRAM_RF) — patch מקומי של AIR-AM
++ *
++ * אירועי overload ו-GainChange של ה-API נבלעו כאן בלי שום פלט (הערות
++ * בלבד ב-ev_callback), כך שלא היה דרך לדעת על רוויה *לפני* ה-AGC. אנחנו
++ * רושמים אותם ל-log של SoapySDR (stderr => journald של rtl_airband), ו-
++ * airam-web קורא אותם משם (חיפוש regex לא-מעוגן — ייתכן prefix כמו
++ * "[INFO] ").
++ *
++ * רמה SOAPY_SDR_INFO בכוונה: זו ברירת המחדל של SoapySDR כשאין
++ * SOAPY_SDR_LOG_LEVEL (LoggerC.cpp:17 ב-soapy-sdr-0.8.1), ו-defaultLogHandler
++ * מדפיס "[INFO] %s\n" בלי קודי ANSI (LoggerC.cpp:63) — ב-WARNING השורה הייתה
++ * עטופה ב-ESC[1m/ESC[33m (LoggerC.cpp:61).
++ *
++ * GainChange מוגבל-קצב: rtl_airband קורא setGainMode(true) תחת AGC
++ * (input-soapysdr.cpp:247), ש-SoapySDRPlay3 ממפה ל-sdrplay_api_AGC_CTRL_EN
++ * (Settings.cpp:557; spec 3.15: "Latest AGC scheme", מוגדר ע"י attack_ms/
++ * decay_ms שנשארים 0 כאן) — *לא* ה-AGC_50HZ של ברירת-המחדל (ההערה "AGC: 50Hz"
++ * ב-Settings.cpp:98 מתארת אותו, לא את מה שרץ אצלנו). קצב ה-GainChange האמיתי
++ * תחתיו לא מתועד — לא ידוע עד שיימדד על ה-Pi. כדי שפרץ לא יציף את journald
++ * רושמים רק כשהערך השתנה, ולכל היותר פעם ב-AIRAM_RF_GAIN_MIN_INTERVAL. ערך שהגיע בתוך החלון נשמר כ"ממתין" ונרשם
++ * בהזדמנות הראשונה אחרי שהחלון נגמר — מ-GainChange הבא *או* מ-readStream()
++ * (נקרא ברציפות ע"י הצרכן), כך שהערך *האחרון* של פרץ (הערך שה-AGC
++ * התייצב עליו — החשוב ביותר) לא הולך לאיבוד גם כשאין אירוע נוסף. המחיר:
++ * עיכוב של עד AIRAM_RF_GAIN_MIN_INTERVAL בדיווח, וערכי-ביניים בתוך פרץ
++ * לא נרשמים. ה-flush רץ על ת'רד הצרכן (readStream) ולא על ת'רד ה-API
++ * (rx_callback), כדי שכתיבה איטית ל-journald לא תעכב את זרם הדגימות.
++ * overload לא מוגבל: כל מעבר הוא קצה-מצב, ואיבוד קצה היה משאיר מצב שגוי.
++ *
++ * מצב סטטי לתהליך (לא פר-מכשיר): AIR-AM פותח RSP1B יחיד בתהליך. ב-RSPduo
++ * dual-tuner שני הטיונרים היו חולקים את מגבלת הקצב.
++ ******************************************************************/
++namespace {
++
++const std::chrono::milliseconds AIRAM_RF_GAIN_MIN_INTERVAL(1000);
++
++std::mutex airam_rf_mutex;
++bool airam_rf_logged = false;          // נרשם ערך כלשהו כבר?
++unsigned int airam_rf_logged_grdb = 0;
++unsigned int airam_rf_logged_lna = 0;
++std::chrono::steady_clock::time_point airam_rf_last_log;
++bool airam_rf_pending = false;         // ערך שעוד לא נרשם (מוגן ע"י המנעול)
++unsigned int airam_rf_pending_grdb = 0;
++unsigned int airam_rf_pending_lna = 0;
++// מסלול מהיר ל-readStream: קריאה אטומית בלבד כשאין מה לרשום
++std::atomic<bool> airam_rf_pending_flag(false);
++
++// have_new=true: ערך חדש מ-GainChange (נועל תמיד).
++// have_new=false: ניסיון flush מ-readStream (try_lock — לעולם לא ממתין).
++void airam_rf_gain(bool have_new, unsigned int grdb, unsigned int lna_grdb)
++{
++    unsigned int out_grdb = 0, out_lna = 0;
++    {
++        std::unique_lock<std::mutex> lock(airam_rf_mutex, std::defer_lock);
++        if (have_new)
++        {
++            lock.lock();
++            airam_rf_pending = true;
++            airam_rf_pending_grdb = grdb;
++            airam_rf_pending_lna = lna_grdb;
++        }
++        else if (!lock.try_lock())
++        {
++            return;
++        }
++        if (!airam_rf_pending)
++        {
++            airam_rf_pending_flag = false;
++            return;
++        }
++        if (airam_rf_logged && airam_rf_pending_grdb == airam_rf_logged_grdb
++                && airam_rf_pending_lna == airam_rf_logged_lna)
++        {
++            // חזר לערך שכבר נרשם — אין מה לדווח
++            airam_rf_pending = false;
++            airam_rf_pending_flag = false;
++            return;
++        }
++        const auto now = std::chrono::steady_clock::now();
++        if (airam_rf_logged && now - airam_rf_last_log < AIRAM_RF_GAIN_MIN_INTERVAL)
++        {
++            airam_rf_pending_flag = true;   // יירשם כשהחלון ייגמר
++            return;
++        }
++        out_grdb = airam_rf_pending_grdb;
++        out_lna = airam_rf_pending_lna;
++        airam_rf_logged = true;
++        airam_rf_logged_grdb = out_grdb;
++        airam_rf_logged_lna = out_lna;
++        airam_rf_last_log = now;
++        airam_rf_pending = false;
++        airam_rf_pending_flag = false;
++    }
++    // הכתיבה מחוץ למנעול; שתי כתיבות רחוקות זו מזו לפחות חלון שלם, כך
++    // שאין סיכון מעשי לסדר הפוך בין שני הת'רדים.
++    SoapySDR_logf(SOAPY_SDR_INFO, "AIRAM_RF gain grdb=%u lna_grdb=%u", out_grdb, out_lna);
++}
++
++// גבול-סשן + הוכחת-חיים, נקרא מ-activateStream *לפני* sdrplay_api_Init.
++// למה כאן ולא רק שורת האתחול של rtl_airband: (1) זו הראיה היחידה שהמודול
++// *המתוקן* הוא זה שנטען, ושה-log שלו (stderr) באמת מגיע לעוקב ב-airam-web —
++// סימן-הבנייה מוכיח רק שה-patch נבנה; בלי השורה הזו airam-web לא מציג "אין
++// עומס" (§12: שקט אינו "אין עומס"). (2) אותו זרם בדיוק כמו שורות ה-overload
++// (stderr => stream socket של journald), כך שהסדר ביניהן נשמר; שורת האתחול
++// של rtl_airband עוברת ב-syslog (/dev/log) — מקור אחר, בלי הבטחת סדר מולו.
++// לפני Init: ev_callback נרשם רק ב-Init, ולכן שום אירוע של הסשן לא קודם לה.
++// מאפס גם את מגבלת-הקצב, כדי שערך ה-gain הראשון של הסשן תמיד יירשם.
++void airam_rf_stream_start()
++{
++    {
++        std::lock_guard<std::mutex> lock(airam_rf_mutex);
++        airam_rf_logged = false;
++        airam_rf_pending = false;
++        airam_rf_pending_flag = false;
++    }
++    SoapySDR_log(SOAPY_SDR_INFO, "AIRAM_RF stream=start");
++}
++
++} // namespace
+ 
+ std::vector<std::string> SoapySDRPlay::getStreamFormats(const int direction, const size_t channel) const
+ {
+@@ -160,6 +281,11 @@ void SoapySDRPlay::ev_callback(sdrplay_api_EventT eventId, sdrplay_api_TunerSele
+ {
+     if (eventId == sdrplay_api_GainChange)
+     {
++        // AIR-AM: ערכים גולמיים מ-sdrplay_api_GainCbParamT (sdrplay_api_callback.h:32-37).
++        // lna_grdb הוא הפחתת-הרווח של ה-LNA ב-dB — *לא* ה-LNA state (ר' ההערה למטה).
++        // לא מסננים טווח (ההערה "gRdB < 200" למטה היא מקור לא-מתועד ב-spec 3.15) —
++        // הצרכן מאמת.
++        airam_rf_gain(true, params->gainParams.gRdB, params->gainParams.lnaGRdB);
+         //Beware, lnaGRdB is really the LNA GR, NOT the LNA state !
+         //sdrplay_api_GainCbParamT gainParams = params->gainParams;
+         //unsigned int gRdB = gainParams.gRdB;
+@@ -177,11 +303,13 @@ void SoapySDRPlay::ev_callback(sdrplay_api_EventT eventId, sdrplay_api_TunerSele
+         {
+             sdrplay_api_Update(device.dev, device.tuner, sdrplay_api_Update_Ctrl_OverloadMsgAck, sdrplay_api_Update_Ext1_None);
+             // OVERLOAD DETECTED
++            SoapySDR_log(SOAPY_SDR_INFO, "AIRAM_RF overload=1");   // AIR-AM
+         }
+         else if (powerOverloadChangeType == sdrplay_api_Overload_Corrected)
+         {
+             sdrplay_api_Update(device.dev, device.tuner, sdrplay_api_Update_Ctrl_OverloadMsgAck, sdrplay_api_Update_Ext1_None);
+             // OVERLOAD CORRECTED
++            SoapySDR_log(SOAPY_SDR_INFO, "AIRAM_RF overload=0");   // AIR-AM
+         }
+     }
+     else if (eventId == sdrplay_api_DeviceRemoved)
+@@ -370,6 +498,8 @@ int SoapySDRPlay::activateStream(SoapySDR::Stream *stream,
+     deviceParams->devParams->mode = sdrplay_api_BULK;
+ #endif
+ 
++    airam_rf_stream_start();   // AIR-AM — ר' ההערה ליד הפונקציה
++
+     err = sdrplay_api_Init(device.dev, &cbFns, (void *)this);
+     if (err != sdrplay_api_Success)
+     {
+@@ -400,6 +530,12 @@ int SoapySDRPlay::readStream(SoapySDR::Stream *stream,
+                              long long &timeNs,
+                              const long timeoutUs)
+ {
++    // AIR-AM: flush של ערך gain ממתין (ר' airam_rf_gain) — קריאה אטומית בלבד ברוב הקריאות
++    if (airam_rf_pending_flag.load(std::memory_order_relaxed))
++    {
++        airam_rf_gain(false, 0, 0);
++    }
++
+     // the API requests us to wait until either the
+     // timeout is reached or the stream is activated
+     if (!streamActive)

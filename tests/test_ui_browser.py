@@ -478,7 +478,7 @@ def test_experiment_flow_prompt_confirm_and_results(page):
                     "drop": 2.5, "detects": False}],
         "atis": {"drop": 53.0, "gone": True},
         "after_disconnect": {"instant": -70.0, "after": -61.0, "rise": 9.0},
-        "stale_rows": 0, "stale_probes": 1,
+        "stale_rows": 0, "stale_probes": 1, "lna": 4, "fm_notch": True,
     }
 
     def status():
@@ -526,6 +526,11 @@ def test_experiment_flow_prompt_confirm_and_results(page):
     expect(res.locator(".exp-head")).to_contain_text("לא היה מזהה")
     expect(res.locator("table")).to_contain_text('אין נתב"ג בחלון')     # escaping תקין, לא שבור
     expect(res.locator(".exp-notes")).to_contain_text("קראו נתונים של התהליך הקודם")
+    # הקצה הקדמי של הריצה (LNA state 4 => 5/9) — ריצות בקצה-קדמי שונה אינן ברות-השוואה
+    notes = res.locator(".exp-notes")
+    expect(notes).to_contain_text("קצה קדמי בריצה")
+    expect(notes).to_contain_text("LNA 5/9")
+    expect(notes).to_contain_text("· מסנן FM")
     expect(page.locator("#expPillTxt")).to_have_text("הושלם")
 
 
@@ -557,3 +562,242 @@ def test_sdr_chip_reports_detected_busy_and_free(page):
     sdr.update(state="missing", usb=False, usb_desc=None, label=None)
     page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
     expect(chip).to_have_text("SDR לא מזוהה")
+
+
+# --- PR 1 (v2.26.0): שליטה ב-RF + חיווי עומס מהחומרה ---------------------------
+# ‏360px — רוחב הטלפון הצר שבו היו רגרסיות גלישה בעבר (ר' הערת .act-row ב-CSS).
+
+def _phone(page):
+    page.set_viewport_size({"width": 360, "height": 800})
+
+
+def _no_hscroll(page):
+    w = page.evaluate("document.documentElement.scrollWidth")
+    assert w <= 360, f"גלילה אופקית ב-360px: scrollWidth={w}"
+
+
+def test_lna_slider_enabled_under_agc_and_fm_notch_from_state(page):
+    """⚠ הממצא שהוביל ל-PR 1: הסליידר הושבת תחת AGC (`rfGain.disabled = auto`),
+    כך שהצירוף הנכון ליד שדה תעופה — AGC על ה-IF + LNA מופחת — היה חסום מהממשק.
+    כאן: AGC דלוק => IF מושבת אבל LNA פעיל; fm_notch מאותחל מ-/api/state בטעינה;
+    ושחרור הסליידר שולח rf_gain + fm_notch גם כש-agc דלוק."""
+    _phone(page)
+    sent = []
+
+    def tune(route, url):
+        sent.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True}))
+
+    st = {**_default_api()["/api/state"], "agc": True, "rf_gain": 6, "fm_notch": True}
+    _mount(page, overrides={"/api/state": st, "/api/tune": tune})
+    page.click("#modeSeg button[data-v=voice]")
+    expect(page.locator("#fmNotch")).to_be_checked()
+    expect(page.locator("#rfGain")).to_be_enabled()
+    expect(page.locator("#ifGain")).to_be_disabled()
+    expect(page.locator("#rfGainVal")).to_have_text("3/9")       # 9 − LNA state 6
+    _no_hscroll(page)
+
+    # שחרור הסליידר (change) => retune. state 6 => סליידר 3; מזיזים ל-2 => state 7.
+    page.evaluate("""() => { const r = document.getElementById('rfGain');
+                             r.value = 2; r.dispatchEvent(new Event('input'));
+                             r.dispatchEvent(new Event('change')); }""")
+    expect(page.locator("#rfGainVal")).to_have_text("2/9")
+    expect(page.locator("#status")).not_to_contain_text("מכוונן…", timeout=10000)
+    assert sent, "שחרור סליידר ה-LNA לא שלח /api/tune"
+    body = sent[-1]
+    assert body["agc"] is True
+    assert body["rf_gain"] == 7, body
+    assert body["fm_notch"] is True, body
+
+
+def test_fm_notch_unchecked_when_state_lacks_it(page):
+    """state ישן (לפני v2.26.0) בלי fm_notch => המתג כבוי (ולא "מאותחל" — כיוונון לא
+    ישלח fm_notch, והשרת ישמור את הערך השמור; ר' fmNotchField)."""
+    _phone(page)
+    _mount(page)
+    page.click("#modeSeg button[data-v=voice]")
+    expect(page.locator("#rfGain")).to_be_enabled()
+    expect(page.locator("#fmNotch")).not_to_be_checked()
+
+
+def test_rf_overload_from_hardware_and_unknown_states(page):
+    """חיווי העומס מגיע מ-rf (אירועי החומרה), לא מכלל ה-‎-3dBFS הישן.
+    §12: telemetry=false => "לא זמין" + פקודת התקנה; overload=null => "לא ידוע";
+    בשני המקרים הצ'יפ האדום מוסתר אבל אין שום טענת "תקין"."""
+    _phone(page)
+    rf = {"telemetry": True, "overload": True, "overload_events": 3,
+          "last_overload_age": 4.2, "ifgr": 43, "lna_grdb": 24, "lna_state": 4,
+          "fm_notch": False, "agc": True}
+    metrics = {"ok": True, "snr": 20.0, "signal": -30.0, "noise": -50.0, "fresh": True,
+               "overload": True, "rf": rf}
+
+    def handler(route, url):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(metrics))
+
+    _mount(page, overrides={"/api/metrics": handler})
+    page.click("#modeSeg button[data-v=voice]")
+    chip, line = page.locator("#overload"), page.locator("#rfHw")
+    expect(chip).to_be_visible()
+    expect(chip).to_contain_text("עומס RF")
+    expect(line).to_contain_text("עומס RF עכשיו")
+    expect(line).to_contain_text("IFGR 43 dB")
+    expect(line).to_contain_text("LNA 5/9")
+    expect(line).to_contain_text("עומסים: 3")
+    expect(line).to_have_class(re.compile(r"\bbad\b"))
+    _no_hscroll(page)
+
+    rf.update(overload=False, overload_events=0, last_overload_age=None)
+    expect(chip).to_be_hidden()
+    expect(line).to_contain_text("אין (לפי החומרה)")
+    expect(line).to_have_class(re.compile(r"\bok\b"))
+
+    # טלמטריה לא זמינה (הדרייבר בלי ה-patch): ניטרלי, עם הוראת התקנה
+    rf.update(telemetry=False, overload=None, ifgr=None, lna_grdb=None)
+    expect(line).to_contain_text("לא זמין")
+    expect(line.locator("code")).to_have_text("sudo ./install.sh")
+    expect(chip).to_be_hidden()
+    expect(line).not_to_have_class(re.compile(r"\bok\b"))
+
+    # טלמטריה קיימת אבל אין קריאה (הקול לא רץ / העוקב לא קורא) — לא ידוע, לא תקין
+    rf.update(telemetry=True, overload=None)
+    expect(line).to_contain_text("לא ידוע")
+    expect(line).not_to_contain_text("עומסים")
+    expect(line).not_to_have_class(re.compile(r"\bok\b"))
+
+    # ⚠ השדה העליון הישן overload=True בלי rf (שרת מלפני v2.26.0, כלל ה-‎-3dBFS)
+    # לא מדליק חיווי — אין לו בסיס בחומרה.
+    metrics.pop("rf")
+    expect(line).to_have_text("עומס RF: לא ידוע")
+    expect(chip).to_be_hidden()
+
+
+def test_activity_rows_show_rf_meta_at_360px(page):
+    """מטא RF לכל שורה מה-sidecar: ⚠ עומס ×N כשהחומרה דיווחה, "עומס: ?" כשלא
+    ידוע, ושום דבר כשאין sidecar בכלל. וה-LNA *רק* כשהקונפיג בזמן ההקלטה ידוע."""
+    _phone(page)
+    base = {"freq": 132.5, "dur": 4.0, "exists": True, "starred": False,
+            "tx": {"state": "none"}}
+    events = [
+        {**base, "ts": 1_700_000_300, "file": "a.mp3",
+         "rf": {"config_known": True, "lna_state": 4, "agc": True, "fm_notch": True,
+                "telemetry": True, "overload": True, "overload_events": 3,
+                "ifgr_min": 40, "ifgr_max": 48}},
+        {**base, "ts": 1_700_000_200, "file": "b.mp3",
+         "rf": {"config_known": False, "lna_state": None, "agc": None,
+                "telemetry": False, "overload": None, "overload_events": None}},
+        {**base, "ts": 1_700_000_100, "file": "c.mp3", "rf": None},
+    ]
+    _mount(page, overrides={"/api/activity": {"ok": True, "events": events}})
+    page.click("#modeSeg button[data-v=voice]")
+    items = page.locator("#activity .act-item")
+    expect(items).to_have_count(3)
+    first = items.nth(0).locator(".act-rf")
+    expect(first).to_contain_text("LNA 5/9")
+    expect(first).to_contain_text("מסנן FM")
+    expect(first).to_contain_text("⚠ עומס RF ×3")
+    expect(first).to_contain_text("IFGR 40–48")
+    second = items.nth(1).locator(".act-rf")
+    expect(second).to_contain_text("עומס: ?")
+    expect(second).not_to_contain_text("LNA")         # config_known=false => לא מנחשים
+    expect(items.nth(2).locator(".act-rf")).to_have_count(0)
+    _no_hscroll(page)
+
+
+def test_voice_field_meter_explains_baseline_config_mismatch(page):
+    """בסיס שנמדד ב-LNA/מסנן אחרים => no_baseline עם סיבה. הממשק חייב להסביר
+    *למה* (כייל מחדש), לא להציג "אין בסיס" כאילו מעולם לא כוילו."""
+    _phone(page)
+    sig = {"ok": True, "mode": "voice", "kind": "continuous", "fresh": True,
+           "signal": -30.0, "noise": -50.0, "snr": 20.0,
+           "baseline": {"noise": -52.0, "lna": 0, "fm_notch": False},
+           "verdict": "no_baseline", "verdict_reason": "baseline_config_mismatch"}
+    _mount(page, overrides={"/api/signal": sig})
+    page.click("#modeSeg button[data-v=voice]")
+    expect(page.locator("#voiceFmVerdict")).to_contain_text("הגדרת LNA/מסנן FM אחרת")
+    expect(page.locator("#voiceFmBaseline")).to_contain_text("LNA 9/9")
+
+
+# --- תיקוני ביקורת PR 1 -------------------------------------------------------
+
+def test_gain_sliders_right_means_more_gain(page):
+    """⚠ blocker מהביקורת: בדף dir=rtl טווח יורש rtl, כך ש*שמאלה* היה ערך 9 = רווח
+    מרבי — והוראת העומס "הזז LNA שמאלה" *העלתה* רווח. נגיעה בקצה הימני חייבת לתת
+    את הערך המרבי (יותר רווח), בקצה השמאלי — 0, בכל סליידרי הרווח."""
+    _phone(page)
+    st = {**_default_api()["/api/state"], "agc": False}          # IF פעיל רק ברווח ידני
+    _mount(page, overrides={"/api/state": st,
+                            "/api/tune": {"ok": True}})
+    page.click("#modeSeg button[data-v=voice]")
+    for sid, top in (("#rfGain", "9"), ("#ifGain", "39")):
+        el = page.locator(sid)
+        expect(el).to_be_enabled()
+        box = el.bounding_box()
+        el.click(position={"x": box["width"] - 2, "y": box["height"] / 2})
+        assert el.input_value() == top, (sid, "ימין")
+        el.click(position={"x": 2, "y": box["height"] / 2})
+        assert el.input_value() == "0", (sid, "שמאל")
+    assert page.evaluate("getComputedStyle(document.getElementById('satcomGain')).direction") == "ltr"
+
+
+def test_overload_advice_is_direction_free_and_unknown_reason_is_specific(page):
+    """הוראת העומס לא תלויה בכיוון ("הורד", לא "שמאלה"); "לא ידוע" אומר *למה*
+    (unknown_reason) ולא "ממתין לדרייבר" גנרי; gRdB מחוץ ל-20..59 לא מוצג כ"בחירת ה-AGC"."""
+    _phone(page)
+    rf = {"telemetry": True, "overload": True, "overload_events": 1, "last_overload_age": 2.0,
+          "ifgr": 43, "lna_grdb": 24, "lna_state": 4, "fm_notch": False, "agc": True,
+          "unknown_reason": None}
+    metrics = {"ok": True, "snr": 20.0, "signal": -30.0, "noise": -50.0, "fresh": True,
+               "overload": True, "rf": rf}
+    _mount(page, overrides={"/api/metrics": lambda route, url: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(metrics))})
+    page.click("#modeSeg button[data-v=voice]")
+    line = page.locator("#rfHw")
+    expect(line).to_contain_text("הורד את ה-LNA")
+    assert "שמאלה" not in line.inner_text()
+    assert "שמאלה" not in (page.locator("#overload").get_attribute("title") or "")
+    rf.update(overload=None, unknown_reason="joined_mid_session")
+    expect(line).to_contain_text("השרת הופעל מחדש באמצע הסשן")
+    expect(line).not_to_have_class(re.compile(r"\bok\b"))
+    rf.update(unknown_reason="no_driver_evidence", ifgr=250)
+    expect(line).to_contain_text("הדרייבר עוד לא אישר")
+    expect(line).to_contain_text("לא מאומת")
+    expect(line).not_to_contain_text("ה-AGC בחר")
+
+
+def test_failed_tune_resyncs_fm_toggle_from_server_state(page):
+    """כיוונון שנכשל (השרת חזר לקונפיג הקודם) => המתג חוזר למה שהשרת אומר, לא נשאר
+    "דלוק" בזמן ש-#rfHw (מה-state) אומר "כבוי"."""
+    _phone(page)
+    back = {**_default_api()["/api/state"], "fm_notch": False, "rf_gain": 4}
+
+    def tune(route, url):
+        route.fulfill(status=500, content_type="application/json",
+                      body=json.dumps({"ok": False, "error": "x", "state": back}))
+    _mount(page, overrides={"/api/tune": tune})
+    page.click("#modeSeg button[data-v=voice]")
+    expect(page.locator("#fmNotch")).not_to_be_checked()
+    page.click("label[for=fmNotch]")
+    expect(page.locator("#status")).to_contain_text("שגיאה")
+    expect(page.locator("#fmNotch")).not_to_be_checked()
+    expect(page.locator("#rfGainVal")).to_have_text("5/9")
+
+
+def test_tune_omits_fm_notch_when_state_never_loaded(page):
+    """/api/state נכשל בטעינה => המתג לא אותחל => לא שולחים fm_notch (השרת שומר את
+    הערך השמור) במקום לכבות בשקט מסנן שהמשתמש הדליק."""
+    _phone(page)
+    sent = []
+
+    def tune(route, url):
+        sent.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+
+    def state_fail(route, url):
+        route.abort()                                   # כשל רשת — הדף נשאר על ברירות המחדל
+    _mount(page, overrides={"/api/state": state_fail, "/api/tune": tune})
+    page.click("#modeSeg button[data-v=voice]")
+    page.evaluate("""() => { const r = document.getElementById('rfGain');
+                             r.value = 3; r.dispatchEvent(new Event('change')); }""")
+    expect(page.locator("#status")).not_to_contain_text("מכוונן…", timeout=10000)
+    assert sent and "fm_notch" not in sent[-1], sent

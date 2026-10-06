@@ -157,3 +157,40 @@ def test_satcom_health_poll_stays_guarded_but_allows_active_aiming():
     # SATCOM שנעצר/קרס בלי מעבר-תצוגה => הצליל לא ממשיך על הערך האחרון (§12)
     assert "renderAimIdle(" in body, \
         "כש-SATCOM לא פעיל והאודיו דלוק גם הפאנל וגם האוזן חייבים לומר 'אין מפענח' (renderAimIdle => aimAudio.dead())"
+
+
+def test_voice_tune_payloads_carry_lna_and_fm_notch():
+    """PR 1 (v2.26.0): ה-LNA חל גם תחת AGC. *כל* payload כיוונון קולי (tune ו-"האזן
+    למגדל") נושא rf_gain ו-fm_notch (השרת משלים fm_notch חסר מה-state, אבל מה
+    שהמשתמש רואה במתג הוא מה שנשלח — כשהמתג כבר אותחל מ-/api/state). וסליידר
+    ה-LNA לעולם לא מושבת לפי AGC (הממצא שהוביל ל-PR)."""
+    js = _inline_js()
+    assert '$("rfGain").disabled = auto' not in js, "סליידר ה-LNA חייב להישאר פעיל תחת AGC"
+    tune = re.search(r'apiSend\("POST", "/api/tune", \{(.*?)\}\);', js, re.S)
+    assert tune, "payload של /api/tune לא נמצא"
+    tower = re.search(r"const towerTune = \(\) => applyMode\(\"voice\", \{(.*?)\}\);", js, re.S)
+    assert tower, "towerTune לא נמצא"
+    for name, body in (("tune", tune.group(1)), ("towerTune", tower.group(1))):
+        assert "rf_gain: sliderToRFGR()" in body, f"{name} חייב לשלוח rf_gain"
+        assert "...fmNotchField()" in body, f"{name} חייב לשלוח fm_notch (דרך fmNotchField)"
+    # ‏fmNotchField שולח את המתג — אבל רק אחרי ש-/api/state אתחל אותו (applyGainState)
+    helper = re.search(r"const fmNotchField = \(\) => \((.*?)\);", js, re.S)
+    assert helper and 'fm_notch: $("fmNotch").checked' in helper.group(1)
+    assert "fmNotchReady ?" in helper.group(1)
+    init = re.search(r"function applyGainState\(st\) \{(.*?)\n    \}", js, re.S)
+    assert init and "fmNotchReady = true" in init.group(1)
+    # אתחול מה-state בטעינת הדף (לא בכניסה לתצוגת הקול) — הלקח של satcomExternalLna —
+    # ורק כשהשרת באמת החזיר bool (תשובת שגיאה לא "מאתחלת" את המתג ל-false)
+    assert '$("fmNotch").checked = st.fm_notch;' in init.group(1)
+    assert 'typeof st.fm_notch === "boolean"' in init.group(1)
+    boot = re.search(r'fetchJSON\("/api/state"\)\.then\(\(st\) => \{(.*?)\n    \}\)', js, re.S)
+    assert boot and "applyGainState(st);" in boot.group(1)
+
+
+def test_overload_ui_uses_hardware_rf_not_old_dbfs_rule():
+    """חיווי העומס הישן השווה את רמת הערוץ ל-‎-3dBFS (אחרי ה-AGC) — עיוור לרוויית
+    LNA/ADC. מעכשיו רק rf.overload מהחומרה, ו-null מוצג כלא-ידוע (§12)."""
+    js = _inline_js()
+    assert "overload_dbfs" not in js
+    assert "!m.overload" not in js, "השדה העליון הישן לא משמש עוד להדלקת החיווי"
+    assert '$("overload").hidden = over !== true' in js

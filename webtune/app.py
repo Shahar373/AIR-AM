@@ -53,13 +53,47 @@ DC_OFFSET = 0.3             # MHz - מזיזים את centerfreq מהתדר כד
 IFGR_MIN, IFGR_MAX = 20, 59
 RFGR_MIN, RFGR_MAX = 0, 9
 IF_GAIN_DEFAULT = 40            # IFGR - אמצע הטווח, בטוח מפני עומס יתר
-RF_GAIN_DEFAULT = 4            # RFGR - מצב LNA בינוני
-OVERLOAD_DBFS = -3.0          # סף "עומס יתר": אות ערוץ קרוב ל-full scale של ה-ADC
+# RFGR - מצב LNA בינוני. ⚠ עד v2.26.0 הקבוע הזה **לא נאכף במצב AGC** (בלי שורת
+# gain הדרייבר השאיר LNAstate=0 — רווח RF מקסימלי, ר' render_config). מאז
+# הוא נכתב גם תחת AGC (‎rfgain_sel ב-device_string) — docs/voice-rf-quality-plan.md §2.2/1.
+RF_GAIN_DEFAULT = 4
+# ⚠ הוסר: OVERLOAD_DBFS (‎-3dBFS על רמת *הערוץ* מה-stats). הערוץ נמדד אחרי
+# ה-AGC ובתוך bin אחד — הוא לא רואה את ה-ADC/LNA, ולכן שתק בעומס אמיתי
+# (docs/voice-rf-quality-plan.md §2.2/3). חיווי העומס מגיע עכשיו מאירועי
+# החומרה עצמם (‎AIRAM_RF, ר' "טלמטריית RF מהחומרה" למטה), או "לא ידוע".
 SQUELCH_MODES = {"auto", "open", "manual"}
 SNR_MIN, SNR_MAX = 0.0, 60.0   # dB - תחום clamp ל-SNR ידני
 SNR_DEFAULT = 9.0              # ≈ סף ה-auto הפנימי של rtl_airband (~9.54 dB)
 STATS_PATH = Path("/run/rtl_airband_stats.txt")   # tmpfs - בלי שחיקת SD
 STATS_MAX_AGE = 5.0            # rtl_airband כותב כל ~1 שנייה; ~5 כתיבות => סובל ג'יטר אך עדיין מזהה restart
+
+# --- טלמטריית RF מהחומרה (docs/voice-rf-quality-plan.md, PR 1 · 1.4/1.5) -------
+# SoapySDRPlay3 נבנה ע"י install.sh עם patch מקומי (patches/soapysdrplay3-airam-rf.patch)
+# שרושם את אירועי ה-API שה-upstream בולע (Streaming.cpp ev_callback — הערות
+# בלבד) ל-log של SoapySDR => stderr של rtl_airband => journald:
+#   "AIRAM_RF overload=1" / "AIRAM_RF overload=0"   (Overload_Detected/Corrected)
+#   "AIRAM_RF gain grdb=<uint> lna_grdb=<uint>"    (GainChange, מוגבל-קצב)
+# ⚠ lna_grdb הוא הפחתת-הרווח של ה-LNA ב-dB, *לא* מצב ה-LNA (0–9) — ההערה
+# "Beware, lnaGRdB is really the LNA GR, NOT the LNA state" ב-Streaming.cpp:163.
+# סימן-הבנייה נכתב ע"י install.sh *רק* כשה-patch הוחל ונבנה בהצלחה => קיום
+# הקובץ = "יש טלמטריה". בלעדיו כל שדה עומס מוצג כ"לא ידוע" (None), לעולם לא
+# כ"תקין" (§12) — בלי patch שום שורת AIRAM_RF לא תגיע, ושקט אינו "אין עומס".
+SOAPY_RF_MARK = Path("/usr/local/share/airam/soapysdrplay3.build-sig")
+# תהליך journalctl *אחד* ארוך-חיים (לא fork לכל בקשה כמו _journal_tail):
+# ‏-n 0 = רק שורות חדשות; -o cat = הודעה בלבד (בלי חותמת/מזהה) — הזמן נלקח
+# בצד שלנו ברגע הקריאה (השהיית journald זניחה מול חלון של שידור שלם).
+RF_JOURNAL_CMD = ["journalctl", "-f", "-u", "rtl_airband", "-o", "cat", "-n", "0", "--no-pager"]
+RF_JOURNAL_BACKOFF_MIN = 2.0       # journalctl יצא => המתנה לפני הפעלה מחדש (מוכפלת עד MAX)
+RF_JOURNAL_BACKOFF_MAX = 60.0
+RF_JOURNAL_HEALTHY_SEC = 60.0      # ריצה ארוכה מזה => ה-backoff מתאפס
+RF_BOOT_ATTACH_WAIT_SEC = 5.0     # _boot_restore ממתין עד כאן לעוקב לפני שמרים את rtl_airband (ר' _rf_follow_attached)
+RF_MARK_RECHECK_SEC = 60.0         # בלי סימן-בנייה: אין מה לקרוא; בודקים שוב מדי פעם (התקנה מאוחרת)
+# אירועי טלמטריה עם חותמת זמן — לחישוב חלון של הקלטה בודדת (sidecar ‏.rf.json).
+# ה-GainChange מוגבל ל-≤1/ש' ב-patch => 4096 אירועים ≥ ~68 דק' בקצב המרבי שלו —
+# הרבה מעבר לעיכוב הזיהוי של _activity_watcher (WATCH_INTERVAL). overload אינו
+# מוגבל (כל קצה-מצב נרשם); בסערת קצוות שדוחקת את תחילת חלון, _rf_window_summary
+# מחזיר None ("לא ידוע") ולא ספירה חלקית.
+RF_EVENTS_MAX = 4096
 
 # --- מד שדה מאוחד + בדיקת אנטנה (ר' docs/field-station-roadmap.md) ---------
 # ב-ACARS/VDL2 אין מד אות רציף כמו ב-קול (rtl_airband): acarsdec/dumpvdl2 לא
@@ -572,7 +606,14 @@ def load_presets():
     return [dict(p) for p in DEFAULT_PRESETS]
 
 DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
+                 # rf_gain = מצב ה-LNA של ה-RSP1B (0–9, קטן=רווח גדול) — חל **בשני**
+                 # המצבים: ב-AGC ה-AGC של ה-API שולט רק ב-gRdB (IF), כך שה-LNA הוא
+                 # בחירה שלנו גם שם (ר' render_config).
                  "if_gain": IF_GAIN_DEFAULT, "rf_gain": RF_GAIN_DEFAULT,
+                 # מסנן ה-FM (‎rfNotchEnable של ה-RSP1B). כבוי כברירת מחדל = ברירת
+                 # המחדל של ה-API (sdrplay_api_rsp1a.h:13) — אין עדיין מדידה שמצדיקה
+                 # אחרת (docs/voice-rf-quality-plan.md §3).
+                 "fm_notch": False,
                  "squelch_mode": "open", "squelch_snr": SNR_DEFAULT,  # ברירת מחדל ATIS => תמיד פתוח
                  # "voice" (rtl_airband) | "acars" (acarsdec) | "vdl2" (dumpvdl2) |
                  # "satcom" (inmarsat-sniffer) | "off" (standby).
@@ -633,7 +674,43 @@ def _squelch_line(squelch_mode, squelch_snr):
 
 
 # --- בניית קובץ ההגדרות ל-rtl_airband ------------------------------------
-def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT):
+def _device_string(agc, rf_gain, fm_notch):
+    """ה-device_string של SoapySDR — מקור-אמת יחיד (גם _parse_airband_conf/_config_stale
+    נשענים על הצורה שלו).
+    ⚠ למה מפתחות נוספים ב-device_string *מגיעים* לדרייבר (מאומת מהמקור, לא הנחה):
+      1. rtl_airband v5.2.0 מעביר את המחרוזת כמות שהיא ל-SoapySDRDevice_makeStrArgs —
+         ‏input-soapysdr.cpp:196 (בדיקת יכולות, ואז unmake) ו-:220 (הפתיחה האמיתית).
+      2. SoapySDR (Factory.cpp:154-157) ממזג את כל ה-kwargs של הקלט מעל תוצאת
+         ה-enumerate ‏(hybridArgs) ומעביר אותם ל-make של הדרייבר (:177). ה-find של
+         sdrplay מסנן רק לפי serial/mode (Registration.cpp:55,100) — מפתחות אחרים
+         לא מפילים את ההתאמה.
+      3. הבנאי של SoapySDRPlay3 (Settings.cpp:105-114) קורא writeSetting(key, value)
+         לכל kwarg שאינו driver/label/mode/serial/soapy — בכל אחת משתי הפתיחות של
+         rtl_airband, כך שגם המכשיר שבאמת מזרים מקבל אותם.
+      4. writeSetting: ‏"rfgain_sel" => tunerParams.gain.LNAstate (Settings.cpp:1628-1630,
+         תחת RF_GAIN_IN_MENU — ON כברירת מחדל ב-CMakeLists.txt:36); "rfnotch_ctrl" ל-RSP1B
+         => rsp1aParams.rfNotchEnable (Settings.cpp:1745-1748,1777-1783; "false"=>0, כל
+         ערך אחר=>1).
+    ⚠ ולמה ה-LNA לא נדרס אחר כך תחת AGC: LNAstate נכתב **רק** ב-writeSetting
+    (rfgain_sel) וב-setGain("RFGR") (Settings.cpp:597-601). rtl_airband קורא
+    setGainMode(agc) תמיד, אבל setGain/setGainElement **רק כש-AGC כבוי**
+    (input-soapysdr.cpp:247-270); setGainMode עצמו נוגע רק ב-agc.enable
+    (Settings.cpp:553-566). ה-AGC של ה-API פועל על gRdB בלבד — אין שדה LNA ב-
+    sdrplay_api_AgcT (sdrplay_api_control.h:36-45). ‏selectDevice() החוזר (מ-getSettingInfo)
+    בוחר מחדש רק כשמכשיר *אחר* נבחר באותו תהליך (Settings.cpp:2031-2038) — לא אצלנו
+    (RSP1B יחיד). לכן עד v2.26.0 (בלי rfgain_sel)
+    ה-AGC רץ עם LNAstate=0 של ברירת-המחדל (sdrplay_api_tuner.h:63) — רווח RF מרבי
+    ורוויה *לפני* ה-AGC (docs/voice-rf-quality-plan.md §2.2/1).
+    ⚠ ברווח ידני לא מוסיפים rfgain_sel: ה-LNA נקבע שם ע"י RFGR בשורת gain
+    (setGainElement אחרי הבנאי) — שני מקורות לאותו ערך היו מזמינים סתירה."""
+    parts = ["driver=sdrplay", f"rfnotch_ctrl={'true' if fm_notch else 'false'}"]
+    if agc:
+        parts.append(f"rfgain_sel={int(rf_gain)}")
+    return ",".join(parts)
+
+
+def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
+                  fm_notch=False):
     f = float(freq)
     lines = [
         "# נוצר אוטומטית ע\"י AIR-AM web tuner. שינויים ידניים נדרסים בכל כיוונון.",
@@ -643,7 +720,7 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
         "(",
         "  {",
         '    type = "soapysdr";',
-        '    device_string = "driver=sdrplay";',
+        f'    device_string = "{_device_string(agc, rf_gain, fm_notch)}";',
     ]
     if not agc:
         # רווח ידני => שני אלמנטים. הגדרת gain מבטלת אוטומטית את ה-AGC בדרייבר.
@@ -754,8 +831,10 @@ def _cleanup_orphan_tmp(dirs=None):
     return removed
 
 
-def write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT):
-    _atomic_write(CONFIG_PATH, render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr))
+def write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
+                 fm_notch=False):
+    _atomic_write(CONFIG_PATH, render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode,
+                                             squelch_snr, fm_notch=fm_notch))
 
 
 _state_corrupt_warned = False   # חד-פעמי לאירוע פגימה, לא לכל קריאה — ר' load_state
@@ -796,7 +875,17 @@ def load_state():
             _state_corrupt_warned = True
         return dict(DEFAULT_STATE)
     _state_corrupt_warned = False          # התאוששנו — אירוע פגימה עתידי יתועד שוב
-    return {**DEFAULT_STATE, **st}
+    merged = {**DEFAULT_STATE, **st}
+    # הגירה חד-פעמית (v2.26.0): עד v2.26.0 rf_gain היה *חסר-השפעה* תחת AGC (שום שורת
+    # LNA לא נכתבה, והסליידר היה מושבת) — אבל ה-UI שלח אותו בכל כיוונון, כך שב-state
+    # נשאר ערך ה-RFGR הידני האחרון. מאז rfgain_sel חל תחת AGC, ובלי הגירה _boot_restore
+    # (‏_config_stale) היה מחיל בשקט, למשל, RFGR=9 — הפחתת ה-LNA הגדולה ביותר — על מי
+    # שפעם הזיז את הסליידר ידנית וחזר ל-AGC. state מלפני v2.26.0 מזוהה בהיעדר
+    # המפתח fm_notch (כל save_state מאז כותב אותו — ר' DEFAULT_STATE), ולכן ההגירה
+    # נעלמת מעצמה בשמירה הראשונה. ברווח ידני rf_gain תמיד היה בתוקף => לא נוגעים.
+    if "fm_notch" not in st and _parse_bool(merged.get("agc", True), True):
+        merged["rf_gain"] = RF_GAIN_DEFAULT
+    return merged
 
 
 def _reset_state_corrupt_warned():
@@ -837,7 +926,13 @@ def _restart_and_verify():
     """מפעיל מחדש את rtl_airband ומוודא שנשאר חי.
     מחזיר (error, detail, sdr_down): ‏sdr_down=True כשה-restart נתקע על המתנה
     ל-SDR — במצב הזה גם רולבק נדון לאותו כישלון ואין טעם לנסות אותו.
-    ה-restart עצמו יכול לחסום עד ~30 שניות (airam-wait-sdrplay) כשה-SDR מנותק."""
+    ה-restart עצמו יכול לחסום עד ~30 שניות (airam-wait-sdrplay) כשה-SDR מנותק.
+    ⚠ נקודת-החנק של כל הפעלה של rtl_airband ש-AIR-AM יוזם (כיוונון, כניסה לקול,
+    סריקה, בדיקת אנטנה, ניסוי) — ולכן כאן מאפסים את מוני הטלמטריה של הסשן
+    (‏_rf_session_reset => "לא ידוע" עד שה-stream=start של התהליך החדש מגיע).
+    הפעלה שלא אנחנו יזמנו (Restart=always אחרי קריסה, PartOf של sdrplay) נתפסת
+    משורת ה-stream=start של התהליך החדש ביומן (ר' _RF_START_RE)."""
+    _rf_session_reset("restart")
     try:
         r = subprocess.run([*SUDO, "systemctl", "restart", "rtl_airband"],
                            capture_output=True, text=True, timeout=45)
@@ -868,7 +963,9 @@ def _rollback(prev):
     log.warning("rollback to %.3f MHz", prev["freq"])
     try:
         write_config(prev["freq"], prev["mod"], prev["agc"], prev["if_gain"],
-                     prev["rf_gain"], prev["squelch_mode"], prev["squelch_snr"])
+                     prev["rf_gain"], prev["squelch_mode"], prev["squelch_snr"],
+                     fm_notch=bool(prev.get("fm_notch", False)))
+        _rf_session_reset("rollback")   # הפעלה שנייה של rtl_airband — ר' _restart_and_verify
         subprocess.run([*SUDO, "systemctl", "restart", "rtl_airband"],
                        capture_output=True, text=True, timeout=45)
     except Exception:
@@ -2854,7 +2951,8 @@ def _enter_voice(params):
             except Exception:
                 pass
     write_config(params["freq"], params["mod"], params["agc"], params["if_gain"],
-                 params["rf_gain"], params["squelch_mode"], params["squelch_snr"])
+                 params["rf_gain"], params["squelch_mode"], params["squelch_snr"],
+                 fm_notch=bool(params.get("fm_notch", False)))
     return _restart_and_verify()
 
 
@@ -3627,6 +3725,150 @@ def _write_tx(mp3, state, text=None, err=None, lang=None):
     return rec
 
 
+# --- sidecar טלמטריית RF להקלטה (‎<file>.mp3.rf.json, PR 1 · 1.6) ------------
+# בשטח לא נשארו ראיות מהסשן (docs/voice-rf-quality-plan.md §1): ה-stats נדרסים
+# כל שנייה ואין היסטוריה. ה-sidecar מצמיד לכל שידור את מה שידוע עליו — הקונפיג
+# שרץ, טלמטריית החומרה בחלון השידור, ותמונת stats — ונוסע עם ההקלטה לכל מקום
+# שה-sidecar של התמלול נוסע (★, retention, סשן, ZIP — ר' _rec_sidecars).
+# ⚠ חלון השידור, מאומת ממקור rtl_airband v5.2.0 (output.cpp):
+#   start — חותמת שם הקובץ: strftime("_%Y%m%d_%H%M%S") של gettimeofday ברגע
+#           הפתיחה (:440, open_time :468), בזמן מקומי (localtime=true בקונפיג).
+#           דיוק שנייה, מעוגל *למטה* => start ≤ ההתחלה האמיתית.
+#   end   — mtime: הקובץ נסגר אחרי ≤0.5ש' שקט (:372), עם כתיבת ה-lametag בסגירה
+#           (:343) ו-rename מ-.tmp (:354, rename לא משנה mtime) => סוף השידור + ≤0.5ש'.
+_REC_TS_RE = re.compile(rf"^{re.escape(REC_BASENAME)}_(\d{{8}})_(\d{{6}})_\d+\.mp3$")
+# אורך מרבי של קובץ שידור: rtl_airband סוגר קובץ אחרי MAX_TRANSMISSION_TIME_SEC=3600
+# (output.cpp:371,385) + שנייה של עיגול-למטה של start (ר' למעלה). משמש *רק*
+# להכרעה בין שני ה-start האפשריים בשעה החוזרת של סוף שעון הקיץ (ר' _rec_start_ts)
+# — המועמד השגוי רחוק בדיוק שעה, ולכן ‎end−start שלו ‏<0 או ‏>3601 (קובץ נסגר רק
+# אחרי ‎>1ש' שידור, MIN_TRANSMISSION_TIME_SEC ‏:370).
+REC_MAX_SPAN_SEC = 3600.0 + 1.0
+# דיוק ה-start של חלון הטלמטריה (שנייה — חותמת שם הקובץ). אירועים ב-[start, start+1)
+# יכולים להיות זנב של השידור הקודם (שידורים צמודים) — נרשם ב-sidecar כדי שמי
+# שקורא אותו (ייצוא, סקריפט) יידע שהשיוך בשנייה הראשונה אינו חד.
+REC_START_PRECISION_SEC = 1
+
+
+def _rf_path(mp3):
+    """airam_....mp3 => airam_....mp3.rf.json."""
+    return mp3.parent / (mp3.name + ".rf.json")
+
+
+def _rec_sidecars(mp3):
+    """*כל* קובצי-הצד של הקלטה (תמלול חדש+ישן, טלמטריית RF) — מקור-אמת יחיד
+    להעברה (★/סשן), להעתקה (סשן של שמורה) ולמחיקה (retention)."""
+    return (*_tx_sidecars(mp3), _rf_path(mp3))
+
+
+def _read_rf(mp3):
+    """ה-sidecar כמילון, או None כשאין (הקלטה מלפני v2.26.0 / כתיבה שנכשלה) —
+    "אין רשומה", לא "תקין". עמיד לקובץ פגום (כמו _read_tx)."""
+    try:
+        d = json.loads(_rf_path(mp3).read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _rec_start_ts(name, end=None):
+    """epoch של תחילת השידור מתוך שם הקובץ (זמן מקומי), או None.
+    ⚠ בסוף שעון הקיץ שעה אחת חוזרת פעמיים (בישראל: 01:00–02:00 בלילה האחרון של
+    אוקטובר) — mktime עם tm_isdst=-1 בוחר אחת מהן *שרירותית*, ושעה מוקדמת מדי
+    הייתה מצמידה לשידור קצר ונקי שעה שלמה של טלמטריה זרה ("⚠ עומס ×N" של שידור
+    אחר — §12: ערך אמיתי לישות הלא-נכונה). לכן: כל המועמדים (base, ‎base±3600)
+    שמתפרשים חזרה לאותה מחרוזת זמן-מקומי הם תקפים; כשיש שניים, מכריעים לפי ה-mtime
+    (‏end) — רק מועמד עם ‎0 ≤ end−start ≤ REC_MAX_SPAN_SEC. אין הכרעה (אין end /
+    שניהם / אף אחד) => None ("לא ידוע"), לא ניחוש. ‎±3600: היסט ה-DST בישראל
+    (ובאזורים הנפוצים) — באזור עם היסט אחר הכפילות לא תזוהה ונופלים להתנהגות
+    mktime הרגילה."""
+    m = _REC_TS_RE.match(name)
+    if not m:
+        return None
+    stamp = m.group(1) + m.group(2)
+    try:
+        base = time.mktime(time.strptime(stamp, "%Y%m%d%H%M%S"))
+        valid = sorted(c for c in {base - 3600, base, base + 3600}
+                       if time.strftime("%Y%m%d%H%M%S", time.localtime(c)) == stamp)
+    except (ValueError, OverflowError, OSError):
+        return None
+    if len(valid) == 1:
+        return valid[0]
+    if len(valid) != 2 or end is None:
+        return None                      # אין מועמד תקף (TZ השתנה?) / אין במה להכריע
+    fits = [c for c in valid if 0 <= end - c <= REC_MAX_SPAN_SEC]
+    return fits[0] if len(fits) == 1 else None
+
+
+def _build_rf_sidecar(mp3, now=None):
+    """מה ידוע על השידור — כל שדה שאי אפשר לדעת נשאר None (§12):
+      * קונפיג (mod/agc/if_gain/lna_state/fm_notch) — מ-airband.conf *רק* אם הוא
+        נכתב לפני תחילת השידור ובאותו תדר; אחרת כוונן מחדש מאז => לא יודעים.
+        ‏if_gain=None תחת AGC (ה-IFGR המוגדר לא חל — ר' ifgr_min/max מהחומרה).
+      * post_stats {signal, noise, snr, t} — ⚠ **תמונת-מצב אחת ברגע הזיהוי**
+        (≤WATCH_INTERVAL אחרי סוף השידור), **לא של השידור**: ה-noise הוא רצפת הערוץ
+        אחרי השידור, וה-signal כנראה כבר לא של השידור עצמו. מקונן תחת שם מפורש (ולא
+        signal/snr ברמה העליונה ליד start/end) כי ה-sidecar יוצא כמות שהוא ב-ZIP —
+        קורא של ה-JSON היה לוקח את ‏snr כ-SNR של השידור (§12: ערך אמיתי לישות הלא-
+        נכונה). None כשלא נלקחה: השלמה אחרי restart, או stats לא טריים/תדר אחר.
+      * טלמטריית חומרה בחלון — _rf_window_summary, רק עם סימן-הבנייה. ‏start_precision_s:
+        דיוק ה-start (ר' REC_START_PRECISION_SEC)."""
+    now = time.time() if now is None else now
+    end = mp3.stat().st_mtime
+    start = _rec_start_ts(mp3.name, end)
+    freq = _rec_freq_mhz(mp3.name)
+    telemetry = _rf_telemetry_available()
+    rec = {"v": 1, "written_at": round(now, 1), "freq": freq,
+           "start": start, "end": round(end, 2),
+           "config_known": False, "mod": None, "agc": None, "if_gain": None,
+           "lna_state": None, "fm_notch": None,
+           "post_stats": None, "start_precision_s": REC_START_PRECISION_SEC,
+           "telemetry": telemetry, "telemetry_covered": False,
+           "overload": None, "overload_at_start": None, "overload_events": None,
+           "gain_events": None, "ifgr_at_start": None, "ifgr_min": None, "ifgr_max": None}
+    try:
+        cst = CONFIG_PATH.stat()
+        conf = _parse_airband_conf(CONFIG_PATH.read_text())
+    except OSError:
+        cst, conf = None, {}
+    if (cst is not None and start is not None and freq is not None
+            and cst.st_mtime <= start and conf.get("freq") is not None
+            and abs(conf["freq"] - freq) < 5e-4):
+        rec.update(config_known=True, mod=conf.get("mod"), agc=conf.get("agc"),
+                   if_gain=None if conf.get("agc") else conf.get("ifgr"),
+                   lna_state=conf.get("lna"), fm_notch=conf.get("fm_notch"))
+    if freq is not None and now - end <= WATCH_INTERVAL + STATS_MAX_AGE:
+        try:
+            smt = STATS_PATH.stat().st_mtime
+            text = STATS_PATH.read_text()
+        except OSError:
+            smt, text = None, ""
+        if smt is not None and now - smt <= STATS_MAX_AGE:
+            vals = parse_stats(text, f"{freq:.3f}")
+            sig = vals.get("channel_dbfs_signal_level")
+            noise = vals.get("channel_dbfs_noise_level")
+            if sig is not None or noise is not None:
+                rec["post_stats"] = {
+                    "signal": sig, "noise": noise, "t": round(smt, 2),
+                    "snr": round(sig - noise, 1) if (sig is not None and noise is not None) else None}
+    if telemetry and start is not None and start <= end:
+        summ = _rf_window_summary(start, end)
+        if summ is not None:
+            rec["telemetry_covered"] = True
+            rec.update(summ)
+    return rec
+
+
+def _write_rf_sidecar(mp3, now=None):
+    """כותב את ה-sidecar אם עוד אין (idempotent: סריקה חוזרת אחרי append שנכשל
+    לא דורסת רשומה שנכתבה ברגע הזיהוי המקורי). מחזיר את הרשומה או None."""
+    p = _rf_path(mp3)
+    if p.exists():
+        return None
+    rec = _build_rf_sidecar(mp3, now)
+    _atomic_write(p, json.dumps(rec, ensure_ascii=False))
+    return rec
+
+
 def _whisper_model(lang="en"):
     """נתיב המודל לשפה המבוקשת, או None אם אין מתאים.
     ⚠ עברית דורשת מודל **רב-לשוני**: `ggml-small.en` לא "פחות טוב" בעברית —
@@ -3879,11 +4121,20 @@ def _transcribe_worker():
 
 def _sweep_recordings():
     """retention: עד REC_MAX_FILES / REC_MAX_BYTES (חדש=>ישן), ו-.tmp נטושים
-    (שידור שנקטע בקריסה משאיר .tmp שלעולם לא ייסגר ל-mp3). קובצי-הצד של התמלול
-    נמחקים יחד עם ההקלטה שלהם.
+    (שידור שנקטע בקריסה משאיר .tmp שלעולם לא ייסגר ל-mp3). קובצי-הצד (תמלול,
+    טלמטריית RF — _rec_sidecars) נמחקים יחד עם ההקלטה שלהם.
     ⚠ הקלטות שמורות (★) לא מטופלות כאן **בכלל** — הן יושבות ב-`saved/`,
     ו-`glob("*.mp3")` אינו רקורסיבי. זה כל מנגנון הפטור: אין רשימה לקרוא,
-    אין מה לסנכרן, ואין מצב שבו קובץ פגום גורם למחיקת מה שהמשתמש שמר."""
+    אין מה לסנכרן, ואין מצב שבו קובץ פגום גורם למחיקת מה שהמשתמש שמר.
+    ⚠ כולו תחת `_STAR_LOCK`: ‏_move_recording (★/ביטול/שמירת סשן) מעביר קודם את
+    קובצי-הצד ואז את ה-mp3. מעבר יתומים שרץ *בין* שני ה-os.replace ראה sidecar
+    ב-saved/ בלי mp3 לידו ומחק אותו לצמיתות — בדיוק הקלטה שהמשתמש בחר לשמור, ו-
+    ‎.rf.json אינו בר-שחזור (אירועי החלון כבר נדחקו). אותה נעילה כמו _write_rf_sidecars."""
+    with _STAR_LOCK:
+        _sweep_recordings_locked()
+
+
+def _sweep_recordings_locked():
     def mtime(p):
         # ⚠ עמיד לכשל על פריט בודד: כשה-key היה `p.stat().st_mtime` והכול
         # עטוף ב-try/except חיצוני, symlink שבור/EACCES על קובץ אחד ביטל את
@@ -3903,7 +4154,7 @@ def _sweep_recordings():
             kept += 1
             if kept > REC_MAX_FILES or total > REC_MAX_BYTES:
                 p.unlink()
-                for s in _tx_sidecars(p):
+                for s in _rec_sidecars(p):
                     s.unlink(missing_ok=True)
         except OSError:
             pass
@@ -3919,7 +4170,7 @@ def _sweep_recordings():
     # הפונקציה הזו בדיוק לפני שהתמלול הספיק לכתוב; הלולאה למעלה מוחקת sidecar רק
     # יחד עם ה-.mp3 שעדיין ברשימה, ולא רואה קובץ שכבר נעדר ממנה.
     for d in (REC_DIR, _saved_dir()):
-        for pat, strip in (("*.txt", ".txt"), ("*.tx.json", ".tx.json")):
+        for pat, strip in (("*.txt", ".txt"), ("*.tx.json", ".tx.json"), ("*.rf.json", ".rf.json")):
             try:
                 orphans = list(d.glob(pat))
             except OSError:
@@ -3957,6 +4208,20 @@ def _scan_new_recordings(last_seen):
     return rows, newest
 
 
+def _write_rf_sidecars(rows):
+    """sidecar טלמטריה לכל הקלטה שזה עתה זוהתה — *לפני* שורת היומן, כך שהשורה
+    מופיעה כבר עם ה-rf שלה. כשל בקובץ בודד לא עוצר את היומן. תחת _STAR_LOCK:
+    ★ שמעביר את ההקלטה ל-saved/ באמצע היה משאיר את ה-sidecar יתום ב-REC_DIR."""
+    for r in rows:
+        try:
+            with _STAR_LOCK:
+                mp3 = _rec_path(str(r.get("file") or ""))
+                if mp3 is not None:
+                    _write_rf_sidecar(mp3)
+        except Exception:
+            log.warning("sidecar RF ל-%s נכשל", r.get("file"), exc_info=True)
+
+
 def _activity_watcher():
     """לולאת רקע: הקלטה חדשה שהסתיימה => שורה ביומן; ואז retention.
     בעלייה ממשיכים מה-ts האחרון שנרשם => הקלטות מהזמן שהשרת היה כבוי נקלטות."""
@@ -3965,6 +4230,7 @@ def _activity_watcher():
         try:
             rows, newest = _scan_new_recordings(last_seen)
             if rows:
+                _write_rf_sidecars(rows)
                 _append_activity(rows)
                 last_seen = newest   # מקדמים רק אחרי כתיבה מוצלחת => כישלון append לא מאבד אירועים
             _sweep_recordings()
@@ -3988,6 +4254,9 @@ def _decorate_event(ev):
         tx["running"] = (name == _tx_busy_file())   # "מתמלל" מול "ממתין בתור"
     ev["tx"] = tx
     ev["text"] = tx.get("text")
+    # טלמטריית RF של השידור — נקראת חי מה-sidecar (כמו tx); None = אין רשומה
+    # (הקלטה ישנה/נמחקה), לא "תקין".
+    ev["rf"] = _read_rf(mp3) if mp3 else None
     return ev
 
 
@@ -4047,7 +4316,7 @@ def _move_recording(src, dst_dir):
     """מעביר הקלטה + קובצי-הצד שלה. ⚠ `os.replace` אטומי בתוך אותו filesystem
     => אין רגע שבו הקובץ לא קיים באף צד, ואין מה לסנכרן עם רשומת-מצב."""
     dst_dir.mkdir(parents=True, exist_ok=True)
-    for s in _tx_sidecars(src):
+    for s in _rec_sidecars(src):
         if s.exists():
             try:
                 os.replace(s, dst_dir / s.name)
@@ -4181,6 +4450,12 @@ def api_starred_zip():
                 tx = _read_tx(p)
                 if tx.get("text"):
                     z.writestr(p.name + ".txt", tx["text"] + "\n")
+                rf = _rf_path(p)
+                if rf.is_file():
+                    try:
+                        z.write(rf, rf.name)      # טלמטריית RF של השידור (sidecar כמות שהוא)
+                    except OSError:
+                        pass
         tmp.close()
         resp = send_file(tmp.name, mimetype="application/zip", as_attachment=True,
                          download_name=f"airam-saved-{time.strftime('%Y%m%d')}.zip")
@@ -4270,19 +4545,22 @@ def api_sessions():
         if not (t_start <= mtime <= t_end):
             continue
         ev = _rec_event(p)
-        if _is_saved(p.name):
-            try:
-                shutil.copy2(p, clips_dir / p.name)
-                for s in _tx_sidecars(p):
-                    if s.exists():
-                        shutil.copy2(s, clips_dir / s.name)
-            except OSError:
-                continue
-        else:
-            try:
-                _move_recording(p, clips_dir)
-            except OSError:
-                continue
+        # תחת _STAR_LOCK: ★ מקביל או מעבר-יתומים של _sweep_recordings באמצע
+        # ההעברה/העתקה היו משאירים/מוחקים קובצי-צד (ר' _sweep_recordings)
+        with _STAR_LOCK:
+            if _is_saved(p.name):
+                try:
+                    shutil.copy2(p, clips_dir / p.name)
+                    for s in _rec_sidecars(p):
+                        if s.exists():
+                            shutil.copy2(s, clips_dir / s.name)
+                except OSError:
+                    continue
+            else:
+                try:
+                    _move_recording(p, clips_dir)
+                except OSError:
+                    continue
         clips.append(ev)
 
     aircraft = sorted({ac[0] for row in rows for ac in row.get("ac", [])})
@@ -4352,6 +4630,7 @@ def api_session_detail(session_id):
     for c in meta.get("clips") or []:
         if isinstance(c, dict) and c.get("file"):
             c["tx"] = _read_tx(clips_dir / c["file"])
+            c["rf"] = _read_rf(clips_dir / c["file"])
     return jsonify(ok=True, session=meta)
 
 
@@ -4404,6 +4683,12 @@ def api_session_export(session_id):
                         z.write(p, f"{SESSION_CLIPS_DIRNAME}/{p.name}")
                     except OSError:
                         continue
+                    rf = _rf_path(p)
+                    if rf.is_file():
+                        try:
+                            z.write(rf, f"{SESSION_CLIPS_DIRNAME}/{rf.name}")
+                        except OSError:
+                            pass
         tmp.close()
         resp = send_file(tmp.name, mimetype="application/zip", as_attachment=True,
                          download_name=f"airam-session-{session_id}.zip")
@@ -4457,6 +4742,288 @@ def api_metar():
     return jsonify(ok=True, metar=text, age=age)
 
 
+# --- טלמטריית RF מהחומרה: עוקב journalctl יחיד (ר' SOAPY_RF_MARK) ------------
+# ⚠ regex *לא מעוגן* (search): ה-defaultLogHandler של SoapySDR מקדים "[INFO] "
+# (LoggerC.cpp:63 ב-SoapySDR 0.8.1) ורמה אחרת הייתה עוטפת בקודי ANSI (:61).
+_RF_OVERLOAD_RE = re.compile(r"AIRAM_RF overload=([01])(?!\d)")
+_RF_GAIN_RE = re.compile(r"AIRAM_RF gain grdb=(\d+) lna_grdb=(\d+)")
+# גבול-סשן *והוכחת-חיים*: ה-patch רושם אותה ב-activateStream, לפני sdrplay_api_Init
+# (ולכן לפני כל אירוע overload של הסשן — ev_callback נרשם רק ב-Init). זו הראיה
+# היחידה בזמן ריצה שהמודול *המתוקן* נטען ושה-log שלו מגיע לעוקב — סימן-הבנייה
+# מוכיח רק בנייה. בלעדיה overload נשאר None ("לא ידוע"), לעולם לא False: מודול
+# לא-מתוקן שזכה ברישום, SOAPY_SDR_LOG_LEVEL מעל INFO, airam בלי הרשאת יומן — כולם
+# "עוקב מחובר ושקט", ושקט אינו "אין עומס" (§12).
+# ⚠ למה לא שורת האתחול של rtl_airband ("SoapySDR: device '..' initialized",
+# input-soapysdr.cpp:272) כגבול, כפי שהיה: היא נרשמת דרך syslog (do_syslog=1
+# כברירת מחדל, rtl_airband.cpp:747,876-878 — ה-unit לא מעביר ‎-e) => /dev/log,
+# בעוד שורות AIRAM_RF הן fprintf(stderr) של SoapySDR (LoggerC.cpp:63) => ה-stream
+# socket של ה-unit. journald לא מבטיח סדר בין שני מקורות, ותחת עומס (אתחול) שורת
+# אתחול מאוחרת הייתה מאפסת "עומס" אמיתי שכבר נקלט. stream=start עוברת באותו זרם
+# בדיוק כמו שורות ה-overload, כך שהסדר ביניהן נשמר.
+_RF_START_RE = re.compile(r"AIRAM_RF stream=start(?!\w)")
+
+_rf_lock = threading.Lock()
+# ‏follower_since: מתי journalctl הנוכחי התחיל לקרוא (None = לא קוראים כרגע).
+# ‏overload: True/False רק מראיה חיובית מהדרייבר (stream=start של הסשן, או קצה-
+# מצב overload=1/0) — None כשהעוקב לא רץ, הצטרף באמצע סשן (‎-n 0 => אירועים
+# שקדמו לו לא נראו), או שסשן חדש עוד לא אישר שהוא מדווח.
+# ‏session_start: הגבול האחרון (reset שלנו או stream=start) — להבחנה בין "הצטרפנו
+# באמצע" ל"סשן חדש שעוד לא אישר" ב-unknown_reason.
+_rf = {"follower_since": None, "session_start": None, "overload": None,
+       "overload_events": 0, "last_overload_t": None, "ifgr": None, "lna_grdb": None}
+# אירועים עם חותמת זמן (לחלון של הקלטה בודדת — _rf_window_summary). כולל גם
+# אירועי מחזור-חיים (reset/follow) כדי שאפשר יהיה לשחזר את המצב בתחילת חלון.
+_rf_events = collections.deque(maxlen=RF_EVENTS_MAX)
+# נקבע כשה-journalctl של העוקב כבר רץ. ‏-n 0 => מה שנכתב ליומן *לפני* שהוא עלה לא
+# ייראה לעולם, ובראשם "AIRAM_RF stream=start" — הראיה היחידה ל"אין עומס". בלי
+# ההמתנה הזאת _boot_restore (שעלה ראשון) היה מרים את rtl_airband לפני שהעוקב
+# מחובר, והסשן הראשון אחרי אתחול היה נשאר "לא ידוע" עד הכיוונון הבא.
+_rf_follow_attached = threading.Event()
+
+
+def _rf_telemetry_available():
+    """יש טלמטריית חומרה <=> install.sh בנה את SoapySDRPlay3 עם ה-patch (ר' SOAPY_RF_MARK)."""
+    try:
+        return SOAPY_RF_MARK.is_file()
+    except OSError:
+        return False
+
+
+def _rf_session_reset(reason, now=None):
+    """AIR-AM עומד להפעיל את rtl_airband מחדש: מאפסים מונים ו-overload=None — **לא**
+    False. עוקב מחובר אינו ראיה שהוא רואה משהו (מודול לא-מתוקן, רמת log, הרשאות —
+    ר' _RF_START_RE); False מגיע רק משורת stream=start של התהליך החדש (§12)."""
+    now = time.time() if now is None else now
+    with _rf_lock:
+        following = _rf["follower_since"] is not None
+        _rf.update(session_start=now, overload=None,
+                   overload_events=0, last_overload_t=None, ifgr=None, lna_grdb=None)
+        _rf_events.append({"t": now, "ev": "reset", "following": following, "reason": reason})
+
+
+def _rf_stream_start(now):
+    """שורת "AIRAM_RF stream=start" — סשן חדש *והדרייבר הוכיח שהוא מדווח*: מכאן
+    "לא ראינו Overload_Detected" באמת אומר "אין עומס" (ה-Detected הבא יגיע באותו
+    זרם, אחרי השורה הזו)."""
+    with _rf_lock:
+        _rf.update(session_start=now, overload=False,
+                   overload_events=0, last_overload_t=None, ifgr=None, lna_grdb=None)
+        _rf_events.append({"t": now, "ev": "start"})
+
+
+def _rf_handle_line(line, now=None):
+    """שורה אחת מהיומן => עדכון מצב הטלמטריה. מחזיר את סוג השורה
+    ("start"/"overload"/"gain"/None) — לבדיקות. לעולם לא זורק על תוכן שורה.
+    קצה overload=1/0 הוא בעצמו ראיה חיובית למצב הנוכחי (גם אחרי הצטרפות באמצע)."""
+    now = time.time() if now is None else now
+    if "AIRAM_RF" in line:
+        if _RF_START_RE.search(line):
+            _rf_stream_start(now)
+            return "start"
+        m = _RF_OVERLOAD_RE.search(line)
+        if m:
+            on = m.group(1) == "1"
+            with _rf_lock:
+                _rf["overload"] = on
+                if on:
+                    _rf["overload_events"] += 1
+                    _rf["last_overload_t"] = now
+                _rf_events.append({"t": now, "ev": "ovl", "on": on})
+            return "overload"
+        m = _RF_GAIN_RE.search(line)
+        if m:
+            # ערכים גולמיים מה-API — בלי סינון טווח: ה-spec (3.15) לא מגדיר טווח
+            # ל-gRdB של GainChange, ולכן מסנן כאן היה סף מומצא (§12).
+            grdb, lna_grdb = int(m.group(1)), int(m.group(2))
+            with _rf_lock:
+                _rf["ifgr"], _rf["lna_grdb"] = grdb, lna_grdb
+                _rf_events.append({"t": now, "ev": "gain", "grdb": grdb, "lna_grdb": lna_grdb})
+            return "gain"
+    return None
+
+
+def _rf_follow_once(popen=None):
+    """הרצה אחת של journalctl -f עד שהוא יוצא. מחזיר כמה שניות רץ.
+    ⚠ ‏stdin/stderr ל-DEVNULL: stderr לא נקרא, ובלי זה buffer מלא היה תוקע את
+    journalctl. כל חריגה בפענוח שורה נבלעת — שורה רעה אחת לא מפילה את העוקב."""
+    popen = popen or subprocess.Popen
+    proc = popen(RF_JOURNAL_CMD, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                 stderr=subprocess.DEVNULL, text=True, bufsize=1, errors="replace")
+    started = time.time()
+    with _rf_lock:
+        # הצטרפות באמצע סשן: ‏-n 0 => מה שקרה לפני עכשיו לא נראה => לא יודעים
+        _rf.update(follower_since=started, overload=None, ifgr=None, lna_grdb=None)
+        _rf_events.append({"t": started, "ev": "follow", "up": True})
+    _rf_follow_attached.set()
+    try:
+        for line in proc.stdout:
+            try:
+                _rf_handle_line(line)
+            except Exception:
+                log.debug("טלמטריית RF: שורה לא פוענחה", exc_info=True)
+    finally:
+        now = time.time()
+        with _rf_lock:
+            _rf.update(follower_since=None, overload=None)
+            _rf_events.append({"t": now, "ev": "follow", "up": False})
+        _rf_follow_attached.clear()
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+    return now - started
+
+
+def _rf_follower_loop(stop_evt=None):
+    """thread רקע (מ-__main__): עוקב יחיד אחרי היומן של rtl_airband. journalctl
+    שיצא (journald הופעל מחדש, נהרג) מופעל שוב עם backoff מעריכי; ריצה תקינה
+    ארוכה מאפסת אותו. **לעולם לא מת** — כמו _transcribe_worker: גם סימן-בנייה
+    שמופיע מאוחר יותר (התקנה בזמן ריצה) נתפס בלי restart."""
+    stop_evt = stop_evt or threading.Event()
+    backoff = RF_JOURNAL_BACKOFF_MIN
+    warned = False
+    while not stop_evt.is_set():
+        if not _rf_telemetry_available():
+            stop_evt.wait(RF_MARK_RECHECK_SEC)
+            continue
+        ran = 0.0
+        try:
+            ran = _rf_follow_once()
+            warned = False
+        except Exception as e:                    # אין journalctl / אין הרשאה וכו'
+            if not warned:
+                log.warning("טלמטריית RF: הפעלת journalctl נכשלה (%s) — ננסה שוב", e)
+                warned = True
+        if ran >= RF_JOURNAL_HEALTHY_SEC:
+            backoff = RF_JOURNAL_BACKOFF_MIN
+        stop_evt.wait(backoff)
+        backoff = min(backoff * 2, RF_JOURNAL_BACKOFF_MAX)
+
+
+def _rf_unknown_reason(telemetry, voice_live, snap):
+    """*למה* overload לא ידוע (None כשהוא ידוע) — כדי שה-UI יאמר את הסיבה האמיתית
+    ולא "ממתין לדרייבר" לכל מקרה (§12: פיצ'ר שלא יודע לומר למה הוא כבוי):
+      no_telemetry       — הדרייבר נבנה בלי ה-patch (אין סימן-בנייה).
+      voice_not_live     — rtl_airband לא רץ (standby/מצב אחר/נכשל).
+      follower_down      — journalctl לא קורא כרגע (ר' _rf_follower_loop).
+      joined_mid_session — העוקב התחיל אחרי תחילת הסשן הנוכחי (למשל airam-web
+                           הופעל מחדש בזמן שהקול רץ) ועוד לא הגיע קצה-מצב;
+                           כוונון מחדש יפתח סשן עם stream=start.
+      no_driver_evidence — סשן שהתחיל בזמן שהעוקב קרא, ושורת stream=start שלו לא
+                           הגיעה: רגעי מיד אחרי כוונון; מתמשך => הדרייבר לא מדווח."""
+    if not telemetry:
+        return "no_telemetry"
+    if not voice_live:
+        return "voice_not_live"
+    if snap["follower_since"] is None:
+        return "follower_down"
+    if snap["overload"] is not None:
+        return None
+    ss = snap["session_start"]
+    if ss is None or ss < snap["follower_since"]:
+        return "joined_mid_session"
+    return "no_driver_evidence"
+
+
+def _rf_metrics(voice_live, st):
+    """אובייקט "rf" ל-/api/metrics (חוזה PR 1, פריט 5). ‏overload/ifgr/lna_grdb
+    הם None ("לא ידוע") כשאין טלמטריה, כשהקול לא רץ, או כשהעוקב לא קורא — לעולם
+    לא False מומצא; ‏unknown_reason אומר למה (ר' _rf_unknown_reason). ‏overload_events
+    תמיד int (חוזה) — משמעותי רק כש-overload אינו None.
+    ‏lna_state/fm_notch/agc — הקונפיגורציה המבוקשת (state), לא מדידה."""
+    telemetry = _rf_telemetry_available()
+    now = time.time()
+    with _rf_lock:
+        snap = dict(_rf)
+    known = telemetry and voice_live and snap["follower_since"] is not None
+    last = snap["last_overload_t"]
+    try:
+        lna_state = int(st.get("rf_gain", RF_GAIN_DEFAULT))
+    except (TypeError, ValueError):
+        lna_state = RF_GAIN_DEFAULT
+    return {"telemetry": telemetry,
+            "overload": snap["overload"] if known else None,
+            "overload_events": snap["overload_events"] if known else 0,
+            "last_overload_age": round(now - last, 1) if (known and last is not None) else None,
+            "ifgr": snap["ifgr"] if known else None,
+            "lna_grdb": snap["lna_grdb"] if known else None,
+            "lna_state": lna_state,
+            "fm_notch": bool(st.get("fm_notch", False)),
+            "agc": bool(st.get("agc", True)),
+            "unknown_reason": _rf_unknown_reason(telemetry, voice_live, snap)}
+
+
+def _rf_window_summary(start, end):
+    """טלמטריה בחלון [start, end] (שידור בודד). None כשאין כיסוי מלא: העוקב לא
+    רץ ברציפות מ*לפני* start, או שאירועי החלון כבר נדחקו מה-deque — "לא ראינו"
+    אינו "לא היה" (§12). אחרת:
+      overload_at_start — מצב העומס בתחילת החלון: False רק אחרי stream=start של
+                          הסשן (עוגן "reset"/"follow" => None — ר' _RF_START_RE),
+      overload_events   — Overload_Detected בתוך החלון,
+      overload          — היה עומס בנקודה כלשהי בחלון (None כשאי אפשר לדעת).
+                          קצה Overload_Corrected בתוך החלון מוכיח עומס *לפניו*
+                          => True גם כשמצב ההתחלה לא ידוע,
+      ifgr_min/max      — מהערך שבתוקף בתחילת החלון + אירועי GainChange בתוכו
+                          (ה-patch מגביל אותם ל-≤1/ש' — ערכי-ביניים בפרץ לא נראים)."""
+    with _rf_lock:
+        since = _rf["follower_since"]
+        events = list(_rf_events)
+        full = len(_rf_events) == _rf_events.maxlen
+    if since is None or since > start:
+        return None
+    if full and (not events or events[0]["t"] > start):
+        return None                      # תחילת החלון נדחקה — ספירה חלקית היא לא ספירה
+    ovl, ifgr, anchored = None, None, False
+    corrected = broken = False
+    n_ovl = n_gain = 0
+    grdbs = []
+    for e in events:
+        if e["t"] > end:
+            break
+        ev = e["ev"]
+        if e["t"] <= start:
+            if ev == "follow":
+                anchored = e["up"]
+                ovl, ifgr = None, None
+            elif ev == "reset":
+                anchored = True
+                ovl, ifgr = None, None   # AIR-AM הפעיל מחדש — False רק מ-stream=start
+            elif ev == "start":
+                anchored = True
+                ovl, ifgr = False, None
+            elif ev == "ovl":
+                ovl = e["on"]
+            elif ev == "gain":
+                ifgr = e["grdb"]
+            continue
+        if ev == "ovl":
+            if e["on"]:
+                n_ovl += 1
+            else:
+                corrected = True         # Overload_Corrected => היה עומס לפניו, בתוך החלון
+        elif ev == "gain":
+            n_gain += 1
+            grdbs.append(e["grdb"])
+        elif ev in ("reset", "start", "follow"):
+            broken = True                # גבול-סשן בתוך שידור — "אין קצה" כבר לא אומר "אין עומס"
+    if not anchored:
+        ovl, ifgr = None, None           # העוגן נדחק — מצב תחילת החלון לא ידוע
+    vals = grdbs + ([ifgr] if ifgr is not None else [])
+    if n_ovl or corrected or ovl:
+        during = True
+    elif ovl is False and not broken:
+        during = False
+    else:
+        during = None
+    return {"overload_at_start": ovl, "overload_events": n_ovl, "overload": during,
+            "gain_events": n_gain, "ifgr_at_start": ifgr,
+            "ifgr_min": min(vals) if vals else None, "ifgr_max": max(vals) if vals else None}
+
+
 def _read_voice_metrics():
     """מדדי RF רציפים לתדר הנוכחי מ-rtl_airband stats. מקור אמת יחיד לפענוח
     הקובץ — משותף ל-/api/metrics (תצוגת קול) ול-/api/signal (מד השדה המאוחד,
@@ -4466,7 +5033,7 @@ def _read_voice_metrics():
         text = STATS_PATH.read_text()
     except OSError:
         return {"fresh": False, "age": None, "signal": None, "noise": None,
-                "snr": None, "overload": False, "squelch_opens": None}
+                "snr": None, "squelch_opens": None}
 
     want = f"{load_state()['freq']:.3f}"       # מדדים מתויגים freq=MHz ב-3 ספרות
     vals = parse_stats(text, want)
@@ -4474,26 +5041,63 @@ def _read_voice_metrics():
     sig = vals.get("channel_dbfs_signal_level")
     noise = vals.get("channel_dbfs_noise_level")
     snr = round(sig - noise, 1) if (sig is not None and noise is not None) else None
-    # עומס יתר: רמת האות בערוץ מתקרבת ל-full scale (0 dBFS) => ה-ADC/רווח רווי.
-    overload = sig is not None and sig >= OVERLOAD_DBFS
+    # ⚠ אין כאן "overload": רמת הערוץ (אחרי ה-AGC, bin יחיד) לא רואה רוויה של
+    # ה-ADC/LNA — ר' הערת ההסרה של OVERLOAD_DBFS ו-_rf_metrics.
     return {"fresh": (age <= STATS_MAX_AGE and snr is not None), "age": round(age, 1),
-            "signal": sig, "noise": noise, "snr": snr, "overload": overload,
+            "signal": sig, "noise": noise, "snr": snr,
             "squelch_opens": vals.get("channel_squelch_counter")}
 
 
 @app.route("/api/metrics")
 def api_metrics():
-    """מדדי RF חיים לתדר הנוכחי. rtl_airband מרענן את הקובץ כל ~1 שנייה."""
-    return jsonify(ok=True, overload_dbfs=OVERLOAD_DBFS, **_read_voice_metrics())
+    """מדדי RF חיים לתדר הנוכחי. rtl_airband מרענן את הקובץ כל ~1 שנייה.
+    ‏rf — טלמטריית החומרה (_rf_metrics). ‏overload ברמה העליונה = rf.overload
+    (תאימות לקליינט ישן): True/False מאירועי החומרה, None = לא ידוע."""
+    # ‏systemctl is-active רק כשיש טלמטריה בכלל — בלעדיה התשובה ממילא "לא ידוע",
+    # ואין טעם ב-fork נוסף בכל פולינג (~1ש') של תצוגת הקול.
+    rf = _rf_metrics(_rf_telemetry_available() and _is_active("rtl_airband"), load_state())
+    return jsonify(ok=True, overload=rf["overload"], rf=rf, **_read_voice_metrics())
 
 
-def _signal_verdict(noise, baseline):
+def _baseline_tag(lna, fm_notch):
+    """הקצה הקדמי שבו בסיס נמדד / שבו המדידה הנוכחית רצה. רצפת הרעש ב-dBFS
+    נמדדת *אחרי* ה-LNA ומסנן ה-FM (שניהם לפני ה-AGC), ולכן בסיס בר-השוואה רק
+    למדידה באותו LNA ובאותו מצב מסנן. ‏agc נשמר לתיעוד — הבדיקה תמיד תחת AGC."""
+    return {"lna": int(lna), "fm_notch": bool(fm_notch), "agc": True}
+
+
+def _verdict_reason(noise, baseline, frontend=None):
+    """*למה* אין פסק-דין (או None כשיש): ‏'no_reading' / 'no_baseline' /
+    ‏'baseline_untagged' (בסיס מלפני v2.26.0 — נמדד כשה-LNA תחת AGC היה 0 בפועל,
+    ר' _device_string, ואין לדעת אם הוא בר-השוואה) / 'baseline_config_mismatch'
+    (נמדד ב-LNA/מסנן אחרים). ‏frontend=None => בלי בדיקת תיוג (קוראים פנימיים
+    בלבד — כל מסלול API מעביר frontend)."""
+    if noise is None:
+        return "no_reading"
+    if not baseline or baseline.get("noise") is None:
+        return "no_baseline"
+    if frontend is not None:
+        if "lna" not in baseline or "fm_notch" not in baseline:
+            return "baseline_untagged"
+        if (baseline.get("lna") != frontend.get("lna")
+                or bool(baseline.get("fm_notch")) != bool(frontend.get("fm_notch"))):
+            return "baseline_config_mismatch"
+    return None
+
+
+def _signal_verdict(noise, baseline, frontend=None):
     """פסק דין *רק* מול בסיס שהמשתמש כייל בעצמו — לעולם לא סף איכות מומצא
     (§12 ב-CLAUDE.md). ‏noise=None (אין מדידה נוכחית) => 'unknown'. בלי בסיס
-    כלל => 'no_baseline' — לא ניחוש. אחרת משווים מול DISCONNECT_DROP_DB."""
-    if noise is None:
+    כלל => 'no_baseline' — לא ניחוש. בסיס שנמדד בקצה-קדמי אחר (או בלי תיוג)
+    => גם 'no_baseline' (הסיבה ב-_verdict_reason): השוואה בין LNA שונים היא
+    בדיוק פסק-הדין המומצא ש-§12 אוסר — רצפת הרעש ב-dBFS נמדדת אחרי ה-LNA, ושינוי
+    LNA לבדו (הפחתה לא-לינארית של כמה dB לצעד, ר' הערת RFGR_MIN; כמה ממנו ה-AGC
+    מפצה ב-IF — לא נמדד) עלול להיראות כמו "ירידה מהבסיס" או להסתיר אחת.
+    אחרת משווים מול DISCONNECT_DROP_DB."""
+    reason = _verdict_reason(noise, baseline, frontend)
+    if reason == "no_reading":
         return "unknown"
-    if not baseline or baseline.get("noise") is None:
+    if reason is not None:
         return "no_baseline"
     return "below_baseline" if (baseline["noise"] - noise) >= DISCONNECT_DROP_DB else "ok"
 
@@ -4514,15 +5118,21 @@ def api_signal():
     st = load_state()
     mode = _live_mode()
     baseline = st.get("signal_baseline")
-    payload = {"ok": True, "mode": mode or "off"}
+    payload = {"ok": True, "mode": mode or "off", "verdict_reason": None}
 
     if mode == "voice":
         m = _read_voice_metrics()
         agc_ok = bool(st.get("agc", True))   # gain ידני => לא בר-השוואה לבסיס (§12: לא משווים תפוחים לתפוזים)
+        # הקצה הקדמי של הקול שרץ — אותה גזירה בדיוק כמו בבדיקת האנטנה (_probe_frontend),
+        # כך שבסיס שכויל בקונפיג הנוכחי בר-השוואה, וכל שינוי LNA/מסנן מבטל אותו בגלוי.
+        frontend = _baseline_tag(*_probe_frontend(st))
+        noise = m["noise"] if agc_ok else None
         payload.update(kind="continuous", fresh=m["fresh"], age=m["age"],
                        signal=m["signal"], noise=m["noise"], snr=m["snr"],
-                       baseline=baseline,
-                       verdict=_signal_verdict(m["noise"] if agc_ok else None, baseline))
+                       baseline=baseline, frontend=frontend,
+                       verdict=_signal_verdict(noise, baseline, frontend),
+                       verdict_reason=(_verdict_reason(noise, baseline, frontend)
+                                       if agc_ok else "manual_gain"))
     elif mode in ("acars", "vdl2"):
         lock = _acars_lock if mode == "acars" else _vdl2_lock
         buf = _acars_msgs if mode == "acars" else _vdl2_msgs
@@ -4608,6 +5218,7 @@ def _restore_after_probe(prev_state, prev_live):
             _enter_voice({"freq": prev_state["freq"], "mod": prev_state["mod"],
                          "agc": prev_state["agc"], "if_gain": prev_state["if_gain"],
                          "rf_gain": prev_state["rf_gain"],
+                         "fm_notch": bool(prev_state.get("fm_notch", False)),
                          "squelch_mode": prev_state["squelch_mode"],
                          "squelch_snr": prev_state["squelch_snr"]})
         else:
@@ -4616,11 +5227,30 @@ def _restore_after_probe(prev_state, prev_live):
         log.warning("בדיקת אנטנה: שחזור המצב הקודם (%s) נכשל", prev_live, exc_info=True)
 
 
-def _probe_params(freq):
-    """תנאי המדידה של בדיקת האנטנה (AGC, סקוולץ' פתוח, AM) — מקור-אמת יחיד
-    ל-/api/antenna/check ולניסוי האוטומטי, כדי שהניסוי יבדוק *את* המסלול של המוצר."""
+def _probe_frontend(st):
+    """(lna, fm_notch) שבהם בדיקת האנטנה (והניסוי) מודדים — **הקצה הקדמי השמור של
+    הקול** (state["rf_gain"]/["fm_notch"]), לא ערך קבוע.
+    ⚠ למה לא RF_GAIN_DEFAULT קבוע: מאז v2.26.0 ה-LNA חל גם תחת AGC, ורצפת הרעש
+    ב-dBFS תלויה בו ישירות. בסיס שנמדד ב-LNA קבוע היה בר-השוואה *רק* לקול שרץ
+    באותו LNA — כלומר משתמש שבחר LNA אחר לאתר שלו (בדיוק מה שהתוכנית מבקשת,
+    docs/voice-rf-quality-plan.md §3) לא היה מקבל פסק-דין בקול **לעולם**, גם אחרי
+    כיול. מדידה בקצה הקדמי של המשתמש + תיוג הבסיס (_baseline_tag) נותנים פסק-דין
+    בכל קונפיגורציה, ושינוי LNA/מסנן מבטל בגלוי את ההשוואה ("no_baseline" +
+    reason) במקום להשוות בשקט בין קצוות-קדמיים שונים (§12)."""
+    try:
+        lna = max(RFGR_MIN, min(RFGR_MAX, int(st.get("rf_gain", RF_GAIN_DEFAULT))))
+    except (TypeError, ValueError):
+        lna = RF_GAIN_DEFAULT
+    return lna, bool(st.get("fm_notch", False))
+
+
+def _probe_params(freq, lna=RF_GAIN_DEFAULT, fm_notch=False):
+    """תנאי המדידה של בדיקת האנטנה (AGC, סקוולץ' פתוח, AM, LNA+מסנן כפי שנמסרו —
+    ר' _probe_frontend) — מקור-אמת יחיד ל-/api/antenna/check ולניסוי האוטומטי,
+    כדי שהניסוי יבדוק *את* המסלול של המוצר."""
     return {"freq": freq, "mod": "am", "agc": True, "if_gain": IF_GAIN_DEFAULT,
-            "rf_gain": RF_GAIN_DEFAULT, "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}
+            "rf_gain": int(lna), "fm_notch": bool(fm_notch),
+            "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}
 
 
 @app.route("/api/antenna/check", methods=["POST"])
@@ -4653,13 +5283,20 @@ def api_antenna_check():
         # שנמדד תחת AGC, ו-verdict של "below_baseline" (= "האנטנה מנותקת!") בלי
         # שדבר באמת השתנה. זו בדיוק ההמצאה שעקרון §12 אוסר, רק בכיוון של
         # פסק-דין במקום ערך. לכן מדלגים רק כשהמצב החי *זהה* לתנאי הבדיקה.
+        lna, fm_notch = _probe_frontend(prev)
+        probe = _probe_params(freq, lna, fm_notch)
+        # ‏rf_gain/fm_notch משתתפים בהשוואה כי הם משנים את רצפת הרעש (LNA לפני
+        # ה-AGC); היום הם נגזרים מ-prev ולכן תמיד שווים, אבל ההשוואה המפורשת
+        # שומרת על הנכונות אם _probe_frontend ישתנה.
         already_voice = (prev_live == "voice"
                          and abs(prev.get("freq", -999.0) - freq) < 5e-4
                          and prev.get("mod") == "am"
                          and bool(prev.get("agc")) is True
-                         and prev.get("squelch_mode") == "open")
+                         and prev.get("squelch_mode") == "open"
+                         and prev.get("rf_gain") == probe["rf_gain"]
+                         and bool(prev.get("fm_notch", False)) == probe["fm_notch"])
         if not already_voice:
-            err, detail, _sdr_down = _enter_voice(_probe_params(freq))
+            err, detail, _sdr_down = _enter_voice(probe)
             if err:
                 # שלב ההכנה כבר עצר את הצרכן הקודם (peer של _enter_acars/_enter_vdl2)
                 # לפני שקול עצמו נכשל לעלות => מנסים best-effort להחזיר את מה שהיה,
@@ -4674,22 +5311,26 @@ def api_antenna_check():
             _restore_after_probe(prev, prev_live)
 
         if result is None:
-            _rflog_event({"ev": "probe", "freq": freq, "calibrate": calibrate,
-                          "already_voice": already_voice, "error": "no_fresh_stats"})
+            _rflog_event({"ev": "probe", "freq": freq, "calibrate": calibrate, "lna": lna,
+                          "fm_notch": fm_notch, "already_voice": already_voice,
+                          "error": "no_fresh_stats"})
             return jsonify(ok=False, error="לא התקבלו מדדים מה-SDR בזמן — נסה שוב"), 504
 
+        frontend = _baseline_tag(lna, fm_notch)
         if calibrate:
-            baseline = {"noise": result["noise"], "freq": freq, "ts": time.time()}
+            baseline = {"noise": result["noise"], "freq": freq, "ts": time.time(), **frontend}
             save_state({**load_state(), "signal_baseline": baseline})
         else:
             baseline = prev.get("signal_baseline")
-        verdict = _signal_verdict(result["noise"], baseline)
-        _rflog_event({"ev": "probe", "freq": freq, "calibrate": calibrate,
-                      "already_voice": already_voice, "noise": result["noise"],
-                      "signal": result["signal"], "verdict": verdict,
-                      "baseline_noise": (baseline or {}).get("noise")})
+        verdict = _signal_verdict(result["noise"], baseline, frontend)
+        reason = _verdict_reason(result["noise"], baseline, frontend)
+        _rflog_event({"ev": "probe", "freq": freq, "calibrate": calibrate, "lna": lna,
+                      "fm_notch": fm_notch, "already_voice": already_voice,
+                      "noise": result["noise"], "signal": result["signal"], "verdict": verdict,
+                      "verdict_reason": reason, "baseline_noise": (baseline or {}).get("noise")})
         return jsonify(ok=True, freq=freq, calibrated=calibrate, baseline=baseline,
-                       verdict=verdict, **result)
+                       verdict=verdict, verdict_reason=reason, lna=lna, fm_notch=fm_notch,
+                       **result)
     finally:
         TUNE_LOCK.release()
 
@@ -4703,11 +5344,30 @@ _CONF_FREQ_RE = re.compile(r"^\s*freq\s*=\s*([0-9.]+)\s*;", re.M)          # ל�
 _CONF_GAIN_RE = re.compile(r'^\s*gain\s*=\s*"IFGR=(\d+),RFGR=(\d+)"', re.M)
 _CONF_SQ_RE = re.compile(r"^\s*squelch_snr_threshold\s*=\s*(-?[0-9.]+)\s*;", re.M)
 _CONF_MOD_RE = re.compile(r'^\s*modulation\s*=\s*"(\w+)"', re.M)
+_CONF_DEVSTR_RE = re.compile(r'^\s*device_string\s*=\s*"([^"]*)"', re.M)
+
+
+def _conf_device_kwargs(text):
+    """ה-kwargs של device_string (‏"driver=sdrplay,rfnotch_ctrl=false,...") כמילון,
+    בפענוח זהה ל-SoapySDR (פסיקים בין זוגות, '=' ראשון מפריד) — {} כשאין שורה."""
+    m = _CONF_DEVSTR_RE.search(text)
+    out = {}
+    if not m:
+        return out
+    for part in m.group(1).split(","):
+        k, sep, v = part.partition("=")
+        if sep and k.strip():
+            out[k.strip()] = v.strip()
+    return out
 
 
 def _parse_airband_conf(text):
     """הקונפיג *שבאמת רץ* מתוך airband.conf שכתב render_config. בלי שורת gain
-    = AGC (כך render_config מבקש אותו — ר' שם); squelch=None = אוטומטי."""
+    = AGC (כך render_config מבקש אותו — ר' שם); squelch=None = אוטומטי.
+    ‏lna = מצב ה-LNA שבאמת הוחל: RFGR ברווח ידני, rfgain_sel תחת AGC. קונפיג ישן
+    (מלפני v2.26.0) בלי rfgain_sel תחת AGC => 0 — לא ניחוש: זה ה-LNAstate של
+    ברירת-המחדל של ה-API (sdrplay_api_tuner.h:63) שאף אחד לא דרס (ר' _device_string).
+    באותו אופן rfnotch_ctrl חסר => False (‏rfNotchEnable default 0, sdrplay_api_rsp1a.h:13)."""
     out = {}
     m = _CONF_FREQ_RE.search(text)
     if m:
@@ -4723,6 +5383,16 @@ def _parse_airband_conf(text):
     out["squelch_snr"] = float(q.group(1)) if q else None
     mm = _CONF_MOD_RE.search(text)
     out["mod"] = mm.group(1) if mm else None
+    kw = _conf_device_kwargs(text)
+    if g:
+        out["lna"] = out["rfgr"]
+    else:
+        try:
+            out["lna"] = int(kw["rfgain_sel"]) if "rfgain_sel" in kw else 0
+        except ValueError:
+            out["lna"] = None             # ערך לא-מספרי: לא יודעים מה הדרייבר עשה איתו
+    # ‏writeSetting: "false" => 0, *כל* ערך אחר => 1 (Settings.cpp:1748) — אותה סמנטיקה
+    out["fm_notch"] = kw["rfnotch_ctrl"] != "false" if "rfnotch_ctrl" in kw else False
     return out
 
 
@@ -4901,7 +5571,14 @@ def api_rflog_export():
 EXP_ATIS_FREQ = 132.5        # ה-ATIS עצמו: אימות שהניתוק/החיבור באמת קרו (הנשא נעלם/חוזר)
 EXP_CLEAN_FREQ = 122.6       # חלון 122.13–123.67: אף תדר של נתב"ג בחלון ה-AGC
 EXP_ATISWIN_FREQ = 132.0     # חלון 131.53–133.07: ה-ATIS 0.2MHz ממרכזו
-EXP_FIXED_GAINS = ((20, 0), (35, 0))   # (IFGR, RFGR): מקסימום ("AGC על המסילה"), ועוד אחד לזיהוי רוויה
+# IFGR ברווח הקבוע: 20 = מקסימום IF ("AGC על המסילה"), ועוד אחד לזיהוי רוויה.
+# ⚠ ה-LNA (RFGR) **אינו** חלק מהקבוע: כל צעדי הריצה — רווח קבוע, AGC ובדיקות
+# האנטנה — רצים באותו מצב LNA+מסנן, זה של בדיקת האנטנה של המוצר (_probe_frontend,
+# נקבע פעם אחת ב-_experiment_start ונרשם ב-exp_start/בכל step). עד v2.26.0 זה
+# היה (IFGR, 0) — ו-AGC רץ בפועל ב-LNA 0 (ר' _device_string), כך שההשוואה "AGC על
+# המסילה ≈ רווח קבוע IFGR 20" (משטר A ב-docs/antenna-calibration-experiment.md)
+# החזיקה. מאז שה-LNA נאכף גם תחת AGC, רק LNA משותף לכל הצעדים שומר עליה.
+EXP_FIXED_IFGRS = (20, 35)
 EXP_REF_SEC = 30
 EXP_FIXED_SEC = 45           # רווח קבוע: גשש-הרעש מתכנס תוך ~0.2ש' (אין הליכת AGC)
 EXP_AGC_SEC = 90             # AGC: כל restart מתחיל מ-gRdB=50 — צריך זמן לראות אם/איך מתכנס
@@ -4948,26 +5625,30 @@ def _rtl_airband_start_wall():
     return round(time.time() - (time.monotonic() - us / 1e6), 2)
 
 
-def _experiment_plan(probe_freq):
+def _experiment_plan(probe_freq, lna=RF_GAIN_DEFAULT, fm_notch=False):
     """תוכנית הניסוי: מחזור מלא עם אנטנה מחוברת, בקשת ניתוק, אותו מחזור מנותק,
     בקשת חיבור, ומחזור קצר לאימות. כל מחזור מסתיים על 132.000 AGC מתכנס — כך
     הניתוק/החיבור קורים בדיוק במצב שבו ה-AGC אמור להסתיר (משטר B), והדקה שאחריהם
-    מתעדת את הזחילה (משטר C)."""
-    def dwell(phase, key, label, freq, agc, gains=(None, None), sec=None):
+    מתעדת את הזחילה (משטר C). ‏lna/fm_notch — משותפים לכל הצעדים (ר' EXP_FIXED_IFGRS)."""
+    lna, fm_notch = int(lna), bool(fm_notch)
+
+    def dwell(phase, key, label, freq, agc, ifgr=None, sec=None):
         return {"kind": "dwell", "phase": phase, "key": key, "label": label, "freq": freq,
-                "agc": agc, "ifgr": gains[0], "rfgr": gains[1],
+                "agc": agc, "ifgr": ifgr, "rfgr": None if agc else lna,
+                "lna": lna, "fm_notch": fm_notch,
                 "sec": sec if sec is not None else (EXP_AGC_SEC if agc else EXP_FIXED_SEC)}
 
     def probe(phase, key, label, freq):
-        return {"kind": "probe", "phase": phase, "key": key, "label": label, "freq": freq}
+        return {"kind": "probe", "phase": phase, "key": key, "label": label, "freq": freq,
+                "lna": lna, "fm_notch": fm_notch}
 
     def cycle(phase):
         steps = [dwell(phase, "atis", "ATIS 132.500 — אימות", EXP_ATIS_FREQ, True, sec=EXP_REF_SEC)]
         for freq, fk, fl in ((EXP_CLEAN_FREQ, "clean", "122.600 · אין נתב\"ג בחלון"),
                              (EXP_ATISWIN_FREQ, "atiswin", "132.000 · ATIS בחלון")):
-            for ifgr, rfgr in EXP_FIXED_GAINS:
+            for ifgr in EXP_FIXED_IFGRS:
                 steps.append(dwell(phase, f"{fk}_f{ifgr}", f"{fl} · רווח קבוע IFGR {ifgr}",
-                                   freq, False, (ifgr, rfgr)))
+                                   freq, False, ifgr))
             if fk == "atiswin":
                 steps.append(probe(phase, "probe_product", f"בדיקת האנטנה של המוצר · {probe_freq:.3f}",
                                    probe_freq))
@@ -4976,11 +5657,14 @@ def _experiment_plan(probe_freq):
         return steps
 
     plan = cycle(1)
+    # prompt: הקונפיג לא משתנה (נשארים על 132.000 AGC של הצעד הקודם) — lna לתיעוד בלבד
     plan.append({"kind": "prompt", "phase": 2, "key": "after_disconnect", "action": "disconnect",
-                 "label": "נתק את האנטנה בכניסת ה-SDR", "sec": EXP_AFTER_PROMPT_SEC})
+                 "label": "נתק את האנטנה בכניסת ה-SDR", "sec": EXP_AFTER_PROMPT_SEC,
+                 "lna": lna, "fm_notch": fm_notch})
     plan += cycle(2)
     plan.append({"kind": "prompt", "phase": 3, "key": "after_reconnect", "action": "reconnect",
-                 "label": "חבר חזרה את האנטנה", "sec": EXP_AFTER_PROMPT_SEC})
+                 "label": "חבר חזרה את האנטנה", "sec": EXP_AFTER_PROMPT_SEC,
+                 "lna": lna, "fm_notch": fm_notch})
     plan.append(dwell(3, "atis", "ATIS 132.500 — אימות", EXP_ATIS_FREQ, True, sec=EXP_REF_SEC))
     plan.append(dwell(3, "clean_agc", "122.600 · אין נתב\"ג בחלון · AGC", EXP_CLEAN_FREQ, True,
                       sec=EXP_FINAL_AGC_SEC))
@@ -5006,7 +5690,8 @@ def _experiment_status():
     st["step_index"] = i
     st["waiting"] = e["waiting"]
     cur = plan[i] if 0 <= i < len(plan) else None
-    st["step"] = ({k: cur.get(k) for k in ("kind", "phase", "key", "label", "freq", "agc", "ifgr", "action")}
+    st["step"] = ({k: cur.get(k) for k in ("kind", "phase", "key", "label", "freq", "agc", "ifgr",
+                                           "lna", "fm_notch", "action")}
                   if cur else None)
     eta = eta_prompt = None
     if e["running"] and plan:
@@ -5025,15 +5710,16 @@ def _experiment_status():
 
 
 def _exp_voice_params(st):
+    # ‏rf_gain = ה-LNA של הריצה בשני המצבים: RFGR ברווח קבוע, rfgain_sel תחת AGC
     return {"freq": st["freq"], "mod": "am", "agc": st["agc"],
             "if_gain": st["ifgr"] if st["ifgr"] is not None else IF_GAIN_DEFAULT,
-            "rf_gain": st["rfgr"] if st["rfgr"] is not None else RF_GAIN_DEFAULT,
+            "rf_gain": st["lna"], "fm_notch": st["fm_notch"],
             "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}
 
 
 def _exp_meta(st):
     return {k: st.get(k) for k in ("i", "kind", "phase", "key", "label", "freq", "agc",
-                                    "ifgr", "rfgr", "sec", "action")}
+                                    "ifgr", "rfgr", "lna", "fm_notch", "sec", "action")}
 
 
 def _experiment_run(run_id, prev, prev_live, plan, stop_evt, confirm_evt, own_rflog):
@@ -5051,7 +5737,8 @@ def _experiment_run(run_id, prev, prev_live, plan, stop_evt, confirm_evt, own_rf
                 _exp["step_started_at"] = time.time()
             if st["kind"] in ("dwell", "probe"):
                 t_enter = time.time()
-                params = _exp_voice_params(st) if st["kind"] == "dwell" else _probe_params(st["freq"])
+                params = (_exp_voice_params(st) if st["kind"] == "dwell"
+                          else _probe_params(st["freq"], st["lna"], st["fm_notch"]))
                 e, _detail, _down = _enter_voice(params)
                 t_ready = time.time()
                 proc_start = _rtl_airband_start_wall()
@@ -5146,7 +5833,8 @@ def _experiment_start():
             probe_freq = float(acars[0])
         except (TypeError, ValueError, IndexError):
             probe_freq = float(ACARS_FREQS_DEFAULT[0])
-        plan = _experiment_plan(probe_freq)
+        lna, fm_notch = _probe_frontend(prev)   # אותו קצה-קדמי כמו בדיקת האנטנה של המוצר
+        plan = _experiment_plan(probe_freq, lna, fm_notch)
         own_rflog = _rflog_start()          # False => המשתמש כבר הקליט; לא נכבה אותו בסוף
         run_id = time.strftime("%Y%m%d-%H%M%S")
         stop_evt, confirm_evt = threading.Event(), threading.Event()
@@ -5155,7 +5843,7 @@ def _experiment_start():
                         plan=plan, i=-1, step_started_at=None, waiting=None, error=None,
                         result=None, stop=stop_evt, confirm=confirm_evt)
         _rflog_event({"ev": "exp_start", "exp": run_id, "version": VERSION, "prev_live": prev_live,
-                      "probe_freq": probe_freq, "steps": len(plan)})
+                      "probe_freq": probe_freq, "lna": lna, "fm_notch": fm_notch, "steps": len(plan)})
         th = threading.Thread(target=_experiment_run, daemon=True,
                               args=(run_id, prev, prev_live, plan, stop_evt, confirm_evt, own_rflog))
         with _exp_lock:
@@ -5288,8 +5976,12 @@ def _experiment_summary(rows):
     atis_drop = drop(atis.get(1), atis.get(2))
     clean_agc = cond.get("clean_agc", {})
     p3 = clean_agc.get("p3") or {}
+    start = next((r for r in rows if r.get("ev") == "exp_start"), {})
     return {
         "threshold_db": DISCONNECT_DROP_DB,
+        # הקצה הקדמי שבו *כל* הריצה נמדדה (None בריצה מלפני v2.26.0 — לא ניחוש)
+        "lna": start.get("lna"),
+        "fm_notch": start.get("fm_notch"),
         "conditions": conditions,
         "probes": list(probes.values()),
         "atis": {"p1": atis.get(1), "p2": atis.get(2), "p3": atis.get(3), "drop": atis_drop,
@@ -5435,9 +6127,31 @@ def api_power():
     return jsonify(**cached)
 
 
+_FALSY_STR = ("false", "0", "off", "no")
+_TRUTHY_STR = ("true", "1", "on", "yes")
+
+
+def _parse_bool(raw, default):
+    """bool עמיד ל-JSON טקסטואלי (curl: ‏"false"/"0"/"off") — אותה סמנטיקה כמו
+    ה-agc הוותיק, כך ש-"false" לעולם לא נקרא True רק כי מחרוזת לא-ריקה.
+    ‏None/ערך לא מזוהה => default (לא ניחוש לאף כיוון)."""
+    if isinstance(raw, bool):
+        return raw
+    if raw is None:
+        return default
+    v = str(raw).strip().lower()
+    if v in _FALSY_STR:
+        return False
+    if v in _TRUTHY_STR:
+        return True
+    return default
+
+
 def _parse_tune(data):
     """מנקה/מאמת פרמטרי כיוונון קולי. מחזיר (params, error). תדר נכתב כ-float
-    מפורמט => ללא סיכון הזרקה."""
+    מפורמט => ללא סיכון הזרקה.
+    ‏rf_gain (מצב ה-LNA) נקלט ונשמר **גם כש-agc=True**: מאז v2.26.0 הוא נכתב
+    לקונפיג בשני המצבים (rfgain_sel ב-AGC, RFGR ברווח ידני — ר' _device_string)."""
     try:
         freq = float(data.get("freq"))
     except (TypeError, ValueError):
@@ -5446,8 +6160,12 @@ def _parse_tune(data):
         return None, "תדר מחוץ לטווח (0.1–1999.5 MHz)"
 
     mod = "nfm" if str(data.get("mod", "am")).lower() == "nfm" else "am"
-    agc_raw = data.get("agc", True)   # עמיד גם ל-"false" טקסטואלי (curl), לא רק bool
-    agc = agc_raw if isinstance(agc_raw, bool) else str(agc_raw).lower() not in ("false", "0", "off", "no")
+    agc = _parse_bool(data.get("agc", True), True)   # עמיד גם ל-"false" טקסטואלי (curl), לא רק bool
+    # ‏fm_notch לפי *נוכחות* המפתח (כמו gain של satcom ב-/api/mode): חסר => None,
+    # ו-_voice_tune משלים מה-state השמור. ברירת-מחדל False הייתה מכבה בשקט מסנן
+    # שהמשתמש הדליק — כל לקוח שלא מכיר את השדה (טאב/PWA שנפתח לפני השדרוג ועדיין
+    # מריץ JS ישן, curl) היה שולח כיוונון "מלא" בלעדיו.
+    fm_notch = _parse_bool(data["fm_notch"], False) if "fm_notch" in data else None
     try:
         if_gain = max(IFGR_MIN, min(IFGR_MAX, int(data.get("if_gain", IF_GAIN_DEFAULT))))
     except (TypeError, ValueError):
@@ -5467,7 +6185,7 @@ def _parse_tune(data):
     squelch_snr = max(SNR_MIN, min(SNR_MAX, squelch_snr))
 
     return {"freq": freq, "mod": mod, "agc": agc, "if_gain": if_gain, "rf_gain": rf_gain,
-            "squelch_mode": squelch_mode, "squelch_snr": squelch_snr}, None
+            "fm_notch": fm_notch, "squelch_mode": squelch_mode, "squelch_snr": squelch_snr}, None
 
 
 def _voice_tune(params):
@@ -5484,15 +6202,18 @@ def _voice_tune(params):
         # סבב תקין "בחינם" ומשאיר "scan זומבי" — צרכן רץ בלי thread שממשיך אותו.
         _scan_stop_thread()
         prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
+        if params.get("fm_notch") is None:   # לא נשלח => נשאר כפי שנשמר (ר' _parse_tune)
+            params = {**params, "fm_notch": bool(prev.get("fm_notch", False))}
         # ⚠ מיזוג על גבי prev, לא דריסה: params מכיל רק שדות קול (freq/mod/
         # gain/squelch). דריסה מלאה הייתה מוחקת satcom_bias_tee/satcom_gain/
         # signal_baseline/scan_plan/last_session_view_at וכו' — עם satcom_bias_tee
         # במיוחד, load_state הבא היה ממזג מ-DEFAULT_STATE=True ומדליק bias-T
         # מחדש בכניסה הבאה ל-SATCOM גם כשהמשתמש כבר מזין LNA חיצוני (§12).
         new_state = {**prev, **params, "app_mode": "voice"}
-        log.info("tune %.3f MHz mod=%s agc=%s if_gain=%d rf_gain=%d squelch=%s snr=%.1f (from %s)",
+        log.info("tune %.3f MHz mod=%s agc=%s if_gain=%d rf_gain=%d fm_notch=%s squelch=%s snr=%.1f (from %s)",
                  params["freq"], params["mod"], params["agc"], params["if_gain"],
-                 params["rf_gain"], params["squelch_mode"], params["squelch_snr"], request.remote_addr)
+                 params["rf_gain"], params["fm_notch"], params["squelch_mode"], params["squelch_snr"],
+                 request.remote_addr)
 
         err, detail, sdr_down = _enter_voice(params)
         if err:
@@ -6202,13 +6923,23 @@ BOOT_SDR_WAIT_SEC = 90    # המתנה ל-SDR באתחול לפני ניסיון
 
 
 def _config_stale():
-    """קונפיג הקול חסר או ישן (שדרוג: בלי stats_filepath למדדי RF / localtime
-    להקלטות) => צריך שכתוב לפני שמרימים את rtl_airband."""
+    """קונפיג הקול חסר או ישן => צריך שכתוב לפני שמרימים את rtl_airband. ישן =
+    בלי stats_filepath (מדדי RF) / localtime (הקלטות), או — מאז v2.26.0 — בלי
+    rfnotch_ctrl (נכתב בשני המצבים) או AGC בלי rfgain_sel. ⚠ בלי הבדיקה האחרונה
+    התקנה משודרגת שיושבת בקול הייתה ממשיכה לרוץ עם LNA=0 תחת AGC (בדיוק הבאג
+    ש-v2.26.0 מתקן, ר' _device_string) עד הכיוונון הידני הבא — _boot_restore מדלג
+    על הכניסה כשהצרכן השמור כבר רץ וה-config לא stale."""
     try:
         cur = CONFIG_PATH.read_text()
     except OSError:
         return True
-    return "stats_filepath" not in cur or "localtime" not in cur
+    if "stats_filepath" not in cur or "localtime" not in cur:
+        return True
+    kw = _conf_device_kwargs(cur)
+    if "rfnotch_ctrl" not in kw:
+        return True
+    agc = _CONF_GAIN_RE.search(cur) is None
+    return agc and "rfgain_sel" not in kw
 
 
 def _boot_restore():
@@ -6237,6 +6968,11 @@ def _boot_restore():
             if _sdr_present():
                 break
             time.sleep(2)
+        # העוקב (journalctl -n 0) חייב להיות מחובר *לפני* שמרימים צרכן — אחרת
+        # "AIRAM_RF stream=start" של הסשן הראשון הולך לאיבוד (ר' _rf_follow_attached).
+        # best-effort בלבד: בלי סימן-בנייה אין למה לחכות, ו-timeout לא חוסם שחזור.
+        if _rf_telemetry_available():
+            _rf_follow_attached.wait(RF_BOOT_ATTACH_WAIT_SEC)
         if not TUNE_LOCK.acquire(blocking=False):
             return   # המשתמש כבר בחר מצב מה-UI — כוונתו גוברת על השחזור
         try:
@@ -6360,6 +7096,10 @@ if __name__ == "__main__":
     # satcom/scan/off) נעשה כאן, ברקע (satcom חריג — לא משוחזר אוטומטית,
     # ר' _boot_restore/§12 ב-CLAUDE.md). מכסה גם שדרוג קונפיג
     # (stats_filepath/localtime) — כניסה לקול תמיד משכתבת את הקונפיג מה-state.
+    # טלמטריית RF מהחומרה: journalctl -f *אחד* ארוך-חיים על יומן rtl_airband
+    # (ר' _rf_follower_loop) — *לפני* _boot_restore (ר' _rf_follow_attached) ולפני ה-watcher, כדי שה-sidecar של ההקלטה
+    # הראשונה כבר ייהנה מכיסוי. רדום כשאין סימן-בנייה; לעולם לא מפיל את השרת.
+    threading.Thread(target=_rf_follower_loop, daemon=True).start()
     threading.Thread(target=_boot_restore, daemon=True).start()
     # התאוששות מקריסת sdrplay.service שלא הופצה לצרכן הפעיל (ר' _mode_reconcile_loop) —
     # thread נפרד מ-_boot_restore: זה רץ *במשך* הסשן, לא רק פעם אחת באתחול.

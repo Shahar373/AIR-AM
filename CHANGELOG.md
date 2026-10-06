@@ -42,6 +42,128 @@
   ייעודית שמאמתת בדיוק את זה, ואומת שהיא נכשלת בלי ההפרדה.
 
 ### נוסף
+- **📻 שליטה ב-RF + חיווי עומס אמיתי מהחומרה (v2.26.0, PR 1 ב-
+  [`docs/voice-rf-quality-plan.md`](docs/voice-rf-quality-plan.md)).** בשטח (כמה
+  ק"מ מנתב"ג, קו-ראייה) המגדל נשמע מעוות ורחשי — **כולל הבקר**, התחנה החזקה ביותר.
+  אות חזק שנשמע רע = בעיה בצד המקלט. קריאת המקור של הגרסאות המותקנות מצאה שלושה
+  פערים, וה-PR סוגר את שלושתם:
+  - **ה-LNA תחת AGC היה תקוע ברווח מרבי.** בלי שורת `gain` (מצב AGC) הדרייבר השאיר
+    ‏`LNAstate=0` של ברירת המחדל (`sdrplay_api_tuner.h:63`) — הקבוע `RF_GAIN_DEFAULT=4`
+    פשוט לא נאכף. ה-AGC של ה-API פועל על `gRdB` (IF) בלבד, אין שדה LNA ב-
+    ‏`sdrplay_api_AgcT` (`sdrplay_api_control.h:36-45`), כך שרוויה ב-LNA קורית *לפני*
+    ה-AGC ואינה הפיכה. עכשיו `render_config` כותב `rfgain_sel=<rf_gain>` ב-`device_string`
+    תחת AGC (`_device_string`). **אומת מהמקור שהמפתח באמת מגיע לדרייבר**: rtl_airband
+    מעביר את המחרוזת כמות שהיא (`input-soapysdr.cpp:196,220`), SoapySDR ממזג אותה ל-
+    kwargs של ה-make (`Factory.cpp:154-157,177`), הבנאי של SoapySDRPlay3 קורא
+    ‏`writeSetting` לכל kwarg (`Settings.cpp:105-114`) ו-`rfgain_sel` ⇒ `LNAstate`
+    (`:1628-1630`); ו-rtl_airband קורא `setGain` **רק** כש-AGC כבוי
+    (`input-soapysdr.cpp:247-270`), כך ששום דבר לא דורס אותו. ברווח ידני ה-LNA נשאר
+    ב-`RFGR` של שורת ה-`gain` (בלי `rfgain_sel` — שני מקורות לאותו ערך היו מזמינים
+    סתירה). `_config_stale` מזהה קונפיג ישן (בלי `rfnotch_ctrl`, או AGC בלי
+    ‏`rfgain_sel`) ⇒ `_boot_restore` משכתב אותו בעלייה הראשונה אחרי השדרוג.
+    **הגירה חד-פעמית:** עד v2.26.0 `rf_gain` היה חסר-השפעה תחת AGC, אבל ה-UI שלח
+    אותו בכל כיוונון — כך שב-state נשאר ערך ה-RFGR **הידני** האחרון. בלי הגירה השדרוג
+    היה מחיל אותו בשקט (למשל RFGR=9 — הפחתת ה-LNA הגדולה ביותר) על AGC. לכן `load_state`
+    מאפס `rf_gain` ל-`RF_GAIN_DEFAULT` כש-state מלפני v2.26.0 (אין `fm_notch`) והמצב AGC;
+    ברווח ידני הערך תמיד היה בתוקף ⇒ לא נוגעים. ההגירה נעלמת בשמירה הראשונה.
+  - **סליידר ה-LNA פעיל גם תחת AGC** (קודם `disabled = auto` חסם בדיוק את הצירוף
+    הנכון — AGC + LNA מופחת); ה-"RF Gain" נקרא עכשיו "LNA", עם רמז "ליד שדה התעופה —
+    הורד אותו". `/api/tune` קולט ושומר `rf_gain` גם כש-`agc=true`. **⚠ תוקן בדרך:**
+    סליידרי הרווח (IF/LNA/SATCOM) ירשו `direction: rtl` מהדף, כך ש*שמאלה* היה רווח
+    מרבי — בניגוד ל"ימינה = יותר" שבטקסט, ב-`.val` ובתיעוד (הוראת עומס "שמאלה" הייתה
+    *מעלה* רווח). עכשיו `direction: ltr`, וההוראות מנוסחות בלי כיוון ("הורד את ה-LNA").
+  - **מתג מסנן FM** (`fm_notch` ב-state, `rfnotch_ctrl` ⇒ `rfNotchEnable` של ה-RSP1B,
+    ‏`Settings.cpp:1745-1748,1777-1783`). **כבוי כברירת מחדל** = ברירת המחדל של ה-API —
+    אין עדיין מדידה שמצדיקה אחרת. נקלט כמו `agc` (עמיד ל-`"false"` טקסטואלי, `_parse_bool`),
+    **לפי נוכחות המפתח**: `/api/tune` בלי `fm_notch` (טאב/PWA עם JS מלפני השדרוג, curl)
+    שומר את הערך השמור במקום לכבות אותו בשקט. ב-UI מאותחל **בטעינת הדף** ונשלח רק
+    אחרי ש-`/api/state` אתחל אותו (`fmNotchField`); כיוונון שנכשל מיישר את המתג
+    והסליידרים חזרה ל-state שהשרת החזיר (`applyGainState`).
+  - **חיווי עומס מהחומרה במקום ‎-3dBFS (הוסר `OVERLOAD_DBFS`/`overload_dbfs`).** הכלל
+    הישן השווה את רמת *הערוץ* מה-stats לסף — אחרי ה-AGC, בתוך bin אחד — ולכן היה עיוור
+    לרוויית LNA/ADC (ועלול היה להתריע בלי עומס). אירועי ה-overload האמיתיים של ה-API
+    **נבלעו** ב-SoapySDRPlay3 (`Streaming.cpp:159-186` — הערות בלבד). לכן:
+    **SoapySDRPlay3 נעוץ** (`SOAPYSDRPLAY_COMMIT=48bd8b4`, עד עכשיו נבנה מ-master בלי
+    בדיקה), ו-**patch קטן** (`patches/soapysdrplay3-airam-rf.patch`, הוספות בלבד)
+    רושם `AIRAM_RF overload=1|0`, `AIRAM_RF gain grdb=.. lna_grdb=..` (מוגבל-קצב: רק
+    בשינוי, ≤1/ש', הערך האחרון של פרץ נרשם מ-`readStream`) ו-`AIRAM_RF stream=start`
+    (ב-`activateStream`, לפני `sdrplay_api_Init`) ב-`SOAPY_SDR_INFO` — ברירת המחדל של
+    SoapySDR, בלי קודי ANSI (`LoggerC.cpp:17,63`). ה-patch גם מאתחל את `streamActive`
+    בתחילת הבנאי (`Settings.cpp`): לולאת ה-kwargs — שדרכה `rfgain_sel`/`rfnotch_ctrl`
+    מגיעים — קראה אותו לפני שאותחל (UB ב-C++11; בזבל לא-אפס `sdrplay_api_Update` לפני `Init`). `airam-web` מריץ `journalctl -f`
+    **אחד** ארוך-חיים על יומן rtl_airband (`_rf_follower_loop`, backoff מעריכי, לעולם לא
+    מת), ו-`/api/metrics` מחזיר `rf: {telemetry, overload, overload_events,
+    last_overload_age, ifgr, lna_grdb, lna_state, fm_notch, agc, unknown_reason}`; ה-`overload`
+    העליון = ‏`rf.overload`. ‏**§12: שלושה מצבים, לא שניים** — `true`/`false` רק מראיה
+    חיובית מהדרייבר: `false` **רק** אחרי `stream=start` של הסשן (או קצה `overload=0`).
+    עוקב מחובר אינו ראיה שהוא *רואה* משהו (מודול לא-מתוקן שזכה ברישום,
+    ‏`SOAPY_SDR_LOG_LEVEL` מעל INFO, airam בלי הרשאת יומן — כולם "מחובר ושקט"), ולכן
+    restart יזום (`_restart_and_verify`/`_rollback`) מאפס ל-`null`, לא ל-`false`.
+    ‏`stream=start` היא גם גבול-הסשן — **לא** שורת האתחול של rtl_airband, שעוברת ב-syslog
+    (מקור journald אחר, בלי הבטחת סדר מול ה-stderr; שורת אתחול מאוחרת הייתה מאפסת
+    "עומס" אמיתי). ‏`unknown_reason` אומר *למה* לא ידוע (`no_telemetry`/`voice_not_live`/
+    ‏`follower_down`/`joined_mid_session`/`no_driver_evidence`), וה-UI מציג טקסט לכל אחד —
+    למשל "השרת הופעל מחדש באמצע הסשן; כוונון מחדש יאפס" במקום "ממתין לדרייבר" גנרי.
+  - **סימן-בנייה = החוזה "יש טלמטריה".** `install.sh` כותב
+    ‏`/usr/local/share/airam/soapysdrplay3.build-sig` **רק** אחרי `git apply` מאומת (כולל
+    grep של ארבע המחרוזות ב-`Streaming.cpp`) ובנייה מוצלחת, ומוחק אותו בתחילת כל בנייה —
+    אחרת בנייה לא-מתוקנת הייתה יורשת marker ישן. ה-marker מוכיח *בנייה*; ההוכחה בזמן
+    ריצה היא `stream=start` (למעלה).
+    patch שנכשל ⇒ בנייה בלעדיו (רדיו עובד עדיף מהתקנה מתה) והחיווי "לא זמין — הרץ
+    ‏`sudo ./install.sh`". clone לתיקייה זמנית ⇒ בלי רשת לא נמחק מקור קיים.
+  - **sidecar ‏`<file>.mp3.rf.json` לכל הקלטה** (`_build_rf_sidecar`, נכתב ע"י
+    ה-activity watcher לפני שורת היומן): הקונפיג שרץ (רק אם `airband.conf` נכתב לפני
+    תחילת השידור ובאותו תדר), טלמטריית החומרה **בחלון השידור** (`overload`,
+    ‏`overload_events`, ‏`ifgr_min/max` — `None` כשהעוקב לא כיסה את כל החלון או שאירועיו
+    נדחקו מה-buffer; קצה `overload=0` בתוך החלון מוכיח עומס לפניו ⇒ `true` גם כשמצב
+    ההתחלה לא ידוע), ו-`post_stats` (תמונת stats אחת ברגע הזיהוי — **מקוננת** ולא
+    ‏`signal`/`snr` ברמה העליונה, כי ה-sidecar יוצא כמות שהוא ב-ZIP ושם הם היו נקראים כ-SNR
+    של השידור). חלון השידור אומת מ-`output.cpp` של rtl_airband (התחלה = חותמת שם הקובץ
+    ‏`:440,468`; סוף = mtime `:343,354,372`). **בשעה החוזרת של סוף שעון הקיץ** חותמת
+    השם מתאימה לשני זמנים — ההכרעה לפי ה-mtime ותקרת אורך הקובץ של rtl_airband
+    (`MAX_TRANSMISSION_TIME_SEC=3600`, `:371`); בלי הכרעה — `start=None` ובלי חלון, לא
+    שעה של טלמטריה זרה. נוסע עם ההקלטה לכל
+    מקום שה-sidecar של התמלול נוסע (★, retention, סשן, `starred.zip`, `export.zip` —
+    ‏`_rec_sidecars`), ו-`/api/activity` מוסיף `rf` (נקרא חי). ביומן: "LNA x/9 · AGC",
+    ‏"⚠ עומס RF ×N" / "ללא עומס" / "עומס: ?".
+  - **בסיס מד השדה מתויג ב-LNA/מסנן** (`signal_baseline` += `lna`, `fm_notch`, `agc`).
+    רצפת הרעש ב-dBFS נמדדת אחרי ה-LNA — שינוי LNA לבדו עלול לחקות "ירידה מהבסיס" או
+    להסתיר אחת (כמה ממנו ה-AGC מפצה ב-IF לא נמדד, ולכן לא משווים בכלל).
+    בסיס שנמדד בקצה-קדמי אחר ⇒ `no_baseline` + `verdict_reason="baseline_config_mismatch"`;
+    בסיס ישן בלי תיוג ⇒ `"baseline_untagged"`; רווח ידני ⇒ `"manual_gain"` — לעולם לא
+    השוואה בין קונפיגורציות. בדיקת האנטנה והניסוי מודדים ב-LNA/מסנן **השמורים של הקול**
+    (`_probe_frontend`), לא בקבוע — אחרת משתמש שבחר LNA אחר לא היה מקבל פסק-דין לעולם.
+    תוצאת הניסוי מציגה את הקצה הקדמי של הריצה ("לא ידוע" בריצה מלפני v2.26.0).
+    בניסוי `EXP_FIXED_GAINS` הוחלף ב-`EXP_FIXED_IFGRS=(20,35)` עם ה-LNA של הריצה בכל
+    הצעדים, כך שההשוואה "AGC על המסילה ≈ IFGR 20 קבוע" עדיין משווה דומה לדומה.
+  - **`rtl_airband -F` במקום `-f`** (`systemd/rtl_airband.service`): `-f` מצייר "textual
+    waterfall" ל-stdout — קודי ESC בלי `\n` בכל batch (`rtl_airband.cpp:657-667`) — ותחת
+    systemd ה-stdout וה-stderr חולקים זרם journald אחד, כך ששורות `AIRAM_RF` היו נדבקות
+    לגוש זבל ארוך (ובפיצול `LineMax` עלולות היו להיחתך). ‏`-F` = חזית בלי waterfall
+    (`:702-703,768-773`); גם `_journal_tail` בהודעות השגיאה מציג מאז שורות קריאות.
+  - **בדיקות:** `tests/test_rf_telemetry.py` (עוקב היומן עם Popen מזויף, `/api/metrics`
+    בכל המצבים, חלון ה-sidecar ונסיעתו עם ההקלטה), `tests/test_install_soapy.py` (נעיצה,
+    חתימה, סדר marker, ה-patch כ-unified diff תקין, רמת INFO), `tests/test_rf_contract.py`
+    (**חוזה חוצה-רכיבים**: מחרוזות הפורמט נשלפות מה-patch, מרונדרות עם/בלי `[INFO] `/
+    ‏`[WARNING] `/ANSI ומוזנות למפענח; נתיב ה-marker; שדות `rf.*` שה-UI קורא ⊆ מה שה-backend
+    מחזיר), ובדיקות דפדפן ב-360px. ה-patch הוחל (`git apply --check`) והודר מול כותרות
+    API 3.15, ו-harness שמפעיל את `ev_callback` אימת פלט ומגבלת קצב.
+  - **ה-retention לא מוחק קובצי-צד באמצע ★:** `_move_recording` מעביר קודם את קובצי-
+    הצד ואז את ה-mp3; מעבר-היתומים של `_sweep_recordings` (thread ה-watcher) שרץ בדיוק
+    באמצע ראה `.rf.json`/`.tx.json` ב-`saved/` בלי mp3 ומחק אותם לצמיתות. ה-sweep כולו,
+    וגם העברת/העתקת הקליפים בשמירת סשן, רצים עכשיו תחת `_STAR_LOCK`.
+  - **מגבלות כנות:** (1) **הטלמטריה דורשת בנייה מחדש של הדרייבר** — `sudo ./install.sh`
+    עם רשת; עד אז החיווי "לא זמין". (2) **כל בסיס קיים מסומן "כייל מחדש"** אחרי השדרוג
+    (נמדד כשה-LNA תחת AGC היה 0 בפועל). (3) **LNA 4 הוא הקבוע הקיים, לא ערך מכויל** — 🩺
+    בדיקת ה-RF (PR 2) תכריע לכל מקום. משתמש ב-AGC שדרג ⇒ LNA 4 (הגירה, למעלה); משתמש
+    ברווח ידני שומר את ה-RFGR שלו. (4) קצב אירועי `PowerOverloadChange`/`GainChange`
+    האמיתי לא נמדד על החומרה (`AGC_CTRL_EN` — לא ה-50Hz של ברירת-המחדל — ר' ה-patch);
+    בסערה, rate-limit של journald עלול להפיל קצוות. (5) `grdb`/`lna_grdb` נשמרים גולמיים;
+    ה-UI מציג "ה-AGC בחר IFGR" רק בטווח שה-spec מגדיר (‏`NORMAL_MIN_GR`=20..`MAX_BB_GR`=59),
+    ומחוצה לו "gRdB גולמי (לא מאומת)". (6) זמן האירוע = רגע הקריאה מ-journalctl (`-o cat`
+    לא נושא את חותמת journald), וה-start של חלון השידור מעוגל לשנייה — אירוע בשנייה
+    הראשונה יכול להיות זנב של שידור צמוד קודם (`start_precision_s=1` ב-sidecar).
+    **ממתין לאימות שטח.**
 - **📟 חיווי SDR: מזוהה? פנוי? (`GET /api/sdr`, v2.25.0).** נורה ברצועת הסטטוס
   (בכל תצוגה) ושורת הסבר במסך הבית. שתי שאלות נפרדות, כל אחת ממקור-אמת משלה:
   **מזוהה** = `lsusb` רואה התקן SDRplay (1df7); **פנוי** = ה-SDRplay API מציע אותו

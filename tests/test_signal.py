@@ -101,12 +101,18 @@ def test_signal_off_mode_reports_none_kind(client, monkeypatch):
     assert data["verdict"] == "unknown"
 
 
+def _tagged(noise, lna=None, fm_notch=False):
+    """בסיס מתויג בקצה הקדמי שבו נמדד (חוזה PR 1, פריט 7)."""
+    return {"noise": noise, "freq": 121.5, "ts": 1.0,
+            "lna": app.RF_GAIN_DEFAULT if lna is None else lna, "fm_notch": fm_notch, "agc": True}
+
+
 def test_signal_voice_continuous_with_baseline(client, paths, monkeypatch):
     monkeypatch.setattr(app, "_live_mode", lambda: "voice")
     st = app.load_state()
     st["freq"] = 121.500
     st["agc"] = True
-    st["signal_baseline"] = {"noise": -74.0, "freq": 121.5, "ts": 1.0}
+    st["signal_baseline"] = _tagged(-74.0)
     app.save_state(st)
     _write_stats(paths / "stats.txt", 121.500, sig=-40.0, noise=-73.0)
 
@@ -118,6 +124,70 @@ def test_signal_voice_continuous_with_baseline(client, paths, monkeypatch):
     assert data["noise"] == -73.0
     assert data["snr"] == pytest.approx(33.0)
     assert data["verdict"] == "ok"   # -74 - (-73) = -1dB, מתחת לסף
+    assert data["verdict_reason"] is None
+    assert data["frontend"] == {"lna": app.RF_GAIN_DEFAULT, "fm_notch": False, "agc": True}
+
+
+# --- 1.7: תיוג הבסיס בקצה הקדמי (LNA + מסנן FM) -------------------------------
+
+def test_verdict_reason_untagged_and_mismatch():
+    fe = app._baseline_tag(4, False)
+    assert app._verdict_reason(-80.0, {"noise": -74.0}, fe) == "baseline_untagged"
+    assert app._signal_verdict(-80.0, {"noise": -74.0}, fe) == "no_baseline"
+    assert app._verdict_reason(-80.0, _tagged(-74.0, lna=6), fe) == "baseline_config_mismatch"
+    assert app._signal_verdict(-80.0, _tagged(-74.0, lna=6), fe) == "no_baseline"
+    assert app._verdict_reason(-80.0, _tagged(-74.0, fm_notch=True), fe) == "baseline_config_mismatch"
+    assert app._verdict_reason(-80.0, _tagged(-74.0), fe) is None
+    assert app._signal_verdict(-84.0, _tagged(-74.0), fe) == "below_baseline"
+    assert app._verdict_reason(None, _tagged(-74.0), fe) == "no_reading"
+    assert app._verdict_reason(-80.0, None, fe) == "no_baseline"
+
+
+def test_signal_voice_untagged_old_baseline_is_not_compared(client, paths, monkeypatch):
+    """בסיס מלפני v2.26.0 נמדד כשה-LNA תחת AGC היה 0 בפועל — לא משווים אליו בכלל,
+    גם כשהמספרים "נראים" קרובים (§12: אין השוואה בין קצוות-קדמיים שונים)."""
+    monkeypatch.setattr(app, "_live_mode", lambda: "voice")
+    st = app.load_state()
+    st.update(freq=121.5, agc=True, signal_baseline={"noise": -74.0, "freq": 121.5, "ts": 1.0})
+    app.save_state(st)
+    _write_stats(paths / "stats.txt", 121.500, sig=-40.0, noise=-73.0)
+    data = client.get("/api/signal").get_json()
+    assert data["verdict"] == "no_baseline"
+    assert data["verdict_reason"] == "baseline_untagged"
+
+
+def test_signal_voice_lna_changed_since_calibration_is_mismatch(client, paths, monkeypatch):
+    """המשתמש שינה LNA אחרי הכיול: רצפה נמוכה ב-25dB **אינה** "אנטנה מנותקת" —
+    זה הקצה הקדמי שהשתנה. פסק-דין "below_baseline" כאן היה המצאה."""
+    monkeypatch.setattr(app, "_live_mode", lambda: "voice")
+    st = app.load_state()
+    st.update(freq=121.5, agc=True, rf_gain=8, signal_baseline=_tagged(-70.0, lna=2))
+    app.save_state(st)
+    _write_stats(paths / "stats.txt", 121.500, sig=-60.0, noise=-95.0)
+    data = client.get("/api/signal").get_json()
+    assert data["verdict"] == "no_baseline"
+    assert data["verdict_reason"] == "baseline_config_mismatch"
+    assert data["frontend"]["lna"] == 8
+
+
+def test_signal_voice_fm_notch_toggle_is_mismatch(client, paths, monkeypatch):
+    monkeypatch.setattr(app, "_live_mode", lambda: "voice")
+    st = app.load_state()
+    st.update(freq=121.5, agc=True, fm_notch=True, signal_baseline=_tagged(-74.0))
+    app.save_state(st)
+    _write_stats(paths / "stats.txt", 121.500, sig=-40.0, noise=-73.0)
+    data = client.get("/api/signal").get_json()
+    assert data["verdict_reason"] == "baseline_config_mismatch"
+
+
+def test_signal_voice_manual_gain_reason(client, paths, monkeypatch):
+    monkeypatch.setattr(app, "_live_mode", lambda: "voice")
+    st = app.load_state()
+    st.update(freq=121.5, agc=False, signal_baseline=_tagged(-74.0))
+    app.save_state(st)
+    _write_stats(paths / "stats.txt", 121.500, sig=-40.0, noise=-73.0)
+    data = client.get("/api/signal").get_json()
+    assert data["verdict"] == "unknown" and data["verdict_reason"] == "manual_gain"
 
 
 def test_signal_voice_manual_gain_skips_verdict(client, paths, monkeypatch):
@@ -126,7 +196,7 @@ def test_signal_voice_manual_gain_skips_verdict(client, paths, monkeypatch):
     st = app.load_state()
     st["freq"] = 121.500
     st["agc"] = False
-    st["signal_baseline"] = {"noise": -74.0, "freq": 121.5, "ts": 1.0}
+    st["signal_baseline"] = _tagged(-74.0)
     app.save_state(st)
     _write_stats(paths / "stats.txt", 121.500, sig=-40.0, noise=-96.0)
 
@@ -253,6 +323,9 @@ def test_antenna_check_calibrate_saves_baseline(client, paths, monkeypatch):
     saved = app.load_state()["signal_baseline"]
     assert saved["noise"] == -70.0
     assert saved["freq"] == 136.975
+    # 1.7: הבסיס מתויג בקצה הקדמי שבו נמדד (ברירת המחדל: LNA 4, מסנן כבוי)
+    assert saved["lna"] == app.RF_GAIN_DEFAULT and saved["fm_notch"] is False
+    assert data["lna"] == app.RF_GAIN_DEFAULT and data["fm_notch"] is False
 
     # בדיקה חוזרת בלי כיול: verdict נשווה עכשיו מול הבסיס שנשמר
     monkeypatch.setattr(app, "_enter_voice",
@@ -386,3 +459,88 @@ def test_antenna_check_skips_reentry_when_live_params_match_probe(client, paths,
     assert r.status_code == 200
     assert entered == []                    # אין restart — התנאים כבר נכונים
     assert r.get_json()["noise"] == -72.0
+
+
+# --- 1.7: הבדיקה מודדת בקצה הקדמי השמור של הקול ---------------------------------
+
+def test_antenna_check_probe_uses_saved_voice_frontend(client, paths, monkeypatch):
+    """ה-probe רץ ב-LNA/מסנן של המשתמש (_probe_frontend), והבסיס מתויג בהם."""
+    st = app.load_state()
+    st.update(rf_gain=7, fm_notch=True)
+    app.save_state(st)
+    monkeypatch.setattr(app, "_live_mode", lambda: "acars")
+    entered = []
+
+    def fake_enter_voice(params):
+        entered.append(dict(params))
+        _write_stats(paths / "stats.txt", params["freq"], sig=-30.0, noise=-72.0)
+        return None, None, False
+
+    monkeypatch.setattr(app, "_enter_voice", fake_enter_voice)
+    monkeypatch.setattr(app, "_enter_acars", lambda freqs: (None, None))
+    monkeypatch.setattr(app, "ANTENNA_CHECK_SAMPLE_SEC", 1.0)
+    r = client.post("/api/antenna/check", json={"freq": 121.5, "calibrate": True})
+    assert r.status_code == 200
+    assert entered[0]["agc"] is True
+    assert entered[0]["rf_gain"] == 7 and entered[0]["fm_notch"] is True
+    saved = app.load_state()["signal_baseline"]
+    assert saved["lna"] == 7 and saved["fm_notch"] is True
+
+
+def test_antenna_check_against_baseline_from_other_lna_is_no_baseline(client, paths, monkeypatch):
+    st = app.load_state()
+    st.update(rf_gain=4, signal_baseline=_tagged(-70.0, lna=0))
+    app.save_state(st)
+    monkeypatch.setattr(app, "_live_mode", lambda: "acars")
+    monkeypatch.setattr(app, "_enter_voice",
+                        lambda params: (_write_stats(paths / "stats.txt", params["freq"],
+                                                     sig=-50.0, noise=-95.0) or (None, None, False)))
+    monkeypatch.setattr(app, "_enter_acars", lambda freqs: (None, None))
+    monkeypatch.setattr(app, "ANTENNA_CHECK_SAMPLE_SEC", 1.0)
+    data = client.post("/api/antenna/check", json={"freq": 121.5}).get_json()
+    assert data["verdict"] == "no_baseline"            # לא "below_baseline" — LNA אחר
+    assert data["verdict_reason"] == "baseline_config_mismatch"
+
+
+def test_antenna_check_skip_compares_saved_frontend_too(client, paths, monkeypatch):
+    """כבר בקול באותו תדר/AGC/squelch, עם LNA ומסנן לא-ברירת-מחדל.
+    כרגע ה-probe נגזר מאותו state, ולכן הם תמיד שווים => אין restart. (שה-skip
+    באמת *נשען* על rf_gain/fm_notch מקובע בבדיקה הבאה, עם probe שונה.)"""
+    st = app.load_state()
+    st.update(app_mode="voice", freq=121.5, mod="am", agc=True, rf_gain=6, fm_notch=True,
+              squelch_mode="open")
+    app.save_state(st)
+    monkeypatch.setattr(app, "_live_mode", lambda: "voice")
+    entered = []
+    monkeypatch.setattr(app, "_enter_voice", lambda p: entered.append(p) or (None, None, False))
+    monkeypatch.setattr(app, "ANTENNA_CHECK_SAMPLE_SEC", 1.0)
+    _write_stats(paths / "stats.txt", 121.500, sig=-30.0, noise=-72.0)
+    r = client.post("/api/antenna/check", json={"freq": 121.5})
+    assert r.status_code == 200 and entered == []
+    assert r.get_json()["lna"] == 6 and r.get_json()["fm_notch"] is True
+
+
+@pytest.mark.parametrize("probe_fe", [(4, True), (6, False)])
+def test_antenna_check_no_skip_when_probe_frontend_differs(client, paths, monkeypatch, probe_fe):
+    """הצד השני של הבדיקה הקודמת — זה מה ש*באמת* מקבע את התנאים: כל השאר זהה
+    (תדר/AGC/squelch פתוח/קול חי), רק ה-LNA או המסנן של ה-probe שונים מהשמור =>
+    חייב restart. בלי ההשוואה של rf_gain/fm_notch ב-skip, המדידה הייתה רצה בקצה-
+    הקדמי של הקול ומתויגת בקצה-הקדמי של ה-probe — בסיס שגוי בשקט."""
+    st = app.load_state()
+    st.update(app_mode="voice", freq=121.5, mod="am", agc=True, rf_gain=6, fm_notch=True,
+              squelch_mode="open")
+    app.save_state(st)
+    monkeypatch.setattr(app, "_live_mode", lambda: "voice")
+    monkeypatch.setattr(app, "_probe_frontend", lambda _st: probe_fe)
+    entered = []
+
+    def enter(p):
+        entered.append(p)
+        _write_stats(paths / "stats.txt", p["freq"], sig=-30.0, noise=-72.0)
+        return None, None, False
+    monkeypatch.setattr(app, "_enter_voice", enter)
+    monkeypatch.setattr(app, "_restore_after_probe", lambda *a, **k: None)
+    monkeypatch.setattr(app, "ANTENNA_CHECK_SAMPLE_SEC", 1.0)
+    r = client.post("/api/antenna/check", json={"freq": 121.5})
+    assert r.status_code == 200
+    assert entered and (entered[0]["rf_gain"], entered[0]["fm_notch"]) == probe_fe

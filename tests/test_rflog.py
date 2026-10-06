@@ -74,6 +74,29 @@ def test_parse_conf_manual_gain_and_auto_squelch():
     assert c["squelch_snr"] is None       # auto = אין שורה, לא ניחוש של ערך
 
 
+def test_parse_conf_frontend_lna_and_fm_notch():
+    """1.1/1.3: הרשם מתעד את ה-LNA שבאמת הוחל ואת מסנן ה-FM."""
+    c = app._parse_airband_conf(app.render_config(132.5, "am", True, 40, 6, "open", 9.0, fm_notch=True))
+    assert c["agc"] is True and c["lna"] == 6 and c["fm_notch"] is True
+    c = app._parse_airband_conf(app.render_config(131.55, "am", False, 20, 3, "auto", 9.0))
+    assert c["agc"] is False and c["lna"] == 3 and c["fm_notch"] is False
+
+
+def test_parse_conf_pre_v226_agc_reports_driver_default_lna():
+    """קונפיג ישן (device_string בלי kwargs): תחת AGC הדרייבר נשאר ב-LNAstate=0 של
+    ברירת-המחדל (sdrplay_api_tuner.h:63) והמסנן כבוי (sdrplay_api_rsp1a.h:13)."""
+    old = app.render_config(132.5, "am", True, 40, 4, "open", 9.0).replace(
+        app._device_string(True, 4, False), "driver=sdrplay")
+    c = app._parse_airband_conf(old)
+    assert c["lna"] == 0 and c["fm_notch"] is False
+
+
+def test_conf_device_kwargs_parsing():
+    kw = app._conf_device_kwargs('    device_string = "driver=sdrplay,rfnotch_ctrl=true,rfgain_sel=2";\n')
+    assert kw == {"driver": "sdrplay", "rfnotch_ctrl": "true", "rfgain_sel": "2"}
+    assert app._conf_device_kwargs("no device line") == {}
+
+
 # --- דגימה ---------------------------------------------------------------------
 
 def test_sample_writes_only_on_new_stats(paths):

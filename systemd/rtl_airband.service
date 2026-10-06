@@ -16,7 +16,13 @@ StartLimitIntervalSec=0
 Type=simple
 # שער מוכנות: מחכה שה-SDRplay API באמת יענה לפני הרצת rtl_airband
 ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
-ExecStart=/usr/local/bin/rtl_airband -f -c /etc/rtl_airband/airband.conf
+# ‏-F (ולא -f): חזית בלי "textual waterfall" (rtl_airband.cpp:702-703,768-773 ב-v5.2.0).
+# ‏-f מצייר ל-stdout בכל batch קודי ESC בלי '\n' (‏GOTOXY ‏rtl_airband.h:55, ‏:657-667 +
+# fflush) — ותחת systemd ה-stdout וה-stderr חולקים זרם journald אחד, כך ששורת
+# "AIRAM_RF ..." (stderr, טלמטריית ה-RF — ר' SOAPY_RF_MARK ב-app.py) הייתה נדבקת
+# לסוף גוש waterfall ארוך, ובפיצול LineMax של journald הטוקן עלול היה להיחתך. גם
+# _journal_tail (הודעות שגיאה בממשק) מציג מאז שורות אמיתיות במקום זבל-ANSI.
+ExecStart=/usr/local/bin/rtl_airband -F -c /etc/rtl_airband/airband.conf
 # rtl_airband זקוק להרשאות root לגישת חומרה ולעדיפות זמן-אמת
 User=root
 Restart=always

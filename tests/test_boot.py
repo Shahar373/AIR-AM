@@ -2,6 +2,7 @@
 # אף צרכן SDR אינו enabled ב-systemd — airam-web משחזר את המצב השמור באתחול,
 # כולל off. אלה הבדיקות שמעגנות את "אין מצב ראשי": השחזור סימטרי לכל המצבים,
 # וכישלון נופל ל-off (לעולם לא לקול). כמו בשאר הבדיקות — systemd/SDR ממוקפים.
+import json
 import types
 
 import pytest
@@ -125,6 +126,52 @@ def test_boot_restore_voice_running_but_stale_config_rewrites(paths, no_sleep, s
     assert "stats_filepath" in app.CONFIG_PATH.read_text()
 
 
+def test_boot_restore_voice_running_with_pre_v226_config_rewrites(paths, no_sleep, sysctl_calls, monkeypatch):
+    """שדרוג ל-v2.26.0 כשהקול כבר רץ: הקונפיג הישן (AGC בלי rfgain_sel) נחשב stale
+    => נכתב מחדש עם ה-LNA וה-FM notch השמורים, והשירות מורם."""
+    app.save_state({**app.DEFAULT_STATE, "freq": 121.5, "app_mode": "voice",
+                    "rf_gain": 6, "fm_notch": True})
+    app.CONFIG_PATH.write_text(app.render_config(121.5, "am", True, 40, 6, "open").replace(
+        app._device_string(True, 6, False), "driver=sdrplay"))
+    monkeypatch.setattr(app, "_is_active", lambda svc: svc == "rtl_airband")
+    restarted = []
+    monkeypatch.setattr(app, "_restart_and_verify", lambda: restarted.append(1) or (None, None, False))
+    app._boot_restore()
+    assert restarted == [1]
+    assert "rfnotch_ctrl=true,rfgain_sel=6" in app.CONFIG_PATH.read_text()
+
+
+def test_pre_v226_state_under_agc_migrates_stale_rf_gain_to_default(paths, no_sleep, sysctl_calls, monkeypatch):
+    """עד v2.26.0 rf_gain היה חסר-השפעה תחת AGC (הסליידר מושבת, שום שורת LNA), אבל
+    נשמר מהכיוונון הידני האחרון. בלי הגירה, השדרוג היה מחיל בשקט RFGR=9 (הפחתת ה-
+    LNA הגדולה ביותר) על AGC. state בלי fm_notch = מלפני v2.26.0 => LNA ברירת-המחדל."""
+    app.STATE_PATH.write_text(json.dumps({"freq": 121.5, "app_mode": "voice", "mod": "am",
+                                          "agc": True, "if_gain": 40, "rf_gain": 9,
+                                          "squelch_mode": "open", "squelch_snr": 9.0}))
+    assert app.load_state()["rf_gain"] == app.RF_GAIN_DEFAULT == 4
+    app.CONFIG_PATH.write_text(app.render_config(121.5, "am", True, 40, 9, "open").replace(
+        app._device_string(True, 9, False), "driver=sdrplay"))
+    monkeypatch.setattr(app, "_is_active", lambda svc: svc == "rtl_airband")
+    monkeypatch.setattr(app, "_restart_and_verify", lambda: (None, None, False))
+    app._boot_restore()
+    assert "rfgain_sel=4" in app.CONFIG_PATH.read_text()
+    assert "rfgain_sel=9" not in app.CONFIG_PATH.read_text()
+
+
+def test_pre_v226_state_manual_gain_keeps_rf_gain_and_v226_state_untouched(paths):
+    """ברווח ידני rf_gain תמיד היה בתוקף (RFGR) => לא נוגעים. ו-state של v2.26.0
+    (יש fm_notch) — גם עם rf_gain=9 תחת AGC — הוא בחירה מפורשת, לא הגירה."""
+    app.STATE_PATH.write_text(json.dumps({"agc": False, "rf_gain": 9}))
+    assert app.load_state()["rf_gain"] == 9
+    app.STATE_PATH.write_text(json.dumps({"agc": True, "rf_gain": 9, "fm_notch": False}))
+    assert app.load_state()["rf_gain"] == 9
+    # ההגירה נעלמת בשמירה הראשונה (save_state כותב fm_notch)
+    app.STATE_PATH.write_text(json.dumps({"agc": True, "rf_gain": 9}))
+    app.save_state(app.load_state())
+    assert json.loads(app.STATE_PATH.read_text())["rf_gain"] == 4
+    assert app.load_state()["rf_gain"] == 4
+
+
 def test_boot_restore_failure_falls_to_off(paths, no_sleep, sysctl_calls, monkeypatch):
     # הכניסה למצב השמור נכשלה (SDR נוכח) => off + prev_mode, לא נפילה לקול
     app.save_state({**app.DEFAULT_STATE, "app_mode": "vdl2"})
@@ -240,3 +287,33 @@ def test_mode_reconcile_loop_survives_exception(monkeypatch):
     with pytest.raises(StopIteration):
         app._mode_reconcile_loop()
     assert len(sleep_calls) == 2   # המשיך לסיבוב שני למרות החריגה בראשון
+
+
+# --- סדר האתחול מול עוקב טלמטריית ה-RF (PR 1, ר' app._rf_follow_attached) ---------
+# ‏journalctl -n 0 לא רואה שורות שנכתבו לפני שעלה. אם _boot_restore מרים את
+# rtl_airband לפני שהעוקב מחובר, "AIRAM_RF stream=start" של הסשן הראשון אובד והעומס
+# נשאר "לא ידוע" עד הכיוונון הבא — לכן השחזור ממתין לעוקב (best-effort, עם timeout).
+
+def test_boot_restore_waits_for_rf_follower_when_telemetry_available(paths, no_sleep,
+                                                                    sysctl_calls, monkeypatch):
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "voice"})
+    order = []
+    monkeypatch.setattr(app, "_rf_telemetry_available", lambda: True)
+    monkeypatch.setattr(app._rf_follow_attached, "wait",
+                        lambda timeout=None: order.append(("wait", timeout)) or True)
+    monkeypatch.setattr(app, "_restart_and_verify",
+                        lambda: order.append(("restart",)) or (None, None, False))
+    app._boot_restore()
+    assert order[0] == ("wait", app.RF_BOOT_ATTACH_WAIT_SEC)   # קודם העוקב...
+    assert ("restart",) in order[1:]                           # ...ורק אז הצרכן
+
+
+def test_boot_restore_does_not_wait_without_telemetry_mark(paths, no_sleep,
+                                                           sysctl_calls, monkeypatch):
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "voice"})
+    monkeypatch.setattr(app, "_rf_telemetry_available", lambda: False)
+    monkeypatch.setattr(app._rf_follow_attached, "wait",
+                        lambda timeout=None: pytest.fail("אין סימן-בנייה => אין למה לחכות"))
+    monkeypatch.setattr(app, "_restart_and_verify", lambda: (None, None, False))
+    app._boot_restore()
+    assert "freq = " in app.CONFIG_PATH.read_text()

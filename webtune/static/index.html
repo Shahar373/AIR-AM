@@ -796,11 +796,24 @@
       padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); transition: opacity .15s ease; }
     .gain-slider:last-of-type { border-bottom: 0; }
     .gain-slider > span:first-child { font-size: .88rem; color: var(--dim); min-width: 5em; }
-    .gain-slider input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
+    /* ⚠ direction: ltr — בדף dir=rtl טווח יורש rtl, כלומר *שמאלה* = ערך גבוה = יותר רווח
+       (נמדד: ה-thumb של 9/9 היה בקצה השמאלי). כל הטקסטים, ה-.val (LTR) והתיעוד אומרים
+       "ימינה = יותר רווח" — בלי זה הוראת "הורד LNA" שבוצעה לפי כיוון הייתה *מעלה* רווח
+       ומחמירה את הרוויה. חל על IF/LNA של הקול ועל רווח ה-SATCOM (אותה מחלקה). */
+    .gain-slider input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); direction: ltr; }
     .gain-slider .val { direction: ltr; font-variant-numeric: tabular-nums;
       color: var(--text); font-size: .9rem; min-width: 3.4em; text-align: end; }
     .gain-slider.dim { opacity: .4; }
     .gain-slider.dim input[type="range"] { cursor: not-allowed; }
+    .setting.fm-notch { cursor: pointer; padding: var(--sp-2) 0; border-bottom: 1px solid var(--border); }
+    .fm-notch small { color: var(--text-faint); font-size: .72rem; }
+    /* שורת עומס RF מהחומרה. ניטרלי כברירת מחדל (לא ידוע/לא זמין) — ירוק רק כש
+       החומרה עצמה דיווחה שאין עומס, אדום רק כשהיא דיווחה עומס (§12). */
+    .rf-hw { font-size: .76rem; line-height: 1.5; color: var(--dim); margin: var(--sp-2) 0 0; }
+    .rf-hw.ok { color: var(--green-fg); }
+    .rf-hw.bad { color: var(--red-fg); font-weight: 700; }
+    .rf-hw code { direction: ltr; unicode-bidi: isolate; white-space: nowrap; background: var(--panel-2);
+      border-radius: var(--r-sm); padding: .05rem .3rem; font-size: .72rem; color: var(--text); }
 
     .hint { color: var(--text-faint); font-size: .78rem; line-height: 1.55; margin: .6rem 0 0; }
 
@@ -856,6 +869,12 @@
     .act-tx.meta button.tx-action { background: none; border: none; padding: 0;
       margin-inline-start: .3em; color: var(--accent); font: inherit; cursor: pointer;
       text-decoration: underline; }
+    /* שורת RF של הקלטה (sidecar ‏.rf.json): קומפקטית, עוטפת בטלפון צר במקום לדחוף
+       את השורה הראשית. ‏.unk — "לא ידוע" גלוי (§12), לא היעדר שקט. */
+    .act-rf { display: flex; flex-wrap: wrap; gap: 0 var(--sp-2); font-size: .72rem;
+      color: var(--text-faint); padding: 0 0 var(--sp-1); margin-top: -.1rem; }
+    .act-rf .bad { color: var(--red-fg); font-weight: 700; }
+    .act-rf .unk { color: var(--text-faint); }
     .act-row button.star { flex: none; padding: var(--sp-1) var(--sp-2); font-size: .95rem;
       line-height: 1; border-radius: 999px; background: transparent; border: 1px solid var(--border);
       color: var(--dim); min-width: 36px; min-height: 36px; }
@@ -1760,10 +1779,10 @@
       </div>
     </div>
 
-    <!-- בקרת רווח (Gain) — בסגנון SDRplay: AGC, System/IF/RF gain + חיווי עומס -->
+    <!-- בקרת רווח (Gain) — בסגנון SDRplay: AGC (IF בלבד) + LNA + מסנן FM + חיווי עומס חומרה -->
     <div class="setting gain-head">
       <span>IF AGC</span>
-      <span class="overload" id="overload" hidden>⚠ עומס יתר</span>
+      <span class="overload" id="overload" hidden>⚠ עומס RF</span>
       <label class="switch">
         <input type="checkbox" id="agc" checked />
         <span class="track"></span>
@@ -1778,13 +1797,29 @@
       <input type="range" id="ifGain" min="0" max="39" step="1" value="19" />
       <span class="val"><span id="ifGainVal">19</span> dB</span>
     </div>
+    <!-- ⚠ LNA פעיל גם תחת AGC: ה-AGC של ה-API שולט רק ב-gRdB (IF) — אין שדה LNA
+         ב-sdrplay_api_AgcT (sdrplay_api_control.h:36-45), ו-rfgain_sel קובע את LNAstate
+         (SoapySDRPlay3 Settings.cpp:1628-1630). רוויה ב-LNA קורית *לפני* ה-AGC ואינה
+         הפיכה — ולכן זה הכפתור שמשנה עיוות של אות חזק (docs/voice-rf-quality-plan.md §2.2). -->
     <div class="gain-slider" id="rfWrap">
-      <span>RF Gain</span>
-      <input type="range" id="rfGain" min="0" max="9" step="1" value="5" />
+      <span>LNA</span>
+      <input type="range" id="rfGain" min="0" max="9" step="1" value="5"
+             aria-label="רווח LNA (ימינה = רווח גבוה יותר)" />
       <span class="val" id="rfGainVal">5/9</span>
     </div>
-    <p class="hint">‏AGC דלוק = רווח אוטומטי (מומלץ). כבה כדי לכוון ידנית: <b>IF Gain</b> ו-<b>RF Gain</b>
-      (ימינה = רווח גבוה יותר). "עומס יתר" מופיע כשהאות חזק מדי וקרוב לרוויה — אז הורד רווח.</p>
+    <label class="setting fm-notch" for="fmNotch">
+      <span>מסנן FM <small>(חוסם <bdi dir="ltr">88–108 MHz</bdi>)</small></span>
+      <span class="switch">
+        <input type="checkbox" id="fmNotch" />
+        <span class="track"></span>
+      </span>
+    </label>
+    <!-- חיווי עומס מהחומרה (Overload_Detected/Corrected + GainChange של ה-API, דרך
+         SoapySDRPlay3 עם ה-patch) — לא מרמת הערוץ אחרי ה-AGC. §12: לא ידוע ≠ תקין. -->
+    <p class="rf-hw" id="rfHw">עומס RF: לא ידוע</p>
+    <p class="hint">‏<b>AGC</b> שולט ברווח ה-IF בלבד (מומלץ דלוק). <b>LNA</b> פעיל תמיד (ימינה = רווח גבוה יותר):
+      ליד שדה התעופה <b>הורד אותו</b> (ערך קטן יותר) — אות חזק מרווה את ה-LNA לפני ה-AGC, והעיוות לא ניתן לתיקון אחר כך.
+      "⚠ עומס RF" מגיע מהחומרה עצמה — כשהוא מופיע, הורד LNA. <b>מסנן FM</b> — נסה כשיש תחנות FM חזקות בסביבה.</p>
 
     <div class="setting" style="border-top:1px solid var(--border);margin-top:.4rem;padding-top:.9rem">
       <span>סקוולץ׳</span>
@@ -2474,9 +2509,39 @@
        הסליידרים מוצגים ב"רווח" (ימינה = יותר), אך SDRplay עובד ב"הפחתת רווח":
          IFGR 20–59  (קטן = רווח גדול)  => ערך סליידר 0–39  = 59 − IFGR
          RFGR 0–9    (קטן = רווח גדול)  => ערך סליידר 0–9   = 9 − RFGR
-       System Gain הוא הערכה (RFGR ≈ 7dB לצעד, לא-לינארי) — חיווי יחסי, לא מדידה. */
+       System Gain הוא הערכה (RFGR ≈ 7dB לצעד, לא-לינארי) — חיווי יחסי, לא מדידה.
+       ⚠ ה-RFGR כאן הוא ה-LNA state של ה-RSP1B (rf_gain ב-state), ומאז v2.26.0 הוא
+       חל **גם תחת AGC** (rfgain_sel ב-device_string) — ה-AGC של ה-API מזיז רק את
+       ה-IF (gRdB). לכן רק סליידר ה-IF מושבת כש-AGC דלוק; ה-LNA תמיד פעיל. */
     const sliderToIFGR = () => 59 - parseInt($("ifGain").value, 10);
     const sliderToRFGR = () => 9 - parseInt($("rfGain").value, 10);
+
+    // ‏fm_notch נשלח רק אחרי ש-/api/state אתחל את המתג (applyGainState). השרת משלים
+    // שדה חסר מה-state השמור (‏_parse_tune לפי נוכחות) — כך ש-/api/state שנכשל בטעינה
+    // לא יגרום ל-checkbox הלא-מאותחל לכבות בשקט מסנן שהמשתמש הדליק.
+    let fmNotchReady = false;
+    const fmNotchField = () => (fmNotchReady ? { fm_notch: $("fmNotch").checked } : {});
+    // ההגדרות האחרונות שהשרת אישר — לשחזור הבקרים אחרי כיוונון שנכשל ברשת
+    let lastGainState = null;
+    // state => בקרי הרווח/המסנן. state שומר IFGR/RFGR (הפחתת רווח) => המרה לערכי
+    // הסליידר (רווח). משותף לטעינת הדף ולתשובת כיוונון שנכשל (השרת חזר/נפל ל-off) —
+    // אחרת המתג היה ממשיך להציג "דלוק" כשהשרת אומר "כבוי", ו-retune הבא היה שולח שוב.
+    function applyGainState(st) {
+      if (!st) return;
+      $("agc").checked = st.agc !== false;
+      const ifgr = Number(st.if_gain);
+      $("ifGain").value = Number.isFinite(ifgr) ? (59 - ifgr) : 19;
+      const rfgr = Number(st.rf_gain);
+      $("rfGain").value = Number.isFinite(rfgr) ? (9 - rfgr) : 5;
+      // ready רק כשהשרת באמת אמר מה מצב המסנן — תשובת שגיאה ({ok:false}) או שרת
+      // ישן בלי השדה משאירים את המתג "לא מאותחל", והשרת ישמור את הערך השמור.
+      if (typeof st.fm_notch === "boolean") {
+        $("fmNotch").checked = st.fm_notch;
+        fmNotchReady = true;
+      }
+      lastGainState = st;
+      renderGainUI();
+    }
 
     function renderGainUI() {
       const auto = $("agc").checked;
@@ -2484,12 +2549,15 @@
       const rfStep = parseInt($("rfGain").value, 10);    // 0–9
       $("ifGainVal").textContent = ifDb;
       $("rfGainVal").textContent = rfStep + "/9";
-      // System Gain ≈ רווח IF + רווח LNA משוער (~7dB לצעד)
+      $("rfGain").title = "LNA state " + (9 - rfStep) + " (0 = רווח מקסימלי)";
+      // System Gain ≈ רווח IF + רווח LNA משוער (~7dB לצעד). תחת AGC ה-IF לא ידוע
+      // מראש (ה-IFGR שה-AGC בחר מוצג בשורת עומס ה-RF, מהחומרה — לא הערכה).
       $("sysGain").textContent = auto ? "אוטו׳" : (ifDb + rfStep * 7);
       $("sysGainUnit").textContent = auto ? "" : " dB";
-      for (const w of ["ifWrap", "rfWrap"]) $(w).classList.toggle("dim", auto);
+      $("ifWrap").classList.toggle("dim", auto);
       $("ifGain").disabled = auto;
-      $("rfGain").disabled = auto;
+      $("rfWrap").classList.remove("dim");
+      $("rfGain").disabled = false;   // ⚠ לא `= auto` (כך היה עד v2.26.0 — חסם את הצירוף הנכון: AGC + LNA מופחת)
     }
 
     /* ---------- פריסטים ---------- */
@@ -2666,7 +2734,8 @@
           mod: segValue("modSeg"),
           agc: $("agc").checked,
           if_gain: sliderToIFGR(),
-          rf_gain: sliderToRFGR(),
+          rf_gain: sliderToRFGR(),          // נשלח גם כש-agc דלוק — ה-LNA חל בשני המצבים
+          ...fmNotchField(),
           squelch_mode: segValue("sqSeg"),
           squelch_snr: getSnr(),
         });
@@ -2678,8 +2747,17 @@
           if (data.state) {
             current = Number(data.state.freq);
             updateDisplay(current);
+            applyGainState(data.state);   // גם המתג/הסליידרים — לא רק התדר
           }
           return;
+        }
+        lastGainState = data;           // ‏{ok, ...new_state} — מה שהשרת שמר בפועל
+        // /api/state נכשל בטעינה => המתג לא אותחל ו-fm_notch לא נשלח (השרת שמר את השמור).
+        // התשובה אומרת מה נשמר בפועל — מיישרים *רק* את המתג (לא את הסליידרים: המשתמש
+        // אולי כבר הזיז אותם בזמן שהבקשה הייתה בדרך).
+        if (!fmNotchReady && typeof data.fm_notch === "boolean") {
+          $("fmNotch").checked = data.fm_notch;
+          fmNotchReady = true;
         }
         // השרת כבר וידא שהשירות נשאר חי => נותר רק לחכות שה-mount יחזור ב-Icecast
         setStatus("מתחבר לסטרים…", "busy");
@@ -2687,6 +2765,7 @@
       } catch (e) {
         current = prevFreq;         // הבקשה לא הגיעה => מיישרים תצוגה חזרה לתדר הקודם
         updateDisplay(prevFreq);
+        applyGainState(lastGainState);   // ...וגם את הבקרים — הרדיו לא השתנה
         setStatus("שגיאת רשת — בדוק חיבור ל-Pi", "err");
       }
     }
@@ -2786,28 +2865,97 @@
       } catch (e) { /* השרת עצמו לא עונה => הסטטוס הכללי כבר יראה שגיאת רשת */ }
     }
 
+    /* ---------- עומס RF מהחומרה (rf ב-/api/metrics) ----------
+       מקור: אירועי Overload_Detected/Corrected ו-GainChange של ה-SDRplay API, שה-patch
+       של AIR-AM ל-SoapySDRPlay3 רושם ל-journal (ר' docs/voice-rf-quality-plan.md §5).
+       החליף את כלל ה-‎-3dBFS הישן (OVERLOAD_DBFS בשרת, הוסר): הוא מדד את רמת *הערוץ* אחרי
+       ה-AGC, בתוך bin אחד — עיוור לרוויית LNA/ADC (§2.2 שם).
+       §12: שלושה מצבים שונים ולא שניים — true (החומרה דיווחה עומס) / false (החומרה
+       דיווחה שאין) / null (לא ידוע: אין טלמטריה, הקול לא רץ, העוקב לא קורא). null
+       לעולם לא מוצג כ"תקין". כל טקסט דינמי דרך textContent; לטינית עטופה ב-bidi(). */
+    const lnaStep = (state) => 9 - state;            // LNA state (0 = רווח מקסימלי) => ערך הסליידר
+    // טווח הפחתת ה-IF (gRdB) שה-spec של SDRplay מגדיר: sdrplay_api_NORMAL_MIN_GR=20
+    // (sdrplay_api_tuner.h:41, ברירת-המחדל של minGr :65 — SoapySDRPlay3 לא משנה אותו)
+    // עד MAX_BB_GR=59 (:4) — אותם IFGR_MIN/IFGR_MAX של השרת. ה-spec לא מגדיר את
+    // הסמנטיקה של gRdB ב-GainChange, ו-upstream שומר משמר "gRdB < 200" לא-מוסבר
+    // (Streaming.cpp:168) — ערך מחוץ לטווח לא יוצג כ"מה שה-AGC בחר". זה גבול ה-spec,
+    // לא סף מומצא (§12).
+    const IFGR_MIN = 20, IFGR_MAX = 59;
+    const ifgrPlausible = (v) => Number.isInteger(v) && v >= IFGR_MIN && v <= IFGR_MAX;
+    // ‏rf.unknown_reason (‏_rf_unknown_reason בשרת) => *למה* לא ידוע, לא "ממתין" גנרי
+    const RF_UNKNOWN_TEXT = {
+      no_telemetry: "לא זמין",
+      voice_not_live: "לא ידוע — הקול לא רץ כרגע",
+      follower_down: "לא ידוע — קריאת יומן הדרייבר לא פעילה כרגע (מנסה שוב)",
+      joined_mid_session: "לא ידוע — השרת הופעל מחדש באמצע הסשן; כוונון מחדש יאפס",
+      no_driver_evidence: "לא ידוע — הדרייבר עוד לא אישר שהוא מדווח (אם זה נמשך אחרי כוונון — ר' README)",
+    };
+    function renderRfHw(rf) {
+      const el = $("rfHw");
+      const over = rf ? rf.overload : null;
+      $("overload").hidden = over !== true;
+      $("overload").title = over === true ? "החומרה מדווחת עומס — הורד את ה-LNA (ערך קטן יותר)" : "";
+      el.className = "rf-hw" + (over === true ? " bad" : over === false ? " ok" : "");
+      el.textContent = "";
+      if (!rf) {                                     // שרת ישן / בקשה נכשלה => לא יודעים
+        el.textContent = "עומס RF: לא ידוע";
+        return;
+      }
+      if (rf.telemetry === false) {
+        el.append("עומס RF: לא זמין — הדרייבר (" + bidi("SoapySDRPlay3") +
+                  ") נבנה בלי טלמטריית עומס. להפעלה הרץ על ה-Pi: ");
+        const c = document.createElement("code");
+        c.textContent = "sudo ./install.sh";
+        el.appendChild(c);
+        return;
+      }
+      const head = over === true ? "⚠ עומס RF עכשיו — הורד את ה-LNA (ערך קטן יותר)"
+                 : over === false ? "עומס RF: אין (לפי החומרה)"
+                 : "עומס RF: " + (RF_UNKNOWN_TEXT[rf.unknown_reason] || "לא ידוע");
+      const parts = [];
+      if (Number.isInteger(rf.lna_state)) {
+        let t = bidi("LNA " + lnaStep(rf.lna_state) + "/9");
+        if (rf.lna_grdb != null) t += " (" + bidi("-" + rf.lna_grdb + " dB") + ")";
+        parts.push(t);
+      }
+      // ה-IFGR שה-AGC בחר בפועל (הפחתה — גדול = פחות רווח). מהחומרה, לא הערכה —
+      // אבל רק בטווח שה-spec מגדיר (ifgrPlausible); מחוצה לו מוצג גולמי ולא כ"בחירה".
+      if (rf.agc && rf.ifgr != null)
+        parts.push(ifgrPlausible(rf.ifgr) ? "ה-AGC בחר " + bidi("IFGR " + rf.ifgr + " dB")
+                                          : bidi("gRdB") + " גולמי " + bidi(String(rf.ifgr)) + " (לא מאומת)");
+      if (rf.fm_notch) parts.push("מסנן FM");
+      if (over !== null && over !== undefined) {
+        let t = "עומסים: " + (rf.overload_events || 0);
+        if (rf.overload_events > 0 && rf.last_overload_age != null)
+          t += " (אחרון לפני " + Math.round(rf.last_overload_age) + " שנ׳)";
+        parts.push(t);
+      }
+      el.textContent = head + (parts.length ? " · " + parts.join(" · ") : "");
+    }
+
     async function pollMetrics() {
       if (metricsInFlight) return;   // בקשה קודמת עדיין פתוחה (רשת איטית) => מדלגים על המחזור
       metricsInFlight = true;
       try {
         const m = await fetchJSON("/api/metrics");
         const panel = $("rfPanel");
+        // עומס החומרה לא תלוי בטריות ה-stats של rtl_airband — מצוירים תמיד
+        // (כש-ok=false: rf חסר => "לא ידוע", לא הסתרה שקטה)
+        renderRfHw(m.ok ? m.rf : null);
         if (!m.ok || !m.fresh || m.snr == null) {
           panel.classList.add("stale");
           explainStale();
-          $("overload").hidden = true;                 // אין נתונים => אין חיווי עומס
           $("snrNow").textContent = "—";
           return;
         }
         panel.classList.remove("stale");
-        $("overload").hidden = !m.overload;            // עומס יתר: אות קרוב לרוויה
         const snrEl = $("rfSnr");
         snrEl.textContent = m.snr.toFixed(1);
         snrEl.className = m.snr >= 10 ? "good" : (m.snr >= 4 ? "weak" : "");
         $("snrNow").textContent = m.snr.toFixed(1);    // עוגן חי לבחירת סף ידני
         if (m.signal != null) {
           $("rfSigBar").style.width = dbfsPct(m.signal) + "%";
-          $("rfSigBar").style.background = m.overload ? "var(--red)" : "";
+          $("rfSigBar").style.background = (m.rf && m.rf.overload === true) ? "var(--red)" : "";
           $("rfSigVal").textContent = m.signal.toFixed(1) + " dBFS";
         }
         if (m.noise != null) {
@@ -2817,7 +2965,7 @@
         snrHist.push(m.snr);
         if (snrHist.length > SNR_HIST_N) snrHist.shift();
         drawSpark();
-      } catch (e) { $("rfPanel").classList.add("stale"); }
+      } catch (e) { $("rfPanel").classList.add("stale"); renderRfHw(null); }
       finally { metricsInFlight = false; }
     }
     // rtl_airband מרענן את הקובץ כל ~1 שנייה => פולינג כל שנייה למשוב כמעט-רציף
@@ -2837,10 +2985,18 @@
       const E = (suf) => $(prefix + suf);
       let polling = false, checking = false;
 
-      function verdictInfo(v) {
+      // ‏verdict_reason מסביר *למה* אין פסק-דין. בסיס שנמדד ב-LNA/מסנן FM אחרים
+      // (או בסיס ישן בלי תיוג, מלפני v2.26.0) לא בר-השוואה: הפרש של צעד LNA אחד
+      // לבדו יכול לחצות את סף הניתוק — ולכן השרת מחזיר no_baseline ולא משווה.
+      function verdictInfo(v, reason) {
         if (v === "ok") return ["✓ תואם לבסיס", "good"];
         if (v === "below_baseline") return ["⚠ מתחת לבסיס — בדוק חיבור אנטנה", "bad"];
+        if (v === "no_baseline" && reason === "baseline_config_mismatch")
+          return ["הבסיס נמדד בהגדרת LNA/מסנן FM אחרת — כייל מחדש בהגדרה הנוכחית", ""];
+        if (v === "no_baseline" && reason === "baseline_untagged")
+          return ["הבסיס נמדד בגרסה קודמת (בלי תיעוד LNA) — כייל מחדש", ""];
         if (v === "no_baseline") return ["אין בסיס — לחץ “כייל בסיס”", ""];
+        if (reason === "manual_gain") return ["רווח ידני — אין השוואה לבסיס (נמדד תחת AGC)", ""];
         return ["", ""];
       }
 
@@ -2853,10 +3009,14 @@
           E("Age").textContent = (d.kind === "last-message" && d.age != null)
             ? "לפני " + Math.round(d.age) + " שנ׳" : "";
         }
-        E("Baseline").textContent = d.baseline
-          ? "בסיס: " + d.baseline.noise.toFixed(1) + " dBFS"
-          : "אין בסיס מכויל";
-        const [txt, cls] = verdictInfo(d.verdict);
+        // ‏d.baseline.noise עלול להיות null (בסיס פגום/חלקי) — לא להפיל את הרינדור
+        const bn = d.baseline && typeof d.baseline.noise === "number" ? d.baseline.noise : null;
+        let bTxt = bn != null ? "בסיס: " + bidi(bn.toFixed(1) + " dBFS") : "אין בסיס מכויל";
+        // התיוג (v2.26.0+) — באיזה LNA/מסנן הבסיס נמדד, כדי שאי-ההתאמה תהיה גלויה
+        if (bn != null && Number.isInteger(d.baseline.lna))
+          bTxt += " · " + bidi("LNA " + (9 - d.baseline.lna) + "/9") + (d.baseline.fm_notch ? " · מסנן FM" : "");
+        E("Baseline").textContent = bTxt;
+        const [txt, cls] = verdictInfo(d.verdict, d.verdict_reason || d.reason);
         const vEl = E("Verdict");
         vEl.textContent = txt;
         vEl.className = "fm-verdict" + (cls ? " " + cls : "");
@@ -3037,6 +3197,13 @@
       if (ad && typeof ad.rise === "number")
         notes.push("אחרי הניתוק, ב-132.000 עם AGC: מיד אחריו " + expFmt(ad.instant) + " dBFS, אחרי דקה וחצי "
           + expFmt(ad.after) + " dBFS — הרעש חזר למעלה " + ad.rise.toFixed(1) + " dB.");
+      // הקצה הקדמי של הריצה (‏_experiment_summary: lna = LNA state, fm_notch) — ריצות
+      // בקצה-קדמי שונה אינן ברות-השוואה. null = ריצה מלפני v2.26.0 (לא נרשם; ה-LNA
+      // תחת AGC היה אז 0 בפועל) — מוצג כ"לא ידוע", לא כערך.
+      notes.push(Number.isInteger(r.lna)
+        ? "קצה קדמי בריצה: " + bidi("LNA " + lnaStep(r.lna) + "/9") + (r.fm_notch ? " · מסנן FM" : " · בלי מסנן FM")
+          + " — אל תשווה לריצה בקצה-קדמי אחר."
+        : "קצה קדמי בריצה: לא ידוע (ריצה מלפני v2.26.0) — לא ברת-השוואה לריצות חדשות.");
       if (r.stale_probes) notes.push("⚠ " + r.stale_probes + " בדיקות אנטנה קראו נתונים של התהליך הקודם (לפני ההפעלה מחדש).");
       else if (r.stale_rows) notes.push(r.stale_rows + " קריאות של התהליך הקודם נרשמו אחרי הפעלות-מחדש (לא נכללו בחישוב).");
       box.innerHTML = head
@@ -4062,6 +4229,55 @@
       return d;
     }
 
+    /* מטא RF של השידור מה-sidecar (ev.rf, נקרא חי בשרת). null => הקלטה בלי
+       רשומה (מלפני v2.26.0 / כתיבה שנכשלה) — לא מציגים כלום, כי אין שום טענה.
+       ‏§12 בתוך הרשומה: config_known=false => לא יודעים באיזה LNA הוקלט (כוונן
+       מאז) — לא מציגים את ה-LNA הנוכחי במקומו. overload=null => "עומס: ?" גלוי.
+       ⚠ snr/signal/noise שב-sidecar **לא מוצגים** בכוונה: הם תמונת-מצב ברגע
+       הזיהוי, אחרי סוף השידור (ר' _build_rf_sidecar) — הצגתם כ"SNR של השידור"
+       הייתה מייחסת ערך אמיתי לישות הלא-נכונה. */
+    function rfMetaNode(ev) {
+      const rf = ev.rf;
+      if (!rf || typeof rf !== "object") return null;
+      const d = document.createElement("div");
+      d.className = "act-rf";
+      const add = (txt, cls, title) => {
+        const sp = document.createElement("span");
+        sp.textContent = txt;
+        if (cls) sp.className = cls;
+        if (title) sp.title = title;
+        d.appendChild(sp);
+      };
+      if (rf.config_known && Number.isInteger(rf.lna_state)) {
+        add(bidi("LNA " + lnaStep(rf.lna_state) + "/9") + (rf.agc ? " · " + bidi("AGC") : ""));
+        if (rf.fm_notch) add("מסנן FM");
+      }
+      if (rf.overload === true) {
+        const n = rf.overload_events || 0;
+        add("⚠ עומס RF" + (n > 1 ? " ×" + n : ""), "bad",
+            "החומרה דיווחה עומס במהלך השידור — נסה LNA נמוך יותר");
+      } else if (rf.overload === false) {
+        add("ללא עומס", "", "לפי החומרה, לאורך כל השידור");
+      } else {
+        // ‏telemetry_covered=true עם overload=null: העוקב קרא לאורך כל השידור, אבל אין
+        // ראיה למצב (בלי stream=start בסשן, הצטרפות באמצע סשן, או גבול-סשן בתוך
+        // השידור — ר' _rf_window_summary) — סיבה שונה מ"לא היה כיסוי" ולכן טקסט שונה.
+        add("עומס: ?", "unk", rf.telemetry === false
+          ? "לא ידוע — הדרייבר נבנה בלי טלמטריית עומס"
+          : rf.telemetry_covered
+            ? "לא ידוע — יומן הדרייבר נקרא, אבל לא הייתה ראיה למצב העומס בתחילת השידור (או שה-SDR הופעל מחדש באמצעו)"
+            : "לא ידוע — אין טלמטריה רציפה שמכסה את השידור הזה");
+      }
+      if (rf.agc && rf.ifgr_min != null && rf.ifgr_max != null) {
+        const rng = rf.ifgr_min === rf.ifgr_max ? rf.ifgr_min : rf.ifgr_min + "–" + rf.ifgr_max;
+        if (ifgrPlausible(rf.ifgr_min) && ifgrPlausible(rf.ifgr_max))
+          add(bidi("IFGR " + rng), "", "הפחתת ה-IF שה-AGC בחר במהלך השידור (גדול = פחות רווח)");
+        else
+          add(bidi("gRdB " + rng) + " ?", "unk", "ערך גולמי מהדרייבר מחוץ לטווח ה-spec (20–59) — לא מאומת");
+      }
+      return d.childNodes.length ? d : null;
+    }
+
     function txNode(ev) {
       const st = (ev.tx && ev.tx.state) || "none";
       if (st === "ok" && ev.text) {
@@ -4216,6 +4432,8 @@
         else { b.disabled = true; b.title = "ההקלטה כבר נמחקה"; }
         row.appendChild(b);
         item.appendChild(row);
+        const rfm = rfMetaNode(ev);
+        if (rfm) item.appendChild(rfm);
         const tx = txNode(ev);
         if (tx) item.appendChild(tx);
         box.appendChild(item);
@@ -6427,6 +6645,9 @@
     const towerTune = () => applyMode("voice", {
       freq: 134.6, mod: "am", agc: true,
       if_gain: sliderToIFGR(), rf_gain: sliderToRFGR(),
+      // השרת משלים fm_notch חסר מה-state (‏_parse_tune), אבל כשהמתג אותחל שולחים
+      // את מה שהמשתמש רואה — ר' fmNotchField.
+      ...fmNotchField(),
       squelch_mode: "auto", squelch_snr: getSnr(),
     });
     $("acarsTowerBtn").onclick = towerTune;
@@ -6443,6 +6664,7 @@
     $("ifGain").onchange = retune;                                // החל רק בשחרור הסליידר
     $("rfGain").oninput = renderGainUI;
     $("rfGain").onchange = retune;                                // החל רק בשחרור הסליידר
+    $("fmNotch").onchange = retune;
     // סליידר ושדה-מספר מסונכרנים דו-כיוונית; retune רק בשחרור/אישור הערך
     $("snr").oninput = () => { $("snrNum").value = $("snr").value; };
     $("snr").onchange = retune;
@@ -6516,13 +6738,10 @@
       cfg = st;
       if (st.version) $("verTag").textContent = "v" + st.version + " · SDRplay RSP1B";
       segSet("modSeg", st.mod === "nfm" ? "nfm" : "am");
-      $("agc").checked = st.agc !== false;
-      // state שומר ב-IFGR/RFGR (הפחתת רווח) => המרה לערכי הסליידר (רווח)
-      const ifgr = Number(st.if_gain);
-      $("ifGain").value = Number.isFinite(ifgr) ? (59 - ifgr) : 19;
-      const rfgr = Number(st.rf_gain);
-      $("rfGain").value = Number.isFinite(rfgr) ? (9 - rfgr) : 5;
-      renderGainUI();
+      // ⚠ מאותחל כאן (טעינת דף), לא בכניסה לתצוגת הקול — כל כיוונון (גם "האזן
+      // למגדל" מתצוגות אחרות) שולח fm_notch, ו-checkbox לא-מאותחל היה מכבה בשקט
+      // מסנן שהמשתמש הדליק (אותו לקח כמו satcomExternalLna, §12 ב-CLAUDE.md).
+      applyGainState(st);
       segSet("sqSeg", st.squelch_mode || "auto");
       const s = Number(st.squelch_snr);                // לא ||: ‏snr=0 הוא ערך חוקי
       setSnr(Number.isFinite(s) ? s : 9);

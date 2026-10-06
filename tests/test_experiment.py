@@ -160,6 +160,21 @@ def test_plan_needs_exactly_two_physical_actions():
     assert [s["i"] for s in plan] == list(range(len(plan)))
 
 
+def test_plan_uses_one_lna_for_every_step():
+    """1.7: כל צעדי הריצה — רווח קבוע, AGC ובדיקות — באותו LNA+מסנן, כך שמשטר A
+    ("AGC על המסילה ≈ רווח קבוע IFGR 20") נשאר השוואה בין שני דברים בני-השוואה."""
+    plan = app._experiment_plan(130.45, 6, True)
+    assert all(s["lna"] == 6 and s["fm_notch"] is True for s in plan)
+    fixed = [s for s in plan if s["kind"] == "dwell" and not s["agc"]]
+    assert fixed and all(s["rfgr"] == 6 for s in fixed)
+    assert {s["ifgr"] for s in fixed} == set(app.EXP_FIXED_IFGRS)
+    agc = next(s for s in plan if s["kind"] == "dwell" and s["agc"])
+    p = app._exp_voice_params(agc)
+    assert p["rf_gain"] == 6 and p["fm_notch"] is True and p["agc"] is True
+    p = app._exp_voice_params(fixed[0])
+    assert p["rf_gain"] == 6 and p["if_gain"] == fixed[0]["ifgr"]
+
+
 # --- מקצה לקצה ------------------------------------------------------------------
 
 def test_full_run_two_prompts_summary_and_restore(client, world):
@@ -198,6 +213,13 @@ def test_full_run_two_prompts_summary_and_restore(client, world):
     assert probes["probe_atiswin"]["detects"] is False
     assert res["stale_probes"] == 0
     assert res["after_disconnect"]["instant"] == pytest.approx(-60.0)
+    # 1.7: כל הריצה באותו קצה-קדמי (ברירת המחדל), והוא מתועד בסיכום ובכל כניסה
+    assert res["lna"] == app.RF_GAIN_DEFAULT and res["fm_notch"] is False
+    assert all(e["rf_gain"] == app.RF_GAIN_DEFAULT and e["fm_notch"] is False for e in world.enters)
+    # הרשם מתעד את ה-LNA שבאמת הוחל (מתוך airband.conf), גם תחת AGC
+    rows = app._read_rflog_run(st["id"])
+    data = [r for r in rows if "ev" not in r and r.get("agc")]
+    assert data and all(r["lna"] == app.RF_GAIN_DEFAULT for r in data)
     # שוחזר ל-ACARS עם הבנק השמור, והנעילה שוחררה
     assert world.restored and world.restored[-1][0] == "acars"
     assert app.TUNE_LOCK.acquire(blocking=False)

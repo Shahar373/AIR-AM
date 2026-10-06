@@ -102,31 +102,122 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# 3. SoapySDRPlay3
+# 3. SoapySDRPlay3  (+ patch טלמטריית RF: AIRAM_RF)
 # ----------------------------------------------------------------------------
-if SoapySDRUtil --info 2>/dev/null | grep -qi sdrplay; then
-  log "SoapySDRPlay3 כבר מותקן - מדלג."
+# SOAPYSDRPLAY_COMMIT נעוץ (כמו RTL_VER/DUMPVDL2_VER): עד עכשיו המודול נבנה
+# מ-master, כך שכל שינוי upstream הגיע לשטח בלי בדיקה — וה-patch שלנו (diff על
+# Streaming.cpp) היה נשבר בשקט. ה-commit הוא ה-tag ‏soapy-sdrplay3-AI-0.6.0
+# (‏git ls-remote --tags), אבל נועצים לפי SHA ולא לפי שם ה-tag: tag ניתן להזזה,
+# SHA לא (כמו SATCOM_SNIFFER_COMMIT). ה-commit, תוכן ה-patch ודגלי ה-cmake הם
+# חלק מחתימת הבנייה => שינוי באחד מהם גורר בנייה מחדש.
+#
+# למה patch? אירועי overload ו-GainChange של ה-SDRplay API נבלעים ב-
+# SoapySDRPlay3 בלי שום פלט (Streaming.cpp:159-186 ב-48bd8b4 — הערות בלבד),
+# ולכן חיווי "עומס יתר" היה רק השוואת רמת *הערוץ* לסף ‎-3dBFS — אחרי ה-AGC,
+# עיוור לרוויה ב-LNA/ADC (ר' docs/voice-rf-quality-plan.md §2.2). ה-patch רושם
+# "AIRAM_RF overload=1|0" ו-"AIRAM_RF gain grdb=.. lna_grdb=.." ל-stderr =>
+# journald של rtl_airband, ו-airam-web קורא משם — וגם "AIRAM_RF stream=start"
+# בכל הפעלת זרם (גבול-סשן + הוכחה בזמן-ריצה שהמודול המתוקן הוא שנטען ושה-log
+# שלו מגיע: ה-marker למטה מוכיח רק בנייה). פירוט ונימוקים בראש ה-patch.
+#
+# סימן-הבנייה (AIRAM_SOAPY_MARK) הוא גם החוזה מול airam-web: הקובץ קיים <=>
+# המודול המותקן נבנה *עם* ה-patch, כלומר הטלמטריה זמינה (SOAPY_RF_MARK ב-
+# app.py). לכן הוא נמחק בתחילת כל בנייה מחדש, ונכתב רק אחרי patch מאומת +
+# בנייה מוצלחת — אחרת בנייה לא-מתוקנת הייתה יורשת marker ישן, וה-UI היה
+# מציג "לא ידוע" במקום "לא זמין — הרץ install.sh" (ו-"אין עומס" מוצג רק אחרי
+# שורת stream=start בזמן ריצה — §12: לא ידוע ≠ תקין).
+SOAPYSDRPLAY_COMMIT="48bd8b41072534018de1d74deb3dea5874d9e0e0"
+SOAPY_RF_PATCH="$REPO_DIR/patches/soapysdrplay3-airam-rf.patch"
+SOAPY_CMAKE_FLAGS=""
+if [[ -f "$SOAPY_RF_PATCH" ]]; then
+  SOAPY_PATCH_SUM="$(sha256sum < "$SOAPY_RF_PATCH" | awk '{print $1}')"
 else
-  log "בונה SoapySDRPlay3..."
+  SOAPY_PATCH_SUM="missing"
+fi
+SOAPY_BUILD_SIG="$(printf '%s' "$SOAPYSDRPLAY_COMMIT $SOAPY_PATCH_SUM $SOAPY_CMAKE_FLAGS" | sha256sum | awk '{print $1}')"
+AIRAM_SOAPY_MARK="/usr/local/share/airam/soapysdrplay3.build-sig"
+
+if SoapySDRUtil --info 2>/dev/null | grep -qi sdrplay \
+   && [[ "$(cat "$AIRAM_SOAPY_MARK" 2>/dev/null)" == "$SOAPY_BUILD_SIG" ]]; then
+  log "SoapySDRPlay3 (${SOAPYSDRPLAY_COMMIT:0:7} + AIRAM_RF) כבר מותקן - מדלג."
+else
+  log "בונה SoapySDRPlay3 ${SOAPYSDRPLAY_COMMIT:0:7} (+ patch טלמטריית RF)..."
+  # המודול המותקן עומד להשתנות — עד שיוכח אחרת, אין טלמטריה (ר' למעלה)
+  rm -f "$AIRAM_SOAPY_MARK"
   cd "$BUILD_DIR"
-  # checkout קיים => מעדכנים (לא הורסים), כמו libacars למטה — עץ שכבר קיים
-  # מריצה קודמת (שנכשלה לפני שהגיע ל-SoapySDRUtil check, או גרסת SDRplay
-  # ישנה) יקבל תיקוני upstream בהרצה חוזרת במקום להישאר קפוא לנצח.
-  if [[ -d SoapySDRPlay3 ]]; then
-    git -C SoapySDRPlay3 pull --ff-only || true
-  else
-    git clone https://github.com/pothosware/SoapySDRPlay3.git
+  # עץ קיים (התקנה ישנה מ-master, או מקור שה-patch כבר הוחל עליו): לא הורסים
+  # אם ה-commit הנעוץ כבר בו או ניתן להשגה ב-fetch. clone חדש נעשה לתיקייה
+  # זמנית ומחליף את הישנה רק בהצלחה — בלי רשת לא מוחקים מקור קיים.
+  _soapy_has_commit() {
+    git -C SoapySDRPlay3 cat-file -e "${SOAPYSDRPLAY_COMMIT}^{commit}" 2>/dev/null
+  }
+  if [[ -d SoapySDRPlay3 && ! -d SoapySDRPlay3/.git ]]; then
+    rm -rf SoapySDRPlay3   # עץ פגום (clone שנקטע)
   fi
-  cd SoapySDRPlay3 && rm -rf build && mkdir build && cd build
-  # ⚠ "|| die" הכרחי: set -e לא תופס כשל של פקודה לא-אחרונה ברשימת && (אומת
-  # אמפירית — "false && echo B" ממשיך לרוץ), אז כשל cmake/make היה מדולג
-  # בשקט והתקנה נחשבת "הצלחה" בלי שהמודול קיים בפועל.
-  cmake .. && make -j"$(nproc)" && make install && ldconfig \
-    || die "בניית SoapySDRPlay3 נכשלה."
-  # אימות אחרי בנייה (כמו command -v לבינארים) — לא מספיק ש-make הצליח, צריך
-  # ש-SoapySDR באמת מזהה את המודול (אחרת מצב תמידית "לא נמצא SDR" בממשק).
-  SoapySDRUtil --info 2>/dev/null | grep -qi sdrplay \
-    || die "SoapySDRPlay3 נבנה אך לא זוהה ע\"י SoapySDR - בדוק את פלט הבנייה למעלה."
+  if [[ -d SoapySDRPlay3 ]] && ! _soapy_has_commit; then
+    git -C SoapySDRPlay3 fetch origin || warn "fetch של SoapySDRPlay3 נכשל - מנסה clone מלא."
+  fi
+  SOAPY_SRC_OK=1
+  if [[ ! -d SoapySDRPlay3 ]] || ! _soapy_has_commit; then
+    rm -rf SoapySDRPlay3.new
+    if git clone https://github.com/pothosware/SoapySDRPlay3.git SoapySDRPlay3.new; then
+      rm -rf SoapySDRPlay3 && mv SoapySDRPlay3.new SoapySDRPlay3
+    else
+      rm -rf SoapySDRPlay3.new
+      SOAPY_SRC_OK=0
+    fi
+  fi
+
+  if [[ $SOAPY_SRC_OK -eq 0 ]]; then
+    # בלי המקור הנעוץ (אין רשת): מודול קיים ועובד עדיף על התקנה מתה — משאירים
+    # אותו, בלי marker (הוא לא נבנה מה-commit הנעוץ => אין טלמטריה), וההרצה
+    # הבאה עם רשת תבנה. אין מודול בכלל => אין רדיו => כשל, כמו קודם.
+    if SoapySDRUtil --info 2>/dev/null | grep -qi sdrplay; then
+      warn "אין גישה למקור SoapySDRPlay3 ${SOAPYSDRPLAY_COMMIT:0:7} - נשאר המודול הקיים, בלי טלמטריית RF. הרץ שוב עם רשת."
+    else
+      die "שכפול SoapySDRPlay3 נכשל (אין רשת?)."
+    fi
+  else
+    # checkout -f: מחזיר גם קבצים שה-patch שינה בריצה קודמת (אידמפוטנטי)
+    git -C SoapySDRPlay3 checkout -q -f "$SOAPYSDRPLAY_COMMIT" \
+      || die "checkout של SoapySDRPlay3 ל-${SOAPYSDRPLAY_COMMIT} נכשל."
+    cd SoapySDRPlay3
+    # git apply אטומי כברירת מחדל (בלי --reject): hunk אחד שנכשל => לא נוגעים
+    # בעץ כלל (git-apply(1), ‏--reject). כשל => בונים *בלי* ה-patch (רדיו עובד
+    # עדיף מהתקנה מתה, כמו PATCH_OK של rtl_airband) אבל בלי marker — הטלמטריה
+    # תוצג "לא זמינה", והבנייה תנוסה שוב בהרצה הבאה.
+    SOAPY_PATCH_OK=0
+    if [[ ! -f "$SOAPY_RF_PATCH" ]]; then
+      warn "קובץ ה-patch חסר ($SOAPY_RF_PATCH) - בונה SoapySDRPlay3 בלי טלמטריית RF."
+    elif git apply --check "$SOAPY_RF_PATCH" && git apply "$SOAPY_RF_PATCH"; then
+      # אימות שהטקסט שה-backend מחפש באמת נמצא במקור (לא רק ש-git apply הצליח)
+      SOAPY_PATCH_OK=1
+      for pat in 'AIRAM_RF stream=start' 'AIRAM_RF overload=1' 'AIRAM_RF overload=0' 'AIRAM_RF gain grdb=%u lna_grdb=%u'; do
+        grep -qF "$pat" Streaming.cpp || { SOAPY_PATCH_OK=0; warn "ה-patch הוחל אך '$pat' חסר ב-Streaming.cpp."; }
+      done
+    else
+      warn "patch טלמטריית ה-RF לא הוחל על SoapySDRPlay3 ${SOAPYSDRPLAY_COMMIT:0:7} - בונה בלעדיו."
+    fi
+    rm -rf build && mkdir build && cd build
+    # ⚠ "|| die" הכרחי: set -e לא תופס כשל של פקודה לא-אחרונה ברשימת && (אומת
+    # אמפירית — "false && echo B" ממשיך לרוץ), אז כשל cmake/make היה מדולג
+    # בשקט והתקנה נחשבת "הצלחה" בלי שהמודול קיים בפועל.
+    # shellcheck disable=SC2086  # SOAPY_CMAKE_FLAGS: רשימת דגלים, פיצול מכוון
+    cmake $SOAPY_CMAKE_FLAGS .. && make -j"$(nproc)" && make install && ldconfig \
+      || die "בניית SoapySDRPlay3 נכשלה."
+    # אימות אחרי בנייה (כמו command -v לבינארים) — לא מספיק ש-make הצליח, צריך
+    # ש-SoapySDR באמת מזהה את המודול (אחרת מצב תמידית "לא נמצא SDR" בממשק).
+    SoapySDRUtil --info 2>/dev/null | grep -qi sdrplay \
+      || die "SoapySDRPlay3 נבנה אך לא זוהה ע\"י SoapySDR - בדוק את פלט הבנייה למעלה."
+    if [[ $SOAPY_PATCH_OK -eq 1 ]]; then
+      mkdir -p "$(dirname "$AIRAM_SOAPY_MARK")"
+      printf '%s' "$SOAPY_BUILD_SIG" > "$AIRAM_SOAPY_MARK"
+    else
+      warn "SoapySDRPlay3 נבנה בלי טלמטריית RF - חיווי העומס בממשק יוצג \"לא זמין\". עדכן את הריפו והרץ שוב."
+    fi
+  fi
+  # ⚠ rtl_airband שרץ כרגע עדיין מחזיק את המודול הישן בזיכרון — ה-restart של
+  # sdrplay בסוף הסקריפט (PartOf => הצרכן הפעיל) טוען את החדש.
 fi
 
 # ----------------------------------------------------------------------------

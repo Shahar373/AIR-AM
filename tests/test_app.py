@@ -79,6 +79,38 @@ def test_render_config_manual_gain():
     assert 'modulation = "nfm";' in cfg
 
 
+def test_render_config_agc_sets_lna_via_rfgain_sel():
+    """1.1: תחת AGC ה-LNA נכתב ל-device_string (rfgain_sel) — אחרת הדרייבר
+    משאיר LNAstate=0 (רווח RF מרבי) ורוויה קורית *לפני* ה-AGC."""
+    cfg = app.render_config(134.6, "am", True, 40, 6)
+    assert 'device_string = "driver=sdrplay,rfnotch_ctrl=false,rfgain_sel=6";' in cfg
+    assert "gain =" not in cfg                     # AGC => בלי שורת gain
+
+
+def test_render_config_manual_gain_has_no_rfgain_sel():
+    """ברווח ידני ה-LNA מגיע מ-RFGR בלבד — לא שני מקורות לאותו ערך."""
+    cfg = app.render_config(120.5, "am", False, 38, 6)
+    assert 'device_string = "driver=sdrplay,rfnotch_ctrl=false";' in cfg
+    assert "rfgain_sel" not in cfg
+    assert 'gain = "IFGR=38,RFGR=6";' in cfg
+
+
+def test_render_config_fm_notch_both_modes():
+    assert 'rfnotch_ctrl=true,rfgain_sel=4"' in app.render_config(118.3, "am", True, 40, 4, fm_notch=True)
+    assert 'device_string = "driver=sdrplay,rfnotch_ctrl=true";' in \
+        app.render_config(118.3, "am", False, 40, 4, fm_notch=True)
+
+
+def test_default_config_file_matches_render_config_device_string():
+    """config/airband.conf (קונפיג התחלתי) חייב לבקש אותו קצה-קדמי כמו
+    render_config עבור DEFAULT_STATE — אחרת התקנה טרייה רצה ב-LNA=0 עד הכיוונון הראשון."""
+    from pathlib import Path
+    conf = (Path(__file__).resolve().parent.parent / "config" / "airband.conf").read_text()
+    d = app.DEFAULT_STATE
+    want = app._device_string(d["agc"], d["rf_gain"], d["fm_notch"])
+    assert f'device_string = "{want}";' in conf
+
+
 def test_render_config_squelch_modes():
     assert "squelch_snr_threshold" not in app.render_config(120.5, "am", True, 40, 4, "auto")
     assert "squelch_snr_threshold = 0;" in app.render_config(120.5, "am", True, 40, 4, "open")
@@ -212,6 +244,85 @@ def test_tune_sanitizes_inputs(client, paths, tuned_ok):
     assert body["rf_gain"] == app.RFGR_MIN        # clamp לרצפה
     assert body["squelch_mode"] == "auto"         # מצב לא מוכר => auto
     assert body["squelch_snr"] == 0.0             # clamp לרצפה
+
+
+def test_tune_agc_accepts_and_persists_rf_gain(client, paths, tuned_ok):
+    """1.2: ה-LNA חל גם תחת AGC => /api/tune מקבל rf_gain כש-agc=true, שומר, וכותב."""
+    r = client.post("/api/tune", json={"freq": 118.3, "agc": True, "rf_gain": 7})
+    assert r.status_code == 200
+    assert app.load_state()["rf_gain"] == 7 and app.load_state()["agc"] is True
+    assert "rfgain_sel=7" in app.CONFIG_PATH.read_text()
+
+
+@pytest.mark.parametrize("raw,want", [(True, True), (False, False), ("true", True),
+                                      ("false", False), ("0", False), ("1", True),
+                                      (None, False), ("garbage", False)])
+def test_tune_fm_notch_parsing_and_persist(client, paths, tuned_ok, raw, want):
+    """1.3: fm_notch עמיד ל-"false" טקסטואלי (כמו agc) — מחרוזת לא-ריקה אינה True."""
+    r = client.post("/api/tune", json={"freq": 118.3, "fm_notch": raw})
+    assert r.status_code == 200 and r.get_json()["fm_notch"] is want
+    assert app.load_state()["fm_notch"] is want
+    assert f"rfnotch_ctrl={'true' if want else 'false'}" in app.CONFIG_PATH.read_text()
+
+
+def test_tune_fm_notch_defaults_off(client, paths, tuned_ok):
+    client.post("/api/tune", json={"freq": 118.3})
+    assert app.load_state()["fm_notch"] is False
+    assert app.DEFAULT_STATE["fm_notch"] is False
+
+
+def test_tune_without_fm_notch_keeps_saved_filter(client, paths, tuned_ok):
+    """לקוח שלא מכיר את השדה (טאב/PWA עם JS מלפני השדרוג, curl) לא מכבה בשקט מסנן
+    שהמשתמש הדליק: מפתח חסר => נשאר כפי שנשמר. ‏null מפורש => כבוי (כמו "false")."""
+    client.post("/api/tune", json={"freq": 118.3, "fm_notch": True})
+    r = client.post("/api/tune", json={"freq": 120.5, "agc": True, "rf_gain": 4})
+    assert r.status_code == 200 and r.get_json()["fm_notch"] is True
+    assert app.load_state()["fm_notch"] is True
+    assert "rfnotch_ctrl=true" in app.CONFIG_PATH.read_text()
+    client.post("/api/tune", json={"freq": 120.5, "fm_notch": None})
+    assert app.load_state()["fm_notch"] is False
+
+
+def test_parse_bool_matches_legacy_agc_semantics():
+    for raw in (True, "true", "1", "on", "yes", 1, "weird", None):
+        assert app._parse_bool(raw, True) is True
+    for raw in (False, "false", "0", "off", "no", 0, "FALSE"):
+        assert app._parse_bool(raw, True) is False
+
+
+def test_rollback_keeps_fm_notch_and_lna(paths, no_sleep, monkeypatch):
+    """הרולבק כותב את הקונפיג הקודם *במלואו* — כולל מסנן FM ו-LNA תחת AGC."""
+    monkeypatch.setattr(app.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(app, "_is_active", lambda svc: True)
+    prev = {**app.DEFAULT_STATE, "freq": 121.5, "fm_notch": True, "rf_gain": 3}
+    assert app._rollback(prev) is True
+    cfg = app.CONFIG_PATH.read_text()
+    assert "rfnotch_ctrl=true" in cfg and "rfgain_sel=3" in cfg
+
+
+def test_enter_voice_threads_fm_notch(paths, monkeypatch):
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)
+    monkeypatch.setattr(app, "_restart_and_verify", lambda: (None, None, False))
+    params, _ = app._parse_tune({"freq": 121.5, "fm_notch": True, "rf_gain": 5})
+    assert app._enter_voice(params) == (None, None, False)
+    assert "rfnotch_ctrl=true,rfgain_sel=5" in app.CONFIG_PATH.read_text()
+
+
+def test_config_stale_detects_pre_v226_device_string(paths):
+    """שדרוג: קונפיג קול ישן (בלי rfnotch_ctrl/rfgain_sel) => stale => _boot_restore
+    משכתב אותו. בלעדיו התקנה משודרגת הייתה ממשיכה ב-LNA=0 תחת AGC."""
+    old = app.render_config(132.5, "am", True, 40, 4, "open").replace(
+        app._device_string(True, 4, False), "driver=sdrplay")
+    app.CONFIG_PATH.write_text(old)
+    assert app._config_stale() is True
+    # AGC עם rfnotch_ctrl אבל בלי rfgain_sel — עדיין stale
+    app.CONFIG_PATH.write_text(old.replace('"driver=sdrplay"', '"driver=sdrplay,rfnotch_ctrl=false"'))
+    assert app._config_stale() is True
+    app.CONFIG_PATH.write_text(app.render_config(132.5, "am", True, 40, 4, "open"))
+    assert app._config_stale() is False
+    app.CONFIG_PATH.write_text(app.render_config(132.5, "am", False, 40, 4, "open"))
+    assert app._config_stale() is False          # ידני: בלי rfgain_sel בכוונה
 
 
 def test_tune_failure_rolls_back(client, paths, monkeypatch):
