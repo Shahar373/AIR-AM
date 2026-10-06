@@ -101,3 +101,21 @@ def test_config_with_old_round_offset_is_stale(paths):
     old = app.CONFIG_PATH.read_text().replace("centerfreq = 132.7999;", "centerfreq = 132.8000;")
     app.CONFIG_PATH.write_text(old)
     assert app._config_stale() is True
+
+
+def test_free_entry_5_decimals_still_correct_bin_and_not_stale(tmp_path, monkeypatch):
+    """עיגול אחד לשני הערכים — 132.28125 נתן קודם הפרש 0.3000 (bin שגוי + stale בכל אתחול)."""
+    monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "airband.conf")
+    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    for fr in (132.28125, 136.49185, 118.00835):
+        cfg = app.render_config(fr, "am", True, 40, 4)
+        ft = app._CONF_FREQ_RE.search(cfg).group(1)
+        ct = app._CONF_CENTER_RE.search(cfg).group(1)
+        b, f, c = _rtl_bin(ft, ct)
+        assert b == _true_bin(f, c), fr
+        app.write_config(fr, "am", True, 40, 4)
+        assert app._config_stale() is False, fr
+
+
+def test_narrow_is_am_only():
+    assert "bandwidth" not in app.render_config(145.5, "nfm", True, 40, 4, narrow=True)

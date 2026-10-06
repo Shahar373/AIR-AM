@@ -2598,6 +2598,9 @@
     }
 
     function renderGainUI() {
+      // מסנן ערוץ צר — AM בלבד (השרת מתעלם ממנו ב-NFM; כאן רק לא מציעים אותו)
+      const nfm = segValue("modSeg") === "nfm";
+      $("voiceNarrow").disabled = !!nfm;
       const auto = $("agc").checked;
       const ifDb = parseInt($("ifGain").value, 10);      // 0–39 dB
       const rfStep = parseInt($("rfGain").value, 10);    // 0–9
@@ -6703,7 +6706,7 @@
     });
     $("syncBtn").onclick = () => { setStatus("מסנכרן…", "busy"); reloadStream(); };
 
-    segInit("modSeg", retune);
+    segInit("modSeg", () => { renderGainUI(); retune(); });
     segInit("sqSeg", (v) => {
       showManual(v === "manual");
       retune();
@@ -6967,6 +6970,7 @@
       cfg = st;
       if (st.version) $("verTag").textContent = "v" + st.version + " · SDRplay RSP1B";
       segSet("modSeg", st.mod === "nfm" ? "nfm" : "am");
+      renderGainUI();
       // ⚠ מאותחל כאן (טעינת דף), לא בכניסה לתצוגת הקול — כל כיוונון (גם "האזן
       // למגדל" מתצוגות אחרות) שולח fm_notch, ו-checkbox לא-מאותחל היה מכבה בשקט
       // מסנן שהמשתמש הדליק (אותו לקח כמו satcomExternalLna, §12 ב-CLAUDE.md).

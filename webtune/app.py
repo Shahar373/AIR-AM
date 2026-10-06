@@ -722,7 +722,9 @@ def _device_string(agc, rf_gain, fm_notch):
 
 def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
                   fm_notch=False, narrow=False, lowpass=AUDIO_LOWPASS_DEFAULT):
-    f = float(freq)
+    # מעגלים *פעם אחת* ובונים את שני הערכים מאותו מספר: עיגול נפרד של freq ושל freq+DC_OFFSET
+    # בתדר חופשי עם 5 ספרות (למשל 132.28125) נתן הפרש 0.3000 — שוב ה-bin הלא-נכון
+    f = round(float(freq), 4)
     lines = [
         "# נוצר אוטומטית ע\"י AIR-AM web tuner. שינויים ידניים נדרסים בכל כיוונון.",
         "localtime = true;   # חותמות הזמן בשמות קובצי ההקלטה בזמן מקומי",
@@ -746,7 +748,8 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
         f"        freq = {f:.4f};",
         f'        modulation = "{mod}";',
     ]
-    if narrow:
+    if narrow and mod == "am":
+        # רק ב-AM: ב-NFM מסנן ב-3.5kHz לפני הדיסקרימינטור היה חותך את הסטייה ומעוות
         # מסנן ערוץ לפני גלאי המעטפה — דוחה ערוצים צמודים (25/8.33kHz) שה-bin הרחב
         # (‎-3dB ב-±6.2kHz) מעביר; לא משפר SNR בתוך הערוץ. כבוי כברירת מחדל עד A/B בשטח.
         lines.append(f"        bandwidth = {CHANNEL_BW_NARROW};")
