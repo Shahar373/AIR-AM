@@ -904,3 +904,15 @@ def test_gain_profiles_select_and_apply(page):
     page.select_option("#gpSelect", "b")
     expect(page.locator("#gpSelect")).to_have_value("a")      # רענון אחרי ההחלה (המוק מחזיר a)
     assert {"action": "apply", "id": "b"} in sent, sent
+
+
+def test_rf_loss_counters_shown_only_when_reported(page):
+    """PR 5: מוני איבוד ב-Pi — מוצגים רק כשהשרת מדווח עליהם; ערך >0 מסומן ⚠."""
+    _phone(page)
+    m = {**_default_api()["/api/metrics"],
+         "counters": {"buffer_overflow_count": 4, "output_overrun_count": 0}}
+    _mount(page, overrides={"/api/metrics": m})
+    page.click("#modeSeg button[data-v=voice]")
+    expect(page.locator("#rfLoss")).to_contain_text("⚠")
+    expect(page.locator("#rfLoss")).to_contain_text("לא הרשת")
+    _no_hscroll(page)

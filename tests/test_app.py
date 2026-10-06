@@ -773,3 +773,30 @@ def test_pwa_assets_served_from_root(client):
     assert sw.status_code == 200 and sw.headers.get("Service-Worker-Allowed") == "/"
     assert client.get("/icon-192.png").status_code == 200
     assert client.get("/nope-asset.foo").status_code == 404   # catch-all לא מגיש זבל
+
+
+# --- PR 5: מוני איבוד של rtl_airband + proxy שמעביר מיד ---------------------
+
+def test_parse_counters_sums_labels_and_omits_missing():
+    text = ('buffer_overflow_count{device="0"}\t3\n'
+            'output_overrun_count{device="0"}\t1\n'
+            'output_overrun_count{mixer="0"}\t2\n'
+            'channel_dbfs_noise_level{freq="132.500"}\t-60.0\n')
+    c = app.parse_counters(text)
+    assert c == {"buffer_overflow_count": 3, "output_overrun_count": 3}
+    assert "input_overrun_count" not in c          # לא מופיע ⇒ לא 0 מומצא
+
+
+def test_stream_proxy_passes_partial_chunks(monkeypatch):
+    """read1: נתונים שכבר הגיעו נשלחים מיד, בלי לחכות ל-8KB מלאים."""
+    class Up:
+        def __init__(self):
+            self.parts = [b"a" * 100, b"b" * 50, b""]
+        def read1(self, n):
+            return self.parts.pop(0)
+        def close(self):
+            pass
+
+    monkeypatch.setattr(app.urllib.request, "urlopen", lambda *a, **k: Up())
+    r = app.app.test_client().get("/stream")
+    assert r.status_code == 200 and r.data == b"a" * 100 + b"b" * 50

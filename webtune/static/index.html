@@ -1863,6 +1863,8 @@
     <!-- חיווי עומס מהחומרה (Overload_Detected/Corrected + GainChange של ה-API, דרך
          SoapySDRPlay3 עם ה-patch) — לא מרמת הערוץ אחרי ה-AGC. §12: לא ידוע ≠ תקין. -->
     <p class="rf-hw" id="rfHw">עומס RF: לא ידוע</p>
+    <!-- מוני איבוד של rtl_airband (v2.29.1): עולים כשה-Pi לא עומד בקצב — "נקטע ב-Pi" ≠ "נקטע ברשת" -->
+    <p class="rf-hw hidden" id="rfLoss"></p>
     <p class="hint">‏<b>AGC</b> שולט ברווח ה-IF בלבד (מומלץ דלוק). <b>LNA</b> פעיל תמיד (ימינה = רווח גבוה יותר):
       ליד שדה התעופה <b>הורד אותו</b> (ערך קטן יותר) — אות חזק מרווה את ה-LNA לפני ה-AGC, והעיוות לא ניתן לתיקון אחר כך.
       "⚠ עומס RF" מגיע מהחומרה עצמה — כשהוא מופיע, הורד LNA. <b>מסנן FM</b> — נסה כשיש תחנות FM חזקות בסביבה.</p>
@@ -2948,6 +2950,15 @@
       joined_mid_session: "לא ידוע — השרת הופעל מחדש באמצע הסשן; כוונון מחדש יאפס",
       no_driver_evidence: "לא ידוע — הדרייבר עוד לא אישר שהוא מדווח (אם זה נמשך אחרי כוונון — ר' README)",
     };
+    function renderRfLoss(c) {
+      const el = $("rfLoss");
+      const ovf = c && c.buffer_overflow_count, orun = c && c.output_overrun_count;
+      if (!c || (ovf == null && orun == null)) { el.classList.add("hidden"); return; }
+      el.classList.remove("hidden");
+      const bad = (ovf || 0) + (orun || 0) > 0;
+      el.textContent = (bad ? "⚠ " : "") + "איבוד ב-Pi מאז הכיוונון: דגימות " + (ovf ?? "?") +
+        " · פלט " + (orun ?? "?") + (bad ? " — המעבד לא עומד בקצב (מתח/עומס), לא הרשת" : "");
+    }
     function renderRfHw(rf) {
       const el = $("rfHw");
       const over = rf ? rf.overload : null;
@@ -3000,6 +3011,7 @@
         // עומס החומרה לא תלוי בטריות ה-stats של rtl_airband — מצוירים תמיד
         // (כש-ok=false: rf חסר => "לא ידוע", לא הסתרה שקטה)
         renderRfHw(m.ok ? m.rf : null);
+        renderRfLoss(m.ok ? m.counters : null);
         if (!m.ok || !m.fresh || m.snr == null) {
           panel.classList.add("stale");
           explainStale();
@@ -6963,6 +6975,39 @@
       if (appMode !== "voice") return;   // במצב ACARS אין סטרים שמע לסנכרן
       if (wantPlaying && (Date.now() - hiddenAt > 10000 || player.error)) reloadStream();
     });
+
+    /* ---------- watchdog לסטרים החי (v2.29.1, PR 5) ----------
+       עד כאן היה רק onerror: תקיעה (waiting/stalled בלי error), ניתוק שקט של Icecast
+       (ended) או פיגור מצטבר השאירו "משדר · live" בזמן שלא נשמע כלום. ‏5ש'/15ש' הם
+       בחירות תזמון של הממשק, לא ספי RF. */
+    const STALL_RELOAD_MS = 5000;    // currentTime לא זז כל כך הרבה בזמן "מנגן" => חיבור מחדש
+    const LAG_JUMP_SEC = 15;         // פיגור מאחורי קצה הבאפר => קפיצה ל-live
+    let stallCount = 0, lastProgressAt = Date.now(), lastCT = -1;
+    const liveStatus = () => setStatus("משדר · live" + (stallCount ? " · נתקע ×" + stallCount : ""), "live");
+    player.addEventListener("playing", () => { lastProgressAt = Date.now(); if (appMode === "voice") liveStatus(); });
+    ["waiting", "stalled"].forEach(ev => player.addEventListener(ev, () => {
+      if (appMode === "voice" && wantPlaying && !player.paused) setStatus("ממתין לנתונים מהסטרים…", "busy");
+    }));
+    // סטרים חי לא "נגמר" — ended = Icecast ניתק אותנו (פיגור/נפילה). מתחברים מחדש.
+    player.addEventListener("ended", () => {
+      if (appMode === "voice" && wantPlaying && !rfcRunning) { stallCount++; reloadStream(); }
+    });
+    setInterval(() => {
+      if (appMode !== "voice" || !wantPlaying || player.paused || rfcRunning) {
+        lastProgressAt = Date.now(); lastCT = player.currentTime; return;
+      }
+      if (player.currentTime !== lastCT) { lastCT = player.currentTime; lastProgressAt = Date.now(); }
+      else if (Date.now() - lastProgressAt > STALL_RELOAD_MS) {
+        stallCount++; lastProgressAt = Date.now();
+        setStatus("הסטרים נתקע — מתחבר מחדש (×" + stallCount + ")", "busy");
+        reloadStream();
+        return;
+      }
+      const b = player.buffered;
+      if (b.length && b.end(b.length - 1) - player.currentTime > LAG_JUMP_SEC) {
+        player.currentTime = b.end(b.length - 1) - 1;    // נשארים קרובים ל-live
+      }
+    }, 1000);
 
     /* ---------- אתחול ---------- */
     fetchJSON("/api/state").then((st) => {

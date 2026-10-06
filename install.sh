@@ -472,14 +472,17 @@ ensure_limit() {  # $1=tag  $2=value
 }
 # burst-size=0 => אין prefill של buffer ישן בחיבור (זה היה מקור ה-30 שניות).
 # queue-size גדול מ-burst (חובה, אחרת ה-source נזרק) ולא מוסיף latency למאזין שעומד בקצב.
+# queue-size = כמה מאזין יכול *לפגר* לפני ש-Icecast מנתק אותו בשקט. 64KB ב-48kbps
+# (~6KB/ש') = ~11 שניות — הפסקת Wi-Fi קצרה בשטח הספיקה לנתק את הטלפון. 192KB ≈ 32 שניות.
+# זה לא מוסיף latency למי שעומד בקצב (burst נשאר 0 — ההחלטה למעלה בעינה).
 ensure_limit burst-on-connect 0
 ensure_limit burst-size 0
-ensure_limit queue-size 65536
+ensure_limit queue-size 196608
 ensure_limit source-timeout 10
 # tripwire: sed על XML עיוור להערות/שינויי פורמט - מוודאים שכל ערך באמת נקלט
 # כתג פעיל בתחילת שורה, אחרת מזהירים ברעש (burst שגוי => חזרת ה-latency של 30 שניות).
 for kv in "source-password ${SOURCE_PW}" "burst-on-connect 0" "burst-size 0" \
-          "queue-size 65536" "source-timeout 10"; do
+          "queue-size 196608" "source-timeout 10"; do
   tag="${kv% *}"; val="${kv#* }"
   grep -Eq "^[[:space:]]*<$tag>$val</$tag>" "$ICE" \
     || warn "אימות Icecast נכשל: <$tag> אינו $val ב-$ICE - תקן ידנית (פורמט הקובץ השתנה?)"
@@ -489,6 +492,21 @@ done
 grep -q "^ENABLE=" /etc/default/icecast2 2>/dev/null || echo "ENABLE=true" >> /etc/default/icecast2
 systemctl enable icecast2
 systemctl restart icecast2
+
+# חיסכון חשמל של ה-Wi-Fi ב-Pi כבוי: הכרטיס "נרדם" בין חבילות ומוסיף השהיות/גמגומים
+# לסטרים הרציף אל הטלפון. drop-in של NetworkManager (Pi OS Bookworm/Trixie) — חל בחיבור
+# הבא / reboot (לא מפעילים מחדש את הרשת באמצע התקנה — זה היה מנתק SSH); ומיידית דרך iw
+# כשאפשר (לא מנתק). root:root — לא קובץ שה-airam יכול לשנות.
+if [[ -d /etc/NetworkManager/conf.d ]]; then
+  printf '%s\n' "# AIR-AM: חיסכון חשמל Wi-Fi כבוי (סטרים רציף לטלפון)" "[connection]" \
+    "wifi.powersave = 2" > /etc/NetworkManager/conf.d/airam-wifi-powersave.conf
+  log "חיסכון חשמל ה-Wi-Fi יכובה בחיבור הבא (NetworkManager)."
+else
+  log "NetworkManager לא נמצא — מדלג על הגדרת חיסכון החשמל של ה-Wi-Fi."
+fi
+if command -v iw >/dev/null 2>&1 && iw dev wlan0 info >/dev/null 2>&1; then
+  iw dev wlan0 set power_save off || warn "iw: כיבוי power_save נכשל (לא קריטי)."
+fi
 
 # ----------------------------------------------------------------------------
 # 6. קובץ הגדרות התחלתי + תיקיית state

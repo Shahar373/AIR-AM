@@ -3303,7 +3303,9 @@ def stream_proxy():
     def gen():
         try:
             while True:
-                chunk = up.read(8192)
+                # read1: מחזיר מה שכבר הגיע (עד 4KB) במקום לחכות ל-8KB מלאים — ב-48kbps
+                # (~6KB/ש') read(8192) צבר ~1.4ש' לפני כל שליחה, בלי שום מרווח לרשת חלשה
+                chunk = up.read1(4096) if hasattr(up, "read1") else up.read(4096)
                 if not chunk:
                     break
                 yield chunk
@@ -3699,6 +3701,27 @@ def api_health():
 # ה-label freq מאותר בתוך הסוגריים בנפרד => עמיד לשינוי סדר/הוספת labels ב-upstream.
 _METRIC_RE = re.compile(r'^(\w+)\{([^}]*)\}\s+(-?[0-9.]+)')
 _FREQ_LABEL_RE = re.compile(r'(?:^|[,{\s])freq="([0-9.]+)"')
+
+
+# מוני "איבוד" של rtl_airband (output.cpp — buffer_overflow_count{device},
+# output_overrun_count{device|mixer}, input_overrun_count{mixer,input}): מתאפסים עם
+# התהליך, כלומר "מאז הכיוונון/ההפעלה האחרונים". עולים כשה-CPU לא עומד בקצב (מתח
+# נמוך/throttling) — מבדילים "השמע נקטע ב-Pi" מ"השמע נקטע ברשת לטלפון".
+_COUNTER_NAMES = ("buffer_overflow_count", "output_overrun_count", "input_overrun_count")
+
+
+def parse_counters(text):
+    """{שם: סכום על כל ה-labels} למוני האיבוד; מונה שלא מופיע בקובץ — לא במילון
+    (לא 0 מומצא: input_overrun_count נכתב רק כשיש mixer)."""
+    out = {}
+    for line in text.splitlines():
+        m = _METRIC_RE.match(line)
+        if m and m.group(1) in _COUNTER_NAMES:
+            try:
+                out[m.group(1)] = out.get(m.group(1), 0) + int(float(m.group(3)))
+            except ValueError:
+                continue
+    return out
 
 
 def parse_stats(text, want_freq):
@@ -5166,7 +5189,7 @@ def _read_voice_metrics():
         text = STATS_PATH.read_text()
     except OSError:
         return {"fresh": False, "age": None, "signal": None, "noise": None,
-                "snr": None, "squelch_opens": None}
+                "snr": None, "squelch_opens": None, "counters": None, "flappy": None}
 
     want = f"{load_state()['freq']:.3f}"       # מדדים מתויגים freq=MHz ב-3 ספרות
     vals = parse_stats(text, want)
@@ -5178,7 +5201,8 @@ def _read_voice_metrics():
     # ה-ADC/LNA — ר' הערת ההסרה של OVERLOAD_DBFS ו-_rf_metrics.
     return {"fresh": (age <= STATS_MAX_AGE and snr is not None), "age": round(age, 1),
             "signal": sig, "noise": noise, "snr": snr,
-            "squelch_opens": vals.get("channel_squelch_counter")}
+            "squelch_opens": vals.get("channel_squelch_counter"),
+            "counters": parse_counters(text), "flappy": vals.get("channel_flappy_counter")}
 
 
 @app.route("/api/metrics")

@@ -762,6 +762,11 @@ renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitAr
 > המופעים יורשים); שינוי ACARS-only/VDL2-only/SATCOM-only בלבד — דרך `opts`
 > (label/prefix/emptyHint) או hook חדש (`onMessage`/`onReset`), לא קוד מיוחד מחוץ לפקטורי.
 
+**watchdog לסטרים החי (v2.29.1):** `STALL_RELOAD_MS`=5000 (‏`currentTime` לא זז בזמן ניגון ⇒
+`reloadStream`, ‏`stallCount` ⇒ "נתקע ×N"), `LAG_JUMP_SEC`=15 (פיגור מקצה הבאפר ⇒ קפיצה ל-live),
+`ended` ⇒ חיבור מחדש (סטרים חי לא "נגמר" — Icecast ניתק). מושבת בזמן 🩺 (`rfcRunning`). `renderRfLoss`
+מציג את `m.counters` (‏`#rfLoss`). ‏`/stream` משתמש ב-`read1` (לא ממתין ל-8KB).
+
 **שכבת רשת: `fetchTimeout`/`fetchJSON` + חיווי ניתוק גלובלי.** כל בקשת רשת בקליינט
 (כל 16 אתרי ה-`fetch` המקוריים, כולל `apiSend` ל-POST) עוברת `AbortController` עם
 timeout (`NET_TIMEOUT_GET`=8s / `NET_TIMEOUT_POST`=45s — תואם את חסם ה-45s בצד
@@ -901,7 +906,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/recordings/starred.zip` | ZIP של כל ההקלטות השמורות + תמלוליהן (`ZIP_STORED`, ללא דחיסה — MP3 כבר דחוס). 404 כשאין שמורות. הדרך להוציא את השמורות לפני מוות של כרטיס SD |
 | GET/POST | `/api/transcribe` | GET: מצב המנגנון (`available`/`model_name`/`lang`/`langs`/`auto`/`queue`/`install_hint`) — זה מה שמאפשר ל-UI לומר "לא מותקן, הנה הפקודה". POST `{auto?, lang?}`: מתג "תמלל הכול" ו/או שפת תמלול (שניהם ב-state). דרך `_guard` |
 | GET | `/recordings/<name>` | קובץ הקלטה MP3 — מחפש בתיקייה החיה ואז ב-`saved/` |
-| GET | `/api/metrics` | מדדי RF (SNR/signal/noise מ-stats_filepath) + `rf: {telemetry, overload, overload_events, last_overload_age, ifgr, lna_grdb, lna_state, fm_notch, agc, unknown_reason}` מטלמטריית החומרה. `overload` העליון = `rf.overload` (`true`/`false` מראיה חיובית מהדרייבר — `false` רק אחרי `stream=start` של הסשן — **`null` = לא ידוע**, ו-`unknown_reason` אומר למה). `overload_events` תמיד int — משמעותי רק כש-`overload !== null`. `overload_dbfs` **הוסר** |
+| GET | `/api/metrics` | מדדי RF (SNR/signal/noise מ-stats_filepath) + `counters` (מוני איבוד של rtl_airband, `parse_counters` — מונה שלא נכתב לא מופיע, לא 0 מומצא) + `flappy` + `rf: {telemetry, overload, overload_events, last_overload_age, ifgr, lna_grdb, lna_state, fm_notch, agc, unknown_reason}` מטלמטריית החומרה. `overload` העליון = `rf.overload` (`true`/`false` מראיה חיובית מהדרייבר — `false` רק אחרי `stream=start` של הסשן — **`null` = לא ידוע**, ו-`unknown_reason` אומר למה). `overload_events` תמיד int — משמעותי רק כש-`overload !== null`. `overload_dbfs` **הוסר** |
 | GET | `/api/airspace` | מסלול פעיל + שיבוש GPS (מ-adsb.py) |
 | GET | `/api/replay/buffer` | מצב ה-buffer המתגלגל של ADS-B — `t_oldest`/`samples`/`gaps` (מ-`adsb.read_track_buffer`) + `clips_available` (יש הקלטה בתוך חלון הבאפר, נבדק כאן כי רק app.py מכיר את `REC_DIR`/`saved/`). שלב 1 ב-`docs/session-replay-design.md` |
 | GET/POST | `/api/sessions` | GET: רשימת סשנים שמורים (חדש→ישן). POST `{minutes, note?}`: שומר את N הדקות האחרונות (נחתך ל-`adsb.TRACK_BUFFER_MIN`) — מסלול ADS-B + הקלטות בחלון (שמורה מ*עתיקה*, לא-שמורה מ*ועברת*) ל-`sessions/<id>/`. שלב 2. דרך `_guard` (POST בלבד) |
@@ -984,7 +989,8 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 `inmarsat-sniffer` ל-SATCOM, נעוץ ל-commit (`SATCOM_SNIFFER_COMMIT`) — אין
 releases רשמיים לפרויקט — חתימת בנייה נכתבת *רק* כשתמיכת SDRplay אושרה בפועל
 מלוג ה-cmake, אחרת הרצה חוזרת תמיד תבנה מחדש**). 5. `Icecast2` (מאזין בלי
-סיסמה). 6. קונפיג התחלתי + state (6b: יצירת משתמש `airam` + sudoers ממוקד —
+סיסמה; `burst` 0 — latency; `queue-size` 192KB ≈ 32ש' פיגור עד ניתוק; + drop-in NetworkManager
+`wifi.powersave = 2` ו-`iw ... power_save off`). 6. קונפיג התחלתי + state (6b: יצירת משתמש `airam` + sudoers ממוקד —
 **9 פקודות systemctl**: restart/stop × rtl_airband/airam-acars/airam-vdl2/
 airam-satcom, ועוד `reset-failed` ל-airam-satcom בלבד (מנקה תקרת-הפעלות אחרי
 קריסה — ר' §12); seeding של `acars.env`+`vdl2.env`+`satcom.env`). 7. שרת הווב
