@@ -148,13 +148,13 @@ def test_pre_v226_state_under_agc_migrates_stale_rf_gain_to_default(paths, no_sl
     app.STATE_PATH.write_text(json.dumps({"freq": 121.5, "app_mode": "voice", "mod": "am",
                                           "agc": True, "if_gain": 40, "rf_gain": 9,
                                           "squelch_mode": "open", "squelch_snr": 9.0}))
-    assert app.load_state()["rf_gain"] == app.RF_GAIN_DEFAULT == 4
+    assert app.load_state()["rf_gain"] == app.RF_GAIN_DEFAULT == 0   # = מה שרץ לפני v2.26.0
     app.CONFIG_PATH.write_text(app.render_config(121.5, "am", True, 40, 9, "open").replace(
         app._device_string(True, 9, False), "driver=sdrplay"))
     monkeypatch.setattr(app, "_is_active", lambda svc: svc == "rtl_airband")
     monkeypatch.setattr(app, "_restart_and_verify", lambda: (None, None, False))
     app._boot_restore()
-    assert "rfgain_sel=4" in app.CONFIG_PATH.read_text()
+    assert "rfgain_sel=0" in app.CONFIG_PATH.read_text()
     assert "rfgain_sel=9" not in app.CONFIG_PATH.read_text()
 
 
@@ -168,8 +168,8 @@ def test_pre_v226_state_manual_gain_keeps_rf_gain_and_v226_state_untouched(paths
     # ההגירה נעלמת בשמירה הראשונה (save_state כותב fm_notch)
     app.STATE_PATH.write_text(json.dumps({"agc": True, "rf_gain": 9}))
     app.save_state(app.load_state())
-    assert json.loads(app.STATE_PATH.read_text())["rf_gain"] == 4
-    assert app.load_state()["rf_gain"] == 4
+    assert json.loads(app.STATE_PATH.read_text())["rf_gain"] == 0
+    assert app.load_state()["rf_gain"] == 0
 
 
 def test_boot_restore_failure_falls_to_off(paths, no_sleep, sysctl_calls, monkeypatch):

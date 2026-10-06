@@ -49,10 +49,12 @@ AUDIO_LOWPASS_OPTIONS = (2500, 3000)
 IFGR_MIN, IFGR_MAX = 20, 59
 RFGR_MIN, RFGR_MAX = 0, 9
 IF_GAIN_DEFAULT = 40            # IFGR - אמצע הטווח, בטוח מפני עומס יתר
-# RFGR - מצב LNA בינוני. ⚠ עד v2.26.0 הקבוע הזה **לא נאכף במצב AGC** (בלי שורת
-# gain הדרייבר השאיר LNAstate=0 — רווח RF מקסימלי, ר' render_config). מאז
-# הוא נכתב גם תחת AGC (‎rfgain_sel ב-device_string) — docs/voice-rf-quality-plan.md §2.2/1.
-RF_GAIN_DEFAULT = 4
+# RFGR - מצב ה-LNA ההתחלתי: 0 (רווח RF מרבי) = בדיוק מה שה-AGC רץ איתו עד v2.26.0
+# (בלי שורת gain הדרייבר השאיר LNAstate=0), כך שהשדרוג לא משנה את הקליטה של אף אחד.
+# ⚠ הוא *לא* "מכויל": ליד שדה תעופה מורידים אותו (סליידר / 🩺 / פרופיל) — מצב 4 ב-RSP1B
+# בטווח 60–420MHz הוא הנחתה של 20dB לפני המגבר, שמונעת עומס אבל מאבדת רגישות למטוסים
+# רחוקים; אין ערך אחד שנכון לכל מקום (docs/voice-rf-quality-plan.md §2.2/1).
+RF_GAIN_DEFAULT = 0
 # ⚠ הוסר: OVERLOAD_DBFS (‎-3dBFS על רמת *הערוץ* מה-stats). הערוץ נמדד אחרי
 # ה-AGC ובתוך bin אחד — הוא לא רואה את ה-ADC/LNA, ולכן שתק בעומס אמיתי
 # (docs/voice-rf-quality-plan.md §2.2/3). חיווי העומס מגיע עכשיו מאירועי

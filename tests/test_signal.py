@@ -131,7 +131,7 @@ def test_signal_voice_continuous_with_baseline(client, paths, monkeypatch):
 # --- 1.7: תיוג הבסיס בקצה הקדמי (LNA + מסנן FM) -------------------------------
 
 def test_verdict_reason_untagged_and_mismatch():
-    fe = app._baseline_tag(4, False)
+    fe = app._baseline_tag(app.RF_GAIN_DEFAULT, False)
     assert app._verdict_reason(-80.0, {"noise": -74.0}, fe) == "baseline_untagged"
     assert app._signal_verdict(-80.0, {"noise": -74.0}, fe) == "no_baseline"
     assert app._verdict_reason(-80.0, _tagged(-74.0, lna=6), fe) == "baseline_config_mismatch"
@@ -323,7 +323,7 @@ def test_antenna_check_calibrate_saves_baseline(client, paths, monkeypatch):
     saved = app.load_state()["signal_baseline"]
     assert saved["noise"] == -70.0
     assert saved["freq"] == 136.975
-    # 1.7: הבסיס מתויג בקצה הקדמי שבו נמדד (ברירת המחדל: LNA 4, מסנן כבוי)
+    # 1.7: הבסיס מתויג בקצה הקדמי שבו נמדד (ברירת המחדל: LNA 0, מסנן כבוי)
     assert saved["lna"] == app.RF_GAIN_DEFAULT and saved["fm_notch"] is False
     assert data["lna"] == app.RF_GAIN_DEFAULT and data["fm_notch"] is False
 
