@@ -111,4 +111,5 @@ power-save כבוי · proxy `read1` · מוני overflow/overrun.
 | שלב 0 | ממתין לשטח |
 | PR 1 (v2.26.0) | **מומש — ממתין לאימות שטח.** 1.1–1.7 בקוד + בדיקות (כולל חוזה חוצה-רכיבים, `tests/test_rf_contract.py`); נוסף `rtl_airband -F` (ה-waterfall של `-f` לכלך את זרם ה-journald של `AIRAM_RF`). לאמת על ה-Pi: ה-patch נבנה ונטען, שורות `AIRAM_RF` מגיעות ל-`journalctl -u rtl_airband -o cat` (בפרט `AIRAM_RF stream=start` בכל כוונון — בלעדיה "אין עומס" לעולם לא מוצג), קצב `PowerOverloadChange` אמיתי, קצב `GainChange` האמיתי תחת `AGC_CTRL_EN` (לא ה-50Hz של ברירת-המחדל — לא מתועד; ה-patch מגביל ל-≤1/ש'), טווח/סמנטיקת `gRdB` ב-GainChange (ה-UI מציג "ה-AGC בחר" רק ב-20–59), והשמע עם LNA 4 מול 0 תחת AGC. תיקוני ביקורת: גבול-סשן `stream=start` (לא שורת האתחול של rtl_airband — syslog בלי הבטחת סדר), `streamActive` מאותחל בבנאי, הגירת `rf_gain` משדרוג תחת AGC, כיוון סליידרים LTR |
 | PR 2 (v2.27.0) | **מומש (גרסה פשוטה) — ממתין לבדיקה בשטח:** האם ההמלצה על ATIS מתאימה למה שנשמע במגדל |
-| PR 3–5 | בעבודה |
+| PR 3 (v2.28.0) | **מומש:** `DC_OFFSET`=0.2999 (bin נכון בכל הערוצים — נבדק מול הנוסחה של rtl_airband); מתגי `bandwidth`=7000 ו-`lowpass` 2500/3000 כבויים — לבדוק A/B בשטח. לדווח upstream על `ceil(x−1)` |
+| PR 4–5 | בעבודה |

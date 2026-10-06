@@ -174,6 +174,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_rfcheck.py          # 🩺 בדיקת RF: כלל ההמלצה (פונקציה טהורה), דחיית stats של התהליך הקודם,
                            #   עומס לא-ידוע נשאר None, ריצה מלאה/ביטול/חריגה ⇒ שחזור פעם אחת + שחרור
                            #   TUNE_LOCK, סירובים, החלה דרך _voice_tune, /api/health בזמן ריצה.
+  test_dsp_bin.py          # PR 3: נוסחת בחירת ה-bin של rtl_airband (כולל קיטום) על כל ערוצי 25/8.33kHz,
+                           #   מתגי bandwidth/lowpass, נוכחות ב-_parse_tune, קונפיג עם היסט 0.3 ⇒ stale.
   test_rflog.py            # רשם ניסוי RF: פענוח airband.conf, דגימה רק על כתיבה חדשה, start/mark/stop/
                            #   export, כיבוי אוטומטי, רישום בדיקת-אנטנה.
   test_experiment.py       # ניסוי כיול אוטומטי מקצה לקצה עם SDR מדומה (כולל שתי הפעולות הפיזיות),
@@ -219,7 +221,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
 | `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain (`--sdrplay-gain=N` או ריק=AGC), bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain — `if_gain`, ו-`rf_gain` = מצב LNA 0–9 שחל **גם תחת AGC** מאז v2.26.0, squelch, `fm_notch` (bool, ברירת מחדל False; היעדרו מסמן state מלפני v2.26.0 ⇒ הגירת `rf_gain`, ר' §12), app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline` — `{noise, freq, ts, lna, fm_notch, agc}` מאז v2.26.0; בלי `lna`/`fm_notch` = מלפני v2.26.0 ⇒ `baseline_untagged`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`, `rf_check_last` — תוצאת 🩺 האחרונה: `{ts, freq, fm_notch, lna_before, agc, rows, recommendation}`) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain — `if_gain`, ו-`rf_gain` = מצב LNA 0–9 שחל **גם תחת AGC** מאז v2.26.0, squelch, `fm_notch` (bool, ברירת מחדל False; היעדרו מסמן state מלפני v2.26.0 ⇒ הגירת `rf_gain`, ר' §12), app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline` — `{noise, freq, ts, lna, fm_notch, agc}` מאז v2.26.0; בלי `lna`/`fm_notch` = מלפני v2.26.0 ⇒ `baseline_untagged`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`, `voice_narrow` (bool) ו-`voice_lowpass` (2500/3000) — הגדרות שמע מאז v2.28.0, `rf_check_last` — תוצאת 🩺 האחרונה: `{ts, freq, fm_notch, lna_before, agc, rows, recommendation}`) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
 | `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
@@ -253,7 +255,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   `fm_notch` (state, ברירת מחדל False) עובר בכל מסלול שכותב קונפיג קול (tune, `_enter_voice`,
   `_rollback`, `_restore_after_probe`, boot/reconcile, רגלי סריקה, probe, ניסוי). `_parse_bool`
   (‏`"false"` טקסטואלי ≠ True — משותף ל-`agc`/`fm_notch`). `_config_stale` מסמן גם קונפיג בלי
-  `rfnotch_ctrl` או AGC בלי `rfgain_sel` (שדרוג ⇒ `_boot_restore` משכתב). תמיד ערוץ יחיד ממורכז (centerfreq מוסט ב-DC_OFFSET).
+  `rfnotch_ctrl` או AGC בלי `rfgain_sel` (שדרוג ⇒ `_boot_restore` משכתב). תמיד ערוץ יחיד ממורכז (centerfreq מוסט ב-`DC_OFFSET`=**0.2999**, לא 0.3 — ר' §12). הגדרות שמע (v2.28.0): `narrow` ⇒ `bandwidth = CHANNEL_BW_NARROW` (7000), `lowpass` (2500/3000, ‏`_sanitize_lowpass`; 2500 = upstream ולא נכתב); `write_config` משלים אותן מ-`state["voice_narrow"/"voice_lowpass"]` כשלא נמסרו (כל מסלול קול שומר עליהן); `_parse_tune` לפי נוכחות, `_voice_tune` משלים מ-prev; `_config_stale` מסמן גם היסט 0.3 ישן (`_CONF_CENTER_RE`).
 - **restart מאומת + רולבק:** `_restart_and_verify` בודק שה-SDR נוכח ושהשירות עלה;
   `_rollback` מחזיר לקונפיג קודם אם נכשל **ומאומת** (מחזיר bool; כישלון ⇒ `_fail_to_off`).
   כיוונון אחד בכל רגע (`TUNE_LOCK`).
@@ -1279,6 +1281,10 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
 - **msg-filter של VDL2** (`VDL2_MSG_FILTER`): מסנן בצד המפענח רעש שהיה מציף את הפיד
   (supervisory, ACK ריקים, **GSIF squitters** שמשודרים כל כמה שניות), ושומר acars +
   x25-data (CPDLC/ADS-C) + xid. `_normalize_vdl2` עדיין סובל כל סוג פריים (הסינון קונפיג, לא הבטחה).
+- **⚠ `DC_OFFSET`=0.2999 ולא 0.3 — אל "תעגל".** rtl_airband v5.2.0 בוחר bin ב-`ceil(x−1)`
+  (`config.cpp:670`), ש*מוריד* bin כש-x שלם; 0.3MHz = בדיוק 60 bins של 5kHz ⇒ כל ערוץ נדגם 5kHz
+  מתחת לתדר (דחיית ערוץ שכן מלמטה ‎-34dB במקום ‎-57dB). ‏0.2999 ⇒ x≈452.02 ⇒ ה-bin הנכון בכל ערוצי
+  25/8.33kHz, עם מרווח לקיטום `(int)(MHz·1e6)` (`parse_anynum2int`). נעול ב-`tests/test_dsp_bin.py`.
 - **gain של SDRplay הפוך:** ערך **קטן יותר = רווח גדול יותר** (IFGR/RFGR הן *הפחתות*).
 - **⚠ ה-AGC של SDRplay לא שולט ב-LNA — ועד v2.26.0 ה-LNA תחת AGC היה תקוע ברווח מרבי.**
   ה-AGC של ה-API מזיז רק `gRdB` (IF) — אין שדה LNA ב-`sdrplay_api_AgcT`

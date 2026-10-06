@@ -1835,6 +1835,21 @@
         <span class="track"></span>
       </span>
     </label>
+    <!-- הגדרות שמע (v2.28.0) — כבויות כברירת מחדל עד בדיקת A/B בשטח -->
+    <label class="setting fm-notch" for="voiceNarrow">
+      <span>מסנן ערוץ צר <small>(<bdi dir="ltr">7 kHz</bdi> — דוחה ערוץ צמוד חזק)</small></span>
+      <span class="switch">
+        <input type="checkbox" id="voiceNarrow" />
+        <span class="track"></span>
+      </span>
+    </label>
+    <label class="setting fm-notch" for="voiceLowpass">
+      <span>רוחב שמע <small>(עמום/חד יותר)</small></span>
+      <select id="voiceLowpass">
+        <option value="2500">2.5 kHz</option>
+        <option value="3000">3 kHz</option>
+      </select>
+    </label>
     <!-- חיווי עומס מהחומרה (Overload_Detected/Corrected + GainChange של ה-API, דרך
          SoapySDRPlay3 עם ה-patch) — לא מרמת הערוץ אחרי ה-AGC. §12: לא ידוע ≠ תקין. -->
     <p class="rf-hw" id="rfHw">עומס RF: לא ידוע</p>
@@ -2541,7 +2556,12 @@
     // שדה חסר מה-state השמור (‏_parse_tune לפי נוכחות) — כך ש-/api/state שנכשל בטעינה
     // לא יגרום ל-checkbox הלא-מאותחל לכבות בשקט מסנן שהמשתמש הדליק.
     let fmNotchReady = false;
-    const fmNotchField = () => (fmNotchReady ? { fm_notch: $("fmNotch").checked } : {});
+    // הגדרות הקצה הקדמי/השמע נשלחות רק אחרי ש-/api/state אתחל אותן (אותו כלל כמו fm_notch)
+    const fmNotchField = () => (fmNotchReady ? {
+      fm_notch: $("fmNotch").checked,
+      voice_narrow: $("voiceNarrow").checked,
+      voice_lowpass: Number($("voiceLowpass").value),
+    } : {});
     // ההגדרות האחרונות שהשרת אישר — לשחזור הבקרים אחרי כיוונון שנכשל ברשת
     let lastGainState = null;
     // state => בקרי הרווח/המסנן. state שומר IFGR/RFGR (הפחתת רווח) => המרה לערכי
@@ -2558,6 +2578,8 @@
       // ישן בלי השדה משאירים את המתג "לא מאותחל", והשרת ישמור את הערך השמור.
       if (typeof st.fm_notch === "boolean") {
         $("fmNotch").checked = st.fm_notch;
+        $("voiceNarrow").checked = st.voice_narrow === true;
+        $("voiceLowpass").value = String(st.voice_lowpass === 3000 ? 3000 : 2500);
         fmNotchReady = true;
       }
       lastGainState = st;
@@ -6799,6 +6821,8 @@
     $("rfGain").oninput = renderGainUI;
     $("rfGain").onchange = retune;                                // החל רק בשחרור הסליידר
     $("fmNotch").onchange = retune;
+    $("voiceNarrow").onchange = retune;
+    $("voiceLowpass").onchange = retune;
     // סליידר ושדה-מספר מסונכרנים דו-כיוונית; retune רק בשחרור/אישור הערך
     $("snr").oninput = () => { $("snrNum").value = $("snr").value; };
     $("snr").onchange = retune;

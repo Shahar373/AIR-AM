@@ -45,7 +45,16 @@ MOUNT = "live.mp3"          # שם ה-stream הקבוע ב-Icecast
 ICECAST_PORT = 8000
 SOURCE_PW = "airam"         # חייבת להיות זהה ל-SOURCE_PW ב-install.sh (נכתבת ל-Icecast שם)
 SAMPLE_RATE = 2.56          # Msps - ערוץ יחיד, חלון צר מספיק
-DC_OFFSET = 0.3             # MHz - מזיזים את centerfreq מהתדר כדי להתרחק מ-spike ה-DC
+# MHz — מזיזים את centerfreq מהתדר כדי להתרחק מ-spike ה-DC. ⚠ **לא 0.3 עגול** (v2.28.0):
+# rtl_airband v5.2.0 בוחר את ה-bin ב-ceil(x−1) (config.cpp:670), כש-x = (freq+rate−center)/
+# (rate/fft_size). ‏0.3MHz = בדיוק 60 bins של 5kHz ⇒ x שלם ⇒ נבחר bin אחד *מתחת* — כל ערוץ
+# נדגם 5kHz מתחת לתדר (סימולציה מלאה: עיוות גבוה יותר, ודחיית הערוץ השכן מלמטה ‎-34dB
+# במקום ‎-57dB). ב-0.2999 ‏x≈452.02 ⇒ ה-bin הנכון (452), 100Hz ממרכזו — מרווח שבולע את
+# קיטום (int)(MHz·1e6) של שני הערכים (parse_anynum2int, config.cpp:298-310). אל "תעגל" ל-0.3.
+DC_OFFSET = 0.2999
+CHANNEL_BW_NARROW = 7000    # Hz — `bandwidth` לערוץ (מסנן Bessel מסדר 2 ב-bw/2, config.cpp:595-618)
+AUDIO_LOWPASS_DEFAULT = 2500   # Hz — ברירת המחדל של rtl_airband (config.cpp:328)
+AUDIO_LOWPASS_OPTIONS = (2500, 3000)
 # רווח SDRplay (מודל legacy של SoapySDRPlay3): שני אלמנטים נפרדים, וקטן יותר = רווח גדול יותר.
 #   IFGR - הפחתת רווח בתדר הביניים, 20–59 dB.
 #   RFGR - מצב ה-LNA (הפחתת רווח RF), 0–9 (לא-לינארי, ~7dB לצעד).
@@ -606,6 +615,8 @@ def load_presets():
     return [dict(p) for p in DEFAULT_PRESETS]
 
 DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
+                 # הגדרות שמע (v2.28.0): מסנן ערוץ צר (bandwidth=7000) ורוחב שמע (lowpass)
+                 "voice_narrow": False, "voice_lowpass": AUDIO_LOWPASS_DEFAULT,
                  # rf_gain = מצב ה-LNA של ה-RSP1B (0–9, קטן=רווח גדול) — חל **בשני**
                  # המצבים: ב-AGC ה-AGC של ה-API שולט רק ב-gRdB (IF), כך שה-LNA הוא
                  # בחירה שלנו גם שם (ר' render_config).
@@ -710,7 +721,7 @@ def _device_string(agc, rf_gain, fm_notch):
 
 
 def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
-                  fm_notch=False):
+                  fm_notch=False, narrow=False, lowpass=AUDIO_LOWPASS_DEFAULT):
     f = float(freq)
     lines = [
         "# נוצר אוטומטית ע\"י AIR-AM web tuner. שינויים ידניים נדרסים בכל כיוונון.",
@@ -735,6 +746,12 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
         f"        freq = {f:.4f};",
         f'        modulation = "{mod}";',
     ]
+    if narrow:
+        # מסנן ערוץ לפני גלאי המעטפה — דוחה ערוצים צמודים (25/8.33kHz) שה-bin הרחב
+        # (‎-3dB ב-±6.2kHz) מעביר; לא משפר SNR בתוך הערוץ. כבוי כברירת מחדל עד A/B בשטח.
+        lines.append(f"        bandwidth = {CHANNEL_BW_NARROW};")
+    if int(lowpass) != AUDIO_LOWPASS_DEFAULT:
+        lines.append(f"        lowpass = {int(lowpass)};")   # רוחב השמע (LAME) — ברירת המחדל לא נכתבת
     sq = _squelch_line(squelch_mode, squelch_snr)
     if sq is not None:
         lines.append(sq)
@@ -832,9 +849,24 @@ def _cleanup_orphan_tmp(dirs=None):
 
 
 def write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
-                 fm_notch=False):
+                 fm_notch=False, narrow=None, lowpass=None):
+    """narrow/lowpass=None => מההעדפה השמורה (voice_narrow/voice_lowpass) — כך כל מסלול
+    שכותב קונפיג קול (בדיקת אנטנה, 🩺, ניסוי, סריקה, שחזור) שומר על הגדרות השמע של המשתמש."""
+    if narrow is None or lowpass is None:
+        st = load_state()
+        narrow = bool(st.get("voice_narrow", False)) if narrow is None else narrow
+        lowpass = _sanitize_lowpass(st.get("voice_lowpass")) if lowpass is None else lowpass
     _atomic_write(CONFIG_PATH, render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode,
-                                             squelch_snr, fm_notch=fm_notch))
+                                             squelch_snr, fm_notch=fm_notch, narrow=bool(narrow),
+                                             lowpass=_sanitize_lowpass(lowpass)))
+
+
+def _sanitize_lowpass(v):
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return AUDIO_LOWPASS_DEFAULT
+    return v if v in AUDIO_LOWPASS_OPTIONS else AUDIO_LOWPASS_DEFAULT
 
 
 _state_corrupt_warned = False   # חד-פעמי לאירוע פגימה, לא לכל קריאה — ר' load_state
@@ -964,7 +996,8 @@ def _rollback(prev):
     try:
         write_config(prev["freq"], prev["mod"], prev["agc"], prev["if_gain"],
                      prev["rf_gain"], prev["squelch_mode"], prev["squelch_snr"],
-                     fm_notch=bool(prev.get("fm_notch", False)))
+                     fm_notch=bool(prev.get("fm_notch", False)),
+                     narrow=prev.get("voice_narrow"), lowpass=prev.get("voice_lowpass"))
         _rf_session_reset("rollback")   # הפעלה שנייה של rtl_airband — ר' _restart_and_verify
         subprocess.run([*SUDO, "systemctl", "restart", "rtl_airband"],
                        capture_output=True, text=True, timeout=45)
@@ -2952,7 +2985,8 @@ def _enter_voice(params):
                 pass
     write_config(params["freq"], params["mod"], params["agc"], params["if_gain"],
                  params["rf_gain"], params["squelch_mode"], params["squelch_snr"],
-                 fm_notch=bool(params.get("fm_notch", False)))
+                 fm_notch=bool(params.get("fm_notch", False)),
+                 narrow=params.get("voice_narrow"), lowpass=params.get("voice_lowpass"))
     return _restart_and_verify()
 
 
@@ -5603,6 +5637,7 @@ _rflog = {"active": False, "started_at": None, "until": None, "rows": 0,
           "marks": 0, "write_errors": 0, "thread": None, "stop": None}
 
 _CONF_FREQ_RE = re.compile(r"^\s*freq\s*=\s*([0-9.]+)\s*;", re.M)          # לא centerfreq
+_CONF_CENTER_RE = re.compile(r"^\s*centerfreq\s*=\s*([0-9.]+)\s*;", re.M)
 _CONF_GAIN_RE = re.compile(r'^\s*gain\s*=\s*"IFGR=(\d+),RFGR=(\d+)"', re.M)
 _CONF_SQ_RE = re.compile(r"^\s*squelch_snr_threshold\s*=\s*(-?[0-9.]+)\s*;", re.M)
 _CONF_MOD_RE = re.compile(r'^\s*modulation\s*=\s*"(\w+)"', re.M)
@@ -6428,6 +6463,9 @@ def _parse_tune(data):
     # שהמשתמש הדליק — כל לקוח שלא מכיר את השדה (טאב/PWA שנפתח לפני השדרוג ועדיין
     # מריץ JS ישן, curl) היה שולח כיוונון "מלא" בלעדיו.
     fm_notch = _parse_bool(data["fm_notch"], False) if "fm_notch" in data else None
+    # אותו כלל נוכחות להגדרות השמע (v2.28.0) — לקוח ישן לא מכבה אותן בשקט
+    voice_narrow = _parse_bool(data["voice_narrow"], False) if "voice_narrow" in data else None
+    voice_lowpass = _sanitize_lowpass(data["voice_lowpass"]) if "voice_lowpass" in data else None
     try:
         if_gain = max(IFGR_MIN, min(IFGR_MAX, int(data.get("if_gain", IF_GAIN_DEFAULT))))
     except (TypeError, ValueError):
@@ -6447,7 +6485,8 @@ def _parse_tune(data):
     squelch_snr = max(SNR_MIN, min(SNR_MAX, squelch_snr))
 
     return {"freq": freq, "mod": mod, "agc": agc, "if_gain": if_gain, "rf_gain": rf_gain,
-            "fm_notch": fm_notch, "squelch_mode": squelch_mode, "squelch_snr": squelch_snr}, None
+            "fm_notch": fm_notch, "voice_narrow": voice_narrow, "voice_lowpass": voice_lowpass,
+            "squelch_mode": squelch_mode, "squelch_snr": squelch_snr}, None
 
 
 def _voice_tune(params):
@@ -6466,6 +6505,10 @@ def _voice_tune(params):
         prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
         if params.get("fm_notch") is None:   # לא נשלח => נשאר כפי שנשמר (ר' _parse_tune)
             params = {**params, "fm_notch": bool(prev.get("fm_notch", False))}
+        if params.get("voice_narrow") is None:
+            params = {**params, "voice_narrow": bool(prev.get("voice_narrow", False))}
+        if params.get("voice_lowpass") is None:
+            params = {**params, "voice_lowpass": _sanitize_lowpass(prev.get("voice_lowpass"))}
         # ⚠ מיזוג על גבי prev, לא דריסה: params מכיל רק שדות קול (freq/mod/
         # gain/squelch). דריסה מלאה הייתה מוחקת satcom_bias_tee/satcom_gain/
         # signal_baseline/scan_plan/last_session_view_at וכו' — עם satcom_bias_tee
@@ -7199,6 +7242,10 @@ def _config_stale():
         return True
     kw = _conf_device_kwargs(cur)
     if "rfnotch_ctrl" not in kw:
+        return True
+    # v2.28.0: היסט 0.3 עגול = ה-bin הלא-נכון ב-rtl_airband (ר' DC_OFFSET) => שכתוב באתחול
+    mf, mc = _CONF_FREQ_RE.search(cur), _CONF_CENTER_RE.search(cur)
+    if mf and mc and abs(float(mc.group(1)) - float(mf.group(1)) - DC_OFFSET) > 5e-5:
         return True
     agc = _CONF_GAIN_RE.search(cur) is None
     return agc and "rfgain_sel" not in kw

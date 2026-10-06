@@ -858,3 +858,24 @@ def test_rfcheck_running_shows_progress_and_stop(page):
     expect(page.locator("#rfcBtn")).to_have_text("⏹ עצור בדיקה")
     expect(page.locator("#rfcStatus")).to_contain_text("2/5")
     expect(page.locator("#rfcResult")).to_contain_text("⚠ עומס")
+
+
+def test_audio_options_init_from_state_and_sent_on_tune(page):
+    """PR 3: מסנן ערוץ צר + רוחב שמע מאותחלים מ-/api/state בטעינה ונשלחים בכיוונון."""
+    _phone(page)
+    sent = []
+
+    def tune(route, url):
+        sent.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+
+    st = {**_default_api()["/api/state"], "fm_notch": False, "voice_narrow": True,
+          "voice_lowpass": 3000}
+    _mount(page, overrides={"/api/state": st, "/api/tune": tune})
+    page.click("#modeSeg button[data-v=voice]")
+    expect(page.locator("#voiceNarrow")).to_be_checked()
+    expect(page.locator("#voiceLowpass")).to_have_value("3000")
+    _no_hscroll(page)
+    page.select_option("#voiceLowpass", "2500")
+    expect(page.locator("#status")).not_to_contain_text("מכוונן…", timeout=10000)
+    assert sent and sent[-1]["voice_lowpass"] == 2500 and sent[-1]["voice_narrow"] is True, sent
