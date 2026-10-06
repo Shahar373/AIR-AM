@@ -25,6 +25,7 @@ import statistics
 import subprocess
 import tempfile
 import threading
+import uuid
 import time
 import urllib.request
 from pathlib import Path
@@ -3378,9 +3379,10 @@ PROFILE_NAME_MAX = 40
 
 
 def _profile_from_state(st, name):
-    p, _ = _parse_tune({**st, "freq": st.get("freq", DEFAULT_STATE["freq"])})
+    # תדר תקין קבוע — הפרופיל לא תלוי בתדר, ותדר פגום ב-state לא יאפס את הרווח לברירות מחדל
+    p, _ = _parse_tune({**st, "freq": DEFAULT_STATE["freq"]})
     p = p or {}
-    return {"id": time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}",
+    return {"id": uuid.uuid4().hex[:12],
             "name": name, "created": time.time(),
             "agc": bool(p.get("agc", True)), "if_gain": int(p.get("if_gain", IF_GAIN_DEFAULT)),
             "rf_gain": int(p.get("rf_gain", RF_GAIN_DEFAULT)),
@@ -3390,9 +3392,11 @@ def _profile_from_state(st, name):
 
 
 def _profile_matches(st, prof):
-    """האם ההגדרות הנוכחיות זהות לפרופיל (ה-UI מסמן "שונה" כשלא)."""
+    """האם ההגדרות הנוכחיות זהות לפרופיל (ה-UI מסמן "שונה" כשלא). תחת AGC ה-IF לא בשימוש
+    (ה-AGC בוחר אותו) — לא משווים אותו, אחרת IF ידני ישן היה מציג "שונה" בלי סיבה."""
     cur = _profile_from_state(st, "")
-    return all(cur[k] == prof.get(k) for k in PROFILE_KEYS)
+    keys = [k for k in PROFILE_KEYS if not (k == "if_gain" and cur["agc"] and prof.get("agc"))]
+    return all(cur[k] == prof.get(k) for k in keys)
 
 
 @app.route("/api/profiles", methods=["GET", "POST"])
@@ -3413,7 +3417,7 @@ def api_profiles():
             return jsonify(ok=False, error="הפרופיל לא נמצא"), 404
         fields = {k: prof[k] for k in PROFILE_KEYS if k in prof}
         if st.get("app_mode") == "voice" and _live_mode() == "voice":
-            params, perr = _parse_tune({**st, **fields})
+            params, perr = _parse_tune({**load_state(), **fields})   # state טרי — לא לדרוס כיוונון מקביל
             if perr:
                 return jsonify(ok=False, error=perr), 400
             payload, status = _voice_tune(params)

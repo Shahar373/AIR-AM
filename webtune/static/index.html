@@ -3225,11 +3225,11 @@
         gpList.forEach(p => {
           const o = document.createElement("option");
           o.value = p.id;
-          o.textContent = p.name + " · LNA " + lnaStep(p.rf_gain) + "/9" + (p.fm_notch ? " · FM" : "");
+          o.textContent = bidi(p.name) + " · " + bidi("LNA " + lnaStep(p.rf_gain) + "/9") + (p.fm_notch ? " · FM" : "");
           sel.appendChild(o);
         });
         sel.value = d.active || "";
-        $("gpDel").classList.toggle("hidden", !d.active);
+        $("gpDel").classList.toggle("hidden", !gpList.length);
       } catch (e) { /* שרת ישן/אין רשת */ }
     }
     async function gpPost(body) {
@@ -3246,6 +3246,8 @@
         if (j.ok) {
           applyGainState(await fetchJSON("/api/state"));
           if (j.note) showToast(j.note);
+          // בקול: rtl_airband הופעל מחדש — מתחברים מחדש לסטרים כמו אחרי tune()
+          else if (appMode === "voice" && wantPlaying) { clearTimeout(connectTimer); connectTimer = setTimeout(() => reloadStream(), 1500); }
         }
       } catch (e) { showToast("שגיאת רשת"); }
       loadProfiles();
@@ -3258,9 +3260,12 @@
       loadProfiles();
     };
     $("gpDel").onclick = async () => {
-      const id = $("gpSelect").value;
-      const p = gpList.find(x => x.id === id);
+      // מחיקה *בלי* להחיל: בחירה מהרשימה הייתה מחילה את הפרופיל (ומפעילה מחדש את rtl_airband)
+      const list = gpList.map((x, i) => (i + 1) + ". " + x.name).join("\n");
+      const n = parseInt(prompt("מספר הפרופיל למחיקה:\n" + list) || "", 10);
+      const p = gpList[n - 1];
       if (!p || !confirm("למחוק את הפרופיל \"" + p.name + "\"?")) return;
+      const id = p.id;
       try { await gpPost({ action: "delete", id }); } catch (e) { showToast("שגיאת רשת"); }
       loadProfiles();
     };
@@ -3338,6 +3343,7 @@
               if (!j.ok) { showToast(j.error || "ההחלה נכשלה"); b.disabled = false; return; }
               applyGainState(await fetchJSON("/api/state"));
               showToast(j.note || "הוחל");
+              if (!j.note && appMode === "voice" && wantPlaying) { clearTimeout(connectTimer); connectTimer = setTimeout(() => reloadStream(), 1500); }
               pollRfcheck();
             } catch (e) { showToast("שגיאת רשת"); b.disabled = false; }
           };

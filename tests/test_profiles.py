@@ -68,3 +68,18 @@ def test_apply_in_voice_goes_through_voice_tune(client, monkeypatch):
 def test_apply_unknown_and_bad_action(client):
     assert client.post("/api/profiles", json={"action": "apply", "id": "nope"}).status_code == 404
     assert client.post("/api/profiles", json={"action": "x"}).status_code == 400
+
+
+def test_match_ignores_if_gain_under_agc_and_ids_unique(client):
+    app.save_state({**app.DEFAULT_STATE, "agc": True, "if_gain": 30, "rf_gain": 6})
+    a = _save(client, "a").get_json()["profiles"][0]
+    app.save_state({**app.load_state(), "if_gain": 50})     # IF לא בשימוש תחת AGC
+    assert client.get("/api/profiles").get_json()["active"] == a["id"]
+    b = _save(client, "b").get_json()["profiles"][1]
+    assert a["id"] != b["id"]
+
+
+def test_profile_ignores_bad_freq_in_state(client):
+    app.save_state({**app.DEFAULT_STATE, "freq": "garbage", "rf_gain": 7})
+    p = _save(client, "x").get_json()["profiles"][0]
+    assert p["rf_gain"] == 7
