@@ -3363,6 +3363,96 @@ def api_state():
     return jsonify(st)
 
 
+# --- פרופילי רווח לפי מקום (PR 4, docs/voice-rf-quality-plan.md) ------------
+# "פארק אריאל שרון: LNA 6, מסנן FM" — הגדרות הקצה הקדמי/השמע שנשמרו *ע"י המשתמש*
+# (אחרי 🩺 או ניסוי ידני) ומוחלות בנגיעה אחת. §12: אין פרופילים מובנים עם מספרים
+# מומצאים — רק מה שנמדד/נבחר במקום עצמו. נשמרים ב-state["gain_profiles"].
+PROFILE_KEYS = ("agc", "if_gain", "rf_gain", "fm_notch", "voice_narrow", "voice_lowpass")
+PROFILES_MAX = 20
+PROFILE_NAME_MAX = 40
+
+
+def _profile_from_state(st, name):
+    p, _ = _parse_tune({**st, "freq": st.get("freq", DEFAULT_STATE["freq"])})
+    p = p or {}
+    return {"id": time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}",
+            "name": name, "created": time.time(),
+            "agc": bool(p.get("agc", True)), "if_gain": int(p.get("if_gain", IF_GAIN_DEFAULT)),
+            "rf_gain": int(p.get("rf_gain", RF_GAIN_DEFAULT)),
+            "fm_notch": bool(st.get("fm_notch", False)),
+            "voice_narrow": bool(st.get("voice_narrow", False)),
+            "voice_lowpass": _sanitize_lowpass(st.get("voice_lowpass"))}
+
+
+def _profile_matches(st, prof):
+    """האם ההגדרות הנוכחיות זהות לפרופיל (ה-UI מסמן "שונה" כשלא)."""
+    cur = _profile_from_state(st, "")
+    return all(cur[k] == prof.get(k) for k in PROFILE_KEYS)
+
+
+@app.route("/api/profiles", methods=["GET", "POST"])
+def api_profiles():
+    """GET: הרשימה + איזה פרופיל תואם כרגע. POST {action}: save {name} (מההגדרות הנוכחיות)
+    | delete {id} | apply {id} (בקול חי — דרך _voice_tune; אחרת רק state). דרך _guard."""
+    if request.method == "GET":
+        st = load_state()
+        profs = st.get("gain_profiles") or []
+        match = next((p["id"] for p in profs if _profile_matches(st, p)), None)
+        return jsonify(ok=True, profiles=profs, active=match, max=PROFILES_MAX)
+    data = request.get_json(silent=True) or {}
+    action = data.get("action")
+    if action == "apply":
+        st = load_state()
+        prof = next((p for p in st.get("gain_profiles") or [] if p.get("id") == data.get("id")), None)
+        if not prof:
+            return jsonify(ok=False, error="הפרופיל לא נמצא"), 404
+        fields = {k: prof[k] for k in PROFILE_KEYS if k in prof}
+        if st.get("app_mode") == "voice" and _live_mode() == "voice":
+            params, perr = _parse_tune({**st, **fields})
+            if perr:
+                return jsonify(ok=False, error=perr), 400
+            payload, status = _voice_tune(params)
+            return jsonify(payload), status
+        # לא בקול — נשמר ויחול בכניסה הבאה (נופל לכתיבת state למטה)
+        def mutate(st):
+            st.update(fields)
+            return None
+    elif action == "save":
+        name = str(data.get("name") or "").strip()[:PROFILE_NAME_MAX]
+        if not name:
+            return jsonify(ok=False, error="חסר שם לפרופיל"), 400
+
+        def mutate(st):
+            profs = list(st.get("gain_profiles") or [])
+            if len(profs) >= PROFILES_MAX:
+                return ("אפשר לשמור עד %d פרופילים — מחק אחד קודם" % PROFILES_MAX, 409)
+            profs.append(_profile_from_state(st, name))
+            st["gain_profiles"] = profs
+            return None
+    elif action == "delete":
+        def mutate(st):
+            profs = [p for p in st.get("gain_profiles") or [] if p.get("id") != data.get("id")]
+            if len(profs) == len(st.get("gain_profiles") or []):
+                return ("הפרופיל לא נמצא", 404)
+            st["gain_profiles"] = profs
+            return None
+    else:
+        return jsonify(ok=False, error="פעולה לא מוכרת"), 400
+    # read-modify-write של state תחת TUNE_LOCK (כמו כל כתיבה אחרת של state)
+    if not TUNE_LOCK.acquire(blocking=False):
+        return jsonify(ok=False, error="פעולה אחרת מתבצעת כרגע — נסה שוב בעוד רגע"), 409
+    try:
+        st = load_state()
+        err = mutate(st)
+        if err:
+            return jsonify(ok=False, error=err[0]), err[1]
+        save_state(st)
+    finally:
+        TUNE_LOCK.release()
+    note = "נשמר — יחול בכניסה הבאה לקול" if action == "apply" else None
+    return jsonify(ok=True, profiles=st.get("gain_profiles") or [], note=note)
+
+
 @app.route("/api/presets", methods=["GET", "PUT"])
 def api_presets():
     """PUT מחליף את הרשימה כולה - העריכה בממשק היא על הסט המלא, אין צורך ב-CRUD."""

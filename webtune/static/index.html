@@ -419,6 +419,9 @@
     .rflog-marks { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
     .rflog-marks button { flex: 1; min-width: 6.5rem; min-height: 44px; font-size: .8rem; }
     .rflog .fm-hint { font-size: .72rem; color: var(--text-faint); margin: 0; }
+    .gp-row { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+    .gp-row select { flex: 1; min-width: 8rem; }
+    .gp-row button { min-height: 40px; font-size: .78rem; padding: .3rem .6rem; }
     .rfc { margin-top: .7rem; padding-top: .6rem; border-top: 1px dashed var(--border); }
     .rfc-hd { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
     .rfc-hd button { min-height: 44px; font-size: .8rem; }
@@ -1850,6 +1853,13 @@
         <option value="3000">3 kHz</option>
       </select>
     </label>
+    <!-- פרופילי רווח לפי מקום (v2.29.0) — רק מה שהמשתמש שמר במקום עצמו, בלי ערכים מומצאים -->
+    <div class="setting gp-row">
+      <span>פרופיל</span>
+      <select id="gpSelect" aria-label="פרופיל רווח"><option value="">—</option></select>
+      <button type="button" class="ghost" id="gpSave">💾 שמור</button>
+      <button type="button" class="ghost hidden" id="gpDel" aria-label="מחק את הפרופיל">🗑</button>
+    </div>
     <!-- חיווי עומס מהחומרה (Overload_Detected/Corrected + GainChange של ה-API, דרך
          SoapySDRPlay3 עם ה-patch) — לא מרמת הערוץ אחרי ה-AGC. §12: לא ידוע ≠ תקין. -->
     <p class="rf-hw" id="rfHw">עומס RF: לא ידוע</p>
@@ -2584,6 +2594,7 @@
       }
       lastGainState = st;
       renderGainUI();
+      if (typeof loadProfiles === "function") loadProfiles();   // "שונה"/פרופיל פעיל מתעדכן
     }
 
     function renderGainUI() {
@@ -2795,6 +2806,7 @@
           return;
         }
         lastGainState = data;           // ‏{ok, ...new_state} — מה שהשרת שמר בפועל
+        loadProfiles();                 // הגדרות השתנו => ייתכן שכבר לא תואמות לפרופיל
         // /api/state נכשל בטעינה => המתג לא אותחל ו-fm_notch לא נשלח (השרת שמר את השמור).
         // התשובה אומרת מה נשמר בפועל — מיישרים *רק* את המתג (לא את הסליידרים: המשתמש
         // אולי כבר הזיז אותם בזמן שהבקשה הייתה בדרך).
@@ -3178,6 +3190,65 @@
       };
     });
     setInterval(() => { if (!document.hidden && appMode === "voice") pollRflog(); }, 3000);
+
+
+    /* ---------- פרופילי רווח לפי מקום (PR 4) ----------
+       שמירה = ההגדרות הנוכחיות (LNA/AGC/IF/מסנן FM/שמע). בחירה = החלה (בקול — כיוונון
+       באותו תדר; אחרת נשמר ויחול בכניסה הבאה). "שונה" כשהנוכחיות לא תואמות אף פרופיל. */
+    let gpList = [];
+    async function loadProfiles() {
+      try {
+        const d = await fetchJSON("/api/profiles");
+        if (!d.ok) return;
+        gpList = d.profiles || [];
+        const sel = $("gpSelect");
+        sel.replaceChildren();
+        const none = document.createElement("option");
+        none.value = "";
+        none.textContent = gpList.length ? "— הגדרות לא שמורות —" : "— אין פרופילים —";
+        sel.appendChild(none);
+        gpList.forEach(p => {
+          const o = document.createElement("option");
+          o.value = p.id;
+          o.textContent = p.name + " · LNA " + lnaStep(p.rf_gain) + "/9" + (p.fm_notch ? " · FM" : "");
+          sel.appendChild(o);
+        });
+        sel.value = d.active || "";
+        $("gpDel").classList.toggle("hidden", !d.active);
+      } catch (e) { /* שרת ישן/אין רשת */ }
+    }
+    async function gpPost(body) {
+      const res = await apiSend("POST", "/api/profiles", body);
+      const j = await res.json();
+      if (!j.ok) showToast(j.error || "הפעולה נכשלה");
+      return j;
+    }
+    $("gpSelect").onchange = async () => {
+      const id = $("gpSelect").value;
+      if (!id) return;
+      try {
+        const j = await gpPost({ action: "apply", id });
+        if (j.ok) {
+          applyGainState(await fetchJSON("/api/state"));
+          if (j.note) showToast(j.note);
+        }
+      } catch (e) { showToast("שגיאת רשת"); }
+      loadProfiles();
+    };
+    $("gpSave").onclick = async () => {
+      const name = (prompt("שם לפרופיל (למשל המקום):") || "").trim();
+      if (!name) return;
+      try { if ((await gpPost({ action: "save", name })).ok) showToast("נשמר: " + name); }
+      catch (e) { showToast("שגיאת רשת"); }
+      loadProfiles();
+    };
+    $("gpDel").onclick = async () => {
+      const id = $("gpSelect").value;
+      const p = gpList.find(x => x.id === id);
+      if (!p || !confirm("למחוק את הפרופיל \"" + p.name + "\"?")) return;
+      try { await gpPost({ action: "delete", id }); } catch (e) { showToast("שגיאת רשת"); }
+      loadProfiles();
+    };
 
     /* ---------- 🩺 בדיקת RF: מעבר על מצבי LNA מעל ATIS (PR 2) ----------
        השרת מחזיק את ה-SDR לכל הבדיקה ותמיד משחזר את מה שרץ קודם; כאן רק תצוגה.

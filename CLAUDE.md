@@ -176,6 +176,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
                            #   TUNE_LOCK, סירובים, החלה דרך _voice_tune, /api/health בזמן ריצה.
   test_dsp_bin.py          # PR 3: נוסחת בחירת ה-bin של rtl_airband (כולל קיטום) על כל ערוצי 25/8.33kHz,
                            #   מתגי bandwidth/lowpass, נוכחות ב-_parse_tune, קונפיג עם היסט 0.3 ⇒ stale.
+  test_profiles.py         # PR 4: פרופילי רווח — שמירה מההגדרות הנוכחיות, active/"שונה", מכסה, מחיקה,
+                           #   apply בקול (דרך _voice_tune, אותו תדר) ומחוצה לו (state בלבד).
   test_rflog.py            # רשם ניסוי RF: פענוח airband.conf, דגימה רק על כתיבה חדשה, start/mark/stop/
                            #   export, כיבוי אוטומטי, רישום בדיקת-אנטנה.
   test_experiment.py       # ניסוי כיול אוטומטי מקצה לקצה עם SDR מדומה (כולל שתי הפעולות הפיזיות),
@@ -221,7 +223,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
 | `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain (`--sdrplay-gain=N` או ריק=AGC), bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain — `if_gain`, ו-`rf_gain` = מצב LNA 0–9 שחל **גם תחת AGC** מאז v2.26.0, squelch, `fm_notch` (bool, ברירת מחדל False; היעדרו מסמן state מלפני v2.26.0 ⇒ הגירת `rf_gain`, ר' §12), app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline` — `{noise, freq, ts, lna, fm_notch, agc}` מאז v2.26.0; בלי `lna`/`fm_notch` = מלפני v2.26.0 ⇒ `baseline_untagged`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`, `voice_narrow` (bool) ו-`voice_lowpass` (2500/3000) — הגדרות שמע מאז v2.28.0, `rf_check_last` — תוצאת 🩺 האחרונה: `{ts, freq, fm_notch, lna_before, agc, rows, recommendation}`) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain — `if_gain`, ו-`rf_gain` = מצב LNA 0–9 שחל **גם תחת AGC** מאז v2.26.0, squelch, `fm_notch` (bool, ברירת מחדל False; היעדרו מסמן state מלפני v2.26.0 ⇒ הגירת `rf_gain`, ר' §12), app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline` — `{noise, freq, ts, lna, fm_notch, agc}` מאז v2.26.0; בלי `lna`/`fm_notch` = מלפני v2.26.0 ⇒ `baseline_untagged`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`, `voice_narrow` (bool) ו-`voice_lowpass` (2500/3000) — הגדרות שמע מאז v2.28.0, `gain_profiles` (עד 20 פרופילי רווח — v2.29.0), `rf_check_last` — תוצאת 🩺 האחרונה: `{ts, freq, fm_notch, lna_before, agc, rows, recommendation}`) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
 | `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
@@ -489,6 +491,10 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   IQR) ⇒ יותר הנחתה, בהליכה מהמיטבי ועצירה במצב הראשון שאינו בשוויון; עומס לא-ידוע ⇒ `confidence="partial"`), `_rfcheck_apply` (דרך `_voice_tune` בקול
   חי, אחרת רק state; 409 כשההמלצה כבר בתוקף). `api_health` מחזיר `rf_check` ו-`ok=True` בזמן ריצה.
   ⚠ גרסה גדולה (בודק root ייעודי) נכתבה ונדחתה — `docs/rf-check-design.md`, ‏78eb0a8.
+- **פרופילי רווח** (PR 4): `PROFILE_KEYS` (agc/if_gain/rf_gain/fm_notch/voice_narrow/voice_lowpass),
+  `_profile_from_state`, `_profile_matches` (GET מחזיר `active` — הפרופיל התואם, או None = "שונה"),
+  `api_profiles` (save/delete — read-modify-write תחת `TUNE_LOCK`; apply — דרך `_voice_tune` בקול חי
+  באותו תדר, אחרת רק state). §12: אין פרופילים מובנים עם ערכים.
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_sweep_recordings` (retention — **לא רואה `saved/` בכלל**, ר' למטה).
 - **הקלטות שמורות (★) + תמלול — שני פיצ'רים מחוברים:** הפטור מ-retention הוא
@@ -905,6 +911,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/sessions/<id>/export.zip` | ייצוא הסשן כולו (מטא-דאטה+מסלול+קליפים), אותו דפוס כמו `starred.zip` |
 | GET | `/api/sdr` | חיווי SDR: `state` (`missing`/`ours`/`switching`/`checking`/`api_down`/`api_error`/`free`/`busy`/`unavailable`/`unknown`), `usb`/`usb_desc`, `mode`+`service_state` כש-`ours`, `label` כש-`free`, `suspects` (לפי שם תהליך — רמז) כש-`busy`, `checked_age`. "פנוי" = ה-SDRplay API מציע אותו (`SoapySDRUtil --find`), נבדק רק כש-AIR-AM לא מחזיק בו |
 | GET/POST | `/api/rfcheck` | 🩺 בדיקת RF. GET: `running`/`step`/`states`/`rows` (חלקי בזמן ריצה)/`error`/`est_sec`/`result` (= `state["rf_check_last"]`). POST `{action}`: `start` (409 כשרץ/ניסוי/סריקה/SATCOM חי/`TUNE_LOCK` תפוס), `abort`, `apply` (409 בלי המלצה/כשרץ/כשכבר בתוקף/כשמסנן ה-FM השתנה מאז הבדיקה/ברווח ידני — נמדד תחת AGC). דרך `_guard` |
+| GET/POST | `/api/profiles` | פרופילי רווח. GET: `profiles`, `active`, `max`. POST `{action}`: `save {name}` (מההגדרות הנוכחיות; 400 בלי שם, 409 מעל 20), `delete {id}` (404), `apply {id}` (בקול — `_voice_tune` באותו תדר; אחרת state + `note`). דרך `_guard` |
 | GET | `/api/power` | מתח/טמפ' ה-Pi (`vcgencmd`), מוגש מ-cache בן ~2 שניות (`_POWER_TTL`) |
 | GET | `/api/metar` | METAR נתב"ג (LLBG) |
 | GET | `/api/health` | בריאות השירותים + `rf_check` (🩺 רצה). בזמן בדיקה `ok`=True כל עוד sdrplay חי — ההחלפה של rtl_airband בין מצבי ה-LNA אינה תקלה |

@@ -879,3 +879,28 @@ def test_audio_options_init_from_state_and_sent_on_tune(page):
     page.select_option("#voiceLowpass", "2500")
     expect(page.locator("#status")).not_to_contain_text("מכוונן…", timeout=10000)
     assert sent and sent[-1]["voice_lowpass"] == 2500 and sent[-1]["voice_narrow"] is True, sent
+
+
+def test_gain_profiles_select_and_apply(page):
+    """PR 4: הפרופיל התואם מסומן; בחירה בפרופיל אחר שולחת apply. בלי גלילה ב-360px."""
+    _phone(page)
+    sent = []
+    profs = [{"id": "a", "name": "בית", "rf_gain": 4, "fm_notch": False},
+             {"id": "b", "name": "פארק אריאל שרון", "rf_gain": 6, "fm_notch": True}]
+
+    def profiles(route, url):
+        if route.request.method == "POST":
+            sent.append(json.loads(route.request.post_data or "{}"))
+            body = {"ok": True, "profiles": profs}
+        else:
+            body = {"ok": True, "profiles": profs, "active": "a"}
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    _mount(page, overrides={"/api/profiles": profiles})
+    page.click("#modeSeg button[data-v=voice]")
+    expect(page.locator("#gpSelect")).to_have_value("a")
+    expect(page.locator("#gpSelect option[value=b]")).to_contain_text("פארק אריאל שרון")
+    _no_hscroll(page)
+    page.select_option("#gpSelect", "b")
+    expect(page.locator("#gpSelect")).to_have_value("a")      # רענון אחרי ההחלה (המוק מחזיר a)
+    assert {"action": "apply", "id": "b"} in sent, sent
