@@ -38,16 +38,6 @@ import adsb   # מסלול פעיל + אינדיקציית GPS מנתוני ADS-
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("airam")
 
-# 🩺 בדיקת RF — שכבת הניתוח (Python טהור, בלי numpy/SoapySDR; docs/rf-check-design.md §4.4).
-# ⚠ ייבוא מוגן: באג/קובץ חסר שם לא יכול להפיל את משטח הבקרה היחיד (airam-web הוא המתזמר
-# של כל המצבים). כשל => הבדיקה "לא זמינה" עם סיבה גלויה (analysis_missing), לא שקט.
-# ‏app.py **לעולם לא** מייבא את rfcheck_probe (numpy + libsdrplay_api רצים רק בתהליך ה-root).
-try:
-    import rfcheck_analysis
-except Exception:   # noqa: BLE001 — כל כשל ייבוא (תחביר, תלות) => הפיצ'ר כבוי, השרת חי
-    rfcheck_analysis = None
-    log.exception("rfcheck_analysis לא נטען — 🩺 בדיקת RF לא תהיה זמינה")
-
 # --- קבועים ---------------------------------------------------------------
 CONFIG_PATH = Path("/etc/rtl_airband/airband.conf")
 STATE_PATH = Path("/var/lib/airam/state.json")
@@ -359,11 +349,6 @@ SATCOM_FREQS_DEFAULT = SATCOM_BANKS[0]["freqs"]      # ["AF1"] — Alphasat, ל-
 SATCOM_BUF_MAX = 500                  # הודעות אחרונות בזיכרון (כמו ACARS/VDL2)
 SATCOM_LOG_PATH = Path("/var/lib/airam/satcom.jsonl")
 SATCOM_LOG_KEEP = 5000                # retention על הדיסק (זנב נשמר; ייצוא לניתוח)
-
-# --- 🩺 בדיקת RF: צרכן SDR חמישי (רק השם כאן — הרגיסטרים למטה צריכים אותו) ------
-# ‏systemd/airam-rfcheck.service. בכוונה **לא** ב-MODE_SERVICE/_live_mode: זו לא "אפליקציה"
-# ששורדת reboot אלא פעולת אבחון של המתזמר תחת TUNE_LOCK. שאר הקבועים — ר' "בדיקת RF" למטה.
-RFCHECK_SERVICE = "airam-rfcheck"
 
 # הקלטות: rtl_airband כותב קובץ MP3 לכל שידור (split_on_transmission) בשם
 # <REC_BASENAME>_YYYYMMDD_HHMMSS_<Hz>.mp3 (.tmp בזמן כתיבה, rename בסגירה
@@ -724,14 +709,6 @@ def _device_string(agc, rf_gain, fm_notch):
     return ",".join(parts)
 
 
-def _voice_centerfreq(freq):
-    """centerfreq של הקול (MHz) — מקור-אמת יחיד ל-render_config *ול*-🩺 בדיקת RF (params
-    ‏center_hz), כדי שהבודק ימדוד בדיוק באותו חלון/bin שבו rtl_airband מנגן.
-    ⚠ PR 3 (docs/voice-rf-quality-plan.md) יתקן כאן את מיקום ה-bin — שני הצרכנים יעקבו
-    אוטומטית. אל תשכפל את החישוב במקום אחר."""
-    return round(float(freq) + DC_OFFSET, 4)
-
-
 def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
                   fm_notch=False):
     f = float(freq)
@@ -751,7 +728,7 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
     lines += [
         f"    sample_rate = {SAMPLE_RATE};",
         '    mode = "multichannel";',
-        f"    centerfreq = {_voice_centerfreq(f):.4f};",   # מוסט מהערוץ כדי להימנע מ-spike ה-DC
+        f"    centerfreq = {f + DC_OFFSET:.4f};",   # מוסט מהערוץ כדי להימנע מ-spike ה-DC
         "    channels:",
         "    (",
         "      {",
@@ -796,7 +773,7 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
     return "\n".join(lines)
 
 
-def _atomic_write(path, text, mode=None):
+def _atomic_write(path, text):
     """כתיבה אטומית (tmp + rename): rtl_airband יכול לעלות בכל רגע
     (Restart=always / udev) ואסור שיקרא קובץ חצי-כתוב. tmp ייחודי לפר-thread
     (pid+ident) => שתי בקשות מקבילות (PUT /api/presets וכו') לא דורסות זו את
@@ -804,14 +781,10 @@ def _atomic_write(path, text, mode=None):
     ⚠ ‏fsync (על הקובץ *ועל התיקייה*) הוא מה שהופך את זה גם לעמיד-בניתוק-חשמל,
     לא רק אטומי-מול-קוראים: בלעדיו הנתונים יכולים לשבת ב-page cache ולהיעלם
     בכיבוי פתאומי (תרחיש אמיתי בהפעלה מסוללה — ר' README, אזהרת ספק כוח).
-    ה-fsync על התיקייה נדרש כי בלעדיו ה-rename עצמו לא בהכרח שרד.
-    ‏mode (אופציונלי): הרשאות הקובץ, נקבעות על ה-tmp *לפני* ה-rename — כך היעד לעולם
-    לא נראה, אפילו לרגע, בהרשאות אחרות (קובץ הפרמטרים של 🩺 בדיקת RF: ‏0640)."""
+    ה-fsync על התיקייה נדרש כי בלעדיו ה-rename עצמו לא בהכרח שרד."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f"{path.suffix}.tmp{os.getpid()}-{threading.get_ident()}")
     with open(tmp, "w", encoding="utf-8") as f:
-        if mode is not None:
-            os.fchmod(f.fileno(), mode)
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
@@ -2623,7 +2596,7 @@ def _satcom_listener():
 
 
 HEALTH_SERVICES = ("rtl_airband", "icecast2", "sdrplay",
-                   "airam-acars", "airam-vdl2", "airam-satcom", RFCHECK_SERVICE)
+                   "airam-acars", "airam-vdl2", "airam-satcom")
 
 
 def _services_status(names):
@@ -2658,8 +2631,7 @@ def _is_active(service):
 def _sysctl(action, service, timeout=45):
     """systemctl פעולה משנת-מצב => דרך SUDO (sudoers ממוקד מתיר בדיוק את
     הפעולות האלה ל-airam: restart/stop של rtl_airband / airam-acars / airam-vdl2 /
-    airam-satcom / airam-rfcheck (🩺 בדיקת RF — שתי השורות שנוספו ב-v2.27.0, סה"כ 11),
-    ו-reset-failed של airam-satcom בלבד — ר' _enter_satcom). אין `start` לאף יחידה."""
+    airam-satcom, ו-reset-failed של airam-satcom בלבד — ר' _enter_satcom)."""
     return subprocess.run([*SUDO, "systemctl", action, service],
                           capture_output=True, text=True, timeout=timeout)
 
@@ -2924,15 +2896,13 @@ def _enter_satcom(freqs, bias_tee=True, skip_c=True, spectrum=True, gain=None):
 
 
 def _enter_standby():
-    """מצב כיבוי (standby): עוצר את *כל* צרכני ה-SDR (rtl_airband + acarsdec +
-    dumpvdl2 + inmarsat-sniffer + בודק ה-RF) => משחרר את ה-RSP1B ליישום SDR אחר, בעוד
+    """מצב כיבוי (standby): עוצר את *ארבעת* צרכני ה-SDR (rtl_airband + acarsdec +
+    dumpvdl2 + inmarsat-sniffer) => משחרר את ה-RSP1B ליישום SDR אחר, בעוד
     airam-web/הדף נשארים פעילים. את sdrplay.service משאירים חי בכוונה: ה-API
     daemon הוא המתווך שמאפשר לאפליקציית SDRplay אחרת להתחבר מיד — וגם ה-sudoers
     ממילא אינו מתיר לעצור אותו. מחזיר (error, detail). serialized תחת TUNE_LOCK
-    ע"י הקורא.
-    ‏airam-rfcheck ראשון: בודק שנשאר רץ (יתום, או כשל בשחזור של בדיקת RF) מחזיק את
-    ה-SDR, ו-standby שלא עוצר אותו היה מדווח "פנוי" בזמן שהמכשיר תפוס."""
-    consumers = (RFCHECK_SERVICE, ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE, "rtl_airband")
+    ע"י הקורא."""
+    consumers = (ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE, "rtl_airband")
     for svc in consumers:
         try:
             _sysctl("stop", svc, timeout=30)
@@ -2971,10 +2941,10 @@ def _enter_voice(params):
     """כניסה סימטרית לקול (peer של _enter_acars/_enter_vdl2/_enter_satcom): עוצר
     את צרכני הדאטה, כותב את קונפיג rtl_airband ומרים עם אימות.
     מחזיר (error, detail, sdr_down) — כמו _restart_and_verify."""
-    # אם acarsdec/dumpvdl2/inmarsat-sniffer (או בודק ה-RF) רץ הוא מחזיק את ה-SDR =>
-    # עוצרים מפורשות לפני שמרימים את rtl_airband (Conflicts גיבוי, אבל זה משחרר את
+    # אם acarsdec/dumpvdl2/inmarsat-sniffer רץ הוא מחזיק את ה-SDR => עוצרים
+    # מפורשות לפני שמרימים את rtl_airband (Conflicts גיבוי, אבל זה משחרר את
     # המכשיר מיד).
-    for svc in (RFCHECK_SERVICE, ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE):
+    for svc in (ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE):
         if _is_active(svc):
             try:
                 _sysctl("stop", svc, timeout=30)
@@ -3354,12 +3324,6 @@ def api_state():
         # mode_ok=False: המצב השמור אמור להריץ צרכן ואף אחד לא רץ (קריסה / עליית
         # מערכת / _boot_restore עוד בדרך). True גם ב-off — standby מכוון אינו תקלה.
         st["mode_ok"] = (live is not None) or (saved == "off")
-    # 🩺 בדיקת RF: rtl_airband עצור *בכוונה* (הבודק מחזיק את ה-SDR) — אבחון מתוכנן אינו
-    # תקלה, בדיוק כמו standby. ‏_live_mode מחזיר None בזמן הבדיקה (הבודק לא ב-MODE_SERVICE).
-    rc = _rfcheck_brief()
-    st["rf_check"] = rc
-    if rc["running"] and saved in ("voice", "off"):
-        st["mode_ok"] = True
     st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT, version=VERSION,
               acars_banks=ACARS_BANKS, vdl2_banks=VDL2_BANKS, satcom_banks=SATCOM_BANKS)
     return jsonify(st)
@@ -3395,11 +3359,8 @@ def api_presets():
 SDR_PROBE_TTL_SEC = 10.0
 SDR_PROBE_TIMEOUT_SEC = 12
 SDR_API_SERVICE = "sdrplay"
-SDR_CONSUMERS = ("rtl_airband", ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE, RFCHECK_SERVICE)
+SDR_CONSUMERS = ("rtl_airband", ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE)
 _SDR_CONSUMER_MODE = {svc: m for m, svc in MODE_SERVICE.items()}
-# ‏⚠ מפורש: המפה נגזרת מ-MODE_SERVICE, ובודק ה-RF במכוון לא שם (אינו "מצב"). בלי השורה
-# הזו /api/sdr היה מציג את הבודק שלנו כ"תוכנה זרה מחזיקה ב-SDR" (busy) במקום "ours".
-_SDR_CONSUMER_MODE[RFCHECK_SERVICE] = "rfcheck"
 # מצבי systemd שבהם הצרכן שלנו מחזיק (או מנסה להחזיק) את המכשיר: "activating"
 # כולל לולאת auto-restart של Restart=always — ה-SDR לא פנוי לאחרים גם אז.
 _SDR_HOLDING_STATES = ("active", "activating", "reloading", "deactivating")
@@ -3574,15 +3535,11 @@ def api_health():
     # מצב הכיבוי שביקש המשתמש היה נראה כקריסה). sdrplay נשאר active במפה.
     saved_state = load_state()
     saved = saved_state.get("app_mode", "off")
-    # 🩺 בודק RF פעיל בזמן standby *בלי* שהמתזמר מריץ אותו (יתום) מחזיק את ה-SDR —
-    # זה לא "כבוי ופנוי". בזמן בדיקה שהמתזמר מריץ, ok נקבע למטה (rc["running"]).
-    rc = _rfcheck_brief()
     off_ok = (saved == "off"
               and services["rtl_airband"] != "active"
               and services["airam-acars"] != "active"
               and services["airam-vdl2"] != "active"
-              and services["airam-satcom"] != "active"
-              and services[RFCHECK_SERVICE] != "active")
+              and services["airam-satcom"] != "active")
     # המצב נגזר מהשירות הפעיל, ובאין פעיל — מהכוונה השמורה (אין ברירת-מחדל לקול).
     # ok = בריאות המצב הנגזר בלבד: מצב שמור שלא רץ => ok=False (תקלה מדווחת),
     # למשל אחרי קריסת שירות או בזמן ש-_boot_restore עוד מחזיר את המצב.
@@ -3600,11 +3557,7 @@ def api_health():
         mode = active or saved
         ok = (voice_ok if mode == "voice" else acars_ok if mode == "acars"
               else vdl2_ok if mode == "vdl2" else satcom_ok if mode == "satcom" else off_ok)
-    # בדיקת RF שהמתזמר מריץ: rtl_airband עצור בכוונה => לא תקלה (design §4.6). המצב
-    # המדווח נשאר הכוונה השמורה (voice/off) — הבדיקה חוזרת אליה בסופה.
-    if rc["running"] and saved in ("voice", "off"):
-        ok = True
-    return jsonify(ok=ok, app_mode=mode, rf_check={"running": rc["running"], "phase": rc["phase"]},
+    return jsonify(ok=ok, app_mode=mode,
                    services=services, sdr_present=_sdr_present(), stats_age=stats_age)
 
 
@@ -6069,1071 +6022,6 @@ def api_experiment():
     return jsonify(ok=False, error="action לא מוכר"), 400
 
 
-# --- 🩺 בדיקת RF (PR 2, v2.27.0 — docs/rf-check-design.md) --------------------------
-# איזה מצב LNA נכון *למקום הזה*? אי אפשר לנחש — מודדים. הבודק (rfcheck_probe.py, יחידת
-# systemd airam-rfcheck, root, numpy) מחזיק את ה-SDR, מחליף מצבי LNA תוך כדי קליטה
-# (~250ms לסלוט, סבב ABBA) וכותב מדדים פר-סלוט ל-/run/airam-rfcheck. airam-web *שופט*
-# (rfcheck_analysis — Python טהור), מחליט מתי לעצור, ומחזיר את הקול. חלוקת העבודה:
-#   * airam-web **לא** מייבא numpy/SoapySDR ולא טוען את libsdrplay_api — קריסה נייטיבית
-#     או deadlock ב-SDR לא יכולים להפיל את משטח הבקרה היחיד (design §4.1).
-#   * אין שום ערוץ IPC אל תהליך ה-root: הקלט היחיד שלו הוא קובץ JSON שאנחנו כותבים
-#     (O_NOFOLLOW + whitelist אצלו), והעצירה היא `systemctl stop` (design §4.2/§4.4).
-#   * root כותב רק לתיקייה שלו; כל קובץ נושא run_id ואנחנו מתעלמים מ-run_id זר (§4.3).
-#   * הבודק לעולם לא נוגע ב-state.json/פריסטים/airband.conf. "החל" היא בקשה נפרדת ומפורשת
-#     שעוברת במסלול /api/tune הקיים (כולל רולבק) — ר' _rfcheck_apply.
-# תפיסת ההפעלה: לא "מצב" (לא ב-MODE_SERVICE/_live_mode, לא שורד reboot) אלא פעולת אבחון
-# של המתזמר תחת TUNE_LOCK לכל אורכה — כמו /api/antenna/check והניסוי האוטומטי, ובסופה
-# תמיד `_restore_after_probe` אל מה שרץ קודם (קול, או standby באבחון מ-off).
-RFCHECK_RUN_DIR = Path("/run/airam-rfcheck")                 # RuntimeDirectory של היחידה (root, 0755)
-RFCHECK_PARAMS_PATH = Path("/var/lib/airam/rfcheck-params.json")   # = PARAMS_PATH בבודק
-RFCHECK_LAST_PATH = Path("/var/lib/airam/rfcheck_last.json")
-RFCHECK_LAST_ROWS_PATH = Path("/var/lib/airam/rfcheck_last_rows.jsonl")
-RFCHECK_HISTORY_PATH = Path("/var/lib/airam/rfcheck_history.jsonl")   # תקציר לכל ריצה — בסיס ל-PR 4
-RFCHECK_HISTORY_KEEP = 50
-RFCHECK_DIAG_PATH = Path("/var/lib/airam/rfcheck_diagnose.json")
-RFCHECK_PROBE_PATH = APP_DIR / "rfcheck_probe.py"
-RFCHECK_UNIT_PATH = Path("/etc/systemd/system/airam-rfcheck.service")
-# אותו מפרש כמו ExecStart של היחידה: python3-soapysdr בנוי רק לפייתון ברירת-המחדל של
-# ההפצה, ולכן בדיקת הזמינות חייבת לרוץ דרכו ולא דרך sys.executable.
-RFCHECK_PYTHON = "/usr/bin/python3"
-SDRPLAY_API_VERSION_PATH = Path("/usr/local/share/airam/sdrplay-api.version")   # install.sh שלב 2
-RFCHECK_INSTALL_HINT = "sudo ./install.sh"
-RFCHECK_ATIS_FREQ = EXP_ATIS_FREQ            # 132.5 — שידור רציף; החלטת משתמש 5: קבוע
-RFCHECK_FREQ_MIN, RFCHECK_FREQ_MAX = 108.0, 137.0   # Air band (AM) בלבד
-# מצבי ה-LNA שנמדדים: (0,2,4,6,7,8) ∪ {הנוכחי}, עד 7 (החלטת משתמש 5 — המשתמש קרוב מאוד
-# למגדל חזק, ולכן גם 8 (‏57dB הנחתה) כלול). ⚠ בחירת תכנון, לא מדידה.
-RFCHECK_STATES_DEFAULT = (0, 2, 4, 6, 7, 8)
-RFCHECK_MAX_STATES = 7                        # = MAX_STATES בבודק (whitelist הפרמטרים)
-# ⚠ ארבעת הקבועים הבאים תלויים-חומרה וטרם אומתו על ה-Pi (האבחון D3/D6/D5 מודד אותם);
-# הם מוצגים בתוצאה ב-selfcheck/untestable ונדרסים ע"י RFCHECK_VERIFIED כשהבנייה תואמת.
-RFCHECK_GUARD_BUFFERS = 1                     # ⚠ D3 — מאגר-מגן אחרי החלפת LNA (‏25.6ms)
-RFCHECK_NOTCH_GUARD_BUFFERS = 10              # ⚠ D6 — אין המתנת-השלמה ל-RfNotch (Settings.cpp:1777-1783)
-RFCHECK_MEASURE_BUFFERS = 7                   # 179.2ms מדידה רציפה לסלוט (תכנון)
-RFCHECK_RATCHET_DB = 10                       # IFGR עולה ב-10dB לסבב אחרי חיתוך/עומס (תכנון, design §5.2)
-# שכנים לאומדן רצפת-רעש (proxy): ‏±40/55/70/85kHz — האפס הראשון של BH-7 ב-35kHz (מחושב).
-RFCHECK_NB_OFFSETS_HZ = (-85000, -70000, -55000, -40000, 40000, 55000, 70000, 85000)
-RFCHECK_RAIL_CODE = 32767                     # ⚠ D5 — fullScale של CS16 לפי הדרייבר (Streaming.cpp:42)
-RFCHECK_OVL_MARGIN_BUFFERS = 1
-RFCHECK_RATE_HZ = int(round(SAMPLE_RATE * 1e6))   # 2,560,000 — זהה לקול (אותו מסנן IF)
-# החלטת משתמש 1: "עד שיש מספיק נתונים, עד 3 דקות" — אוטומטי, **בלי** "הארך".
-RFCHECK_HARD_MAX_SEC = 180
-RFCHECK_DIAG_MAX_SEC = 150                    # = DIAG_MAX_SEC בבודק
-RFCHECK_ATIS_PROBE_EXTRA_SEC = 10             # max_sec של ריצת ATIS = ATIS_MAX_SEC + 10 (הבודק לא עוצר לפנינו)
-# כלבי-שמירה של המתזמר (תכנון, לא ספי RF): פעימת status.json קפואה, אי-פתיחה, חריגת זמן.
-RFCHECK_HEARTBEAT_STALE_SEC = 5.0             # status.json נכתב אחרי כל סלוט (≤4Hz)
-RFCHECK_DIAG_HEARTBEAT_STALE_SEC = 30.0       # באבחון יש שלבים בלי סלוטים (D1: סביבה)
-RFCHECK_OPEN_TIMEOUT_SEC = 30.0               # מ-restart שחזר ועד meta.json/streaming
-RFCHECK_DEADLINE_GRACE_SEC = 30.0             # מעבר ל-max של השלב — "משהו תקוע", עוצרים
-RFCHECK_POLL_SEC = 0.5
-RFCHECK_STOP_WAIT_SEC = 10.0                  # המתנה לעצירת rtl_airband לפני הפעלת הבודק
-RFCHECK_AVAIL_TTL_OK = 300.0                  # בדיקת זמינות (fork של python3 -I --selftest) — cache
-RFCHECK_AVAIL_TTL_BAD = 30.0                  # שלילי נבדק שוב מהר יותר (אחרי install.sh)
-RFCHECK_SELFTEST_TIMEOUT = 15
-RFCHECK_ROWS_MAX = 20000                      # תקרת זיכרון בלבד (~720 שורות ב-180ש')
-# v2.27.1: {"soapy_build_sig": "...", "sdrplay_api": "3.15.2", "guard_buffers": n,
-#           "notch_guard_buffers": n, "rail_code": n, "overload_reported_with_agc_off": bool}
-# — ייכתב מתוצאת האבחון שהמשתמש ישלח. עד אז הכלי מסומן "🧪 ניסיוני" (design §2.5).
-RFCHECK_VERIFIED = None
-_RFC_RUN_ID_RE = re.compile(r"^[0-9a-f]{16}$")
-
-_rfc_lock = threading.Lock()
-# מצב הבקר (לקריאה מ-GET/api_state). ה-thread הוא הכותב היחיד בזמן ריצה; כל עדכון מחליף
-# אובייקטים שלמים (live/probe) — קורא מקבל snapshot עקבי בלי להחזיק את הנעילה.
-_rfc = {"running": False, "run_id": None, "parent_id": None, "kind": None, "stage": None,
-        "ref": None, "freq": None, "atis_freq": None, "states": [], "ifgr_start": {},
-        "ifgr_ref": None, "config_at_start": None,
-        "started_at": None, "finished_at": None, "phase_started_at": None, "phase_max": None,
-        "probe": None, "live": None, "offer_atis": False, "result": None, "diagnose": None,
-        "error": None, "error_code": None, "detail": None, "ended": None, "restore": None,
-        "stop_evt": None, "finish_evt": None, "atis_evt": None, "wake": None, "thread": None}
-_rfc_avail = {"t": None, "result": None}
-_RFC_AVAIL_LOCK = threading.Lock()
-_rfc_last_cache = {"sig": None, "result": None}
-
-# הודעות שגיאה למשתמש לפי קוד (הקוד נשמר בנפרד — error_code — לאבחון/לבדיקות).
-_RFC_ERRORS = {
-    "start_failed": "ה-SDR לא נפתח לבדיקה",
-    "start_timeout": "הפעלת הבודק נתקעה — בדוק שה-SDR מחובר",
-    "open_timeout": "הבודק לא התחיל להזרים בזמן — הבדיקה נעצרה",
-    "watchdog": "הבודק הפסיק לדווח (פעימה קפואה) — הבדיקה נעצרה",
-    "deadline": "הבדיקה חרגה מהזמן המרבי — נעצרה",
-    "probe_died": "הבודק יצא בלי לדווח — ר' journalctl -u airam-rfcheck",
-    "params": "כתיבת פרמטרי הבדיקה נכשלה",
-    "internal": "שגיאה פנימית בבדיקת RF",
-    "analysis": "ניתוח התוצאה נכשל",
-}
-
-
-def _rfcheck_error_text(err):
-    """קוד שגיאה פנימי => משפט למשתמש. ‏probe:<code> — הקוד של הבודק עצמו, כמות שהוא."""
-    if not err:
-        return None
-    if err in _RFC_ERRORS:
-        return _RFC_ERRORS[err]
-    if err.startswith("probe:"):
-        return "הבודק נכשל: " + err[6:]
-    return err
-
-
-def _rfc_set(**kw):
-    with _rfc_lock:
-        _rfc.update(kw)
-
-
-def _rfcheck_brief():
-    """תקציר ל-/api/state ול-/api/health: האם בדיקה רצה, באיזה שלב ובאיזו ריצה."""
-    with _rfc_lock:
-        running = bool(_rfc["running"])
-        return {"running": running, "phase": _rfc["stage"] if running else None,
-                "kind": _rfc["kind"] if running else None,
-                "run_id": _rfc["run_id"] if running else None}
-
-
-def _rfcheck_verified():
-    """RFCHECK_VERIFIED — רק כשהוא קשור ל*בנייה המותקנת*: חתימת SoapySDRPlay3 (+patch) וגרסת
-    ה-API תואמות. בנייה מחדש (commit/patch אחרים) מחזירה את התג "ניסיוני" אוטומטית —
-    ערכים שאומתו על בנייה אחרת אינם ראיה על זו (design §2.5)."""
-    v = RFCHECK_VERIFIED
-    if not isinstance(v, dict) or not v.get("soapy_build_sig"):
-        return None
-    try:
-        if SOAPY_RF_MARK.read_text().strip() != v["soapy_build_sig"]:
-            return None
-        if v.get("sdrplay_api") and SDRPLAY_API_VERSION_PATH.read_text().strip() != v["sdrplay_api"]:
-            return None
-    except OSError:
-        return None
-    return dict(v)
-
-
-def _rfcheck_selftest():
-    """(selftest, reasons): ‏`python3 -I rfcheck_probe.py --selftest` כמשתמש airam — לעולם לא
-    פותח מכשיר (listModules רק סורק נתיבים). זמינות *חיה*, לא "הותקן פעם": numpy/
-    python3-soapysdr שהוסרו או מודול sdrplay חסר => הכפתור לא מוצג והכפתור הישן נשאר."""
-    try:
-        r = subprocess.run([RFCHECK_PYTHON, "-I", str(RFCHECK_PROBE_PATH), "--selftest"],
-                           capture_output=True, text=True, timeout=RFCHECK_SELFTEST_TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return None, ["selftest_failed"]
-    st = None
-    for line in reversed((r.stdout or "").splitlines()):
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                st = json.loads(line)
-            except ValueError:
-                st = None
-            break
-    if not isinstance(st, dict):
-        return None, ["selftest_failed"]
-    reasons = []
-    if not st.get("numpy"):
-        reasons.append("numpy_missing")
-    if not st.get("soapysdr"):
-        reasons.append("soapysdr_missing")
-    elif not st.get("sdrplay_module"):
-        reasons.append("sdrplay_module_missing")
-    if not reasons and r.returncode != 0:
-        reasons.append("selftest_failed")
-    return st, reasons
-
-
-def _rfcheck_availability(force=False):
-    """{available, reasons, install_hint, telemetry_expected, verified, selftest}. החלק היקר
-    (fork של python3 -I --selftest) ב-cache; הבדיקות הזולות (קובצי סימן) תמיד טריות. בקשה
-    מקבילה בזמן בדיקה מקבלת את התשובה האחרונה במקום להמתין (כמו _SDR_PROBE_LOCK)."""
-    def fresh():
-        c, t = _rfc_avail["result"], _rfc_avail["t"]
-        ttl = RFCHECK_AVAIL_TTL_OK if (c and c["available"]) else RFCHECK_AVAIL_TTL_BAD
-        return c is not None and t is not None and not force and time.monotonic() - t < ttl
-
-    if not fresh() and _RFC_AVAIL_LOCK.acquire(blocking=_rfc_avail["result"] is None or force):
-        try:
-            if not fresh():                      # בדיקה כפולה: אולי חושב בזמן שחיכינו
-                reasons, selftest = [], None
-                if rfcheck_analysis is None:
-                    reasons.append("analysis_missing")
-                probe_ok = RFCHECK_PROBE_PATH.is_file()
-                if not probe_ok:
-                    reasons.append("probe_missing")
-                if not RFCHECK_UNIT_PATH.is_file():
-                    reasons.append("unit_missing")
-                if probe_ok:
-                    selftest, st_reasons = _rfcheck_selftest()
-                    reasons += st_reasons
-                _rfc_avail.update(t=time.monotonic(), result={
-                    "available": not reasons, "reasons": reasons, "selftest": selftest})
-        finally:
-            _RFC_AVAIL_LOCK.release()
-    cached = _rfc_avail["result"]
-    return {**cached, "reasons": list(cached["reasons"]), "install_hint": RFCHECK_INSTALL_HINT,
-            "telemetry_expected": _rf_telemetry_available(),
-            "verified": _rfcheck_verified() is not None}
-
-
-def _rfcheck_reset_availability_cache():
-    """לבדיקות ולאחר התקנה: הבדיקה הבאה תריץ selftest מחדש."""
-    with _RFC_AVAIL_LOCK:
-        _rfc_avail.update(t=None, result=None)
-
-
-def _rfcheck_read_last():
-    """rfcheck_last.json (התוצאה שורדת reload/restart), ב-cache לפי mtime+size — GET נקרא כל
-    שנייה בזמן ריצה. פגום/חסר => None (לא ממציאים תוצאה)."""
-    try:
-        stt = RFCHECK_LAST_PATH.stat()
-    except OSError:
-        return None
-    sig = (stt.st_mtime_ns, stt.st_size)
-    if _rfc_last_cache["sig"] == sig:
-        return _rfc_last_cache["result"]
-    try:
-        res = json.loads(RFCHECK_LAST_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        res = None
-    if not isinstance(res, dict):
-        res = None
-    _rfc_last_cache.update(sig=sig, result=res)
-    return res
-
-
-def _rfcheck_current_result():
-    with _rfc_lock:
-        mem = _rfc["result"]
-    return mem if mem is not None else _rfcheck_read_last()
-
-
-def _rfcheck_gr():
-    """טבלת ה-GR של RSP1B ‏60–420MHz (spec.txt:2287-2293) — מקור יחיד: rfcheck_analysis. משמשת
-    *רק* לנקודת הפתיחה של ה-IF ולתצוגה; ההכרעה לא תלויה בה (CNR באותו מצב, design §2.3)."""
-    return rfcheck_analysis.GR_RSP1B_60_420
-
-
-def _rfcheck_label(s):
-    return f"{RFGR_MAX - int(s)}/9"      # = הסליידר (#rfGainVal): ‎(9 − state)/9
-
-
-def _rfcheck_cur_state(st):
-    try:
-        return max(RFGR_MIN, min(RFGR_MAX, int(st.get("rf_gain", RF_GAIN_DEFAULT))))
-    except (TypeError, ValueError):
-        return RF_GAIN_DEFAULT
-
-
-def _rfcheck_ifgr_ref(prev, prev_live):
-    """(ערך, מקור) של נקודת העבודה של ה-IF בייצור, לפי סדר עדיפות (design §5.2):
-      manual   — if_gain ידני (AGC כבוי בייצור): בדיוק מה שרץ.
-      agc_live — ה-gRdB האחרון מטלמטריית PR 1, ובלבד שנקלט אחרי stream=start של התהליך
-                 *הנוכחי* של rtl_airband (session_start ≥ זמן ההפעלה) ובטווח IFGR של ה-spec
-                 (‎20–59; ערך אחר הוא gRdB גולמי שלא אומת — לא נקודת עבודה).
-      assumed  — IF_GAIN_DEFAULT (40), ומסומן "הונח" בתוצאה. לא ידוע ≠ ניחוש שקט."""
-    if not _parse_bool(prev.get("agc", True), True):
-        try:
-            v = int(prev.get("if_gain", IF_GAIN_DEFAULT))
-        except (TypeError, ValueError):
-            v = IF_GAIN_DEFAULT
-        return max(IFGR_MIN, min(IFGR_MAX, v)), "manual"
-    if prev_live == "voice":
-        with _rf_lock:
-            snap = dict(_rf)
-        g = snap.get("ifgr")
-        if (type(g) is int and IFGR_MIN <= g <= IFGR_MAX
-                and snap.get("follower_since") is not None and snap.get("session_start") is not None):
-            sw = _rtl_airband_start_wall()
-            if sw is not None and snap["session_start"] >= sw - 1:
-                return g, "agc_live"
-    return IF_GAIN_DEFAULT, "assumed"
-
-
-def _rfcheck_states(cur, requested=None):
-    """ברירת המחדל (או רשימה מפורשת — "בדיקה ממוקדת") ∪ {הנוכחי}, ממוין, עד RFCHECK_MAX_STATES.
-    הנוכחי תמיד נמדד: ההמלצה היא *השוואה מולו* (keep_current). מעל התקרה נשמט המצב הקרוב
-    ביותר לנוכחי (הכי פחות אינפורמטיבי — הנוכחי עצמו כבר מכסה את הסביבה שלו)."""
-    states = sorted(set(requested if requested else RFCHECK_STATES_DEFAULT) | {int(cur)})
-    while len(states) > RFCHECK_MAX_STATES:
-        others = [s for s in states if s != cur]
-        states.remove(min(others, key=lambda s: (abs(s - cur), -s)))
-    return states
-
-
-def _rfcheck_ifgr_start(states, cur, ifgr_ref):
-    """IFGR_s = clamp(IFGR_ref + GR(cur) − GR(s), 20, 59): אותו רווח כולל כמו בייצור, חתוך
-    בגבולות שה-AGC עצמו לא חוצה (Settings.cpp:647; MAX_BB_GR=59, design §5.2)."""
-    gr = _rfcheck_gr()
-    return {str(s): max(IFGR_MIN, min(IFGR_MAX, int(round(ifgr_ref + gr[cur] - gr[s]))))
-            for s in states}
-
-
-def _rfcheck_params(run_id, kind, ref, freq, states, ifgr_start, notch_base, max_sec, verified):
-    """קובץ הפרמטרים — בדיוק ה-whitelist של הבודק (rfcheck_probe.validate_params). ‏center_hz
-    דרך _voice_centerfreq (אותו חלון/bin כמו rtl_airband). ערכים מאומתים דורסים רק כשהבנייה
-    תואמת (_rfcheck_verified)."""
-    v = verified or {}
-    return {
-        "v": 1, "run_id": run_id, "phase": kind, "ref": ref,
-        "freq_hz": int(round(float(freq) * 1e6)),
-        "center_hz": int(round(_voice_centerfreq(freq) * 1e6)),
-        "rate": RFCHECK_RATE_HZ, "states": list(states),
-        "ifgr_start": {str(k): int(val) for k, val in ifgr_start.items()},
-        "notch_base": bool(notch_base), "notch_alternate": kind == "notch",
-        "guard_buffers": int(v.get("guard_buffers", RFCHECK_GUARD_BUFFERS)),
-        "notch_guard_buffers": int(v.get("notch_guard_buffers", RFCHECK_NOTCH_GUARD_BUFFERS)),
-        "measure_buffers": RFCHECK_MEASURE_BUFFERS, "ratchet_db": RFCHECK_RATCHET_DB,
-        "nb_offsets_hz": list(RFCHECK_NB_OFFSETS_HZ),
-        "rail_code": int(v.get("rail_code", RFCHECK_RAIL_CODE)),
-        "max_sec": int(max_sec), "ovl_margin_buffers": RFCHECK_OVL_MARGIN_BUFFERS,
-    }
-
-
-def _rfcheck_write_params(params):
-    """כתיבה אטומית, ‏0640, בבעלות airam (הבודק מקבל בעלים root/airam בלבד, פותח עם
-    O_NOFOLLOW ובודק S_ISREG). ‏os.replace מחליף symlink שהושתל — לא עוקב אחריו."""
-    _atomic_write(RFCHECK_PARAMS_PATH, json.dumps(params, separators=(",", ":")), mode=0o640)
-
-
-def _rfcheck_unlink_params():
-    """אחרי הריצה הפרמטרים נמחקים: הפעלה תועה של היחידה (systemctl ידני, סקריפט) תסתיים מיד
-    ב-params:open (יציאה 2, המכשיר לא נפתח) במקום לרוץ 3 דקות על פרמטרים ישנים."""
-    try:
-        RFCHECK_PARAMS_PATH.unlink()
-    except OSError:
-        pass
-
-
-class _RfcReader:
-    """קורא את פלטי הבודק לריצה אחת (run_id). קובץ עם run_id אחר — שריד של ריצה קודמת
-    (הבודק מוחק אותם רק כשהוא עולה) — מתעלמים ממנו. ‏rows.jsonl נקרא מצטבר (offset), רק
-    שורות שלמות, ורק *אחרי* ש-meta.json (או end.json) של הריצה הזו נראה: הבודק מוחק את
-    כל הפלטים הישנים *לפני* שהוא כותב אותם (main_with => OutDir.reset), כך שמשם והלאה
-    הקובץ בוודאות של הריצה הזו ו-offset 0 נכון. ⚠ לא מסתמכים על inode לזיהוי קובץ שנוצר
-    מחדש: tmpfs ממחזר inode מיד אחרי unlink (נבדק — tests/test_rfcheck_api.py)."""
-
-    def __init__(self, run_dir, run_id):
-        self.dir = Path(run_dir)
-        self.run_id = run_id
-        self.rows, self.meta, self.status, self.end = [], None, None, None
-        self._off, self._buf = 0, b""
-        self.dropped = 0
-
-    def _json(self, name):
-        try:
-            obj = json.loads((self.dir / name).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        return obj if isinstance(obj, dict) and obj.get("run_id") == self.run_id else None
-
-    def poll(self):
-        """מחזיר True כשנוספו שורות או השתנה סטטוס (לחישוב-חוזר של הסיכום החי)."""
-        before = (len(self.rows), (self.status or {}).get("t_wall"), self.end is not None)
-        m = self._json("meta.json")
-        if m is not None:
-            self.meta = m
-        s = self._json("status.json")
-        if s is not None:
-            self.status = s
-        e = self._json("end.json")
-        if e is not None:
-            self.end = e
-        if self.meta is not None or self.end is not None:
-            self._read_rows()
-        return before != (len(self.rows), (self.status or {}).get("t_wall"), self.end is not None)
-
-    def _read_rows(self):
-        p = self.dir / "rows.jsonl"
-        try:
-            stt = p.stat()
-            if stt.st_size < self._off:              # קוצר — לא אמור לקרות בריצה אחת
-                self._off, self._buf = 0, b""
-            if stt.st_size == self._off:
-                return
-            with open(p, "rb") as f:
-                f.seek(self._off)
-                chunk = f.read(stt.st_size - self._off)
-        except OSError:
-            return
-        self._off += len(chunk)
-        parts = (self._buf + chunk).split(b"\n")
-        self._buf = parts.pop()                     # שורה חלקית — תושלם בקריאה הבאה
-        for ln in parts:
-            try:
-                rec = json.loads(ln)
-            except ValueError:
-                continue
-            if not isinstance(rec, dict) or rec.get("run_id") != self.run_id:
-                continue
-            if len(self.rows) >= RFCHECK_ROWS_MAX:
-                self.dropped += 1
-                continue
-            self.rows.append(rec)
-
-
-def _rfcheck_new_run_id():
-    return os.urandom(8).hex()
-
-
-def _rfcheck_stop_probe(job):
-    """עצירה מסודרת (SIGTERM => הבודק משחרר את ההתקן וכותב end.json). אידמפוטנטי."""
-    if job.get("probe_stopped"):
-        return
-    job["probe_stopped"] = True
-    try:
-        _sysctl("stop", RFCHECK_SERVICE, timeout=20)
-    except Exception:
-        log.warning("בדיקת RF: עצירת airam-rfcheck נכשלה", exc_info=True)
-
-
-def _rfcheck_launch(job, phase_max):
-    """מפעיל את היחידה על קובץ הפרמטרים שכבר נכתב. ‏systemctl restart חוזר אחרי ExecStartPre
-    (שער המוכנות) => rc!=0 = ה-SDR לא נפתח. מחזיר (error_code, detail)."""
-    ctx = job["ctx"]
-    job["reader"] = _RfcReader(RFCHECK_RUN_DIR, ctx["run_id"])
-    job["probe_stopped"] = False
-    job["summary"], job["summary_sig"] = None, None
-    try:
-        r = _sysctl("restart", RFCHECK_SERVICE, timeout=60)
-    except subprocess.TimeoutExpired:
-        return "start_timeout", None
-    if r.returncode != 0:
-        detail = ((r.stderr or "").strip() + "\n" + (_journal_tail(RFCHECK_SERVICE, 15) or "")).strip()
-        return "start_failed", detail or None
-    job["phase_t0"] = time.monotonic()
-    job["phase_max"] = phase_max
-    _rfc_set(run_id=ctx["run_id"], parent_id=ctx.get("parent_id"), ref=ctx["ref"],
-             atis_freq=ctx.get("atis_freq"), phase_started_at=time.time(), phase_max=phase_max,
-             probe=None, live=None, offer_atis=False)
-    return None, None
-
-
-def _rfcheck_stage_running(job):
-    if job["kind"] == "notch":
-        return "notch"
-    if job["kind"] == "diagnose":
-        return "diagnose"
-    return "atis" if job["ctx"]["ref"] == "atis" else "listening"
-
-
-def _rfcheck_refresh(job):
-    """קריאת פלטי הבודק + סיכום חי (רק כשמשהו השתנה — הניתוח רץ על כל השורות)."""
-    ctx, rd = job["ctx"], job["reader"]
-    changed = rd.poll()
-    ctx["meta"] = rd.meta
-    ctx["telemetry_lines"] = (rd.status or {}).get("telemetry_lines")
-    streaming = rd.meta is not None or (rd.status or {}).get("phase") in ("streaming", "stopping")
-    elapsed = time.monotonic() - job["phase_t0"]
-    summary = job.get("summary")
-    if job["kind"] != "diagnose" and (changed or summary is None):
-        try:
-            summary = rfcheck_analysis.live_summary(rd.rows, ctx)
-        except Exception:
-            if not job.get("live_warned"):
-                log.warning("בדיקת RF: הסיכום החי נכשל", exc_info=True)
-                job["live_warned"] = True
-            summary = None
-        job["summary"] = summary
-    offer = False
-    if summary is not None:
-        try:
-            offer = bool(rfcheck_analysis.offer_atis(summary, ctx, elapsed))
-        except Exception:
-            offer = False
-    st = rd.status or {}
-    probe = {k: st.get(k) for k in ("phase", "cycle", "slot", "state", "ifgr", "rows", "overflows",
-                                    "gr_timeouts", "telemetry_lines", "diag_step")}
-    upd = {"live": summary, "offer_atis": offer, "probe": probe if rd.status else None}
-    with _rfc_lock:
-        if streaming and _rfc["stage"] == "starting":
-            upd["stage"] = _rfcheck_stage_running(job)
-        _rfc.update(upd)
-    return summary, elapsed, streaming
-
-
-def _rfcheck_switch_atis(job):
-    """המגדל שקט והמשתמש בחר ATIS ‏132.5: עצירה, פרמטרים חדשים (ref=atis, run_id חדש עם
-    parent_id), הפעלה מחדש — **תחת אותה TUNE_LOCK** (design §7.1). שורות/עובדות המגדל נשמרות
-    ב-ctx["tower"] ומאוחדות בניתוח (פסילה = איחוד שני השלבים)."""
-    ctx = job["ctx"]
-    _rfc_set(stage="atis")
-    _rfcheck_stop_probe(job)
-    rd = job["reader"]
-    rd.poll()
-    ctx["tower"] = {"rows": list(rd.rows), "meta": rd.meta, "end": rd.end}
-    job["tower_reader"] = rd
-    ctx["parent_id"] = ctx.get("parent_id") or ctx["run_id"]
-    ctx.update(run_id=_rfcheck_new_run_id(), ref="atis", atis_freq=RFCHECK_ATIS_FREQ,
-               meta=None, telemetry_lines=None)
-    atis_max = int(rfcheck_analysis.ATIS_MAX_SEC) + RFCHECK_ATIS_PROBE_EXTRA_SEC
-    # אותו IFGR_ref ואותו פיצוי — לא ה-IF שעלה ב-ratchet במגדל (סביבה אחרת, תדר אחר)
-    params = _rfcheck_params(ctx["run_id"], "lna", "atis", RFCHECK_ATIS_FREQ, ctx["states"],
-                             job["ifgr_start"], job["notch_base"], atis_max, job["verified"])
-    try:
-        _rfcheck_write_params(params)
-    except OSError:
-        return "params", None
-    log.info("בדיקת RF: מעבר ל-ATIS %.3f (run %s, parent %s)", RFCHECK_ATIS_FREQ,
-             ctx["run_id"], ctx["parent_id"])
-    return _rfcheck_launch(job, atis_max)
-
-
-def _rfcheck_probe_end_error(end):
-    """end.json => קוד שגיאה (או None לסיום תקין: stopped/max_sec)."""
-    if not isinstance(end, dict):
-        return "probe_died"
-    if end.get("ended") in ("error", "device_lost"):
-        return "probe:" + str(end.get("error") or end.get("ended"))
-    return None
-
-
-def _rfcheck_loop(job):
-    """לולאת המעקב. מחזירה (ended, error_code, detail). ended: target/atis_target/notch_target/
-    time/finish/abort/probe_exit/error."""
-    ctx = job["ctx"]
-    while True:
-        summary, elapsed, streaming = _rfcheck_refresh(job)
-        if job["stop_evt"].is_set():
-            return "abort", None, None
-        if job["finish_evt"].is_set():
-            return "finish", None, None
-        if job["atis_evt"].is_set():
-            job["atis_evt"].clear()
-            if job["kind"] == "lna" and ctx["ref"] == "tower":
-                err, detail = _rfcheck_switch_atis(job)
-                if err:
-                    return "error", err, detail
-                continue
-        if job["kind"] != "diagnose" and summary is not None:
-            try:
-                reason = rfcheck_analysis.stop_reason(summary, ctx, elapsed)
-            except Exception:
-                log.warning("בדיקת RF: כלל העצירה נכשל", exc_info=True)
-                reason = None
-            if reason:
-                return reason, None, None
-        rd = job["reader"]
-        if rd.end is not None:
-            return "probe_exit", _rfcheck_probe_end_error(rd.end), None
-        if _services_status((RFCHECK_SERVICE,))[RFCHECK_SERVICE] not in _SDR_HOLDING_STATES:
-            rd.poll()                     # end.json נכתב רגע לפני היציאה
-            detail = None if rd.end is not None else _journal_tail(RFCHECK_SERVICE, 15)
-            return "probe_exit", _rfcheck_probe_end_error(rd.end), detail
-        if streaming:
-            stale = (RFCHECK_DIAG_HEARTBEAT_STALE_SEC if job["kind"] == "diagnose"
-                     else RFCHECK_HEARTBEAT_STALE_SEC)
-            tw = (rd.status or {}).get("t_wall")
-            if isinstance(tw, (int, float)) and time.time() - tw > stale:
-                return "error", "watchdog", None
-        elif elapsed > RFCHECK_OPEN_TIMEOUT_SEC:
-            return "error", "open_timeout", _journal_tail(RFCHECK_SERVICE, 15)
-        if elapsed > job["phase_max"] + RFCHECK_DEADLINE_GRACE_SEC:
-            return "error", "deadline", None
-        job["wake"].wait(RFCHECK_POLL_SEC)
-        job["wake"].clear()
-
-
-def _rfcheck_ctx_public(ctx):
-    return {k: ctx.get(k) for k in ("run_id", "parent_id", "phase", "ref", "freq", "atis_freq",
-                                    "started_at", "ended_at", "ended", "error", "config_at_start",
-                                    "ifgr_ref", "states", "guard_buffers", "rail_code", "verified",
-                                    "hard_max")}
-
-
-def _rfcheck_rows_text(job):
-    """rfcheck_last_rows.jsonl: הקשר + meta/end/שורות של כל שלב, מתויגים (tower/atis/notch).
-    מספיק כדי לשחזר את פסק הדין מחדש (design §4.4) — זה מה שמורידים ב"⬇ הורד נתונים"."""
-    ctx = job["ctx"]
-    out = [{"kind": "ctx", "version": VERSION, **_rfcheck_ctx_public(ctx)}]
-    phases = []
-    if ctx.get("tower"):
-        phases.append(("tower", ctx["tower"]["rows"], ctx["tower"].get("meta"), ctx["tower"].get("end")))
-    rd = job["reader"]
-    tag = ctx["ref"] if job["kind"] == "lna" else job["kind"]
-    phases.append((tag, rd.rows, rd.meta, rd.end))
-    for tag, rows, meta, end in phases:
-        out.append({"kind": "meta", "tag": tag, "meta": meta})
-        out.extend({"kind": "row", "tag": tag, **r} for r in rows)
-        out.append({"kind": "end", "tag": tag, "end": end})
-    return "".join(json.dumps(o, ensure_ascii=False, separators=(",", ":")) + "\n" for o in out)
-
-
-def _rfcheck_save_diagnose(job):
-    """diagnose.json של *הריצה הזו* => /var/lib/airam (העתק אטומי). root כתב אותו ל-/run
-    (tmpfs, נמחק ב-reboot) — כאן הוא שורד עד שהמשתמש שולח אותו."""
-    p = RFCHECK_RUN_DIR / "diagnose.json"
-    try:
-        text = p.read_text(encoding="utf-8")
-        obj = json.loads(text)
-    except (OSError, ValueError):
-        return None
-    if not isinstance(obj, dict) or obj.get("run_id") != job["ctx"]["run_id"]:
-        return None
-    try:
-        _atomic_write(RFCHECK_DIAG_PATH, text)
-    except OSError:
-        log.warning("בדיקת RF: שמירת diagnose.json נכשלה", exc_info=True)
-        return None
-    return {"run_id": obj.get("run_id"), "complete": bool(obj.get("complete")),
-            "summary_text": obj.get("summary_text")}
-
-
-def _rfcheck_history_entry(res, job):
-    rec = res.get("recommendation") if isinstance(res.get("recommendation"), dict) else None
-    sc = res.get("selfcheck") if isinstance(res.get("selfcheck"), dict) else {}
-    return {"v": 1, "run_id": res.get("run_id"), "parent_id": res.get("parent_id"),
-            "ts": round(time.time(), 2), "kind": job["kind"], "ref": res.get("ref"),
-            "freq": res.get("freq"), "atis_freq": res.get("atis_freq"), "ended": res.get("ended"),
-            "level": res.get("level"), "headline": res.get("headline"),
-            "recommendation": ({k: rec.get(k) for k in ("rf_gain", "if_gain", "fm_notch", "basis")}
-                               if rec else None),
-            "config_at_start": res.get("config_at_start"), "states": res.get("states"),
-            "telemetry": sc.get("telemetry"), "verified": sc.get("verified")}
-
-
-def _rfcheck_persist(res, job):
-    """הצלחה בלבד (spec §6.8): התוצאה, השורות, ושורת היסטוריה (retention 50)."""
-    try:
-        _atomic_write(RFCHECK_LAST_PATH, json.dumps(res, ensure_ascii=False))
-        _atomic_write(RFCHECK_LAST_ROWS_PATH, _rfcheck_rows_text(job))
-    except (OSError, TypeError, ValueError):
-        log.warning("בדיקת RF: שמירת התוצאה נכשלה", exc_info=True)
-        return
-    _append_jsonl_log(RFCHECK_HISTORY_PATH, _rfcheck_history_entry(res, job))
-    _trim_jsonl_log(RFCHECK_HISTORY_PATH, RFCHECK_HISTORY_KEEP)
-
-
-def _rfcheck_run(job):
-    """ה-thread של הבדיקה. מחזיק את TUNE_LOCK (נתפס ב-_rfcheck_start) ומשחרר אותו **תמיד**
-    ב-finally, אחרי עצירת הבודק ו-`_restore_after_probe` (נקרא בדיוק פעם אחת בכל מסלול) —
-    שכבת השחזור הראשונה (design §11), ולא תלויה באף פרמטר לא-מאומת."""
-    ctx = job["ctx"]
-    ended, err, detail = None, None, None
-    result, diag = None, None
-    try:
-        # rtl_airband קודם: Conflicts+After ממילא עוצרים אותו לפני שהבודק עולה; העצירה
-        # המפורשת משחררת את המכשיר מיד ונותנת שגיאה ברורה אם משהו נתקע.
-        if job["prev_live"] == "voice" or _is_active("rtl_airband"):
-            try:
-                _sysctl("stop", "rtl_airband", timeout=30)
-            except Exception:
-                log.warning("בדיקת RF: עצירת rtl_airband נכשלה", exc_info=True)
-            t_end = time.monotonic() + RFCHECK_STOP_WAIT_SEC
-            while _is_active("rtl_airband") and time.monotonic() < t_end:
-                time.sleep(0.2)
-        phase_max = RFCHECK_DIAG_MAX_SEC if job["kind"] == "diagnose" else RFCHECK_HARD_MAX_SEC
-        err, detail = _rfcheck_launch(job, phase_max)
-        if err:
-            ended = "error"
-        else:
-            log.info("בדיקת RF: הבודק הופעל (run %s, %s, %s)", ctx["run_id"], job["kind"], ctx["ref"])
-            ended, err, detail = _rfcheck_loop(job)
-        _rfc_set(stage="finishing")
-        _rfcheck_stop_probe(job)
-        job["reader"].poll()
-        ctx.update(ended=ended, ended_at=round(time.time(), 2), meta=job["reader"].meta,
-                   error=_rfcheck_error_text(err))
-        if ended == "abort":
-            pass                      # ביטול = שום דבר לא נשמר (גם לא קובץ אבחון חלקי)
-        elif job["kind"] == "diagnose":
-            diag = _rfcheck_save_diagnose(job)
-        else:
-            try:
-                rd = job["reader"]
-                result = rfcheck_analysis.analyze(rd.rows, rd.meta, rd.end, ctx)
-            except Exception:
-                log.warning("בדיקת RF: הניתוח נכשל", exc_info=True)
-                err = err or "analysis"
-                result = None
-    except Exception:
-        log.exception("בדיקת RF: שגיאה פנימית")
-        err, ended = err or "internal", ended or "error"
-    finally:
-        restore = {"ok": False, "error": None}
-        try:
-            try:
-                _rfcheck_stop_probe(job)
-            except Exception:
-                pass
-            _rfc_set(stage="restoring")
-            try:
-                _restore_after_probe(job["prev"], job["prev_live"])
-            except Exception:
-                log.warning("בדיקת RF: שחזור המצב הקודם נכשל", exc_info=True)
-            try:
-                ok = (_live_mode() == "voice") if job["prev_live"] == "voice" else True
-            except Exception:
-                ok = False
-            restore = {"ok": bool(ok), "error": None if ok else
-                       "השמע לא חזר אוטומטית — ינסה שוב לבד (או לחץ ⏻)"}
-            _rfcheck_unlink_params()
-        finally:
-            try:
-                TUNE_LOCK.release()
-            except RuntimeError:          # לא אמור לקרות; לא מפילים את סימון הסיום בגללו
-                log.warning("בדיקת RF: TUNE_LOCK כבר שוחרר")
-        msg = _rfcheck_error_text(err)
-        try:
-            if result is not None:
-                result["restore"] = restore
-                if not err and not result.get("error"):
-                    _rfcheck_persist(result, job)
-            rec = result.get("recommendation") if isinstance(result, dict) else None
-            level = result.get("level") if isinstance(result, dict) else None
-            _rflog_event({"ev": "rfcheck", "run_id": ctx.get("run_id"), "parent_id": ctx.get("parent_id"),
-                          "phase": job["kind"], "ref": ctx.get("ref"), "freq": ctx.get("freq"),
-                          "ended": ended, "error": err, "level": level,
-                          "rec": ({k: rec.get(k) for k in ("rf_gain", "if_gain", "fm_notch")}
-                                  if isinstance(rec, dict) else None),
-                          "restore_ok": restore["ok"]})
-            log.info("בדיקת RF הסתיימה (run %s): ended=%s error=%s level=%s restore_ok=%s",
-                     ctx.get("run_id"), ended, err, level, restore["ok"])
-        except Exception:
-            log.warning("בדיקת RF: סיום (שמירה/רישום) נכשל", exc_info=True)
-        finally:
-            with _rfc_lock:
-                _rfc.update(running=False, finished_at=time.time(), result=result,
-                            diagnose=diag, ended=ended, error=msg, error_code=err,
-                            detail=detail, restore=restore,
-                            stage="error" if err else "done", offer_atis=False,
-                            stop_evt=None, finish_evt=None, atis_evt=None, wake=None)
-
-
-def _rfcheck_parse_states(raw):
-    """רשימת מצבים מבקשה ("בדיקה ממוקדת"): 1..RFCHECK_MAX_STATES שלמים 0..9, ייחודיים.
-    מחזיר (list|None, error)."""
-    if raw is None:
-        return None, None
-    if not isinstance(raw, list) or not 1 <= len(raw) <= RFCHECK_MAX_STATES:
-        return None, "states: רשימה של 1–%d מצבי LNA" % RFCHECK_MAX_STATES
-    out = []
-    for s in raw:
-        if type(s) is not int or not RFGR_MIN <= s <= RFGR_MAX:
-            return None, "states: מצב LNA הוא שלם 0–9"
-        out.append(s)
-    if len(set(out)) != len(out):
-        return None, "states: מצבים כפולים"
-    return sorted(out), None
-
-
-def _rfcheck_notch_basis(from_run, st):
-    """מסנן FM נבדק במצב ה-LNA *המומלץ* של ריצה קודמת (רמת fact/stat, אותו תדר), אחרת בנוכחי.
-    מחזיר (state|None, ifgr_final|None)."""
-    if not from_run:
-        return None, None
-    res = _rfcheck_current_result()
-    if not isinstance(res, dict) or res.get("run_id") != from_run or res.get("phase") != "lna":
-        return None, None
-    rec = res.get("recommendation")
-    if res.get("level") not in ("fact", "stat") or not isinstance(rec, dict):
-        return None, None
-    try:
-        if abs(float(res.get("freq")) - float(st.get("freq"))) > 0.0005:
-            return None, None
-        s = int(rec.get("rf_gain"))
-    except (TypeError, ValueError):
-        return None, None
-    if not RFGR_MIN <= s <= RFGR_MAX:
-        return None, None
-    ifgr = None
-    for p in res.get("per_state") or []:
-        if isinstance(p, dict) and p.get("lna") == s:
-            g = p.get("ifgr_final")
-            ifgr = g if type(g) is int and IFGR_MIN <= g <= IFGR_MAX else None
-    return s, ifgr
-
-
-def _rfcheck_start(data):
-    """POST {action:"start", phase?, states?, from_run?} => (payload, status). סדר הסירובים לפי
-    spec §6.5 (תפוס → לא זמין → ניסוי → סריקה → מצב → תדר → קלט → TUNE_LOCK)."""
-    with _rfc_lock:
-        if _rfc["running"]:
-            return {"ok": False, "error": "בדיקת RF כבר רצה"}, 409
-    av = _rfcheck_availability()
-    if not av["available"]:
-        av = _rfcheck_availability(force=True)     # שלילי ישן לא חוסם אחרי install.sh
-    if not av["available"]:
-        return {"ok": False, "error": "בדיקת RF לא מותקנת — הרץ sudo ./install.sh",
-                "reasons": av["reasons"], "install_hint": RFCHECK_INSTALL_HINT}, 501
-    with _exp_lock:
-        exp_running = _exp["running"]
-    if exp_running:
-        return {"ok": False, "error": "ניסוי הכיול רץ — המתן לסיומו"}, 409
-    with _scan_lock:
-        scanning = _scan_thread is not None and _scan_thread.is_alive()
-    if scanning:
-        return {"ok": False, "error": "עצור את הסריקה לפני בדיקת RF"}, 409
-    kind = data.get("phase") or "lna"
-    if kind not in ("lna", "notch", "diagnose"):
-        return {"ok": False, "error": "phase לא מוכר"}, 400
-    st = load_state()
-    live = _live_mode()
-    saved = st.get("app_mode", "off")
-
-    def mode_refusal(live_now):
-        if kind == "diagnose":
-            if live_now not in ("voice", None) or saved not in ("voice", "off"):
-                return "אבחון זמין ממצב קול או כבוי בלבד"
-        elif live_now != "voice":
-            return "בדיקת RF זמינה במצב קול בלבד"
-        return None
-
-    refusal = mode_refusal(live)
-    if refusal:
-        return {"ok": False, "error": refusal}, 409
-    if kind != "diagnose":
-        try:
-            f = float(st.get("freq"))
-        except (TypeError, ValueError):
-            f = -1.0
-        if not (RFCHECK_FREQ_MIN <= f <= RFCHECK_FREQ_MAX) or st.get("mod") != "am":
-            return {"ok": False, "error": "בדיקת RF זמינה לתדרי Air band ‏AM (108–137 MHz) בלבד"}, 409
-    req_states, serr = _rfcheck_parse_states(data.get("states"))
-    if serr:
-        return {"ok": False, "error": serr}, 400
-    from_run = data.get("from_run")
-    if from_run is not None and not (isinstance(from_run, str) and _RFC_RUN_ID_RE.match(from_run)):
-        return {"ok": False, "error": "from_run לא תקין"}, 400
-    if not TUNE_LOCK.acquire(blocking=False):
-        return {"ok": False, "error": "פעולה אחרת מתבצעת כרגע — נסה שוב בעוד רגע"}, 409
-    try:
-        prev = load_state()
-        prev_live = _live_mode()          # שוב, תחת הנעילה: המצב יכול היה להשתנות מאז הבדיקה
-        refusal = mode_refusal(prev_live)
-        if refusal:
-            TUNE_LOCK.release()
-            return {"ok": False, "error": refusal}, 409
-        cur = _rfcheck_cur_state(prev)
-        freq = RFCHECK_ATIS_FREQ if kind == "diagnose" else float(prev["freq"])
-        if (int(round(_voice_centerfreq(freq) * 1e6)) - int(round(freq * 1e6))) % 5000:
-            TUNE_LOCK.release()   # הבודק מודד bin מדויק (rate/N = 5kHz); תדר לא-מיושר — לא מנחשים
-            return {"ok": False, "error": "התדר לא מיושר לרזולוציית המדידה (5kHz) — בדיקת RF לא אפשרית"}, 409
-        ifgr_ref, ifgr_src = _rfcheck_ifgr_ref(prev, prev_live)
-        if kind == "notch":
-            rec_state, rec_ifgr = _rfcheck_notch_basis(from_run, prev)
-            lna = rec_state if rec_state is not None else cur
-            states = [lna]
-            ifgr_start = ({str(lna): rec_ifgr} if rec_ifgr is not None
-                          else _rfcheck_ifgr_start(states, cur, ifgr_ref))
-        else:
-            states = _rfcheck_states(cur, req_states)
-            ifgr_start = _rfcheck_ifgr_start(states, cur, ifgr_ref)
-        verified = _rfcheck_verified()
-        run_id = _rfcheck_new_run_id()
-        ref = "atis" if kind == "diagnose" else "tower"
-        notch_base = bool(prev.get("fm_notch", False))
-        max_sec = RFCHECK_DIAG_MAX_SEC if kind == "diagnose" else RFCHECK_HARD_MAX_SEC
-        params = _rfcheck_params(run_id, kind, ref, freq, states, ifgr_start, notch_base,
-                                 max_sec, verified)
-        cfg = {"freq": float(prev.get("freq", DEFAULT_STATE["freq"])), "mod": prev.get("mod"),
-               "agc": _parse_bool(prev.get("agc", True), True), "if_gain": prev.get("if_gain"),
-               "rf_gain": cur, "fm_notch": notch_base,
-               "squelch_mode": prev.get("squelch_mode"), "squelch_snr": prev.get("squelch_snr")}
-        ctx = {"run_id": run_id, "parent_id": None, "phase": kind, "ref": ref, "freq": freq,
-               "atis_freq": None, "started_at": round(time.time(), 2), "ended_at": None,
-               "ended": None, "error": None, "config_at_start": cfg,
-               "ifgr_ref": {"value": int(ifgr_ref), "source": ifgr_src}, "states": states,
-               "guard_buffers": params["guard_buffers"], "rail_code": params["rail_code"],
-               "verified": verified, "hard_max": RFCHECK_HARD_MAX_SEC, "meta": None,
-               "telemetry_lines": None, "tower": None, "restore": None}
-        _rfcheck_write_params(params)
-        job = {"ctx": ctx, "kind": kind, "prev": prev, "prev_live": prev_live,
-               "ifgr_start": ifgr_start, "notch_base": notch_base, "verified": verified,
-               "stop_evt": threading.Event(), "finish_evt": threading.Event(),
-               "atis_evt": threading.Event(), "wake": threading.Event(),
-               "reader": _RfcReader(RFCHECK_RUN_DIR, run_id), "phase_t0": time.monotonic(),
-               "phase_max": max_sec, "probe_stopped": False}
-        th = threading.Thread(target=_rfcheck_run, args=(job,), daemon=True, name="rfcheck")
-        with _rfc_lock:
-            _rfc.update(running=True, run_id=run_id, parent_id=None, kind=kind, stage="starting",
-                        ref=ref, freq=freq, atis_freq=None, states=states, ifgr_start=ifgr_start,
-                        ifgr_ref=ctx["ifgr_ref"], config_at_start=cfg,
-                        started_at=time.time(), finished_at=None, phase_started_at=None,
-                        phase_max=max_sec, probe=None, live=None, offer_atis=False, result=None,
-                        diagnose=None, error=None, error_code=None, detail=None, ended=None,
-                        restore=None, stop_evt=job["stop_evt"], finish_evt=job["finish_evt"],
-                        atis_evt=job["atis_evt"], wake=job["wake"], thread=th)
-        log.info("בדיקת RF: התחלה (%s, %.3f MHz, מצבים %s, IFGR_ref %s/%s)", kind, freq, states,
-                 ifgr_ref, ifgr_src)
-        th.start()
-    except Exception:
-        TUNE_LOCK.release()
-        with _rfc_lock:
-            _rfc.update(running=False, stage="error", error=_RFC_ERRORS["internal"],
-                        error_code="internal", stop_evt=None, finish_evt=None, atis_evt=None,
-                        wake=None)
-        log.exception("בדיקת RF: ההתחלה נכשלה")
-        return {"ok": False, "error": _RFC_ERRORS["internal"]}, 500
-    return {"ok": True, **_rfcheck_status()}, 200
-
-
-def _rfcheck_status():
-    """GET /api/rfcheck — הכול מה שה-UI צריך: זמינות, התקדמות חיה, התוצאה האחרונה."""
-    av = _rfcheck_availability()
-    with _rfc_lock:
-        s = dict(_rfc)
-    live = s["live"] if isinstance(s["live"], dict) else {}
-    running = s["running"]
-    now = time.time()
-    elapsed = None
-    if s["started_at"]:
-        elapsed = round(max(0.0, (now if running else (s["finished_at"] or now)) - s["started_at"]), 1)
-    phase_elapsed = (round(max(0.0, now - s["phase_started_at"]), 1)
-                     if running and s["phase_started_at"] else None)
-    states = live.get("states")
-    if not states and s["states"]:
-        gr = _rfcheck_gr() if rfcheck_analysis is not None else None
-        prod = (s["config_at_start"] or {}).get("rf_gain")
-        states = [{"lna": x, "label": _rfcheck_label(x), "gr_db": gr[x] if gr else None,
-                   "ifgr": (s["ifgr_start"] or {}).get(str(x)), "n_carrier": 0, "n_silence": 0,
-                   "n_edge": 0, "overload": None, "clip": None, "current": False,
-                   "production": prod == x, "candidate": True} for x in s["states"]]
-    out = {
-        "available": av["available"], "reasons": av["reasons"],
-        "install_hint": av["install_hint"], "telemetry_expected": av["telemetry_expected"],
-        "verified": av["verified"], "experimental": not av["verified"],
-        "selftest": av.get("selftest"),
-        "running": running, "run_id": s["run_id"], "parent_id": s["parent_id"],
-        "kind": s["kind"], "phase": s["stage"], "ref": s["ref"], "freq": s["freq"],
-        "atis_freq": s["atis_freq"], "elapsed": elapsed, "phase_elapsed": phase_elapsed,
-        "phase_max": s["phase_max"],
-        # החלטת משתמש 1: אין "הארך" — עד שיש מספיק נתונים, עד 3 דקות (soft=hard)
-        "soft_max": RFCHECK_HARD_MAX_SEC, "hard_max": RFCHECK_HARD_MAX_SEC, "can_extend": False,
-        "states": states or [], "current_state": live.get("current_state"),
-        "production_state": (s["config_at_start"] or {}).get("rf_gain"),
-        "last_slot": live.get("last_slot"),
-        "tx_captured": live.get("tx_captured"), "tx_target": live.get("tx_target"),
-        "full_blocks": live.get("full_blocks"), "blocks_target": live.get("blocks_target"),
-        "transmissions": live.get("transmissions"), "no_traffic_sec": live.get("no_traffic_sec"),
-        "progress": live.get("progress"), "level": live.get("level"),
-        "stat_ready": live.get("stat_ready"), "pairs": live.get("pairs"),
-        "pairs_target": live.get("pairs_target"), "configs": live.get("configs"),
-        "telemetry": live.get("telemetry"), "valid": live.get("valid"),
-        "invalid": live.get("invalid"), "cycles": live.get("cycles"),
-        "offer_atis": bool(running and s["offer_atis"]),
-        "ifgr_ref": s["ifgr_ref"], "probe": s["probe"],
-        # בזמן ריצה התוצאה הקודמת לא רלוונטית (וחוסכת ~עשרות KB בכל פולינג של שנייה)
-        "result": None if running else (s["result"] if s["result"] is not None
-                                        else _rfcheck_read_last()),
-        "diagnose": s["diagnose"], "diagnose_available": RFCHECK_DIAG_PATH.is_file(),
-        "error": s["error"], "error_code": s["error_code"], "detail": s["detail"],
-        "ended": s["ended"], "restore": s["restore"],
-        "started_at": s["started_at"], "finished_at": s["finished_at"],
-    }
-    return out
-
-
-def _rfcheck_apply(data):
-    """POST {action:"apply", run_id} => (payload, status). מחיל את ההמלצה **דרך _voice_tune**
-    (אותו חוזה כמו /api/tune: אימות, רולבק לקונפיג האחרון שעבד, נפילה ל-off רק אם גם הוא
-    נכשל). רק ברמת fact/stat (החלטת משתמש 5), רק בקול, ורק אם התנאים לא השתנו מאז הבדיקה."""
-    with _rfc_lock:
-        if _rfc["running"]:
-            return {"ok": False, "error": "בדיקת RF רצה — המתן לסיומה"}, 409
-    res = _rfcheck_current_result()
-    run_id = data.get("run_id")
-    if not isinstance(res, dict) or not run_id or res.get("run_id") != run_id:
-        return {"ok": False, "error": "זו לא התוצאה האחרונה — הרץ בדיקה שוב"}, 409
-    rec = res.get("recommendation")
-    if (res.get("level") not in ("fact", "stat") or not isinstance(rec, dict)
-            or res.get("error") or rec.get("rf_gain") is None):
-        return {"ok": False, "error": "אין המלצה ברמה שמאפשרת החלה"}, 409
-    st = load_state()
-    if st.get("app_mode") != "voice":
-        return {"ok": False, "error": "עבור לקול כדי להחיל"}, 409
-    cfg = res.get("config_at_start") if isinstance(res.get("config_at_start"), dict) else {}
-    try:
-        same = (abs(float(cfg.get("freq")) - float(st.get("freq"))) <= 0.0005
-                and bool(cfg.get("agc")) == _parse_bool(st.get("agc", True), True)
-                and (res.get("phase") == "notch"
-                     or bool(cfg.get("fm_notch")) == bool(st.get("fm_notch", False))))
-    except (TypeError, ValueError):
-        same = False
-    if not same:
-        return {"ok": False, "error": "ההגדרות השתנו מאז הבדיקה — הרץ שוב"}, 409
-    if res.get("apply_allowed") is False:
-        return {"ok": False, "error": "ההמלצה זהה להגדרה הנוכחית — אין מה להחיל"}, 409
-    params, perr = _parse_tune(st)
-    if perr:
-        return {"ok": False, "error": perr}, 409
-    try:
-        rf = int(rec["rf_gain"])
-    except (TypeError, ValueError):
-        rf = -1
-    if not RFGR_MIN <= rf <= RFGR_MAX:
-        return {"ok": False, "error": "אין המלצה ברמה שמאפשרת החלה"}, 409
-    before = (params["rf_gain"], params["if_gain"], bool(params.get("fm_notch")))
-    params["rf_gain"] = rf
-    # החלטת משתמש 5: ברווח ידני גם נקודת ה-IF *שנמדדה בפועל*; תחת AGC — ה-AGC בוחר אותה
-    if not params["agc"] and type(rec.get("if_gain")) is int:
-        params["if_gain"] = max(IFGR_MIN, min(IFGR_MAX, rec["if_gain"]))
-    if isinstance(rec.get("fm_notch"), bool):
-        params["fm_notch"] = rec["fm_notch"]
-    # ההמלצה כבר בתוקף (הוחלה קודם, או שהמשתמש כיוון לשם ידנית) => לא מפעילים מחדש את
-    # rtl_airband (קטיעת שמע) בשביל כלום. ה-UI מסתיר את הכפתור באותו מצב — אבל אחרי reload
-    # הוא לא זוכר שכבר הוחל, והשרת הוא שמכריע.
-    if before == (params["rf_gain"], params["if_gain"], bool(params.get("fm_notch"))):
-        return {"ok": False, "error": "ההמלצה כבר בתוקף — אין מה להחיל"}, 409
-    payload, code = _voice_tune(params)
-    if payload.get("ok"):
-        applied = {"run_id": run_id, "ts": round(time.time(), 2), "rf_gain": params["rf_gain"],
-                   "if_gain": params["if_gain"] if not params["agc"] else None,
-                   "fm_notch": bool(params.get("fm_notch"))}
-        try:
-            save_state({**load_state(), "rf_check_applied": applied})
-        except OSError:
-            log.warning("בדיקת RF: שמירת rf_check_applied נכשלה", exc_info=True)
-        payload = {**payload, "rf_check_applied": applied}
-    return payload, code
-
-
-@app.route("/api/rfcheck", methods=["GET", "POST"])
-def api_rfcheck():
-    """GET: זמינות + התקדמות + התוצאה האחרונה. POST {action}: start / atis / finish / abort /
-    apply. דרך _guard (POST). אין "extend" (החלטת משתמש 1)."""
-    if request.method == "GET":
-        return jsonify(ok=True, **_rfcheck_status())
-    data = request.get_json(silent=True) or {}
-    action = data.get("action")
-    if action == "start":
-        payload, code = _rfcheck_start(data)
-        return jsonify(payload), code
-    if action == "apply":
-        payload, code = _rfcheck_apply(data)
-        return jsonify(payload), code
-    if action in ("atis", "finish", "abort"):
-        with _rfc_lock:
-            running, kind, ref = _rfc["running"], _rfc["kind"], _rfc["ref"]
-            evts = {"atis": _rfc["atis_evt"], "finish": _rfc["finish_evt"],
-                    "abort": _rfc["stop_evt"]}
-            wake = _rfc["wake"]
-        if not running or evts[action] is None:
-            return jsonify({**_rfcheck_status(), "ok": False,
-                            "error": "אין בדיקת RF שרצה כרגע"}), 409
-        if action == "atis" and not (kind == "lna" and ref == "tower"):
-            return jsonify({**_rfcheck_status(), "ok": False,
-                            "error": "מעבר ל-ATIS זמין רק בבדיקת LNA מול המגדל"}), 409
-        evts[action].set()
-        if wake is not None:
-            wake.set()
-        return jsonify(ok=True, **_rfcheck_status())
-    if action == "extend":
-        return jsonify(ok=False, error="אין הארכה — הבדיקה נמשכת עד שיש מספיק נתונים (עד 3 דקות)"), 400
-    return jsonify(ok=False, error="action לא מוכר"), 400
-
-
-@app.route("/api/rfcheck/export")
-def api_rfcheck_export():
-    """הורדת התוצאה / השורות / קובץ האבחון (לשליחה — design §10)."""
-    kind = request.args.get("kind", "result")
-    files = {"result": (RFCHECK_LAST_PATH, "application/json", "json"),
-             "rows": (RFCHECK_LAST_ROWS_PATH, "application/x-ndjson", "jsonl"),
-             "diagnose": (RFCHECK_DIAG_PATH, "application/json", "json")}
-    if kind not in files:
-        return jsonify(ok=False, error="kind: result / rows / diagnose"), 400
-    path, mime, ext = files[kind]
-    if not path.is_file():
-        return jsonify(ok=False, error="אין קובץ עדיין"), 404
-    return send_file(str(path), mimetype=mime, as_attachment=True,
-                     download_name=f"airam-rfcheck-{kind}-{time.strftime('%Y%m%d-%H%M')}.{ext}")
-
-
 @app.route("/api/airspace")
 def api_airspace():
     """מסלול נחיתות/המראות פעיל ומצב GPS, מנותחים מ-ADS-B (ראה adsb.py).
@@ -8061,16 +6949,6 @@ def _boot_restore():
     רץ ב-thread daemon => לא חוסם את app.run; כל כישלון => off + לוג, לעולם לא
     מפיל את שרת הווב."""
     try:
-        # 🩺 בודק RF שרץ כשה-airam-web עולה הוא *תמיד* יתום: המתזמר שהפעיל אותו (thread
-        # ב-airam-web) מת יחד עם התהליך. בלי עצירה מפורשת כאן הוא היה מחזיק את ה-SDR עד
-        # max_sec/RuntimeMaxSec — וב-off (live=None, שום _enter_* לא רץ) גם Conflicts לא
-        # היה עוצר אותו. ‏activating נחשב (ExecStartPre — כבר בדרך לתפוס את המכשיר).
-        try:
-            if _services_status((RFCHECK_SERVICE,))[RFCHECK_SERVICE] in _SDR_HOLDING_STATES:
-                log.warning("boot restore: בודק RF יתום רץ (airam-web הופעל מחדש באמצע בדיקה) — עוצר")
-                _sysctl("stop", RFCHECK_SERVICE, timeout=20)
-        except Exception:
-            log.warning("boot restore: עצירת בודק RF יתום נכשלה", exc_info=True)
         st = load_state()
         mode = st.get("app_mode", "off")
         live = _live_mode()

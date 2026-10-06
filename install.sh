@@ -35,13 +35,6 @@ apt-get install -y \
   libconfig++-dev libfftw3-dev \
   zlib1g-dev libxml2-dev libglib2.0-dev \
   icecast2 python3 python3-flask
-# 🩺 בדיקת RF (PR 2): numpy + ה-bindings של SoapySDR לבודק (rfcheck_probe.py, root).
-# ⚠ קריאה *נפרדת וסובלנית* בכוונה: כשל כאן (חבילה שלא קיימת בגרסת Pi OS מסוימת) לא
-# עוצר את ההתקנה — הרדיו עובד בלעדיהן, והממשק מציג "בדיקת RF לא זמינה" עם הסיבה
-# (‏airam-web מריץ את --selftest של הבודק) ומשאיר את "כייל בסיס" הישן. python3-soapysdr
-# מגיע מאותו source של libsoapysdr-dev שלמעלה (debian/control:77).
-apt-get install -y python3-numpy python3-soapysdr \
-  || warn "python3-numpy/python3-soapysdr לא הותקנו — 🩺 בדיקת RF לא תהיה זמינה (הכפתור הישן נשאר)."
 
 # ----------------------------------------------------------------------------
 # 2. SDRplay API  (הורדה + חילוץ + התקנה אוטומטית, ללא אישור רישיון אינטראקטיבי)
@@ -521,9 +514,6 @@ done
 # reset-failed ל-airam-satcom בלבד: היחידה היחידה עם StartLimitBurst סופי (בטיחות
 # bias-T, ר' systemd/airam-satcom.service) — _enter_satcom צריך לאפס תקרה קודמת
 # כדי שכניסה ידנית מחדש מה-UI תמיד תעבוד גם אחרי כמה קריסות רצופות.
-# 🩺 בדיקת RF (v2.27.0): restart/stop ל-airam-rfcheck בלבד — *בלי* start ובלי wildcard. הבודק
-# מקבל את הפרמטרים מקובץ JSON שהוא מאמת בעצמו (לא EnvironmentFile), כך ששתי השורות לא
-# פותחות ערוץ קלט חדש לתהליך ה-root. סה"כ 11 שורות.
 # ⚠ נכתב תחילה לקובץ זמני ומאומת *לפני* שהוא מגיע ל-/etc/sudoers.d/airam —
 # לא ישירות ליעד. sudo מסרב לרוץ *בכלל* כשקובץ כלשהו תחת sudoers.d לא תקין,
 # כולל לניסיונות התיקון של המשתמש עצמו (sudo ...) — קובץ פגום שנשאר ביעד
@@ -541,8 +531,6 @@ airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-vdl2
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-satcom
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-satcom
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed airam-satcom
-airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-rfcheck
-airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-rfcheck
 EOF
 visudo -cf "$SUDOERS_TMP" >/dev/null \
   || { rm -f "$SUDOERS_TMP"; die "קובץ sudoers לא תקין (נבדק לפני התקנה — /etc/sudoers.d/airam לא נגע)."; }
@@ -575,15 +563,6 @@ log "מתקין את שרת הווב ל-/opt/airam ..."
 mkdir -p /opt/airam/webtune
 cp -r "$REPO_DIR/webtune/." /opt/airam/webtune/   # אידמפוטנטי (לא יוצר webtune/webtune)
 [[ -f "$REPO_DIR/VERSION" ]] && cp "$REPO_DIR/VERSION" /opt/airam/webtune/VERSION   # הגרסה להצגה בממשק
-# 🩺 בודק ה-RF רץ כ-root (‏/usr/bin/python3 -I, systemd/airam-rfcheck.service) — הקובץ
-# שלו חייב להיות של root ולא ניתן לכתיבה ע"י airam (אחרת airam => root). מוחל תמיד
-# (לא רק ביצירה) כדי שגם עותק שהגיע עם בעלות אחרת יתוקן. התיקייה עצמה נוצרת כאן
-# ע"י root; ‏-I מבטיח שקבצים לידו (שאינם הבודק) לא נטענים לתוכו.
-if [[ -f /opt/airam/webtune/rfcheck_probe.py ]]; then
-  chown root:root /opt/airam/webtune/rfcheck_probe.py && chmod 0644 /opt/airam/webtune/rfcheck_probe.py
-fi
-# כלי האבחון (sudo airam-rfcheck-diag) — עוטף את ה-API המקומי, ר' docs/rf-check-design.md §10
-install -m755 "$REPO_DIR/scripts/airam-rfcheck-diag" /usr/local/bin/airam-rfcheck-diag
 # שער המוכנות ל-SDRplay (ExecStartPre של rtl_airband)
 cp "$REPO_DIR/scripts/airam-wait-sdrplay" /usr/local/bin/
 chmod 755 /usr/local/bin/airam-wait-sdrplay
@@ -660,11 +639,9 @@ cp "$REPO_DIR/systemd/airam-web.service"    /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-acars.service"  /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-vdl2.service"   /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-satcom.service" /etc/systemd/system/
-# 🩺 בודק ה-RF — לעולם לא enabled (בלי [Install]); airam-web מפעיל אותו לפי בקשה בלבד.
-cp "$REPO_DIR/systemd/airam-rfcheck.service" /etc/systemd/system/
 systemctl daemon-reload
-# אף צרכן SDR (rtl_airband / airam-acars / airam-vdl2 / airam-satcom / airam-rfcheck)
-# אינו enabled בכוונה: אין "מצב ראשי" — airam-web (המתזמר, enabled) קורא את
+# אף צרכן SDR (rtl_airband / airam-acars / airam-vdl2 / airam-satcom) אינו
+# enabled בכוונה: אין "מצב ראשי" — airam-web (המתזמר, enabled) קורא את
 # state.json באתחול ומשחזר את המצב השמור האחרון, כולל off. Conflicts ב-units
 # מבטיח שלא ירוצו יחד.
 systemctl enable sdrplay.service airam-web.service

@@ -25,9 +25,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      # numpy: בדיקות ה-DSP והבודק של 🩺 בדיקת RF (importorskip — בלעדיו הן מדלגות, לא נכשלות).
-      # ‏app.py עצמו *לא* תלוי בו — tests/test_rfcheck_api.py מייבא אותו עם numpy חסום.
-      - run: pip install flask pytest numpy
+      - run: pip install flask pytest
       # node כבר מותקן ב-ubuntu-latest. הוא נחוץ ל-tests/test_frontend.py, שמריץ
       # `node --check` על הסקריפט ה-inline של index.html: אין build step ל-UI,
       # ולכן שגיאת תחביר שם לא נתפסת בשום מקום אחר — הדף פשוט נשבר אצל המשתמש.
@@ -37,14 +35,14 @@ jobs:
       # ב-job הזה בכוונה, כדי שהחבילה המהירה תמשיך לחסום מהר. ר' ה-job שאחריו.
       - run: python -m pytest tests/ -v
       - name: bash syntax check
-        run: bash -n install.sh scripts/airam-wait-sdrplay scripts/airam-rfcheck-diag
+        run: bash -n install.sh scripts/airam-wait-sdrplay
       - name: shellcheck
         # bash -n -o תחביר בלבד; shellcheck תופס בעיות סמנטיות אמיתיות (משתנה
         # לא-מצוטט שנשבר עם רווח, קוד שלעולם לא רץ וכו') שהיו שם ולא נתפסו —
         # ר' תיקון ה-"|| true"‎ ב-ls|head תחת set -e -o pipefail. -S warning
         # (לא error/style) כדי לא להיכשל על הערות info סגנוניות שכבר קיימות
         # בכוונה בקוד (כמו A && B || die, ש-shellcheck מציין כ-info בלבד).
-        run: shellcheck -S warning install.sh scripts/airam-wait-sdrplay scripts/airam-rfcheck-diag
+        run: shellcheck -S warning install.sh scripts/airam-wait-sdrplay
       - name: systemd unit files verify
         # מריצים אימות אמיתי (לא רק בדיקת syntax) על כל היחידות — תופס בעיות
         # כמו מפתח במקטע הלא-נכון (StartLimitIntervalSec תחת [Service] במקום

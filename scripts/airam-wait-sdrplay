@@ -12,9 +12,7 @@
 #  את sdrplay פעם אחת וממשיכים לבדוק. (אומת בשטח: restart פותר את התקיעה.)
 #
 #  יציאה != 0 => systemd ינסה שוב (Restart=always) — *חוץ* מ-airam-satcom,
-#  שיש לו StartLimitBurst סופי (בטיחות bias-T, ר' systemd/airam-satcom.service),
-#  ומ-airam-rfcheck (🩺 בדיקת RF, Restart=no): שם כשל השער = `systemctl restart`
-#  של המתזמר מחזיר rc!=0 => "ה-SDR לא נפתח לבדיקה" והקול משוחזר.
+#  שיש לו StartLimitBurst סופי (בטיחות bias-T, ר' systemd/airam-satcom.service).
 #
 #  %n (שם היחידה הקוראת, מועבר כארגומנט ראשון ע"י ExecStartPre=...%n ב-
 #  systemd/*.service): "בעיטה" ל-sdrplay (למטה) מפיצה restart דרך PartOf גם
