@@ -2398,6 +2398,7 @@
     let current = 132.5;          // התדר הפעיל (לכיוונון-מחדש בשינוי הגדרות)
     let retryTimer = null;
     let connectTimer = null;
+    let watchArmed = false;       // watchdog הסטרים — רק אחרי "playing" מאז הטעינה האחרונה (PR 5)
     let wantPlaying = false;      // iOS עוצר את הנגן ברקע => זוכרים את כוונת המשתמש
     let appMode = "home";         // התצוגה הנוכחית: "home" (מרכז) | "voice" | "acars" | "vdl2" | "satcom"
     let sdrOff = false;           // האם המקלט בכיבוי (standby) — שני הצרכנים עצורים, ה-SDR פנוי
@@ -2764,6 +2765,7 @@
       if (sdrOff || acars.active || (vdl2 && vdl2.active) || (satcom && satcom.active)) return;
       stopReplay();                 // חזרה ל-live עוצרת הקלטה מתנגנת (לא שני זרמים יחד)
       clearTimeout(retryTimer);
+      watchArmed = false;           // ה-watchdog נדרך מחדש רק אחרי "playing" של הטעינה הזו
       player.onerror = null;
       player.src = streamURL();
       player.load();
@@ -2786,6 +2788,7 @@
       showError(null);
       clearTimeout(connectTimer);   // כיוונון מהיר ברצף => לא צוברים שרשראות reload
       clearTimeout(retryTimer);
+      watchArmed = false; stallCount = 0;   // restart שלנו אינו "תקיעה"
       setStatus("מכוונן…", "busy");
       try {
         const res = await apiSend("POST", "/api/tune", {
@@ -6955,7 +6958,8 @@
       if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
     });
     player.addEventListener("pause", () => {
-      if (!document.hidden) wantPlaying = false;
+      // ⚠ הדפדפן יורה pause *לפני* ended — ניתוק של Icecast אינו "המשתמש עצר"
+      if (!document.hidden && !player.ended) wantPlaying = false;
       if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
     });
 
@@ -6989,17 +6993,25 @@
     const STALL_RELOAD_MS = 5000;    // currentTime לא זז כל כך הרבה בזמן "מנגן" => חיבור מחדש
     const LAG_JUMP_SEC = 15;         // פיגור מאחורי קצה הבאפר => קפיצה ל-live
     let stallCount = 0, lastProgressAt = Date.now(), lastCT = -1;
+    // לפי מצב ה-SDR ולא לפי התצוגה: ב-🏠 השמע ממשיך להתנגן וצריך אותה הגנה
+    const voiceSdr = () => !(sdrOff || acars.active || (vdl2 && vdl2.active) || (satcom && satcom.active));
     const liveStatus = () => setStatus("משדר · live" + (stallCount ? " · נתקע ×" + stallCount : ""), "live");
-    player.addEventListener("playing", () => { lastProgressAt = Date.now(); if (appMode === "voice") liveStatus(); });
+    player.addEventListener("playing", () => {
+      watchArmed = true; lastProgressAt = Date.now(); lastCT = player.currentTime;
+      if (voiceSdr()) liveStatus();
+    });
     ["waiting", "stalled"].forEach(ev => player.addEventListener(ev, () => {
-      if (appMode === "voice" && wantPlaying && !player.paused) setStatus("ממתין לנתונים מהסטרים…", "busy");
+      if (voiceSdr() && wantPlaying && !player.paused) setStatus("ממתין לנתונים מהסטרים…", "busy");
     }));
     // סטרים חי לא "נגמר" — ended = Icecast ניתק אותנו (פיגור/נפילה). מתחברים מחדש.
     player.addEventListener("ended", () => {
-      if (appMode === "voice" && wantPlaying && !rfcRunning) { stallCount++; reloadStream(); }
+      if (voiceSdr() && wantPlaying && !rfcRunning) { stallCount++; reloadStream(); }
     });
+    // נדרך רק אחרי "playing" מאז הטעינה האחרונה: עלייה איטית, restart שלנו (כיוונון/פרופיל/
+    // כניסה לקול) ו-mount שנעלם (שרשרת ה-onerror של reloadStream מטפלת בו, עם מונה ניסיונות)
+    // לא נחשבים "תקיעה" — אחרת כל reload היה מאפס את המונה ונכנס ללולאה אינסופית.
     setInterval(() => {
-      if (appMode !== "voice" || !wantPlaying || player.paused || rfcRunning) {
+      if (!watchArmed || !voiceSdr() || !wantPlaying || player.paused || player.error || rfcRunning) {
         lastProgressAt = Date.now(); lastCT = player.currentTime; return;
       }
       if (player.currentTime !== lastCT) { lastCT = player.currentTime; lastProgressAt = Date.now(); }
@@ -7009,9 +7021,11 @@
         reloadStream();
         return;
       }
+      // ⚠ דורש seek בסטרים חי — עובד ב-Chrome; ב-Safari/iOS טווח ה-seekable ריק בד"כ
+      // והקפיצה לא קורית (ושם timers ברקע מושהים בכל מקרה). ה-ended/reload הם רשת הביטחון.
       const b = player.buffered;
       if (b.length && b.end(b.length - 1) - player.currentTime > LAG_JUMP_SEC) {
-        player.currentTime = b.end(b.length - 1) - 1;    // נשארים קרובים ל-live
+        try { player.currentTime = b.end(b.length - 1) - 1; } catch (e) { /* לא seekable */ }
       }
     }, 1000);
 

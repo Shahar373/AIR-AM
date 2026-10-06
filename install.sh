@@ -500,7 +500,10 @@ systemctl restart icecast2
 if [[ -d /etc/NetworkManager/conf.d ]]; then
   printf '%s\n' "# AIR-AM: חיסכון חשמל Wi-Fi כבוי (סטרים רציף לטלפון)" "[connection]" \
     "wifi.powersave = 2" > /etc/NetworkManager/conf.d/airam-wifi-powersave.conf
-  log "חיסכון חשמל ה-Wi-Fi יכובה בחיבור הבא (NetworkManager)."
+  # NetworkManager קורא את conf.d רק ב-reload/restart; reload conf לא מנתק — ברירת המחדל
+  # חלה מההפעלה הבאה של החיבור (reconnect/reboot), ו-iw למטה מכבה כבר עכשיו.
+  command -v nmcli >/dev/null 2>&1 && { nmcli general reload conf >/dev/null 2>&1 || true; }
+  log "חיסכון חשמל ה-Wi-Fi כבוי מההתחברות הבאה לרשת (NetworkManager), ומיידית דרך iw כשאפשר."
 else
   log "NetworkManager לא נמצא — מדלג על הגדרת חיסכון החשמל של ה-Wi-Fi."
 fi
