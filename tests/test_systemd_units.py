@@ -24,9 +24,13 @@ import pytest
 
 UNITS = Path(__file__).resolve().parent.parent / "systemd"
 
-# ארבעת צרכני ה-SDR: מתחרים על אותו RSP1B, ולכן מודרים הדדית.
-SDR_CONSUMERS = ["rtl_airband.service", "airam-acars.service",
-                 "airam-vdl2.service", "airam-satcom.service"]
+# חמשת צרכני ה-SDR: מתחרים על אותו RSP1B, ולכן מודרים הדדית. החמישי — בודק ה-RF
+# (🩺, PR 2) — אינו "מצב" אלא פעולת אבחון של המתזמר, אבל הוא מחזיק את אותו מכשיר
+# בדיוק כמו השאר, ולכן חייב להיות בכל בדיקת הדרה/אי-enable.
+RFCHECK = "airam-rfcheck.service"
+MODE_CONSUMERS = ["rtl_airband.service", "airam-acars.service",
+                  "airam-vdl2.service", "airam-satcom.service"]
+SDR_CONSUMERS = MODE_CONSUMERS + [RFCHECK]
 
 
 def _unit(name):
@@ -74,13 +78,50 @@ def test_sdr_consumers_are_not_enabled_at_boot(name):
         f"{name} מכיל מקטע [Install] — הוא ייהפך ל-enabled ויעקוף את המתזמר")
 
 
-@pytest.mark.parametrize("name", SDR_CONSUMERS)
+@pytest.mark.parametrize("name", MODE_CONSUMERS)
 def test_sdr_consumers_bind_to_sdrplay(name):
     """‏Requires+PartOf על sdrplay: נפילת/עצירת שירות ה-API מורידה גם את הצרכן,
-    במקום להשאיר תהליך שמחזיק את ההתקן בלי API חי."""
+    במקום להשאיר תהליך שמחזיק את ההתקן בלי API חי.
+    ⚠ airam-rfcheck פטור **במפורש** (ר' test_rfcheck_unit_invariants): ל-PartOf יש שם
+    תוצאה הפוכה — כל "בעיטה" ב-sdrplay (airam-wait-sdrplay בניסיון 8, udev, install.sh)
+    הייתה מפעילה את הבודק *מחדש* על פרמטרים ישנים באמצע ריצה שהמתזמר עוקב אחריה."""
     text = _unit(name)
     assert "sdrplay.service" in _directive(text, "Requires")
     assert "sdrplay.service" in _directive(text, "PartOf")
+
+
+def test_rfcheck_unit_invariants():
+    """האינווריאנטות של בודק ה-RF (docs/rf-check-design.md §4.1, spec §2) — כל אחת מגינה
+    על משהו אחר:
+      * Wants (לא Requires/PartOf) על sdrplay — ר' הפטור למעלה.
+      * After= מול *כל* ארבעת הצרכנים: Conflicts לבדו לא קובע סדר; עם After עצירת הצד
+        השני מסודרת לפני ההפעלה שלנו (systemd.unit(5)) — אחרת שני תהליכים על ה-SDR לרגע.
+      * בלי EnvironmentFile/Environment: הקלט היחיד לתהליך ה-root הוא קובץ JSON מאומת;
+        EnvironmentFile שכותב airam היה מייצא LD_PRELOAD וכו' ל-root (design §3).
+      * Restart=no + RuntimeMaxSec: המתזמר מחליט מתי לרוץ; רשת ביטחון כשהוא מת.
+      * RuntimeDirectory + Preserve=yes: בלי Preserve systemd מוחק את end.json/השורות
+        האחרונות ברגע העצירה — לפני שהמתזמר קרא אותן.
+      * ExecStart מדויק: ‏/usr/bin/python3 (שם python3-soapysdr בנוי) עם ‎-I (מבודד).
+      * User=root, KillMode=mixed (SIGTERM => שחרור מסודר של ההתקן לפני SIGKILL)."""
+    text = _unit(RFCHECK)
+    assert _directive(text, "Wants") == ["sdrplay.service"]
+    assert _directive(text, "Requires") == []
+    assert _directive(text, "PartOf") == []
+    after = _directive(text, "After")
+    for name in ["sdrplay.service"] + MODE_CONSUMERS:
+        assert name in after, f"After= חסר {name}"
+    assert sorted(_directive(text, "Conflicts")) == sorted(MODE_CONSUMERS)
+    assert _directive(text, "EnvironmentFile") == []
+    assert _directive(text, "Environment") == []
+    assert _directive(text, "Restart") == ["no"]
+    assert _directive(text, "RuntimeMaxSec"), "RuntimeMaxSec חסר — אין רשת ביטחון"
+    assert _directive(text, "RuntimeDirectory") == ["airam-rfcheck"]
+    assert _directive(text, "RuntimeDirectoryPreserve") == ["yes"]
+    exec_start = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("ExecStart=")]
+    assert exec_start == ["ExecStart=/usr/bin/python3 -I /opt/airam/webtune/rfcheck_probe.py"]
+    assert _directive(text, "User") == ["root"]
+    assert _directive(text, "KillMode") == ["mixed"]
+    assert _directive(text, "StartLimitIntervalSec") == ["0"]
 
 
 def test_only_orchestrator_and_api_are_enabled():

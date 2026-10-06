@@ -419,6 +419,108 @@
     .rflog-marks { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
     .rflog-marks button { flex: 1; min-width: 6.5rem; min-height: 44px; font-size: .8rem; }
     .rflog .fm-hint { font-size: .72rem; color: var(--text-faint); margin: 0; }
+    /* "📏 כייל בסיס" כקישור משני קטן כשבדיקת ה-RF זמינה (החלטת משתמש 2: הכפתור הראשי הוא
+       🩺, אבל הכיול הישן ושורת הבסיס/פסק-הדין נשארים — זה כלי אחר: חיבור אנטנה, לא רווח). */
+    .fm-btns button.fm-link { flex: 0 0 auto; background: none; border: 0; box-shadow: none;
+      color: var(--accent); font-size: .74rem; font-weight: 500; text-decoration: underline;
+      text-underline-offset: 2px; padding: .3rem .1rem; min-height: 32px; }
+
+    /* ---------- 🩺 בדיקת RF (GET/POST /api/rfcheck — docs/rf-check-design.md) ---------- */
+    .rfc { margin-top: .8rem; padding-top: .7rem; border-top: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: var(--sp-2); text-align: start; }
+    .rfc-hd { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+    .rfc-ttl { font-size: .8rem; font-weight: 700; color: var(--dim); }
+    .rfc-badge { font-size: .7rem; font-weight: 600; padding: .1rem .5rem; border-radius: 999px;
+      border: 1px solid rgba(var(--amber-rgb),.5); color: var(--amber-fg); background: rgba(var(--amber-rgb),.12); }
+    button.rfc-start { min-height: 52px; font-size: 1rem; width: 100%; }
+    .rfc p { margin: 0; }
+    .rfc-hint, .rfc-note { font-size: .74rem; color: var(--text-faint); }
+    .rfc-unavail { font-size: .78rem; color: var(--dim); line-height: 1.5; }
+    .rfc code { font-family: var(--font-mono); font-size: .76rem; direction: ltr; unicode-bidi: isolate;
+      background: var(--wash); border: 1px solid var(--border); border-radius: 6px; padding: 0 .3rem; }
+    .rfc-exp { font-size: .76rem; color: var(--dim); border: 1px dashed rgba(var(--amber-rgb),.45);
+      border-radius: var(--r-sm); padding: .4rem .6rem; }
+    .rfc-exp > summary { cursor: pointer; color: var(--amber-fg); font-weight: 600; min-height: 32px;
+      display: flex; align-items: center; }
+    .rfc-exp ul, .rfc-res ul { margin: .35rem 0 0; padding-inline-start: 1.1rem; display: flex;
+      flex-direction: column; gap: .2rem; }
+    .rfc-msg { font-size: .8rem; color: var(--dim); }
+    .rfc-msg.err { color: var(--red-fg); }
+    .rfc-msg.ok { color: var(--green-fg); }
+    .rfc-tools { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+    .rfc-tools > * { flex: 1 1 9rem; min-height: 44px; }
+    /* התקדמות */
+    .rfc-prog { display: flex; flex-direction: column; gap: var(--sp-2); padding: .65rem .75rem;
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-ctrl); }
+    .rfc-ph { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); flex-wrap: wrap; }
+    .rfc-ph b { font-size: .9rem; }
+    .rfc-time { font-size: .8rem; color: var(--dim); font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate; }
+    .rfc-until { font-size: .8rem; color: var(--text); }
+    .rfc-bar { height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
+    .rfc-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
+    .rfc-count { font-size: .8rem; color: var(--dim); font-variant-numeric: tabular-nums; }
+    .rfc-chips { display: flex; flex-wrap: wrap; gap: .35rem; }
+    .rfc-chip { flex: 1 1 4.6rem; min-width: 0; display: flex; flex-direction: column; gap: .05rem;
+      padding: .35rem .45rem; border-radius: var(--r-sm); border: 1px solid var(--border);
+      background: var(--panel); font-size: .72rem; line-height: 1.3; }
+    .rfc-chip b { font-size: .86rem; font-variant-numeric: tabular-nums; }
+    .rfc-chip .sub { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+    .rfc-chip.prod { border-style: dashed; border-color: var(--border-strong); }
+    .rfc-chip.cur { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(var(--accent-rgb),.25);
+      animation: rfc-pulse 1.2s ease-in-out infinite; }
+    .rfc-chip .warn { color: var(--red-fg); font-weight: 700; }
+    @keyframes rfc-pulse { 50% { box-shadow: 0 0 0 4px rgba(var(--accent-rgb),.08); } }
+    @media (prefers-reduced-motion: reduce) { .rfc-chip.cur { animation: none; } .rfc-bar i { transition: none; } }
+    .rfc-status { font-size: .84rem; font-weight: 600; }
+    .rfc-status.car { color: var(--green-fg); }
+    .rfc-offer { padding: .65rem .75rem; border-radius: var(--r-sm);
+      background: rgba(var(--amber-rgb),.12); border: 1px solid rgba(var(--amber-rgb),.5);
+      display: flex; flex-direction: column; gap: .5rem; }
+    .rfc-offer p { font-size: .86rem; color: var(--amber-fg); font-weight: 600; line-height: 1.45; }
+    .rfc-btns { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+    .rfc-btns button, .rfc-btns a.ghost { flex: 1 1 8rem; min-height: 44px; }
+    .rfc-btns button.rfc-apply { flex-basis: 100%; min-height: 52px; font-size: 1rem; }
+    .rfc-net { font-size: .8rem; color: var(--amber-fg); }
+    /* תוצאה */
+    .rfc-res { display: flex; flex-direction: column; gap: var(--sp-2); padding: .7rem .75rem;
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-ctrl); font-size: .82rem; }
+    .rfc-res-hd { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; font-size: .72rem; color: var(--text-faint); }
+    .rfc-lvl { font-size: .72rem; font-weight: 700; padding: .12rem .5rem; border-radius: 999px;
+      border: 1px solid var(--border-strong); color: var(--dim); }
+    .rfc-lvl.fact { color: var(--accent); border-color: rgba(var(--accent-rgb),.55); }
+    .rfc-lvl.stat { color: var(--green-fg); border-color: rgba(var(--green-rgb),.55); }
+    .rfc-lvl.indication { color: var(--amber-fg); border-color: rgba(var(--amber-rgb),.55); }
+    .rfc-head { font-size: .95rem; font-weight: 700; line-height: 1.45; color: var(--text); }
+    .rfc-head.err { color: var(--red-fg); }
+    .rfc-sub { color: var(--dim); line-height: 1.45; }
+    .rfc-dir { padding: .45rem .6rem; border-radius: var(--r-sm); border: 1px solid rgba(var(--amber-rgb),.45);
+      background: rgba(var(--amber-rgb),.08); color: var(--text); line-height: 1.45; }
+    .rfc-res details > summary { cursor: pointer; color: var(--dim); font-size: .78rem; min-height: 32px;
+      display: flex; align-items: center; }
+    .rfc-unt { color: var(--dim); }
+    .rfc-unt b { color: var(--text); font-size: .8rem; }
+    .rfc-tbl-wrap { overflow-x: auto; }
+    .rfc-tbl { width: 100%; border-collapse: collapse; font-size: .72rem; }
+    .rfc-tbl th { text-align: start; font-weight: 600; color: var(--text-faint); padding: .3rem; white-space: nowrap;
+      border-bottom: 1px solid var(--border-strong); }
+    .rfc-tbl td { padding: .3rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+    .rfc-tbl td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .rfc-sc { margin: .3rem 0 0; display: grid; grid-template-columns: auto minmax(0,1fr); gap: .15rem .6rem; font-size: .74rem; }
+    .rfc-sc dt { color: var(--text-faint); }
+    .rfc-sc dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+    body.rfc-on { padding-bottom: 6.5rem; }
+    /* דף אישור (bottom sheet) לפני כל הפעלה — השמע נעצר, אז לא מתחילים מלחיצה אחת בטעות */
+    .rfc-sheet-bg { position: fixed; inset: 0; z-index: 950; background: rgba(0,0,0,.45);
+      display: flex; align-items: flex-end; justify-content: center; }
+    .rfc-sheet { width: 100%; max-width: 32rem; background: var(--panel); color: var(--text);
+      border-top-left-radius: var(--r-card); border-top-right-radius: var(--r-card);
+      border: 1px solid var(--border-strong); box-shadow: var(--sh-card);
+      padding: var(--sp-4) max(var(--sp-4), env(safe-area-inset-left)) calc(var(--sp-4) + env(safe-area-inset-bottom));
+      display: flex; flex-direction: column; gap: var(--sp-3); text-align: start; }
+    .rfc-sheet h3 { margin: 0; font-size: 1rem; }
+    .rfc-sheet ul { margin: 0; padding-inline-start: 1.1rem; display: flex; flex-direction: column; gap: .3rem;
+      font-size: .86rem; line-height: 1.45; }
+    .rfc-sheet .rfc-btns button { min-height: 48px; }
 
     /* --- דוח סשן: "מה קרה בזמן שלא הסתכלת" --- */
     .session-stats { font-size: .85rem; color: var(--text); margin: 0 0 .5rem; }
@@ -1704,6 +1806,51 @@
         <p class="fm-hint" id="rflogHint">לניסוי כיול האנטנה: ה-Pi רושם את מדדי ה-RF כל שנייה, אתה מסמן מתי חיברת/ניתקת.</p>
       </div>
     </div>
+    <!-- ═══ 🩺 בדיקת RF (docs/rf-check-design.md) ═══
+         משווה את מצבי ה-LNA על *אותם* שידורים חיים (יחידת systemd נפרדת על ה-Pi, השמע נעצר
+         בזמן הבדיקה). מחוץ ל-#rfPanel בכוונה: האבחון זמין גם מ-standby, שבו #rfPanel מוסתר.
+         כל טקסט מהשרת — textContent בלבד; לטינית/מספרים עטופים ב-bidi(). -->
+    <div class="rfc" id="rfcBox">
+      <div class="rfc-hd">
+        <span class="rfc-ttl">🩺 בדיקת RF</span>
+        <span class="rfc-badge hidden" id="rfcBadge">🧪 ניסיוני</span>
+      </div>
+      <button type="button" class="primary rfc-start hidden" id="rfcStart">🩺 בדיקת RF</button>
+      <p class="rfc-hint" id="rfcHint">משווה את מצבי ה-LNA על אותם שידורים — עד שיש מספיק נתונים (עד 3 דקות), בלי שמע.</p>
+      <p class="rfc-unavail hidden" id="rfcUnavail"></p>
+      <details class="rfc-exp hidden" id="rfcExperimental">
+        <summary>🧪 ניסיוני — חלק מהפרמטרים טרם אומתו על החומרה</summary>
+        <p class="rfc-note" style="margin-top:.3rem">עד שקובץ "🔧 אבחון חומרה" ייבדק, אלה הנחות ולא מדידות:</p>
+        <ul id="rfcExpList"></ul>
+      </details>
+      <div class="rfc-prog hidden" id="rfcProgress">
+        <div class="rfc-ph"><b id="rfcPhase"></b><span class="rfc-time" id="rfcTime"></span></div>
+        <p class="rfc-until" id="rfcUntil"></p>
+        <div class="rfc-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="rfcBarWrap"><i id="rfcBarFill"></i></div>
+        <p class="rfc-count" id="rfcCounters"></p>
+        <div class="rfc-chips" id="rfcChips"></div>
+        <p class="rfc-status" id="rfcStatus" aria-live="polite"></p>
+        <div class="rfc-offer hidden" id="rfcAtisOffer">
+          <p>המגדל שקט כבר 30 שניות. לעבור ל-ATIS ‏<span id="rfcAtisFreq"></span> (שידור רציף, עד 30 שניות)?</p>
+          <div class="rfc-btns">
+            <button type="button" class="primary" id="rfcAtisYes">עבור ל-ATIS</button>
+            <button type="button" class="ghost" id="rfcAtisNo">המשך לחכות</button>
+          </div>
+        </div>
+        <p class="rfc-note" id="rfcPlayerNote"></p>
+        <p class="rfc-net hidden" id="rfcNet">אין קשר לשרת — הבדיקה ממשיכה ב-Pi, התוצאה תחכה לך.</p>
+        <div class="rfc-btns">
+          <button type="button" id="rfcFinish">⏹ עצור עכשיו ותן תוצאה</button>
+          <button type="button" class="ghost" id="rfcAbort">בטל</button>
+        </div>
+      </div>
+      <div class="rfc-res hidden" id="rfcResult"></div>
+      <p class="rfc-msg" id="rfcMsg" aria-live="polite"></p>
+      <div class="rfc-tools hidden" id="rfcTools">
+        <button type="button" class="ghost" id="rfcDiagBtn">🔧 אבחון חומרה</button>
+        <a class="ghost hidden" id="rfcDiagDl" href="/api/rfcheck/export?kind=diagnose" download>⬇ קובץ האבחון</a>
+      </div>
+    </div>
     </div><!-- /panel-bd -->
   </section>
 
@@ -2337,6 +2484,29 @@
     </div>
   </div>
 
+  <!-- סרגל 🩺 בדיקת RF: גלובלי, כמו #expBar — השמע עצור והמקלט "תפוס" בכל תצוגה שבה
+       המשתמש נמצא, אז החיווי והעצירה חייבים להיות זמינים בכולן. השניים לא רצים יחד
+       (השרת מסרב לבדיקה בזמן ניסוי). בלי aria-live: השעון מתעדכן כל שנייה. -->
+  <div id="rfcBar" class="exp-bar hidden">
+    <div class="exp-bar-main">
+      <div class="exp-bar-txt"><b id="rfcBarTitle">🩺 בדיקת RF רצה</b><span id="rfcBarSub"></span></div>
+      <button type="button" class="ghost" id="rfcBarFinish">⏹ סיים</button>
+    </div>
+    <div class="exp-prog"><i id="rfcBarProg"></i></div>
+  </div>
+
+  <!-- דף אישור לפני הפעלת בדיקה/אבחון (bottom sheet; התוכן נבנה ב-JS לפי הסוג) -->
+  <div id="rfcConfirm" class="rfc-sheet-bg hidden">
+    <div class="rfc-sheet" role="dialog" aria-modal="true" aria-labelledby="rfcConfirmTitle">
+      <h3 id="rfcConfirmTitle"></h3>
+      <ul id="rfcConfirmList"></ul>
+      <div class="rfc-btns">
+        <button type="button" class="primary" id="rfcConfirmOk">התחל</button>
+        <button type="button" class="ghost" id="rfcConfirmCancel">ביטול</button>
+      </div>
+    </div>
+  </div>
+
   <!-- טוסט כללי (כרגע: ביטול-מחיקה לפריסט) — מוסתר כברירת מחדל -->
   <div id="toast" class="toast hidden">
     <span id="toastMsg"></span>
@@ -2703,7 +2873,10 @@
       // תוך כדי SATCOM ולנסות להתחבר ל-Icecast מת (sdrOff=false ב-SATCOM,
       // בניגוד ל-off, אז הבדיקה הישנה עברה בטעות).
       if (sdrOff || acars.active || (vdl2 && vdl2.active) || (satcom && satcom.active)) return;
-      stopReplay();                 // חזרה ל-live עוצרת הקלטה מתנגנת (לא שני זרמים יחד)
+      // 🩺 בדיקת RF מחזיקה את ה-SDR (rtl_airband עצור, ה-mount מת) — ▶ ממסך הנעילה היה
+      // מבזבז 10 ניסיונות ומסיים ב"הסטרים לא זמין". השמע חוזר מ-rfcOnDone בסוף הבדיקה.
+      if (rfcRunning) { setStatus("⏸ מושהה לבדיקת RF — השמע יחזור בסופה", "busy"); return; }
+      stopReplay();                // חזרה ל-live עוצרת הקלטה מתנגנת (לא שני זרמים יחד)
       clearTimeout(retryTimer);
       player.onerror = null;
       player.src = streamURL();
@@ -3747,7 +3920,8 @@
        "מזוהה" = ה-RSP ב-USB. "פנוי" = ה-SDRplay API מציע אותו עכשיו (API לא מחזיר
        מכשיר שתוכנה אחרת כבר בחרה). השרת בודק את ה-API רק כש-AIR-AM עצמו לא מחזיק
        במכשיר. §12: "לא נבדק" (unknown) מוצג ככזה — לא "פנוי" כברירת מחדל. */
-    const SDR_MODE_LABEL = { voice: "📻 קול", acars: "📡 ACARS", vdl2: "🛰️ VDL2", satcom: "📶 SATCOM" };
+    const SDR_MODE_LABEL = { voice: "📻 קול", acars: "📡 ACARS", vdl2: "🛰️ VDL2", satcom: "📶 SATCOM",
+                             rfcheck: "🩺 בדיקת RF" };   // צרכן חמישי, זמני (לא app_mode)
     let sdrInFlight = false, sdrDetail = "";
     // FSI…PDI: בידוד כיווני לטקסט לטיני בתוך משפט עברי (כמו <bdi>, אבל ב-textContent/toast)
     const bidi = (x) => "\u2068" + x + "\u2069";
@@ -3760,7 +3934,9 @@
         case "missing": return ["err", "SDR לא מזוהה",
           "ה-SDR לא מופיע ב-USB: lsusb לא מוצא התקן SDRplay. בדוק את הכבל ואת החיבור ל-Pi."];
         case "ours": return d.service_state === "active"
-          ? ["live", "SDR · בשימוש: " + m, seen + ". בשימוש של AIR-AM במצב " + m + ". לשחרור: ⏻ עצור מקלט."]
+          ? ["live", "SDR · בשימוש: " + m, seen + ". בשימוש של AIR-AM במצב " + m + ". "
+             + (d.mode === "rfcheck" ? "הבדיקה מחזירה את המצב הקודם בסופה (⏹ בסרגל התחתון)."
+                                     : "לשחרור: ⏻ עצור מקלט.")]
           : ["busy", "SDR · עולה: " + m, seen + ". AIR-AM מנסה להפעיל אותו במצב " + m
              + " (השירות במצב " + bidi(d.service_state) + ")."];
         case "switching": return ["busy", "SDR · מחליף מצב…", "AIR-AM מחליף מצב כרגע. החיווי יתעדכן בעוד רגע."];
@@ -3808,6 +3984,735 @@
     setInterval(() => { if (!document.hidden) pollSdr(); }, 15000);
     document.addEventListener("visibilitychange", () => { if (!document.hidden) pollSdr(); });
     pollSdr();
+
+    /* ---------- 🩺 בדיקת RF (GET/POST /api/rfcheck — docs/rf-check-design.md) ----------
+       ה-Pi *מודד* (airam-rfcheck.service, root) ו*שופט* (rfcheck_analysis ב-airam-web); כאן רק
+       מציגים התקדמות ותוצאה ושולחים פעולות. עקרונות (§12 ב-CLAUDE.md, design §8):
+         • "לא נבדק" ≠ "לא נצפה" ≠ "אין": overload=null מוצג "לא נבדק" — לעולם לא ירוק.
+         • "החל" רק ברמת fact/stat (החלטת משתמש 5). באינדיקציה: "כיוון אפשרי" בלי כפתור —
+           הסליידר נשאר לשינוי ידני.
+         • תמיד אומרים מה *לא* נמדד: רשימת untestable מהשרת + שורת היקף קבועה.
+         • בלי "⏱ עוד דקה" (החלטת משתמש 1): הבדיקה נעצרת לבד כשיש מספיק נתונים, עד 3 דקות;
+           "⏹ עצור" מסיים מוקדם עם הרמה שהושגה.
+       תווית LNA זהה לסליידר (#rfGainVal): ‎(9 − state)/9 דרך lnaStep. טקסט מהשרת — textContent
+       בלבד; לטינית/מספרים בתוך עברית עטופים ב-bidi(). */
+    // var (לא let): reloadStream/pollGlobalState מוגדרים מוקדם יותר בקובץ וקוראים אותו
+    var rfcRunning = false;
+    let rfcState = null, rfcInFlight = false, rfcAvail = null;
+    let rfcPlay = null;              // {wasPlaying} — רק כשהבדיקה הוזנקה מהטלפון הזה (אחרת: לא ידוע)
+    let rfcAtisDismissed = null;     // run_id שבו נבחר "המשך לחכות"
+    let rfcPrevSlot = null, rfcPrevTx = 0;
+    let rfcResKey = null;            // רינדור-מחדש רק כשהתוצאה השתנתה — <details> פתוח נשאר פתוח
+    let rfcKeepRun = null;           // run_id שעליו נבחר "השאר כפי שהוא"
+    let rfcConfirmCb = null;
+    const RFC_ATIS_FREQ = 132.5;     // RFCHECK_ATIS_FREQ בשרת (החלטת משתמש 5 — קבוע)
+    // RFCHECK_STATES_DEFAULT בשרת ∪ {נוכחי}, עד 7 (החלטת משתמש 5) — כאן רק למספר שבדף האישור
+    const RFC_STATES_DEFAULT = [0, 2, 4, 6, 7, 8], RFC_STATES_MAX = 7;
+    const RFC_HARD_MAX_DEFAULT = 180;
+
+    const rfcLna = (s) => bidi("LNA " + lnaStep(s) + "/9");
+    const rfcLnaList = (a) => (Array.isArray(a) ? a : []).filter(Number.isInteger).map(rfcLna).join(", ");
+    const rfcFreq = (f) => (typeof f === "number" && isFinite(f) ? bidi(f.toFixed(3)) : "—");
+    const rfcMmss = (sec) => {
+      sec = Math.max(0, Math.round(Number(sec) || 0));
+      return Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
+    };
+    // הנחתת LNA ב-dB (טבלת ה-spec — תצוגה בלבד); 0 בלי "−0"
+    const rfcGr = (gr, unit) => (typeof gr === "number" ? bidi((gr ? "−" + gr : "0") + (unit ? " dB" : "")) : "—");
+    const rfcNum = (v, d) => (typeof v === "number" && isFinite(v) ? v.toFixed(d) : "—");
+    const rfcP = (p) => (typeof p !== "number" ? "?" : p < 0.001 ? "<0.001" : p.toFixed(3));
+    const rfcNotch = (on) => (on === true ? "דלוק" : on === false ? "כבוי" : "?");
+    // השרת עשוי להחזיר את הסיכום החי שטוח או תחת live — קוראים משניהם
+    const rfcF = (d, k) => (d && d[k] !== undefined ? d[k]
+                          : d && d.live && d.live[k] !== undefined ? d.live[k] : undefined);
+    function rfcEl(tag, cls, text) {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text != null) e.textContent = text;
+      return e;
+    }
+
+    // ‏reasons של _rfcheck_availability ⇒ למה הכפתור לא מוצג (לא "לא זמין" גנרי)
+    const RFC_REASON_TEXT = {
+      probe_missing: "קובץ הבודק חסר",
+      unit_missing: "יחידת ה-systemd של הבדיקה חסרה",
+      numpy_missing: "חסרה חבילת " + bidi("python3-numpy"),
+      soapysdr_missing: "חסרה חבילת " + bidi("python3-soapysdr"),
+      sdrplay_module_missing: "מודול ה-SDRplay של " + bidi("SoapySDR") + " לא נמצא",
+      selftest_failed: "הבדיקה העצמית של הבודק נכשלה",
+      analysis_missing: "מודול הניתוח לא נטען בשרת",
+    };
+    // מה שטרם אומת על החומרה (design §2.4/§9 של המפרט, ⚠) — מוצג כל עוד experimental
+    const RFC_UNVERIFIED = [
+      "זמן ההתייצבות אחרי החלפת LNA — מגן של מאגר אחד, " + bidi("25.6ms") + " (" + bidi("D3") + ")",
+      "האם החומרה מדווחת עומס כש-AGC כבוי — עד אז \"לא נצפה\" אינו \"אין עומס\" (" + bidi("D5") + ")",
+      "קוד הרוויה של ה-ADC לזיהוי חיתוך — " + bidi("32767") + " לפי קוד הדרייבר, לא נמדד (" + bidi("D5") + ")",
+      "זמן ההחלפה של מסנן ה-FM — מגן של " + bidi("256ms") + " (" + bidi("D6") + ")",
+      "עומס המעבד של " + bidi("Pi 5") + " בקצב הדגימה המלא (" + bidi("D8") + ")",
+      "דיוק טבלת ההנחתה של ה-LNA — משמשת רק לנקודת ההתחלה ולתצוגה, לא להכרעה",
+    ];
+    // ‏untestable (rfcheck_analysis._untestable) ⇒ "ⓘ מה לא נבדק / לא ודאי"
+    function rfcUntestableText(u) {
+      const st = rfcLnaList(u.states);
+      switch (u.code) {
+        case "soft_compression_tower": return "דחיסה רכה (עיוות הדיבור) לא נבדקת על שידורי המגדל";
+        case "settle_unverified": return "זמן ההתייצבות אחרי החלפת LNA טרם אומת על החומרה (מגן: " + bidi("25.6ms") + ")";
+        case "overload_semantics_unverified": return "לא אומת שהחומרה מדווחת עומס כש-AGC כבוי — \"לא נצפה\" אינו \"אין עומס\"";
+        case "telemetry_absent": return "אין טלמטריית עומס — עמודת העומס: לא נבדק";
+        case "telemetry_silent": return "הדרייבר לא דיווח דבר לאורך כל הבדיקה — עמודת העומס: לא נבדק";
+        case "rail_unverified": return "קוד הרוויה לפי הדרייבר, לא נמדד";
+        case "agc_dynamics": return "ה-AGC מדומה כנקודת עבודה, לא כמהירות תגובה";
+        case "proxy_noise": return "רעש לפי תדרים שכנים — קירוב";
+        case "few_blocks": return "מעט בלוקים — לתוצאה מובהקת: ATIS או בדיקה כשיש יותר תעבורה";
+        case "cpu_invalid": return "המעבד לא עמד בקצב — חלק מהמדידות נפסלו";
+        // ‏IFGR הוא הנחתה: נדרש <20 ונחתך ל-20 => *יותר* הנחתה מהנדרש => הרווח הכולל נמוך מהנוכחי (ולהפך ב-59)
+        case "ifgr_clamped_low": return "ב-" + st + " פיצוי ה-IF נדרש מתחת ל-" + bidi("20") + " ונחתך — הרווח הכולל שם נמוך מהנוכחי";
+        case "ifgr_clamped_high": return "ב-" + st + " פיצוי ה-IF נדרש מעל " + bidi("59") + " ונחתך — הרווח הכולל שם גבוה מהנוכחי";
+        case "ratchets": return "ב-" + st + " ה-IF הוחלש תוך כדי הבדיקה בגלל חיתוך";
+        case "gr_table_unknown": return "טבלת ההנחתה של ה-LNA לא ידועה לחומרה הזו — נקודות ההתחלה לא פוצו";
+        default: return "לא ודאי: " + bidi(String(u.code));
+      }
+    }
+    // ‏evidence (rfcheck_analysis._fact_reasons/_stat_reasons/analyze_notch) ⇒ "על מה זה מבוסס"
+    function rfcEvidenceText(e) {
+      const cfg = typeof e.fm_notch === "boolean" ? "מסנן FM " + rfcNotch(e.fm_notch) : null;
+      const k = Number.isFinite(e.cycles) ? " (" + bidi(String(e.cycles)) + " סבבים)" : "";
+      const nd = (x) => bidi((typeof x === "number" ? x.toFixed(1) : "?") + " dB");
+      const np = " (" + bidi("n=" + e.n + ", p=" + rfcP(e.p)) + ")";
+      switch (e.code) {
+        case "op_clip": return "חיתוך ADC ב-" + (cfg || rfcLnaList(e.states)) + " גם ב-IF ‏" + bidi("59") + k;
+        case "op_ovl": return "עומס חומרה ב-" + (cfg || rfcLnaList(e.states)) + " גם ב-IF ‏" + bidi("59") + k;
+        case "env_ovl_silence": return "עומס סביבתי בשקט ב-" + rfcLnaList(e.states) + " (חשד לחסימה ע״י FM/משדר קרוב)";
+        case "lost": {
+          const by = Array.isArray(e.heard_by) ? rfcLnaList(e.heard_by)
+                   : Number.isInteger(e.heard_by) ? rfcLna(e.heard_by) : "מצב אחר";
+          return (cfg || rfcLna(e.state)) + " איבד שידור ש-" + by + " שמע" + k;
+        }
+        case "compression": return "CNR ב-" + rfcLna(e.b) + " גבוה ב-" + nd(e.median_d) + " מ-" + rfcLna(e.a)
+                                   + np + " — סימן לעומס בקצה הקדמי ב-" + rfcLna(e.a);
+        case "sensitivity": return "CNR ב-" + rfcLna(e.c) + " נמוך ב-" + nd(e.median_d) + " מ-" + rfcLna(e.best)
+                                   + np + " — עלות רגישות מדידה";
+        case "tie": return "שוויון בתוך אי-הוודאות בין " + rfcLnaList(e.states) + " ⇒ מעדיפים ריסון (יותר הנחתה)";
+        case "notch_compare": return "CNR עם מסנן FM " + rfcNotch(e.better) + " גבוה ב-" + nd(e.median_d) + np;
+        default: return null;   // atis_based/proxy_noise — מוצגים בתווית ה-ATIS וברשימת "לא ודאי"
+      }
+    }
+    // headline + headline_params ⇒ משפט אחד בעברית (מפרט §7.5)
+    function rfcHeadline(r, restore) {
+      const p = r.headline_params || {};
+      const x = Number.isInteger(p.x) ? rfcLna(p.x) : "?", y = Number.isInteger(p.y) ? rfcLna(p.y) : "?";
+      switch (r.headline) {
+        case "keep_current": return ["✅ ההגדרה הנוכחית (" + x + ") טובה — אין יתרון מדיד לשינוי", ""];
+        case "reduce_gain_tie": return ["⬇️ מומלץ " + y + " — פחות רווח, בלי אובדן רגישות מדיד", ""];
+        case "reduce_gain_compression": return ["⬇️ מומלץ " + y + " — ב-" + x + " ה-CNR נמוך יותר: סימן לעומס בקצה הקדמי", ""];
+        case "reduce_gain_overload": return ["⚠ עומס חומרה ב-" + rfcLnaList(p.list) + " גם בהפחתת IF מרבית — מומלץ " + y, ""];
+        case "increase_gain_sensitivity": return ["⬆️ מומלץ " + y + " — ב-" + x + " הרגישות נמוכה יותר באופן מדיד", ""];
+        case "increase_gain_lost": return ["⬆️ מומלץ " + y + " — ב-" + x + " שידור ירד מתחת לסף הסקוולץ'", ""];
+        case "all_overloaded": return ["⚠ גם ב-LNA המוחלש ביותר שנבדק יש עומס — שקול מסנן FM, LNA נמוך יותר או מסנן חיצוני", ""];
+        case "indication": {
+          const n = " (" + bidi("n=" + (Number.isFinite(p.n) ? p.n : "?")) + ")";
+          if (r.phase === "notch")
+            return ["❔ אינדיקציה בלבד — מעט מדי זוגות מדידה" + n + ". "
+                    + (typeof p.fm_notch === "boolean" ? "כיוון אפשרי: מסנן FM " + rfcNotch(p.fm_notch) : "אין כיוון ברור"), ""];
+          return ["❔ אינדיקציה בלבד — מעט מדי שידורים" + n + ". "
+                  + (Number.isInteger(p.y) ? "כיוון אפשרי: " + y : "אין כיוון ברור"), ""];
+        }
+        case "no_traffic": return [r.phase === "notch"
+          ? "❔ לא נקלטו שידורים — אין השוואה של מסנן ה-FM"
+          : "❔ לא נקלטו שידורים — אין השוואת איכות. עובדות מהשקט למטה", ""];
+        case "notch_on": return ["מסנן FM: מומלץ להדליק", ""];
+        case "notch_off": return ["מסנן FM: מומלץ לכבות", ""];
+        case "notch_no_difference": return ["מסנן FM: אין הבדל מדיד — נשאר " + rfcNotch(p.fm_notch), ""];
+        case "error": {
+          // "השמע הוחזר" רק כשהשרת אישר את השחזור — לא מניחים (§12)
+          const back = restore && restore.ok === false ? "⚠ השמע לא חזר אוטומטית"
+                     : restore && restore.ok === true ? "השמע הוחזר" : "מצב השמע לא ידוע";
+          return ["הבדיקה נכשלה: " + (p.error || r.error || "שגיאה") + " — " + back, "err"];
+        }
+        default:
+          if (r.phase === "diagnose") return ["🔧 האבחון הסתיים — הקובץ נועד לשליחה, הוא לא המלצה", ""];
+          return ["לא ניתן להכריע", ""];
+      }
+    }
+    function rfcLevelBadge(r) {
+      const lv = r.level;
+      if (lv === "fact") return ["עובדה", "fact"];
+      if (lv === "stat") return ["השוואה מובהקת (" + bidi("n=" + (Number.isFinite(r.n) ? r.n : "?")) + ")", "stat"];
+      if (lv === "indication") return ["אינדיקציה בלבד", "indication"];
+      return ["לא ניתן להכריע", ""];
+    }
+    function rfcObs(st, k) {
+      if (st === "observed") return "נצפה (" + bidi(String(k == null ? "≥2" : k)) + ")";
+      if (st === "observed_once") return "נצפה פעם אחת";
+      if (st === "probe_only") return "רק ברווח הבדיקה";
+      if (st === "not_observed") return "לא נצפה";
+      return "לא נבדק";            // null — אין טלמטריה מאומתת: לעולם לא "תקין"
+    }
+    const RFC_FLAG_TEXT = {
+      best: "CNR מיטבי", recommended: "מומלץ", current: "נוכחי", disqualified: "נפסל (עובדה)",
+      lost: "איבד שידור", excluded: "מחוץ למועמדים", compression_evidence: "סימן לעומס",
+      sensitivity_cost: "עלות רגישות", tie: "בשוויון", ratchet: "IF הוחלש בבדיקה",
+      clamped_low: "IF נחתך (20)", clamped_high: "IF נחתך (59)",
+      probe_clip: "חיתוך ברווח הבדיקה", probe_ovl: "עומס ברווח הבדיקה",
+    };
+
+    /* ---------- אישור (bottom sheet) ---------- */
+    function rfcConfirm(title, lines, okLabel, cb) {
+      $("rfcConfirmTitle").textContent = title;
+      const ul = $("rfcConfirmList");
+      ul.textContent = "";
+      lines.forEach((t) => ul.appendChild(rfcEl("li", null, t)));
+      $("rfcConfirmOk").textContent = okLabel || "התחל";
+      rfcConfirmCb = cb;
+      $("rfcConfirm").classList.remove("hidden");
+      $("rfcConfirmOk").focus();
+    }
+    const rfcConfirmClose = () => { $("rfcConfirm").classList.add("hidden"); rfcConfirmCb = null; };
+    $("rfcConfirmCancel").onclick = rfcConfirmClose;
+    $("rfcConfirm").onclick = (ev) => { if (ev.target === $("rfcConfirm")) rfcConfirmClose(); };
+    $("rfcConfirmOk").onclick = () => { const cb = rfcConfirmCb; rfcConfirmClose(); if (cb) cb(); };
+
+    // כמה מצבי LNA הבדיקה תמדוד — אותו כלל כמו השרת (ברירת מחדל ∪ נוכחי, עד 7); תצוגה בלבד
+    function rfcStateCount() {
+      const cur = lastGainState && Number.isInteger(Number(lastGainState.rf_gain)) ? Number(lastGainState.rf_gain) : null;
+      const s = new Set(RFC_STATES_DEFAULT);
+      if (cur != null) s.add(cur);
+      return Math.min(RFC_STATES_MAX, s.size);
+    }
+    const rfcExpLine = () => (rfcState && rfcState.experimental
+      ? ["🧪 ניסיוני: חלק מהפרמטרים טרם אומתו על החומרה — ההמלצה עלולה להיות שגויה."] : []);
+
+    function rfcAskStart(kind, extra) {
+      const audio = "השמע ייעצר בזמן הבדיקה ויחזור לבד בסופה.";
+      const lock = "אפשר לנעול את המסך — הבדיקה רצה ב-Pi.";
+      if (kind === "diagnose") {
+        rfcConfirm("🔧 אבחון חומרה", [
+          "אבחון חומרה: כ-90 שניות על ATIS ‏" + rfcFreq(RFC_ATIS_FREQ) + ", השמע ייעצר.",
+          "התוצאה היא קובץ לשליחה — לא המלצה.", lock], "התחל אבחון",
+          () => rfcStart({ action: "start", phase: "diagnose" }));
+        return;
+      }
+      if (kind === "notch") {
+        // אותו כלל כמו השרת (_rfcheck_notch_basis): המצב המומלץ רק מתוצאת fact/stat באותו תדר —
+        // אחרת (אינדיקציה, תדר אחר) המסנן נבדק ב-LNA הנוכחי, ולא מבטיחים כאן משהו אחר
+        const r = extra.result;
+        const rec = (r.level === "fact" || r.level === "stat") && r.recommendation
+          && typeof r.freq === "number" && Math.abs(r.freq - current) <= 0.0005 ? r.recommendation : null;
+        const cur = lastGainState && Number.isInteger(Number(lastGainState.rf_gain)) ? Number(lastGainState.rf_gain) : null;
+        const s = rec && Number.isInteger(rec.rf_gain) ? rec.rf_gain : cur;
+        rfcConfirm("🔁 השוואת מסנן FM · עד 3 דקות", [
+          audio, "ב-" + (Number.isInteger(s) ? rfcLna(s) : "LNA הנוכחי") + " קבוע, המסנן מתחלף כבוי/דלוק בכל סבב על אותם שידורים ב-" + rfcFreq(current) + ".",
+          "נעצרת לבד כשיש מספיק זוגות מדידה (עד 3 דקות).", lock, ...rfcExpLine()], "התחל",
+          () => rfcStart({ action: "start", phase: "notch", from_run: r.run_id }));
+        return;
+      }
+      const states = extra && Array.isArray(extra.states) ? extra.states : null;
+      const k = states ? states.length : rfcStateCount();
+      rfcConfirm(states ? "🔎 בדיקה ממוקדת · עד 3 דקות" : "🩺 בדיקת RF · עד 3 דקות", [
+        audio,
+        "הבדיקה מחכה לשידורים ב-" + rfcFreq(current) + " ומודדת כל שידור בכל " + bidi(String(k)) + " רמות ה-LNA"
+          + (states ? " (" + rfcLnaList(states) + ")" : "") + ".",
+        "ממשיכים עד שיש מספיק נתונים (עד 3 דקות); אפשר לעצור מוקדם ולקבל את מה שנאסף.",
+        lock, ...rfcExpLine()], "התחל",
+        () => rfcStart(states ? { action: "start", phase: "lna", states } : { action: "start", phase: "lna" }));
+    }
+
+    function rfcSetMsg(text, cls) {
+      const m = $("rfcMsg");
+      m.textContent = text || "";
+      m.className = "rfc-msg" + (cls ? " " + cls : "");
+    }
+    async function rfcPost(body) {
+      const res = await apiSend("POST", "/api/rfcheck", body);
+      let d = {};
+      try { d = await res.json(); } catch (e) { d = { ok: false, error: "תשובה לא תקינה מהשרת" }; }
+      return d;
+    }
+    async function rfcStart(body) {
+      rfcSetMsg("");
+      $("rfcStart").disabled = true;
+      try {
+        const d = await rfcPost(body);
+        if (!d.ok) {
+          rfcSetMsg("⚠ " + (d.error || "הבדיקה לא התחילה"), "err");
+          if (d.reasons) renderRfcheck({ ok: true, available: false, reasons: d.reasons, install_hint: d.install_hint });
+          return;
+        }
+        // מפרט §7.4: זוכרים אם השמע ניגן *לפני* העצירה — רק אז מחזירים אותו בסוף
+        rfcPlay = { wasPlaying: !player.paused };
+        player.pause();
+        rfcRunning = true;          // לפני renderRfcheck: reloadStream חסום מעכשיו
+        setStatus("🩺 בדיקת RF רצה — השמע מושהה", "busy");
+        renderRfcheck({ ...d, running: d.running !== false });
+        pollRfcheck();
+      } catch (e) {
+        rfcSetMsg("⚠ שגיאת רשת — הבדיקה לא התחילה.", "err");
+      } finally { rfcSyncButtons(); }
+    }
+    async function rfcAction(action, extra) {
+      try {
+        const d = await rfcPost({ action, ...(extra || {}) });
+        if (!d.ok) rfcSetMsg("⚠ " + (d.error || "הפעולה נכשלה"), "err");
+        pollRfcheck();
+        return d;
+      } catch (e) { rfcSetMsg("⚠ שגיאת רשת — נסה שוב.", "err"); return null; }
+    }
+    // סוף ריצה שהטלפון הזה ראה רצה ⇒ שחזור השמע (רק אם ניגן לפני) + אמירה גלויה מה קרה
+    function rfcOnDone(d) {
+      const play = rfcPlay;
+      rfcPlay = null;
+      const r = d.result || null;
+      const restore = d.restore || (r && r.restore) || null;
+      if (restore && restore.ok === false) {
+        rfcSetMsg("⚠ השמע לא חזר אוטומטית — מנסה שוב (או לחץ ⏻)" + (restore.error ? ": " + restore.error : ""), "err");
+        setStatus("⚠ השחזור אחרי בדיקת RF נכשל", "err");
+        if (play && play.wasPlaying) connectTimer = setTimeout(() => reloadStream(), 1500);
+        return;
+      }
+      if (play && play.wasPlaying && restore && restore.ok === true) {
+        connectTimer = setTimeout(() => reloadStream(), 1500);
+        rfcSetMsg("✓ השמע חזר", "ok");
+      } else if (play) {
+        rfcSetMsg(restore && restore.ok === true ? "✓ הבדיקה הסתיימה — המקלט חזר למצבו הקודם" : "הבדיקה הסתיימה", "ok");
+        if (appMode === "voice" && !sdrOff) setStatus("מוכן — לחץ ▶ או בחר תדר");
+      }
+      pollGlobalState();
+    }
+
+    function rfcSyncButtons() {
+      const dataActive = acars.active || (vdl2 && vdl2.active) || (satcom && satcom.active);
+      const voiceLive = !sdrOff && !dataActive && !scanning;
+      const expRunning = !!(expState && expState.running);
+      const avail = rfcAvail === true;
+      const st = $("rfcStart");
+      st.classList.toggle("hidden", !avail || rfcRunning);
+      st.disabled = !voiceLive || expRunning;
+      $("rfcHint").textContent = !avail ? ""
+        : expRunning ? "ניסוי הכיול רץ — הבדיקה תהיה זמינה בסיומו."
+        : voiceLive ? "משווה את מצבי ה-LNA על אותם שידורים — עד שיש מספיק נתונים (עד 3 דקות), בלי שמע."
+        : "זמינה במצב קול פעיל (" + bidi("AM") + ", " + bidi("108–137 MHz") + ").";
+      $("rfcHint").classList.toggle("hidden", !avail || rfcRunning);
+      // אבחון מותר מקול ומ-standby (החלטת משתמש 5), לא ממצבי דאטה/סריקה
+      $("rfcTools").classList.toggle("hidden", !avail || rfcRunning);
+      $("rfcDiagBtn").disabled = !(voiceLive || (sdrOff && !scanning)) || expRunning;
+      // החלטת משתמש 2: 🩺 הוא הכפתור הראשי, אבל "כייל בסיס" נשאר — כקישור משני קטן
+      const cal = $("voiceFmCalBtn");
+      cal.classList.toggle("fm-link", avail);
+      cal.classList.toggle("ghost", !avail);
+      cal.textContent = avail ? "📏 כייל בסיס" : "📏 כייל בסיס עכשיו";
+      cal.title = "מודד את רצפת הרעש עכשיו ושומר אותה כבסיס להשוואה (חיבור אנטנה — לא בחירת רווח)";
+    }
+
+    function renderRfcChips(d) {
+      const box = $("rfcChips");
+      box.textContent = "";
+      const configs = rfcF(d, "configs");
+      if (Array.isArray(configs) && configs.length) {         // שלב מסנן ה-FM: שתי תצורות
+        configs.forEach((c) => {
+          const ch = rfcEl("div", "rfc-chip" + (c.current ? " cur" : ""));
+          ch.appendChild(rfcEl("b", null, "מסנן FM " + rfcNotch(c.fm_notch)));
+          rfcChipBody(ch, c);
+          box.appendChild(ch);
+        });
+        return;
+      }
+      (rfcF(d, "states") || []).forEach((s) => {
+        if (!s || !Number.isInteger(s.lna)) return;
+        const ch = rfcEl("div", "rfc-chip" + (s.current ? " cur" : "") + (s.production ? " prod" : ""));
+        ch.title = "LNA state " + s.lna + (s.production ? " (ההגדרה הנוכחית)" : "")
+          + " · עומס: " + rfcObs(s.overload).replace(/[⁨⁩]/g, "");
+        // הלייבל זהה לסליידר: (9 − state)/9 — לא ה-state הגולמי
+        ch.appendChild(rfcEl("b", null, bidi(lnaStep(s.lna) + "/9") + (s.production ? " ●" : "")));
+        if (typeof s.gr_db === "number") ch.appendChild(rfcEl("span", "sub", rfcGr(s.gr_db, true)));
+        rfcChipBody(ch, s);
+        if (typeof s.ifgr === "number") ch.appendChild(rfcEl("span", "sub", bidi("IF " + s.ifgr)));
+        box.appendChild(ch);
+      });
+    }
+    function rfcChipBody(ch, s) {
+      ch.appendChild(rfcEl("span", null, "📡" + bidi(String(s.n_carrier || 0)) + " · 🔇" + bidi(String(s.n_silence || 0))));
+      const marks = [];
+      if (s.overload === "observed" || s.overload === "observed_once") marks.push("⚠ עומס");
+      if (s.clip === "observed" || s.clip === "observed_once") marks.push("✂ חיתוך");
+      if (marks.length) ch.appendChild(rfcEl("span", "warn", marks.join(" ")));
+    }
+
+    function renderRfcProgress(d) {
+      const phase = d.phase, ref = rfcF(d, "ref");
+      const el = Number(d.elapsed) || 0;
+      const hard = Number(d.hard_max) || RFC_HARD_MAX_DEFAULT;
+      // ‏phase = שלב הבקר (starting/listening/atis/notch/diagnose/finishing/restoring); ‏kind = סוג
+      // הריצה (lna/notch/diagnose) — גם ב-starting/finishing יודעים איזו ריצה זו
+      const isDiag = phase === "diagnose" || d.kind === "diagnose";
+      const isNotch = !isDiag && (phase === "notch" || d.kind === "notch");
+      const isAtis = !isDiag && !isNotch && (phase === "atis" || ref === "atis");
+      const ph = {
+        starting: "מכין — עוצר את השמע ופותח את ה-SDR…",
+        listening: "מקשיב ל-" + rfcFreq(d.freq),
+        atis: "מודד על ATIS ‏" + rfcFreq(d.freq || RFC_ATIS_FREQ),
+        notch: "משווה מסנן FM כבוי/דלוק ב-" + rfcFreq(d.freq),
+        diagnose: "🔧 אבחון חומרה רץ",
+        finishing: "מסיים ומנתח…",
+        restoring: "מחזיר את המקלט למצבו הקודם…",
+      }[phase] || "בדיקת RF רצה";
+      $("rfcPhase").textContent = ph;
+      $("rfcTime").textContent = isDiag ? rfcMmss(el) : rfcMmss(el) + " / " + rfcMmss(hard);
+      // מה עוצר את הבדיקה — במילים, כדי ש"עוד לא נגמר" לא ייראה כתקלה
+      $("rfcUntil").textContent = isDiag
+        ? "כ-90 שניות. התוצאה היא קובץ לשליחה — לא המלצה."
+        : isAtis ? "ATIS: ממשיכים עד " + bidi("20") + " בלוקים או " + bidi("30") + " שניות."
+        : isNotch ? "ממשיכים עד שיש מספיק זוגות מדידה (עד 3 דקות)."
+        : "ממשיכים עד שיש מספיק נתונים (עד 3 דקות).";
+      // התקדמות לעבר היעד הסטטיסטי (לא הזמן): progress מהשרת, או החישוב שלו כגיבוי
+      let prog = rfcF(d, "progress");
+      const tx = rfcF(d, "tx_captured") || 0, txT = rfcF(d, "tx_target") || 0;
+      const b = rfcF(d, "full_blocks") || 0, bT = rfcF(d, "blocks_target") || 0;
+      const pr = rfcF(d, "pairs") || 0, prT = rfcF(d, "pairs_target") || 0;
+      if (typeof prog !== "number") {
+        prog = isNotch ? (prT ? pr / prT : 0) : (bT ? b / bT : 0);
+        if (!isNotch && txT) prog = Math.min(prog, tx / txT);
+      }
+      if (isDiag) prog = Math.min(1, el / 90);
+      const pct = Math.round(100 * Math.max(0, Math.min(1, prog)));
+      $("rfcBarFill").style.width = pct + "%";
+      $("rfcBarWrap").setAttribute("aria-valuenow", String(pct));
+      $("rfcBarProg").style.width = pct + "%";
+      let cnt = "";
+      if (isDiag) cnt = "";
+      else if (isNotch) cnt = "זוגות: " + bidi(pr + "/" + (prT || "?"));
+      else if (isAtis) cnt = "בלוקים: " + bidi(b + "/" + (bT || 20));
+      else cnt = "שידורים: " + bidi(tx + "/" + (txT || 3)) + " · בלוקים: " + bidi(b + "/" + (bT || 12));
+      // היעד המספרי הושג אבל ההשוואה עוד לא מובהקת — אומרים את זה במפורש (השרת: progress 0.99)
+      if (!isDiag && prog >= 0.99 && rfcF(d, "stat_ready") === false)
+        cnt += " · היעד המספרי הושג, ממשיכים עד שההשוואה מובהקת";
+      $("rfcCounters").textContent = cnt;
+      $("rfcCounters").classList.toggle("hidden", !cnt);
+      renderRfcChips(d);
+      // שורת מצב: רק נשא/שקט משנים אותה (edge/invalid — בלי שינוי, מפרט §7.3)
+      const slot = rfcF(d, "last_slot");
+      const stEl = $("rfcStatus");
+      if (isDiag) { stEl.textContent = "מודד את התנהגות החומרה (בלי המלצה)"; stEl.className = "rfc-status"; }
+      else if (slot === "carrier") { stEl.textContent = "📡 שידור! מודד אותו משפט בכל הרמות…"; stEl.className = "rfc-status car"; }
+      else if (slot === "silence") { stEl.textContent = "שקט — מודד רצפת רעש ועומס סביבתי"; stEl.className = "rfc-status"; }
+      else if (!stEl.textContent || phase === "starting") { stEl.textContent = phase === "starting" ? "" : "ממתין לנתונים…"; stEl.className = "rfc-status"; }
+      // רטט בעליית נשא (התחלת שידור או שידור נוסף שנמדד)
+      if ((slot === "carrier" && rfcPrevSlot !== "carrier") || tx > rfcPrevTx) {
+        try { navigator.vibrate && navigator.vibrate(80); } catch (e) {}
+      }
+      rfcPrevSlot = slot; rfcPrevTx = tx;
+      // ATIS: הצעה בלבד, לעולם לא אוטומטית (design §7.1); "המשך לחכות" זוכר את הריצה
+      const offer = rfcF(d, "offer_atis") === true && rfcAtisDismissed !== d.run_id;
+      $("rfcAtisFreq").textContent = rfcFreq(RFC_ATIS_FREQ);
+      $("rfcAtisOffer").classList.toggle("hidden", !offer);
+      $("rfcPlayerNote").textContent = rfcPlay ? "⏸ מושהה לבדיקת RF — השמע יחזור לבד בסופה" : "השמע עצור בזמן הבדיקה";
+      $("rfcFinish").textContent = isDiag ? "⏹ עצור את האבחון" : "⏹ עצור עכשיו ותן תוצאה";
+      $("rfcFinish").disabled = phase === "finishing" || phase === "restoring";
+      // סרגל גלובלי
+      $("rfcBarTitle").textContent = (isDiag ? "🔧 אבחון חומרה רץ · " : "🩺 בדיקת RF רצה · ") + rfcMmss(el);
+      $("rfcBarSub").textContent = isDiag ? "השמע עצור" : (cnt ? cnt + " · " : "") + "השמע עצור";
+      rfcNetRender();
+    }
+    function rfcNetRender() {
+      $("rfcNet").classList.toggle("hidden", !(rfcRunning && netDisconnected));
+    }
+
+    function rfcAppendList(box, title, items, cls) {
+      if (!items.length) return;
+      const wrap = rfcEl("div", cls || null);
+      wrap.appendChild(rfcEl("b", null, title));
+      const ul = rfcEl("ul");
+      items.forEach((t) => ul.appendChild(rfcEl("li", null, t)));
+      wrap.appendChild(ul);
+      box.appendChild(wrap);
+    }
+    function rfcTable(head, rows) {
+      const wrap = rfcEl("div", "rfc-tbl-wrap"), t = rfcEl("table", "rfc-tbl");
+      const tr = rfcEl("tr");
+      head.forEach((h) => tr.appendChild(rfcEl("th", null, h)));
+      const th = rfcEl("thead"); th.appendChild(tr); t.appendChild(th);
+      const tb = rfcEl("tbody");
+      rows.forEach((cells) => {
+        const r = rfcEl("tr");
+        cells.forEach((c, i) => r.appendChild(rfcEl("td", i > 0 && i < head.length - 1 ? "num" : null, c)));
+        tb.appendChild(r);
+      });
+      t.appendChild(tb); wrap.appendChild(t);
+      return wrap;
+    }
+    function rfcSelfChecks(sc) {
+      const dl = rfcEl("dl", "rfc-sc");
+      const add = (k, v) => { dl.appendChild(rfcEl("dt", null, k)); dl.appendChild(rfcEl("dd", null, v)); };
+      const tel = { ok: "פעילה", silent: "שקטה — אף שורה לאורך הבדיקה", absent: "חסרה (הדרייבר בלי ה-patch)",
+                    no_handler: "לא נרשמה" }[sc.telemetry] || "לא ידוע";
+      add("טלמטריית עומס", tel);
+      add("עומס כש-AGC כבוי", sc.overload_semantics_verified ? "אומת על החומרה" : "לא אומת");
+      const s = sc.settle || {};
+      add("התייצבות אחרי החלפה", s.suspect ? "⚠ חשד: המאגר הראשון שונה (" + bidi("p=" + rfcP(s.p) + ", n=" + s.n) + ")"
+          : Number.isFinite(s.n) && s.n > 0 ? "לא נמצא חשד (" + bidi("n=" + s.n) + ")" : "לא נבדק (מעט נתוני שקט)");
+      add("מאגרי מגן", (sc.guard_buffers != null ? bidi(String(sc.guard_buffers)) : "?") + (sc.guard_verified ? " · מאומת" : " · לא מאומת"));
+      add("overflow / gr timeout", bidi((sc.overflows ?? "?") + " / " + (sc.gr_timeouts ?? "?")));
+      if (typeof sc.invalid_frac === "number") add("מדידות שנפסלו", bidi(Math.round(sc.invalid_frac * 100) + "%"));
+      add("מעבד (p50/p95)", bidi(rfcNum(sc.proc_ms_p50, 1) + " / " + rfcNum(sc.proc_ms_p95, 1) + " ms") + (sc.light_mode ? " · מצב קל" : ""));
+      if (sc.rate_measured != null) add("קצב נמדד", bidi(String(sc.rate_measured)));
+      add("קוד שיא / רוויה", bidi((sc.peak_code_max ?? "—") + " / " + (sc.rail_code ?? "?"))
+          + (sc.rail_source === "verified" ? " · מאומת" : " · לפי הדרייבר"));
+      add("bias-T", sc.bias_t_forced_off === true ? "היה דלוק — כובה לבדיקה" : sc.bias_t_forced_off === false ? "כבוי" : "—");
+      add("מסנן FM (readback)", sc.notch_readback_ok === true ? "תואם" : sc.notch_readback_ok === false ? "⚠ לא תואם" : "—");
+      if (sc.proxy_check) add("רעש שכנים מול רעש אמיתי", "הפרש " + bidi(rfcNum(sc.proxy_check.median_diff, 1) + " dB")
+          + " (" + bidi("U=" + rfcNum(sc.proxy_check.u, 1)) + ")");
+      if (sc.hw) add("חומרה", bidi(typeof sc.hw === "string" ? sc.hw : JSON.stringify(sc.hw)));
+      add("פרמטרים מאומתים", sc.verified ? "כן" : "לא — 🧪 ניסיוני");
+      return dl;
+    }
+    // טקסט לשיתוף (📋) — אותו תוכן כמו הכרטיס, בלי סימני הבידוד
+    function rfcResultText(r, d) {
+      const strip = (t) => String(t).replace(/[⁨⁩]/g, "");
+      const L = ["AIR-AM 🩺 בדיקת RF · " + (r.run_id || "?") + " · " + (typeof r.freq === "number" ? r.freq.toFixed(3) : "?") + " MHz",
+        strip(rfcHeadline(r, d.restore || r.restore)[0]), "רמה: " + strip(rfcLevelBadge(r)[0])];
+      (r.evidence || []).map(rfcEvidenceText).filter(Boolean).forEach((t) => L.push("• " + strip(t)));
+      (r.per_state || []).forEach((p) => L.push("LNA " + lnaStep(p.lna) + "/9: CNR " + rfcNum(p.cnr_median, 1)
+        + " · רעש " + rfcNum(p.noise_dbfs, 1) + " dBFS · עומס " + strip(rfcObs(p.overload, p.op_ovl))
+        + " · חיתוך " + strip(rfcObs(p.clip, p.op_clip)) + " · אבד " + (p.lost ?? 0)));
+      (r.untestable || []).forEach((u) => L.push("ⓘ " + strip(rfcUntestableText(u))));
+      return L.join("\n");
+    }
+    async function rfcCopy(text) {
+      try {
+        if (window.isSecureContext && navigator.clipboard) { await navigator.clipboard.writeText(text); showToast("התוצאה הועתקה"); return; }
+      } catch (e) { /* נופלים לשיטה הישנה */ }
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.setAttribute("readonly", ""); ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      let ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) {}
+      ta.remove();
+      showToast(ok ? "התוצאה הועתקה" : text);   // ב-HTTP בלי הרשאה: לפחות מציגים את הטקסט
+    }
+
+    function renderRfcResult(d) {
+      const box = $("rfcResult"), r = d.result;
+      if (!r || rfcRunning) { box.classList.add("hidden"); box.textContent = ""; rfcResKey = null; return; }
+      const restore = d.restore || r.restore || null;
+      const gs = lastGainState || {};
+      const key = JSON.stringify([r.run_id, r.ended_at, r.headline, r.level, restore, rfcKeepRun === r.run_id,
+                                  gs.agc, gs.fm_notch, gs.rf_gain, gs.if_gain, current, rfcAvail, sdrOff]);
+      if (key === rfcResKey) return;
+      rfcResKey = key;
+      box.textContent = "";
+      const isNotch = r.phase === "notch", isDiag = r.phase === "diagnose";
+      // כותרת: רמה + הפניה + מתי
+      const hd = rfcEl("div", "rfc-res-hd");
+      const [lvT, lvC] = rfcLevelBadge(r);
+      if (!isDiag) hd.appendChild(rfcEl("span", "rfc-lvl" + (lvC ? " " + lvC : ""), lvT));
+      hd.appendChild(rfcEl("span", null, (isNotch ? "מסנן FM" : isDiag ? "אבחון" : "LNA") + " · " + rfcFreq(r.freq)));
+      if (typeof r.ended_at === "number")
+        hd.appendChild(rfcEl("span", null, bidi(new Date(r.ended_at * 1000).toLocaleString("he-IL",
+          { day: "numeric", month: "numeric", hour: "2-digit", minute: "2-digit" }))));
+      box.appendChild(hd);
+      const [hT, hC] = rfcHeadline(r, restore);
+      box.appendChild(rfcEl("p", "rfc-head" + (hC ? " " + hC : ""), hT));
+      if (r.ref && String(r.ref).indexOf("atis") >= 0)
+        box.appendChild(rfcEl("p", "rfc-sub", "לפי ATIS ‏" + rfcFreq(r.atis_freq || RFC_ATIS_FREQ)
+          + " — משקף את הסביבה בתדר הזה; שידורי המגדל עצמם לא נמדדו"));
+      // אינדיקציה: "כיוון אפשרי" בלי "החל" (החלטת משתמש 5)
+      const ind = r.indication;
+      if (r.level === "indication" && ind && (Number.isInteger(ind.rf_gain) || typeof ind.fm_notch === "boolean")) {
+        const what = isNotch ? (typeof ind.fm_notch === "boolean" ? "מסנן FM " + rfcNotch(ind.fm_notch) : null)
+                             : rfcLna(ind.rf_gain);
+        if (what) box.appendChild(rfcEl("p", "rfc-dir", "כיוון אפשרי: " + what
+          + ". אין מספיק נתונים להחלה אוטומטית — אפשר לשנות ידנית ב" + (isNotch ? "מתג מסנן ה-FM" : "סליידר ה-LNA") + " למעלה."));
+      }
+      // ראיות
+      const ev = (r.evidence || []).map(rfcEvidenceText).filter(Boolean);
+      rfcAppendList(box, "על מה זה מבוסס", ev);
+      // מה לא נבדק — תמיד, גם כשהרשימה מהשרת ריקה (היקף הבדיקה עצמו)
+      const unt = (r.untestable || []).map(rfcUntestableText);
+      if (!isDiag) unt.push("הבדיקה תקפה לתדר, למקום ולשעה שנמדדו — לא מבטיחה דבר לגבי מטוס חלש שלא שידר בזמן הבדיקה; "
+        + "חיבור האנטנה לא נבדק כאן (לזה: 📏 כייל בסיס).");
+      rfcAppendList(box, "ⓘ מה לא נבדק / לא ודאי", unt, "rfc-unt");
+      // טבלת מצבים
+      if (Array.isArray(r.per_state) && r.per_state.length) {
+        const det = rfcEl("details");
+        det.appendChild(rfcEl("summary", null, "טבלת מצבי ה-LNA"));
+        det.appendChild(rfcTable(["LNA", "GR", "IF", "CNR [p25–p75]", "רעש dBFS", "עומס", "חיתוך", "אבד", "הערות"],
+          r.per_state.map((p) => [
+            bidi(lnaStep(p.lna) + "/9"),
+            rfcGr(p.gr_db),
+            bidi((p.ifgr_start ?? "?") + "→" + (p.ifgr_final ?? "?")),
+            p.cnr_median != null ? bidi(rfcNum(p.cnr_median, 1) + " [" + rfcNum(p.cnr_p25, 1) + "–" + rfcNum(p.cnr_p75, 1) + "]") : "—",
+            bidi(rfcNum(p.noise_dbfs, 1)) + (p.noise_ref === "proxy" ? " ≈" : ""),
+            rfcObs(p.overload, p.op_ovl), rfcObs(p.clip, p.op_clip),
+            bidi(String(p.lost ?? 0)),
+            (p.flags || []).map((f) => RFC_FLAG_TEXT[f] || f).join(", "),
+          ])));
+        box.appendChild(det);
+      }
+      if (Array.isArray(r.per_config) && r.per_config.length) {
+        const det = rfcEl("details");
+        det.appendChild(rfcEl("summary", null, "טבלת מסנן ה-FM"));
+        det.appendChild(rfcTable(["מסנן", "CNR", "נשא/שקט", "עומס", "חיתוך", "אבד", ""],
+          r.per_config.map((c) => ["מסנן FM " + rfcNotch(c.fm_notch), bidi(rfcNum(c.cnr_median, 1)),
+            bidi((c.n_carrier || 0) + "/" + (c.n_silence || 0)), rfcObs(c.overload, c.op_ovl),
+            rfcObs(c.clip, c.op_clip), bidi(String(c.lost ?? 0)), ""])));
+        box.appendChild(det);
+      }
+      if (r.selfcheck) {
+        const det = rfcEl("details");
+        det.appendChild(rfcEl("summary", null, "בדיקות עצמיות"));
+        det.appendChild(rfcSelfChecks(r.selfcheck));
+        box.appendChild(det);
+      }
+      // פעולות
+      const act = rfcEl("div", "rfc-btns");
+      const rec = r.recommendation;
+      const cfg = r.config_at_start || {};
+      // אותם תנאים שהשרת אוכף (409) — כדי לא להציע כפתור שיידחה: התדר/AGC/המסנן השתנו
+      const changed = (typeof cfg.freq === "number" && Math.abs(cfg.freq - current) > 0.0005)
+        || (typeof cfg.agc === "boolean" && typeof gs.agc === "boolean" && cfg.agc !== gs.agc)
+        || (!isNotch && typeof cfg.fm_notch === "boolean" && typeof gs.fm_notch === "boolean" && cfg.fm_notch !== gs.fm_notch);
+      // ההמלצה כבר בתוקף (הוחלה, או כוונה לשם ידנית) — גם אחרי reload, כשהדף לא זוכר שהוחלה;
+      // השרת מסרב באותו מצב (409 "כבר בתוקף") — לא מציעים כפתור שיידחה
+      const inEffect = !!rec && Number(gs.rf_gain) === rec.rf_gain
+        && (rec.if_gain == null || gs.agc !== false || Number(gs.if_gain) === rec.if_gain)
+        && (typeof rec.fm_notch !== "boolean" || gs.fm_notch === rec.fm_notch);
+      const canApply = (r.level === "fact" || r.level === "stat") && rec && r.apply_allowed !== false
+        && rec.changes !== false && rfcKeepRun !== r.run_id && !inEffect;
+      if ((r.level === "fact" || r.level === "stat") && rec && rec.changes !== false && inEffect && !changed)
+        box.appendChild(rfcEl("p", "rfc-msg ok", "✓ ההמלצה בתוקף."));
+      if (canApply && changed) {
+        box.appendChild(rfcEl("p", "rfc-sub", "⚠ ההגדרות (תדר/AGC/מסנן) השתנו מאז הבדיקה — הרץ שוב כדי להחיל."));
+      } else if (canApply) {
+        let lbl = "החל ";
+        if (isNotch) {
+          lbl += "מסנן FM " + rfcNotch(rec.fm_notch);
+          if (Number.isInteger(rec.rf_gain) && rec.rf_gain !== r.current_state) lbl += " ו-" + rfcLna(rec.rf_gain);
+        } else lbl += rfcLna(rec.rf_gain);
+        if (rec.if_gain != null) lbl += " ו-IF " + bidi(String(rec.if_gain));   // רווח ידני: נקודת ה-IF שנמדדה
+        const ap = rfcEl("button", "primary rfc-apply", lbl);
+        ap.type = "button"; ap.id = "rfcApply";
+        ap.onclick = () => rfcApply(r, ap);
+        act.appendChild(ap);
+        const keep = rfcEl("button", "ghost", "השאר כפי שהוא");
+        keep.type = "button"; keep.id = "rfcKeep";
+        keep.onclick = () => { rfcKeepRun = r.run_id; rfcSetMsg("נשאר ללא שינוי."); renderRfcResult(rfcState || d); };
+        act.appendChild(keep);
+      }
+      const cp = rfcEl("button", "ghost", "📋 העתק תוצאה");
+      cp.type = "button"; cp.onclick = () => rfcCopy(rfcResultText(r, d));
+      act.appendChild(cp);
+      const dl = rfcEl("a", "ghost", isDiag ? "⬇ קובץ האבחון" : "⬇ הורד נתונים");
+      dl.href = isDiag ? "/api/rfcheck/export?kind=diagnose" : "/api/rfcheck/export?kind=rows";
+      dl.setAttribute("download", "");
+      act.appendChild(dl);
+      // השוואת מסנן FM — רק לפי דרישה, אחרי תוצאת LNA (החלטת משתמש 5)
+      const startable = rfcAvail === true && !rfcRunning;
+      if (!isNotch && !isDiag && r.headline !== "error" && startable) {
+        const nb = rfcEl("button", "ghost", "🔁 השווה מסנן FM");
+        nb.type = "button"; nb.id = "rfcNotchBtn";
+        nb.onclick = () => rfcAskStart("notch", { result: r });
+        act.appendChild(nb);
+      }
+      if (Array.isArray(r.refine_suggestion) && r.refine_suggestion.length && startable) {
+        const rb = rfcEl("button", "ghost", "🔎 בדיקה ממוקדת");
+        rb.type = "button"; rb.id = "rfcRefineBtn";
+        rb.title = "מצבים סמוכים שלא נבדקו: " + rfcLnaList(r.refine_suggestion).replace(/[⁨⁩]/g, "");
+        rb.onclick = () => rfcAskStart("lna", { states: r.refine_suggestion });
+        act.appendChild(rb);
+      }
+      box.appendChild(act);
+      if (restore && restore.ok === false && r.headline !== "error")
+        box.appendChild(rfcEl("p", "rfc-msg err", "⚠ השמע לא חזר אוטומטית — מנסה שוב (או לחץ ⏻)"));
+      box.classList.remove("hidden");
+    }
+    async function rfcApply(r, btn) {
+      btn.disabled = true;
+      rfcSetMsg("מחיל…");
+      try {
+        const d = await rfcPost({ action: "apply", run_id: r.run_id });
+        if (!d.ok) {
+          rfcSetMsg("⚠ " + (d.error || "ההחלה נכשלה"), "err");
+          if (d.state) applyGainState(d.state);     // השרת אמר מה רץ בפועל (רולבק/נפילה)
+          btn.disabled = false;
+          return;
+        }
+        // אותו חוזה כמו /api/tune: ‏{ok, ...state}
+        applyGainState(d.state || d);
+        rfcKeepRun = r.run_id;
+        rfcSetMsg("✓ הוחל.", "ok");
+        setStatus("מתחבר לסטרים…", "busy");
+        connectTimer = setTimeout(() => reloadStream(), 1500);
+        pollRfcheck();
+      } catch (e) { rfcSetMsg("⚠ שגיאת רשת — לא ידוע אם הוחל; רענן את הדף.", "err"); btn.disabled = false; }
+    }
+
+    function renderRfcheck(d) {
+      if (!d || d.ok === false && d.available === undefined) return;
+      rfcState = d;
+      const wasRunning = rfcRunning;
+      rfcRunning = !!d.running;
+      if (typeof d.available === "boolean") rfcAvail = d.available;
+      // זמינות
+      const un = $("rfcUnavail");
+      if (rfcAvail === false) {
+        un.textContent = "";
+        const rs = (d.reasons || []).map((x) => RFC_REASON_TEXT[x] || bidi(String(x)));
+        un.append("בדיקת RF לא זמינה" + (rs.length ? ": " + rs.join(", ") : "") + ". להתקנה הרץ על ה-Pi: ");
+        un.appendChild(rfcEl("code", null, d.install_hint || "sudo ./install.sh"));
+        un.append(". עד אז — 📏 כייל בסיס למטה עובד כרגיל.");
+      }
+      un.classList.toggle("hidden", rfcAvail !== false);
+      const exp = !!d.experimental && rfcAvail !== false;
+      $("rfcBadge").classList.toggle("hidden", !exp);
+      $("rfcExperimental").classList.toggle("hidden", !exp);
+      if (exp && !$("rfcExpList").childElementCount)
+        RFC_UNVERIFIED.forEach((t) => $("rfcExpList").appendChild(rfcEl("li", null, t)));
+      $("rfcDiagDl").classList.toggle("hidden", !d.diagnose_available);
+      // ריצה
+      document.body.classList.toggle("rfc-on", rfcRunning);
+      $("rfcBar").classList.toggle("hidden", !rfcRunning);
+      $("rfcProgress").classList.toggle("hidden", !rfcRunning);
+      if (rfcRunning) renderRfcProgress(d);
+      else { rfcPrevSlot = null; rfcPrevTx = 0; }
+      if (wasRunning && !rfcRunning) rfcOnDone(d);
+      if (!rfcRunning && d.error && !d.result) rfcSetMsg("⚠ " + d.error, "err");
+      renderRfcResult(d);
+      rfcSyncButtons();
+    }
+    async function pollRfcheck() {
+      if (rfcInFlight) return;
+      rfcInFlight = true;
+      try {
+        const res = await fetchTimeout("/api/rfcheck");
+        if (res.status === 404) {        // שרת ישן בלי הפיצ'ר: כמו "לא זמינה", בלי לשבור את הכיול הישן
+          renderRfcheck({ ok: true, available: false, reasons: [], running: false });
+          return;
+        }
+        renderRfcheck(await res.json());
+      } catch (e) { rfcNetRender(); /* המחזור הבא ינסה שוב; #connChip מדווח על ניתוק */ }
+      finally { rfcInFlight = false; }
+    }
+    $("rfcStart").onclick = () => rfcAskStart("lna");
+    $("rfcDiagBtn").onclick = () => rfcAskStart("diagnose");
+    $("rfcAtisYes").onclick = () => { $("rfcAtisOffer").classList.add("hidden"); rfcAction("atis"); };
+    $("rfcAtisNo").onclick = () => { rfcAtisDismissed = rfcState && rfcState.run_id; $("rfcAtisOffer").classList.add("hidden"); };
+    const rfcStop = () => {
+      if (rfcState && (rfcState.phase === "diagnose" || rfcState.kind === "diagnose")) {
+        if (confirm("לעצור את האבחון? קובץ האבחון לא יישמר.")) rfcAction("abort");
+        return;
+      }
+      rfcAction("finish");
+    };
+    $("rfcFinish").onclick = rfcStop;
+    $("rfcBarFinish").onclick = rfcStop;
+    $("rfcAbort").onclick = () => {
+      if (confirm("לבטל את הבדיקה? לא תישמר תוצאה, והמקלט יחזור למצבו הקודם.")) rfcAction("abort");
+    };
+    // רץ: כל שנייה בכל תצוגה (מזין את #rfcBar). לא רץ: רק בתצוגת הקול, לאט — כדי לגלות
+    // בדיקה שהופעלה מטלפון אחר / תוצאה שמחכה. חזרה לטאב ⇒ רענון מיידי.
+    setInterval(() => { rfcNetRender(); if (!document.hidden && rfcRunning) pollRfcheck(); }, 1000);
+    setInterval(() => { if (!document.hidden && !rfcRunning && appMode === "voice") pollRfcheck(); }, 15000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) pollRfcheck(); });
+    pollRfcheck();
 
     /* ---------- מפת המסלולים (SVG בקנה מידה) ---------- */
     // לשמור מסונכרן עם RUNWAYS ב-webtune/adsb.py: כיוון -> [thr lat, lon, קורס אמיתי]
@@ -4523,6 +5428,14 @@
       if (document.hidden || applyModeInFlight) return;
       try {
         const h = await fetchJSON("/api/health");
+        // 🩺 בדיקת RF מחזיקה את ה-SDR זמנית (rtl_airband עצור בכוונה): בלי היציאה הזאת
+        // live=null היה הופך את הממשק ל"מקלט בכיבוי" ומסתיר את פאנל הקול באמצע הבדיקה.
+        // הבדיקה מחזירה את המצב הקודם בעצמה — הדגלים נשארים כפי שהיו עד שהיא מסתיימת.
+        if (h.rf_check && h.rf_check.running) {
+          if (!rfcRunning) pollRfcheck();     // הופעלה מטלפון אחר => מציגים את הסרגל הגלובלי
+          if (appMode === "home") renderHome();
+          return;
+        }
         // הדגלים משקפים את השירות שרץ *בפועל* (לא את הכוונה השמורה) — מצב שקרס
         // לא מוצג כ"מאזין"; h.app_mode (מציאות-או-כוונה) משמש רק להודעת התקלה.
         const s = h.services || {};
@@ -4579,7 +5492,7 @@
       segSet("modeSeg", mode);
       renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acars/vdl2/satcom.active — עדכן בכל מעבר
       if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); pollExperiment(); }
-      if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); pollRflog(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
+      if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); pollRflog(); pollRfcheck(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
       if (mode === "acars") acarsFm.poll();
       if (mode === "vdl2") vdl2Fm.poll();
       if (mode === "acars") acars.show(); else acars.hide();   // תצוגת ACARS מנוהלת בפקטורי (כמו VDL2/SATCOM)

@@ -801,3 +801,392 @@ def test_tune_omits_fm_notch_when_state_never_loaded(page):
                              r.value = 3; r.dispatchEvent(new Event('change')); }""")
     expect(page.locator("#status")).not_to_contain_text("מכוונן…", timeout=10000)
     assert sent and "fm_notch" not in sent[-1], sent
+
+
+# --- PR 2 (v2.27.0): 🩺 בדיקת RF (GET/POST /api/rfcheck) --------------------------
+# ה-API ממוקף לפי המפרט (§6.5–6.8) וסכמת התוצאה של rfcheck_analysis.analyze. כל הבדיקות
+# ב-360px (הטלפון הצר): בלי גלילה אופקית, כפתורים ≥44px ("החל" 52px).
+
+_RFC_STATES = [0, 2, 4, 6, 7, 8]
+_RFC_GR = {0: 0, 2: 12, 4: 20, 6: 32, 7: 38, 8: 57}
+
+
+def _rfc_status(**kw):
+    st = {"ok": True, "available": True, "reasons": [], "install_hint": "sudo ./install.sh",
+          "telemetry_expected": True, "experimental": True, "running": False, "run_id": None,
+          "phase": None, "ref": None, "freq": None, "elapsed": 0, "soft_max": 180,
+          "hard_max": 180, "can_extend": False, "states": [], "current_state": None,
+          "last_slot": None, "tx_captured": 0, "tx_target": 3, "full_blocks": 0,
+          "blocks_target": 12, "no_traffic_sec": None, "offer_atis": False, "result": None,
+          "diagnose_available": False, "error": None, "restore": None}
+    st.update(kw)
+    return st
+
+
+def _rfc_running(slot="silence", tx=0, blocks=0, elapsed=12, offer=False, ncar=0, **kw):
+    states = [{"lna": s, "label": f"{9 - s}/9", "gr_db": _RFC_GR[s], "ifgr": 40,
+               "n_carrier": ncar, "n_silence": 5, "overload": None, "clip": "not_observed",
+               "current": s == 4, "production": s == 0} for s in _RFC_STATES]
+    base = dict(running=True, run_id="r1", phase="listening", ref="tower", freq=132.5,
+                elapsed=elapsed, states=states, current_state=4, last_slot=slot,
+                tx_captured=tx, full_blocks=blocks, offer_atis=offer,
+                n_carrier_rows=ncar, progress=min(tx / 3, blocks / 12))
+    base.update(kw)
+    return _rfc_status(**base)
+
+
+def _rfc_result(**kw):
+    per_state = [{"lna": s, "label": f"{9 - s}/9", "gr_db": _RFC_GR[s], "ifgr_start": 40,
+                  "ifgr_final": 40, "clamped": None, "ratchets": 0, "valid": 20, "invalid": 0,
+                  "n_carrier": 12, "n_silence": 8, "n_edge": 0, "noise_ref": "silence",
+                  "noise_dbfs": -60.0, "cnr_median": 30.0, "cnr_p25": 29.0, "cnr_p75": 31.0,
+                  "op_clip": 0, "op_ovl": None, "lost": 0, "probe_clip": 0, "probe_ovl": None,
+                  "env_ovl_silence": None, "overload": None, "clip": "not_observed",
+                  "flags": ["current"] if s == 0 else []} for s in _RFC_STATES]
+    r = {"v": 1, "run_id": "r1", "phase": "lna", "ref": "tower", "freq": 132.5,
+         "atis_freq": None, "started_at": 1_790_000_000, "ended_at": 1_790_000_090,
+         "ended": "stopped", "config_at_start": {"freq": 132.5, "mod": "am", "agc": True,
+                                                  "if_gain": 40, "rf_gain": 0, "fm_notch": False},
+         "states": _RFC_STATES, "current_state": 0, "level": "stat",
+         "headline": "reduce_gain_tie", "headline_params": {"x": 0, "y": 6},
+         "recommendation": {"rf_gain": 6, "if_gain": None, "fm_notch": None, "basis": "stat",
+                            "reasons": [], "changes": True},
+         "indication": None, "refine_suggestion": None, "apply_allowed": True,
+         "evidence": [{"code": "tie", "states": [0, 2, 4, 6]}],
+         "per_state": per_state, "comparisons": [], "n": 12, "best": 4, "tie_set": [0, 2, 4, 6],
+         "transmissions": 3, "tx_captured": 3, "full_blocks": 12, "cycles": 30,
+         "selfcheck": {"telemetry": "absent", "overload_semantics_verified": False,
+                       "settle": {"suspect": False, "p": None, "n": 0, "median_db": None},
+                       "guard_buffers": 1, "guard_verified": False, "overflows": 0,
+                       "gr_timeouts": 0, "invalid_frac": 0.0, "proc_ms_p50": 20.0,
+                       "proc_ms_p95": 30.0, "light_mode": False, "rate_measured": 2560000,
+                       "rail_code": 32767, "rail_source": "driver_source", "peak_code_max": 9000,
+                       "bias_t_forced_off": False, "notch_readback_ok": True,
+                       "proxy_check": None, "hw": "RSP1B", "verified": False},
+         "untestable": [{"code": "soft_compression_tower"}, {"code": "settle_unverified"},
+                        {"code": "telemetry_absent", "status": "absent"}],
+         "restore": {"ok": True, "error": None}}
+    r.update(kw)
+    return r
+
+
+def _rfc_mount(page, holder, sent, extra=None):
+    """‏holder["st"] = תשובת GET הנוכחית (הבדיקה מחליפה אותה בין שלבים); POST נרשם ל-sent
+    ומוחזר דרך holder["post"](body) אם הוגדר, אחרת ok + הסטטוס."""
+    def rfcheck(route, url):
+        req = route.request
+        if req.method == "POST":
+            body = json.loads(req.post_data or "{}")
+            sent.append(body)
+            resp = holder.get("post", lambda b: {"ok": True, **holder["st"]})(body)
+            route.fulfill(status=200 if resp.get("ok") else 409,
+                          content_type="application/json", body=json.dumps(resp))
+            return
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps(holder["st"]))
+    ov = {"/api/rfcheck": rfcheck}
+    ov.update(extra or {})
+    _mount(page, overrides=ov)
+    page.click("#modeSeg button[data-v=voice]")
+
+
+def _rfc_refresh(page):
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+
+
+def test_rfcheck_unavailable_keeps_old_calibrate_button(page):
+    """לא מותקן (python3-soapysdr חסר) ⇒ אין 🩺, הסיבה ופקודת ההתקנה גלויות, והכיול הישן
+    נשאר בצורתו הרגילה (קריטריון קבלה 8)."""
+    _phone(page)
+    holder = {"st": _rfc_status(available=False, reasons=["soapysdr_missing"], experimental=True)}
+    _rfc_mount(page, holder, [])
+    expect(page.locator("#rfcUnavail")).to_be_visible()
+    expect(page.locator("#rfcUnavail")).to_contain_text("python3-soapysdr")
+    expect(page.locator("#rfcUnavail")).to_contain_text("sudo ./install.sh")
+    expect(page.locator("#rfcStart")).to_be_hidden()
+    expect(page.locator("#rfcBadge")).to_be_hidden()
+    cal = page.locator("#voiceFmCalBtn")
+    expect(cal).to_be_visible()
+    expect(cal).to_have_class(re.compile(r"\bghost\b"))
+    expect(cal).to_contain_text("כייל בסיס עכשיו")
+    _no_hscroll(page)
+
+
+def test_rfcheck_primary_button_keeps_baseline_link_and_experimental_list(page):
+    """החלטת משתמש 2: 🩺 הוא הכפתור הראשי, אבל "📏 כייל בסיס" נשאר כקישור משני קטן
+    ושורת הבסיס/פסק-הדין לא מוסתרת — והקישור עדיין מכייל. "🧪 ניסיוני" + רשימת מה שטרם
+    אומת מוצגים כל עוד experimental. ואין כפתור "הארך" (החלטת משתמש 1)."""
+    _phone(page)
+    cal_sent = []
+
+    def check(route, url):
+        cal_sent.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "noise": -55.0, "verdict": "ok",
+                                       "baseline": {"noise": -55.0, "lna": 0, "fm_notch": False}}))
+    holder = {"st": _rfc_status()}
+    _rfc_mount(page, holder, [], extra={"/api/antenna/check": check})
+    start = page.locator("#rfcStart")
+    expect(start).to_be_visible()
+    assert start.bounding_box()["height"] >= 52
+    cal = page.locator("#voiceFmCalBtn")
+    expect(cal).to_be_visible()
+    expect(cal).to_have_class(re.compile(r"\bfm-link\b"))
+    expect(cal).to_have_text("📏 כייל בסיס")
+    expect(page.locator("#voiceFmBaseline")).to_be_visible()
+    expect(page.locator("#rfcBadge")).to_be_visible()
+    page.click("#rfcExperimental > summary")
+    expect(page.locator("#rfcExpList li")).to_have_count(6)
+    expect(page.locator("#rfcExpList")).to_contain_text("AGC כבוי")
+    assert "עוד דקה" not in page.inner_text("body")       # טקסט גלוי, לא הערות בקוד
+    cal.click()
+    expect(page.locator("#voiceFmBaseline")).to_contain_text("-55.0")
+    assert cal_sent and cal_sent[-1]["calibrate"] is True
+    _no_hscroll(page)
+
+
+def test_rfcheck_start_progress_silence_carrier_and_audio_resume(page):
+    """מקצה לקצה: דף אישור ("עד 3 דקות", מספר המצבים) ⇒ start ⇒ השמע נעצר ⇒ התקדמות
+    בשקט ("ממשיכים עד שיש מספיק נתונים", מונים, צ'יפ לכל מצב עם תווית הסליידר) ⇒ נשא
+    (שורת מצב + רטט) ⇒ סיום עם שחזור ⇒ השמע חוזר כי ניגן לפני (מפרט §7.4)."""
+    _phone(page)
+    sent = []
+    holder = {"st": _rfc_status()}
+    holder["post"] = lambda b: ({"ok": True, **_rfc_running()} if b.get("action") == "start"
+                                else {"ok": True, **holder["st"]})
+    _rfc_mount(page, holder, sent)
+    expect(page.locator("#rfcStart")).to_be_visible()
+    page.evaluate("""() => {
+        const p = document.getElementById('player');
+        window.__paused = false; window.__pauses = 0; window.__plays = 0; window.__vib = 0;
+        Object.defineProperty(p, 'paused', {get: () => window.__paused, configurable: true});
+        p.pause = () => { window.__paused = true; window.__pauses++; };
+        p.play = () => { window.__plays++; window.__paused = false; return Promise.resolve(); };
+        p.load = () => {};
+        navigator.vibrate = () => { window.__vib++; return true; };
+    }""")
+    page.click("#rfcStart")
+    sheet = page.locator("#rfcConfirm")
+    expect(sheet).to_be_visible()
+    expect(sheet).to_contain_text("עד 3 דקות")
+    expect(sheet).to_contain_text("6")                     # {0,2,4,6,7,8} ∪ {0} = 6 מצבים
+    expect(sheet).to_contain_text("🧪 ניסיוני")
+    assert page.locator("#rfcConfirmOk").bounding_box()["height"] >= 44
+    _no_hscroll(page)
+    holder["st"] = _rfc_running()
+    page.click("#rfcConfirmOk")
+    expect(page.locator("#rfcProgress")).to_be_visible()
+    assert sent[0] == {"action": "start", "phase": "lna"}, sent
+    assert page.evaluate("window.__pauses") >= 1
+    expect(page.locator("#rfcUntil")).to_have_text("ממשיכים עד שיש מספיק נתונים (עד 3 דקות).")
+    expect(page.locator("#rfcCounters")).to_contain_text("שידורים:")
+    expect(page.locator("#rfcCounters")).to_contain_text("0/3")
+    expect(page.locator("#rfcCounters")).to_contain_text("0/12")
+    expect(page.locator("#rfcChips .rfc-chip")).to_have_count(6)
+    expect(page.locator("#rfcChips .rfc-chip").first).to_contain_text("9/9")   # LNA state 0
+    expect(page.locator("#rfcChips .rfc-chip.cur")).to_contain_text("5/9")     # state 4 נמדד עכשיו
+    expect(page.locator("#rfcStatus")).to_contain_text("שקט")
+    expect(page.locator("#rfcPlayerNote")).to_contain_text("מושהה לבדיקת RF")
+    expect(page.locator("#rfcTime")).to_contain_text("3:00")
+    expect(page.locator("#rfcBar")).to_be_visible()
+    expect(page.locator("#rfcStart")).to_be_hidden()
+    _no_hscroll(page)
+
+    holder["st"] = _rfc_running(slot="carrier", tx=1, blocks=4, ncar=4)
+    expect(page.locator("#rfcStatus")).to_contain_text("📡 שידור!", timeout=5000)
+    expect(page.locator("#rfcCounters")).to_contain_text("1/3")
+    assert page.evaluate("window.__vib") >= 1
+
+    holder["st"] = _rfc_status(run_id="r1", result=_rfc_result(), restore={"ok": True, "error": None})
+    expect(page.locator("#rfcResult")).to_be_visible(timeout=5000)
+    expect(page.locator("#rfcProgress")).to_be_hidden()
+    expect(page.locator("#rfcBar")).to_be_hidden()
+    expect(page.locator("#rfcMsg")).to_contain_text("✓ השמע חזר")
+    page.wait_for_function("window.__plays >= 1", timeout=5000)
+
+
+def test_rfcheck_no_traffic_offers_atis(page):
+    """30 שניות בלי שידור ⇒ הצעה (לעולם לא אוטומטית) לעבור ל-ATIS ‏132.5; "עבור" שולח atis,
+    "המשך לחכות" מסתיר את ההצעה לריצה הזאת."""
+    _phone(page)
+    sent = []
+    holder = {"st": _rfc_running(elapsed=31, offer=True)}
+    _rfc_mount(page, holder, sent)
+    offer = page.locator("#rfcAtisOffer")
+    expect(offer).to_be_visible()
+    expect(offer).to_contain_text("132.500")
+    expect(offer).to_contain_text("30 שניות")
+    _no_hscroll(page)
+    page.click("#rfcAtisNo")
+    expect(offer).to_be_hidden()
+    # רינדור נוסף של אותה ריצה (הזמן מוכיח שהגיע) — ההצעה שנדחתה לא חוזרת. בלי sleep.
+    holder["st"] = _rfc_running(elapsed=33, offer=True)
+    expect(page.locator("#rfcTime")).to_contain_text("0:33", timeout=5000)
+    expect(offer).to_be_hidden()
+    # ריצה אחרת ⇒ הצעה חדשה; "עבור" שולח atis, והשרת עובר לשלב ATIS (בלי הצעה)
+    holder["st"] = _rfc_running(elapsed=40, offer=True, run_id="r2")
+    expect(offer).to_be_visible(timeout=5000)
+
+    def post(b):
+        holder["st"] = _rfc_running(elapsed=41, phase="atis", ref="atis", run_id="r3")
+        return {"ok": True, **holder["st"]}
+    holder["post"] = post
+    page.click("#rfcAtisYes")
+    expect(page.locator("#rfcPhase")).to_contain_text("ATIS", timeout=5000)
+    expect(page.locator("#rfcUntil")).to_contain_text("20")
+    expect(offer).to_be_hidden()
+    assert {"action": "atis"} in sent, sent
+
+
+def test_rfcheck_global_bar_visible_in_home_and_finishes(page):
+    """בזמן ריצה הסרגל הגלובלי מופיע בכל תצוגה (גם בבית), ו-"⏹ סיים" שולח finish."""
+    _phone(page)
+    sent = []
+    holder = {"st": _rfc_running(elapsed=65)}
+    _rfc_mount(page, holder, sent)
+    page.click("#modeSeg button[data-v=home]")
+    bar = page.locator("#rfcBar")
+    expect(bar).to_be_visible()
+    expect(page.locator("#rfcBarTitle")).to_contain_text("1:05")
+    def post(b):
+        holder["st"] = _rfc_running(elapsed=66, phase="finishing")
+        return {"ok": True, **holder["st"]}
+    holder["post"] = post
+    page.click("#rfcBarFinish")
+    expect(page.locator("#rfcBarTitle")).to_contain_text("1:06", timeout=5000)
+    assert {"action": "finish"} in sent, sent
+    _no_hscroll(page)
+
+
+def test_rfcheck_indication_shows_direction_without_apply(page):
+    """אינדיקציה ⇒ "כיוון אפשרי" בלי כפתור "החל" (החלטת משתמש 5); הסליידר נשאר להחלה ידנית.
+    "🔁 השווה מסנן FM" מוצע לפי דרישה בלבד."""
+    _phone(page)
+    res = _rfc_result(level="indication", headline="indication",
+                      headline_params={"n": 3, "y": 6}, recommendation=None,
+                      indication={"rf_gain": 6, "best": 4, "states": [4, 6], "n": 3, "reasons": []},
+                      apply_allowed=False, n=3,
+                      untestable=[{"code": "soft_compression_tower"}, {"code": "few_blocks"}])
+    holder = {"st": _rfc_status(run_id="r1", result=res)}
+    _rfc_mount(page, holder, [])
+    box = page.locator("#rfcResult")
+    expect(box).to_be_visible()
+    expect(box).to_contain_text("אינדיקציה בלבד")
+    expect(box.locator(".rfc-dir")).to_contain_text("כיוון אפשרי")
+    expect(box.locator(".rfc-dir")).to_contain_text("LNA 3/9")
+    expect(page.locator("#rfcApply")).to_have_count(0)
+    expect(box).to_contain_text("דחיסה רכה")
+    expect(page.locator("#rfcNotchBtn")).to_be_visible()
+    _no_hscroll(page)
+
+
+def test_rfcheck_stat_result_apply_and_unknown_overload(page):
+    """רמת stat ⇒ כפתור "החל LNA y/9" (52px) שולח apply עם run_id ומיישר את הסליידר מהתשובה.
+    עמודת העומס בלי טלמטריה ⇒ "לא נבדק" (לעולם לא "לא נצפה"/ירוק); "מה לא נבדק" כולל
+    תמיד דחיסה רכה על המגדל."""
+    _phone(page)
+    sent = []
+    holder = {"st": _rfc_status(run_id="r1", result=_rfc_result())}
+    state_after = {**_default_api()["/api/state"], "rf_gain": 6, "fm_notch": False}
+    holder["post"] = lambda b: {"ok": True, **state_after}
+    _rfc_mount(page, holder, sent)
+    box = page.locator("#rfcResult")
+    expect(box).to_be_visible()
+    expect(box.locator(".rfc-lvl")).to_contain_text("השוואה מובהקת")
+    expect(box.locator(".rfc-head")).to_contain_text("LNA 3/9")
+    expect(box).to_contain_text("דחיסה רכה (עיוות הדיבור) לא נבדקת על שידורי המגדל")
+    expect(box).to_contain_text("חיבור האנטנה לא נבדק")
+    box.locator("summary", has_text="טבלת מצבי ה-LNA").click()
+    expect(box.locator(".rfc-tbl")).to_contain_text("לא נבדק")
+    apply = page.locator("#rfcApply")
+    expect(apply).to_be_visible()
+    expect(apply).to_contain_text("החל")
+    expect(apply).to_contain_text("LNA 3/9")
+    assert apply.bounding_box()["height"] >= 52
+    _no_hscroll(page)
+    apply.click()
+    expect(page.locator("#rfcMsg")).to_contain_text("✓ הוחל")
+    assert sent[-1] == {"action": "apply", "run_id": "r1"}, sent
+    expect(page.locator("#rfGainVal")).to_have_text("3/9")
+
+
+def test_rfcheck_recommendation_already_in_effect_hides_apply(page):
+    """אחרי reload הדף לא זוכר שההמלצה כבר הוחלה — ההגדרה החיה (rf_gain=6) היא שמכריעה: בלי
+    "החל" (השרת היה מסרב ב-409 "כבר בתוקף"), עם "✓ ההמלצה בתוקף". וגם: IFGR הוא *הנחתה* —
+    ‏ifgr_clamped_low = רווח כולל *נמוך* מהנוכחי (הטקסט היה הפוך בגרסת הפיתוח)."""
+    _phone(page)
+    res = _rfc_result(untestable=[{"code": "soft_compression_tower"},
+                                  {"code": "ifgr_clamped_low", "states": [8]},
+                                  {"code": "ifgr_clamped_high", "states": [0]}])
+    holder = {"st": _rfc_status(run_id="r1", result=res)}
+    st = {**_default_api()["/api/state"], "rf_gain": 6, "agc": True, "fm_notch": False}
+    _rfc_mount(page, holder, [], extra={"/api/state": st})
+    box = page.locator("#rfcResult")
+    expect(box).to_be_visible()
+    expect(box).to_contain_text("✓ ההמלצה בתוקף")
+    expect(page.locator("#rfcApply")).to_have_count(0)
+    expect(box).to_contain_text("ונחתך — הרווח הכולל שם נמוך מהנוכחי")
+    expect(box).to_contain_text("ונחתך — הרווח הכולל שם גבוה מהנוכחי")
+    _no_hscroll(page)
+
+
+def test_rfcheck_manual_gain_fact_apply_label_includes_if(page):
+    """רווח ידני: "החל" קובע גם את נקודת ה-IF שנמדדה (החלטת משתמש 5) — והתווית אומרת את זה."""
+    _phone(page)
+    res = _rfc_result(level="fact", headline="reduce_gain_overload",
+                      headline_params={"list": [0, 2], "x": 0, "y": 4},
+                      recommendation={"rf_gain": 4, "if_gain": 47, "fm_notch": None,
+                                      "basis": "fact", "reasons": [], "changes": True},
+                      config_at_start={"freq": 132.5, "mod": "am", "agc": False, "if_gain": 40,
+                                       "rf_gain": 0, "fm_notch": False},
+                      evidence=[{"code": "op_clip", "states": [0, 2], "cycles": 3,
+                                 "counts": {"0": 3, "2": 2}}])
+    holder = {"st": _rfc_status(run_id="r1", result=res)}
+    st = {**_default_api()["/api/state"], "agc": False, "fm_notch": False}
+    _rfc_mount(page, holder, [], extra={"/api/state": st})
+    box = page.locator("#rfcResult")
+    expect(box.locator(".rfc-lvl")).to_have_text("עובדה")
+    expect(box.locator(".rfc-head")).to_contain_text("עומס חומרה")
+    expect(box).to_contain_text("חיתוך ADC")
+    apply = page.locator("#rfcApply")
+    expect(apply).to_contain_text("LNA 5/9")
+    expect(apply).to_contain_text("IF")
+    expect(apply).to_contain_text("47")
+    _no_hscroll(page)
+
+
+def test_rfcheck_error_with_failed_restore_is_explicit(page):
+    """כשל + שחזור שנכשל ⇒ אומרים את שניהם במפורש ("השמע לא חזר"), לא "השמע הוחזר"."""
+    _phone(page)
+    res = _rfc_result(level="none", headline="error",
+                      headline_params={"error": "ה-SDR לא נפתח לבדיקה"}, recommendation=None,
+                      apply_allowed=False, error="ה-SDR לא נפתח לבדיקה",
+                      restore={"ok": False, "error": "rtl_airband לא עלה"})
+    holder = {"st": _rfc_status(run_id="r1", result=res,
+                                restore={"ok": False, "error": "rtl_airband לא עלה"})}
+    _rfc_mount(page, holder, [])
+    head = page.locator("#rfcResult .rfc-head")
+    expect(head).to_contain_text("הבדיקה נכשלה: ה-SDR לא נפתח לבדיקה")
+    expect(head).to_contain_text("השמע לא חזר אוטומטית")
+    expect(head).not_to_contain_text("השמע הוחזר")
+    expect(page.locator("#rfcApply")).to_have_count(0)
+    expect(page.locator("#rfcNotchBtn")).to_have_count(0)
+    _no_hscroll(page)
+
+
+def test_rfcheck_notch_compare_is_on_demand_from_result(page):
+    """"🔁 השווה מסנן FM" — אחרי תוצאת LNA, בלחיצה בלבד, עם from_run של התוצאה."""
+    _phone(page)
+    sent = []
+    holder = {"st": _rfc_status(run_id="r1", result=_rfc_result())}
+    def post(b):
+        holder["st"] = _rfc_running(phase="notch")
+        return {"ok": True, **holder["st"]}
+    holder["post"] = post
+    _rfc_mount(page, holder, sent)
+    page.click("#rfcNotchBtn")
+    expect(page.locator("#rfcConfirm")).to_be_visible()
+    expect(page.locator("#rfcConfirm")).to_contain_text("LNA 3/9")
+    page.click("#rfcConfirmOk")
+    expect(page.locator("#rfcProgress")).to_be_visible()
+    assert sent[0] == {"action": "start", "phase": "notch", "from_run": "r1"}, sent

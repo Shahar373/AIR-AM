@@ -31,7 +31,8 @@
 **מה הפרויקט עושה בפועל:**
 - **מצב קול (📻):** בורר תדרים ל-Air band (AM, 118–137 MHz) דרך `rtl_airband` →
   `Icecast2` → נגן הדפדפן. פריסטים לנתב"ג + תדר חופשי, בקרת gain/squelch, מדדי RF
-  חיים (SNR/signal/noise), יומן שידורים + הקלטות MP3, תמלול ATC אופציונלי, METAR.
+  חיים (SNR/signal/noise), יומן שידורים + הקלטות MP3, תמלול ATC אופציונלי, METAR,
+  ו-**🩺 בדיקת RF** — השוואת מצבי ה-LNA על השידורים עצמם, עם המלצה ברמה מוצהרת (§5, §12).
 - **מצב ACARS (📡):** פענוח הודעות נתונים דיגיטליות של מטוסים דרך `acarsdec`,
   הצגה חיה בכרטיסים אחידים, שמירה ל-JSONL, ייצוא CSV/JSON, מפת Leaflet עם שובל מסלול.
 - **מודעוּת מרחבית (תמיד פעיל):** ניתוח ADS-B מקהילה (adsb.lol/adsb.fi) מסיק את
@@ -69,6 +70,16 @@
 דו-כיווני; `airam-satcom` מצהיר מול שלושת האחרים) — הפעלת אחת עוצרת אוטומטית את השאר.
 **אי אפשר שניים מהם בו-זמנית עם SDR אחד.** מעבר מצב = ~3 שניות.
 
+**צרכן חמישי, זמני — `airam-rfcheck` (🩺 בדיקת RF, v2.27.0) — *אינו* `app_mode`.** בודק
+(‏`webtune/rfcheck_probe.py`, root, numpy) שמחזיק את ה-SDR עד 3 דקות ומחליף מצבי LNA תוך
+כדי קליטה. `Conflicts` מול *ארבעת* הצרכנים (+`After=` — סדר עצירה/הפעלה בכל כיוון), `Wants=sdrplay`
+**ולא** `PartOf`/`Requires` (בעיטת `airam-wait-sdrplay` ב-sdrplay לא תפעיל מחדש בדיקה ישנה),
+`Restart=no`, בלי `[Install]`. **לא** ב-`MODE_SERVICE`/`_live_mode` (בזמן בדיקה `_live_mode()`
+מחזיר None) — airam-web מפעיל אותו תחת `TUNE_LOCK` לכל אורך הבדיקה ותמיד מחזיר את מה שרץ
+קודם (`_restore_after_probe`); הוא לא שורד reboot (`_boot_restore` עוצר בודק יתום). הוא *מודד*
+(שורות ל-`/run/airam-rfcheck`), airam-web *שופט* (‏`rfcheck_analysis.py`, פייתון טהור) —
+airam-web **לעולם לא** מייבא numpy/SoapySDR ולא טוען את libsdrplay_api. ר' docs/rf-check-design.md.
+
 **תפיסת ההפעלה — אין "מצב ראשי", airam-web הוא המתזמר:** קול/ACARS/VDL2/SATCOM הם
 "אפליקציות" שוות-מעמד על משאב ה-SDR, ו-`off` (standby) הוא המצב הניטרלי היחיד.
 **אף צרכן SDR אינו enabled ב-systemd** (גם לא rtl_airband!) — `airam-web` (שעולה
@@ -90,12 +101,20 @@ CLAUDE.md                   # ← המסמך הזה: ארכיטקטורה + פי
 webtune/
   app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, SATCOM, סריקה,
                             #   רוסטר מאוחד, מד שדה + בדיקת אנטנה, דוח סשן, REST API, יומן,
-                            #   הקלטות, תמלול, METAR, מדדי RF + טלמטריית עומס מהחומרה, מעבר מצבים, ארכיון חיפוש. ~7000 שורות.
+                            #   הקלטות, תמלול, METAR, מדדי RF + טלמטריית עומס מהחומרה, מעבר מצבים, ארכיון חיפוש, ו-🩺 המתזמר של בדיקת ה-RF. ~8200 שורות.
   adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS + סדרת סשן +
                             #   buffer מתגלגל לשחזור-סשן (docs/session-replay-design.md,
                             #   שלב 1). thread נפרד. ניתן להרצה ידנית: `python3 adsb.py [--selftest]`.
+  rfcheck_probe.py          # 🩺 הבודק (root, systemd airam-rfcheck; **קובץ יחיד** — `python3 -I`
+                            #   גורר `-P`, import של קובץ שכן נכשל). stdlib + numpy + SoapySDR
+                            #   (עצלים). קורא *רק* את קובץ הפרמטרים (O_NOFOLLOW + whitelist), כותב
+                            #   *רק* ל-/run/airam-rfcheck. `--selftest` לבדיקת זמינות (לא פותח מכשיר).
+                            #   ⚠ app.py **לעולם לא** מייבא אותו (נבדק ב-test_rfcheck_api).
+  rfcheck_analysis.py       # 🩺 שכבת השיפוט — פייתון טהור (math/statistics בלבד, בלי I/O): סיווג
+                            #   נשא/שקט, עובדות, CNR זוגי, מבחן סימן + Holm, רמה והמלצה, סיכום חי,
+                            #   כללי עצירה. airam-web מייבא אותו (מוגן — כשל ⇒ "לא זמין", השרת חי).
   static/
-    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~6800 שורות). PWA. 5 תצוגות:
+    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~7700 שורות). PWA. 5 תצוגות:
                             #   🏠 מרכז (בית/standby/scan, כולל דוח סשן+התראות) + קול + ACARS +
                             #   VDL2 + SATCOM. ACARS/VDL2/SATCOM שלושה מופעים סימטריים של אותו
                             #   פקטורי createDataView (ר' §7); מד השדה — פקטורי מקביל, שני.
@@ -126,6 +145,10 @@ systemd/
   airam-satcom.service     # SATCOM (inmarsat-sniffer). Conflicts=שלושת האחרים. *לא* enabled. root.
                            #   אף צרכן SDR לא עולה באתחול — airam-web (המתזמר) משחזר את המצב השמור.
   airam-web.service        # שרת הווב + המתזמר. enabled. User=airam (לא-root). Restart=always.
+  airam-rfcheck.service    # 🩺 בודק ה-RF — צרכן חמישי *זמני*, לא מצב. Conflicts=ארבעת הצרכנים,
+                           #   Wants (לא PartOf) sdrplay, Restart=no, RuntimeDirectory=airam-rfcheck
+                           #   (+Preserve=yes), RuntimeMaxSec=240, KillMode=mixed. root. *לא* enabled.
+                           #   ⚠ בכוונה **בלי** EnvironmentFile/Environment (ר' §9).
 
 patches/
   soapysdrplay3-airam-rf.patch  # ★ patch מקומי ל-SoapySDRPlay3 (נעוץ ל-SOAPYSDRPLAY_COMMIT): רושם
@@ -138,6 +161,9 @@ patches/
 scripts/
   airam-wait-sdrplay       # שער מוכנות (ExecStartPre): מחכה שה-API *באמת* יענה, ומרים
                            # מחדש את sdrplay אם הוא "active" אבל ServiceNotResponding.
+  airam-rfcheck-diag       # 🩺 `sudo airam-rfcheck-diag`: מריץ את שלב האבחון (D1–D8) דרך ה-API
+                           # המקומי (אותם סירובים/נעילה/שחזור כמו בממשק), מדפיס בלוק AIRAM-RFDIAG v1
+                           # ואת הנתיב לשליחה. PIN מ-airam.env דרך stdin של curl (לא argv).
 
 udev/
   99-airam.rules           # חיבור RSP1B (Vendor 1df7) → restart אוטומטי לשירותי SDR.
@@ -185,6 +211,23 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
                            #   ‏/api/sessions/<id>, /track, /clips/<name>, /export.zip —
                            #   כולל שמורה (★) מועתקת מול לא-שמורה מועברת, חיתוך minutes
                            #   ל-TRACK_BUFFER_MIN, path-traversal ב-<id>/<name>.
+  rfsim.py                 # 🩺 סימולטור (numpy): IQ סינתטי (AM דמוי-דיבור, PTT, דעיכה, חוסמים/IM3,
+                           #   Rapp, רעש מקלט/ADC, מסילה) + FakeRadio/FakeBackend על שעון וירטואלי
+                           #   עם מכניקת הטבעת של SoapySDRPlay3; probe_params()/simulate().
+  test_rfcheck_dsp.py      # 🩺 ה-DSP של הבודק (BH-7, bin מדויק, c_car, clip, n_nb) — importorskip numpy.
+  test_rfcheck_probe.py    # 🩺 הבודק מול FakeRadio: ניקוז (marker), סדר החלפת רווח, ratchet, ABBA,
+                           #   overflow/gr_timeout/device_lost, SIGTERM, פרמטרים (symlink/FIFO/בעלים/
+                           #   whitelist — קודים בלבד), מסנן FM, אבחון D1–D8, --selftest.
+  test_rfcheck_analysis.py # 🩺 הניתוח (פייתון טהור): סיווג, עובדות, Holm, U, תרחישים, אי-תלות בשגיאת
+                           #   טבלה ±3dB, כיול השערת-אפס (500 זרעים), מסנן FM, כללי עצירה, מיזוג ATIS.
+  test_rfcheck_api.py      # 🩺 המתזמר (/api/rfcheck): מטריצת סירובים, פרמטרים מול validate_params,
+                           #   כל מסלולי היציאה (שחזור *פעם אחת*, TUNE_LOCK משוחרר), ATIS, אבחון, החלה,
+                           #   זמינות, _boot_restore/standby, וסקריפט ה-diag מול Flask אמיתי.
+  test_rfcheck_e2e.py      # 🩺 קצה-לקצה: הבודק האמיתי (main_with) מול FakeRadio + הניתוח האמיתי + המתזמר
+                           #   האמיתי: עומס ב-LNA נמוך ⇒ המלצה מתרחקת ⇒ "החל"; מגדל שקט ⇒ ATIS; ביטול;
+                           #   מסנן FM לפי דרישה. importorskip numpy.
+  test_install_rfcheck.py  # 🩺 install.sh סטטית: sudoers (11 שורות, visudo), היחידה לא enabled, apt
+                           #   סובלני, chown root לבודק; bash -n + shellcheck לסקריפט ה-diag.
 
 docs/                       # מסמכי תכנון/החלטות. מתעדים *למה* — ומה נדחה ועל סמך מה.
   field-station-roadmap.md  # מפת הדרכים שהובילה למד השדה, דוח הסשן ורוסטר המטוסים.
@@ -192,11 +235,14 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   antenna-calibration-experiment.md  # ניסוי: האם "בדוק אנטנה" מזהה ניתוק ב-VHF תחת AGC? מה ידוע
                             #   מהמקור (rtl_airband/SoapySDRPlay3), נוהל ליד נתב"ג, והחלטות לפי תוצאה.
   voice-rf-quality-plan.md  # ★ איכות ההאזנה בקול: ממצאים מהמקור (LNA תקוע תחת AGC, חיווי עומס עיוור,
-                            #   היסט bin), החלטות ו-PR 1–5. PR 1 (v2.26.0) מומש — ממתין לאימות שטח.
+                            #   היסט bin), החלטות ו-PR 1–5. PR 1 (v2.26.0) ו-PR 2 (v2.27.0) מומשו — ממתינים לאימות שטח.
+  rf-check-design.md        # ★ 🩺 בדיקת RF: מה אומת מהמקור, מה הונח (⚠) ומה נמדד באבחון (🧪); מדידה,
+                            #   כלל ההכרעה (החלטות המשתמש), Holm על כל הזוגות, בטיחות/שחזור, מה לא נטען.
   session-replay-design.md  # ★ תכנון "שחזור סשן" (מפה+אודיו על ציר זמן). שלבים 0–2 בוצעו
                             #   (buffer מתגלגל + POST /api/sessions) — ר' §11 למימוש שנותר (UI).
 
-.github/workflows/ci.yml   # pytest + `bash -n` על install.sh ו-airam-wait-sdrplay.
+.github/workflows/ci.yml   # pytest (+numpy) + `bash -n`/shellcheck על install.sh, airam-wait-sdrplay
+                           #   ו-airam-rfcheck-diag + systemd-analyze verify.
 ```
 
 > **`app.py` ו-`index.html` הם הקבצים שתיגע בהם הכי הרבה.** ה-UI כולו inline ב-HTML
@@ -210,13 +256,13 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 
 | נתיב | תוכן | נכתב ע"י |
 |------|------|----------|
-| `/opt/airam/webtune/` | הקוד הפרוס (app.py, adsb.py, static) | install.sh |
+| `/opt/airam/webtune/` | הקוד הפרוס (app.py, adsb.py, rfcheck_*.py, static). ⚠ `rfcheck_probe.py` רץ כ-root ⇒ `root:root 0644` (install.sh מחיל בכל הרצה) — airam לא יכול לשנות אותו | install.sh |
 | `/etc/rtl_airband/airband.conf` | קונפיג קול חי (תדר נבחר) | app.py בכל `/api/tune` |
 | `/etc/airam/acars.env` | תדרי ACARS חיים | app.py בכל מעבר ל-ACARS |
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
 | `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain (`--sdrplay-gain=N` או ריק=AGC), bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain — `if_gain`, ו-`rf_gain` = מצב LNA 0–9 שחל **גם תחת AGC** מאז v2.26.0, squelch, `fm_notch` (bool, ברירת מחדל False; היעדרו מסמן state מלפני v2.26.0 ⇒ הגירת `rf_gain`, ר' §12), app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline` — `{noise, freq, ts, lna, fm_notch, agc}` מאז v2.26.0; בלי `lna`/`fm_notch` = מלפני v2.26.0 ⇒ `baseline_untagged`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain — `if_gain`, ו-`rf_gain` = מצב LNA 0–9 שחל **גם תחת AGC** מאז v2.26.0, squelch, `fm_notch` (bool, ברירת מחדל False; היעדרו מסמן state מלפני v2.26.0 ⇒ הגירת `rf_gain`, ר' §12), app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline` — `{noise, freq, ts, lna, fm_notch, agc}` מאז v2.26.0; בלי `lna`/`fm_notch` = מלפני v2.26.0 ⇒ `baseline_untagged`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`, `rf_check_applied` — `{run_id, ts, rf_gain, if_gain, fm_notch}` של ההחלה האחרונה מ-🩺 (תיעוד בלבד; הערכים עצמם ב-`rf_gain`/`if_gain`/`fm_notch`)) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
 | `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
@@ -227,6 +273,13 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | `/var/lib/airam/recordings/saved/` | הקלטות **שמורות** (★) — **תת-תיקייה, לא רשימה בקובץ צד**. עד 100 קבצים / 100MB, פטורות לגמרי מ-`_sweep_recordings` (‏`glob("*.mp3")` אינו רקורסיבי — הפטור מגיע ב*אפס* שורות לוגיקה, ר' §5/§12) | app.py (`/api/recordings/star`) |
 | `/var/lib/airam/sessions/<id>/` | סשן שמור (שחזור-סשן שלב 2) — `meta.json` (אטומי), `track.jsonl.gz` (חתך `track.jsonl` בטווח), `clips/*.mp3` (הקלטות רלוונטיות — שמורה מ*עתיקה*, לא-שמורה מ*ועברת*). אין retention אוטומטי — מחיקה היא `DELETE /api/sessions/<id>` בלבד | app.py (`POST /api/sessions`) |
 | `/run/rtl_airband_stats.txt` | מדדי RF (tmpfs, ~1Hz) | rtl_airband |
+| `/run/airam-rfcheck/` | 🩺 פלטי הבודק: `meta.json`, `status.json` (פעימה, ≤4Hz), `rows.jsonl` (שורה לסלוט), `end.json`, `diagnose.json` — כולם עם `run_id`, ‏0644. `RuntimeDirectory` (root, ‏0755) עם `Preserve=yes` (אחרת נמחק לפני שהמתזמר קורא את end.json). הבודק מוחק פלטים ישנים *בעלייה*; airam-web מתעלם מ-`run_id` זר | rfcheck_probe.py (root) |
+| `/var/lib/airam/rfcheck-params.json` | 🩺 קובץ הפרמטרים לריצה הבאה — **הקלט היחיד** של הבודק (whitelist, ‏`O_NOFOLLOW`, בעלים root/airam, ≤4KiB). ‏0640, אטומי (`_atomic_write(mode=0o640)`); **נמחק אחרי כל ריצה** (הפעלה תועה של היחידה ⇒ `params:open`, המכשיר לא נפתח) | app.py (`_rfcheck_write_params`) |
+| `/var/lib/airam/rfcheck_last.json` | 🩺 התוצאה האחרונה (סכמת `rfcheck_analysis.analyze`) — שורדת reload/restart; נשמרת **רק בהצלחה** (ביטול/שגיאה לא דורסים תוצאה טובה) | app.py |
+| `/var/lib/airam/rfcheck_last_rows.jsonl` | 🩺 השורות הגולמיות של הריצה האחרונה (ctx + meta/rows/end פר-שלב, מתויגים tower/atis/notch) — מספיק לשחזר את פסק הדין; "⬇ הורד נתונים" | app.py |
+| `/var/lib/airam/rfcheck_history.jsonl` | 🩺 תקציר לכל ריצה מוצלחת (retention 50) — בסיס לפרופילים (PR 4) | app.py |
+| `/var/lib/airam/rfcheck_diagnose.json` | 🩺 תוצאת שלב האבחון (D1–D8 + `summary_text` שמתחיל ב-`AIRAM-RFDIAG v1`) — **לשליחה** לצורך v2.27.1; לא דורס את תוצאת ה-LNA | app.py (עותק אטומי מ-/run) |
+| `/usr/local/bin/airam-rfcheck-diag` | 🩺 עוטף ה-CLI לאבחון | install.sh (שלב 7) |
 | `/usr/local/share/airam/soapysdrplay3.build-sig` | סימן-בנייה = **החוזה "יש טלמטריית RF"** (`SOAPY_RF_MARK`): קיים <=> SoapySDRPlay3 הנעוץ נבנה *עם* ה-patch המאומת. נמחק בתחילת כל בנייה מחדש | install.sh (שלב 3) |
 | `/var/lib/airam/rf_log.jsonl` | רשם ניסוי RF — שורה לכל כתיבה חדשה של המדדים + הקונפיג שרץ + סימוני משתמש + תוצאות בדיקת-אנטנה. **רק כשמופעל** (כבוי כברירת מחדל, כיבוי אוטומטי אחרי שעתיים); append+`fsync` (תוצאת ניסוי שדה); מעל 5MB בהפעלה ⇒ `.prev` | app.py (`/api/rflog`) |
 
@@ -251,6 +304,9 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   `_rollback`, `_restore_after_probe`, boot/reconcile, רגלי סריקה, probe, ניסוי). `_parse_bool`
   (‏`"false"` טקסטואלי ≠ True — משותף ל-`agc`/`fm_notch`). `_config_stale` מסמן גם קונפיג בלי
   `rfnotch_ctrl` או AGC בלי `rfgain_sel` (שדרוג ⇒ `_boot_restore` משכתב). תמיד ערוץ יחיד ממורכז (centerfreq מוסט ב-DC_OFFSET).
+  ‏`_voice_centerfreq(freq)` הוא **מקור-האמת היחיד** ל-centerfreq — גם של `render_config` וגם של
+  ‏`center_hz` בפרמטרי 🩺 (אותו חלון/bin כמו rtl_airband); PR 3 יתקן כאן את ה-bin ושניהם יעקבו.
+  ‏`_atomic_write(path, text, mode=None)` — `mode` נקבע על ה-tmp *לפני* ה-rename (קובץ הפרמטרים: 0640).
 - **restart מאומת + רולבק:** `_restart_and_verify` בודק שה-SDR נוכח ושהשירות עלה;
   `_rollback` מחזיר לקונפיג קודם אם נכשל **ומאומת** (מחזיר bool; כישלון ⇒ `_fail_to_off`).
   כיוונון אחד בכל רגע (`TUNE_LOCK`).
@@ -474,6 +530,42 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   ‏`manual_gain` ב-`api_signal`), `_probe_frontend` (בדיקת האנטנה והניסוי מודדים ב-LNA/מסנן
   **השמורים של הקול**, לא בקבוע), `_conf_device_kwargs` (פענוח `device_string` — `_parse_airband_conf`
   מחזיר גם `lna`/`fm_notch`; קונפיג ישן תחת AGC ⇒ lna=0, ברירת המחדל של ה-API).
+- **🩺 בדיקת RF — המתזמר** (PR 2, `docs/rf-check-design.md`; הבודק והניתוח בקבצים משלהם, §3).
+  ייבוא מוגן של `rfcheck_analysis` (כשל ⇒ `analysis_missing`, השרת חי). **זמינות:**
+  `_rfcheck_availability` (קובץ הבודק + קובץ היחידה + `/usr/bin/python3 -I rfcheck_probe.py --selftest`
+  חי — numpy/SoapySDR/מודול sdrplay; cache ‏300ש'/30ש', שלילי ישן נבדק מחדש ב-start),
+  `_rfcheck_verified` (‏`RFCHECK_VERIFIED` חל **רק** כשחתימת הבנייה + גרסת ה-API תואמות — אחרת
+  "🧪 ניסיוני"). **התחלה:** `_rfcheck_start` — סירובים לפי הסדר (רץ → 501 לא זמין → ניסוי →
+  סריקה → מצב: lna/notch רק מקול חי, אבחון מקול או off → AM ‏108–137 → קלט → `TUNE_LOCK`
+  לא-חוסם), ואז תחת הנעילה: בדיקה חוזרת של המצב, `_rfcheck_ifgr_ref` (‏manual → agc_live רק
+  כשה-gRdB בטווח 20–59 *וגם* נקלט אחרי הפעלת rtl_airband הנוכחית → assumed 40),
+  `_rfcheck_states` (‏`RFCHECK_STATES_DEFAULT`=(0,2,4,6,7,8) ∪ {נוכחי}, עד 7), `_rfcheck_ifgr_start`
+  (‏`clamp(ref+GR[cur]−GR[s], 20, 59)`), `_rfcheck_notch_basis` (מסנן FM במצב *המומלץ* של ריצת
+  fact/stat קודמת באותו תדר, ב-IF הסופי שלה), `_rfcheck_params` (בדיוק ה-whitelist של
+  ‏`rfcheck_probe.validate_params`; תדר שאינו כפולה של 5kHz מהמרכז ⇒ 409, לא מנחשים bin),
+  ואז thread ‏`_rfcheck_run` **שמחזיק את `TUNE_LOCK` לכל אורכו**. **הריצה:** עצירת rtl_airband
+  → `_rfcheck_launch` (‏`systemctl restart airam-rfcheck`; rc≠0 ⇒ "ה-SDR לא נפתח לבדיקה" + journal)
+  → `_rfcheck_loop` (כל `RFCHECK_POLL_SEC`: `_RfcReader` קורא status/meta/end ושורות חדשות —
+  **רק** של ה-`run_id` שלנו ורק אחרי שה-meta/end שלו הופיע; ⚠ לא לפי inode — tmpfs ממחזר;
+  `live_summary` רק כשמשהו השתנה; יציאה ב: `stop_reason` / finish / abort / מעבר ATIS /
+  יציאת הבודק / פעימה קפואה 5ש' (אבחון 30ש') / אי-פתיחה 30ש' / deadline) → עצירה → `analyze`
+  → `_rfcheck_persist` (**רק בהצלחה**). **`finally` — בכל מסלול:** עצירת הבודק,
+  ‏`_restore_after_probe(prev, prev_live)` **בדיוק פעם אחת**, אימות (`_live_mode()=="voice"`),
+  מחיקת קובץ הפרמטרים, שחרור `TUNE_LOCK`, `_rflog_event`. `app_mode` לא משתנה.
+  **ATIS:** `_rfcheck_switch_atis` — עצירה, שורות המגדל ל-`ctx["tower"]`, `run_id` חדש עם
+  ‏`parent_id`, פרמטרים ל-132.5 (‏`max_sec`=30+10, אותו IFGR_ref — לא ה-ratchet), הפעלה מחדש —
+  **תחת אותה נעילה, בלי שחזור ביניהם**. **אבחון:** אין כלל עצירה; `_rfcheck_save_diagnose` מעתיק
+  את diagnose.json (של ה-run_id שלנו) ל-/var/lib/airam; ביטול ⇒ לא נשמר כלום. **החלה:**
+  `_rfcheck_apply` — רק התוצאה האחרונה, רק fact/stat ו-`apply_allowed`, רק כש-app_mode=voice ו-
+  freq/agc/(fm_notch בתוצאת LNA) לא השתנו, **לא כשההמלצה כבר בתוקף** (409 — בלי restart סרק),
+  ואז **`_voice_tune`** (אותו חוזה כמו /api/tune, כולל רולבק); תחת AGC רק `rf_gain`, ברווח ידני
+  גם `if_gain` שנמדד; כותב `state["rf_check_applied"]`. **סטטוס:** `_rfcheck_status` (GET) —
+  ‏`result` הוא `null` בזמן ריצה (חוסך את המטען בפולינג של שנייה), אחר כך מהזיכרון או מ-
+  ‏`rfcheck_last.json`; `_rfcheck_brief` ל-`/api/state`/`/api/health`. **שילוב:** `RFCHECK_SERVICE`
+  ב-`HEALTH_SERVICES`, ב-`SDR_CONSUMERS` וב-`_SDR_CONSUMER_MODE` (מפורש — המפה נגזרת מ-MODE_SERVICE);
+  ‏`_enter_standby` עוצר אותו *ראשון*, `_enter_voice` עוצר אותו אם פעיל; `_boot_restore` עוצר בודק
+  יתום (כל מצב מחזיק) בתחילתו; `api_state`/`api_health` — `mode_ok`/`ok`=True בזמן בדיקה כשהשמור
+  voice/off (אבחון מתוכנן ≠ תקלה), ובודק יתום ב-standby ⇒ `off_ok=False`.
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_sweep_recordings` (retention — **לא רואה `saved/` בכלל**, ר' למטה).
 - **הקלטות שמורות (★) + תמלול — שני פיצ'רים מחוברים:** הפטור מ-retention הוא
@@ -574,6 +666,55 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   ‏`meta.json`/העברת קליפים הם אחריות `app.py` (הוא היחיד שמכיר `REC_DIR`/`saved/`).
 
 החלפת מיקום השדה: ערוך `ARP_LAT/ARP_LON/RUNWAYS` בראש הקובץ.
+
+---
+
+## 6א. 🩺 `webtune/rfcheck_probe.py` + `webtune/rfcheck_analysis.py`
+
+**הבודק (`rfcheck_probe.py`, root, numpy + SoapySDR עצלים — `--selftest` רץ גם בלעדיהם).**
+`main()` ⇒ `main_with(PARAMS_PATH, SoapyBackend(), OutDir(OUT_DIR))` (בדיקות קוראות ל-`main_with`/
+`run_probe` עם FakeRadio). **קוד יציאה:** 0 stopped/max_sec (גם אבחון שהסתיים) · 1 חריגה · 2 פרמטרים ·
+3 import/פתיחה · 4 device_lost — אבל המתזמר קורא את **`end.json`**, לא את הקוד.
+- `load_params`/`validate_params`: ‏`O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC`, ‏`S_ISREG`, ≤4096 בתים, בעלים
+  root/airam, JSON בלי מפתחות כפולים, **בדיוק 19 מפתחות** (`_PARAM_KEYS`), `type(v) is int` (bool נדחה),
+  ‏1–7 מצבים ממוינים (`MAX_STATES`), ‏`(center_hz−freq_hz) % 5000 == 0` ו-|bin|<256, ‏`max_sec` ‏5..180
+  (אבחון ≤150). הפרה ⇒ `end.json {"error":"params:<code>"}`, יציאה 2, **המכשיר לא נפתח**, התוכן
+  לעולם לא מודפס (גם לא שם מפתח לא מוכר).
+- `OutDir`: מוחק פלטים ישנים בעלייה, JSON אטומי ‏0644, `rows.jsonl` append+flush. `LogSink.handler`
+  רק מוסיף לתור (רץ על threads של ה-API — לא נוגעים בשום דבר אחר שם); גלישה ⇒ מצב העומס "לא ידוע".
+  `Telemetry`: עומס `None` **עד** `AIRAM_RF stream=start` (החלטה 6 — כמו PR 1, עוקב מחובר אינו ראיה),
+  קצוות `overload=1|0`, `"Gain reduction update timeout."` בחלון ההחלפה ⇒ סלוט `gr_timeout`,
+  ‏`"Device has been removed"` ⇒ `device_lost` (‏TIMEOUT ולא NOT_SUPPORTED כשהטבעת ריקה —
+  `Streaming.cpp:524-537`).
+- `Probe._slot`: החלפת רווח לפי כיוון (רווח עולה: IFGR ואז RFGR; יורד: להפך — הרווח הכולל לא "קופץ
+  מעל"), ניקוז עד TIMEOUT (overflow בניקוז רק נספר — ה-flush משאיר רק נתונים מאחרי ההחלפה), השלכת
+  ‏`1+guard_buffers` (במסנן: `max(1+guard, notch_guard)` אחרי החלפה), מדידת `measure_buffers` ברצף.
+  ‏`inv`: ‏gr_timeout > overflow > short. ratchet פר-מצב בסוף סבב (+10, עד 59, לעולם לא יורד, תקופה
+  חדשה), ABBA בין סבבים (במסנן: ABBA בתוך קבוצה של 4, `pos`/`notch_rb`), מצב קל (מגדל בלבד, דביק).
+- `SlotDSP`: BH-7 עם מקדמי ה-float32 של rtl_airband ומכנה N−1, ‏N=512, hop 160, ה-bin **המדויק**;
+  ‏`c_tot`(+חצאים), `c_car` (‏20·log10 mean|z| — אומדן נשא בלתי-תלוי-דיבור), `b_tot`, `n_nb` (חציון
+  |Z|² בשכנים ±40–85kHz, מינימום על השכנים), `p_wb`, `clip`/`peak` (int32 — כולל ‎−32768), `e_*` (dB,
+  מידע בלבד). ‏`ovl`/`ovl_edge` לפי חלון עם מרווח של `ovl_margin_buffers`.
+- `_diagnose`: ‏D1 סביבה · D3 תגובת מדרגה ⇒ `guard_buffers` · D2 GainChange בעדכון ידני · D4 ליניאריות
+  IF · D5 קוד שיא/מסילה/עומס כש-AGC כבוי · D6 מסנן FM ⇒ `notch_guard_buffers` · D7 AGC · D8 CPU. כל
+  שלב תופס את השגיאות שלו; `suggested` הן **הצעות** — ‏`RFCHECK_VERIFIED` נכתב ע"י אדם שקרא את הקובץ.
+
+**הניתוח (`rfcheck_analysis.py`, פייתון טהור, דטרמיניסטי).** ממשק: `analyze(rows, meta, end, ctx)` ⇒
+התוצאה (‏`rfcheck_last.json`), `live_summary(rows, ctx)` ⇒ צ'יפים/מונים/`progress`/`level`,
+`stop_reason(summary, ctx, elapsed)`, `offer_atis(summary, ctx, elapsed)`. ‏`ctx.config_at_start.rf_gain`
+**חובה** (בלעדיו לעולם לא מעל "אינדיקציה").
+- סיווג פר-קבוצה (lna, epoch, notch): רצפת שקט אמיתית (`silence_ref`, מגדל, ≥3 סלוטים) או רעש-
+  שכנים (`proxy`); נשא/שקט/קצה לפי שני החצאים מול סף T (‏9.54dB, או `squelch_snr` ידני).
+- **עובדות** רק ב-IFGR ‏59 וב-≥2 סבבים (`op_clip`/`op_ovl`; ב-IF נמוך יותר ⇒ `probe_only`, לא עובדה),
+  ‏`lost` בסבבים פנימיים. טלמטריה ≠ `ok` ⇒ כל ערך עומס `null` ("לא נבדק"), לעולם לא "לא נצפה".
+- **השוואה:** CNR = ‏`c_car` − רצפה (שקט קרוב בזמן מאותה קבוצה, או `n_nb`); הפרשים זוגיים פר-סבב;
+  מבחן סימן מדויק + **Holm על כל הזוגות** (‏`n_min` = 9/10/10 ל-K=5/6/7) + שער גודל `|median|>U`
+  (‏U = IQR של שאריות הרעש). ⚠ "המיטבי מול השאר" (המקורי) נכשל בכיול השערת-האפס — ר' §12.
+- **כלל ההכרעה (החלטת משתמש 3):** עובדות רק מרחיקות; העלאת רווח רק עם `sensitivity_cost` מובהק
+  (או `lost`); שוויון ⇒ המצב המוחלש ביותר שאינו מובהק-גרוע; שומר מונוטוני — שוויון לא קופץ מעל
+  מצב שעלות-הרגישות שלו הוכחה. ‏`apply_allowed` = רמה fact/stat ∧ יש המלצה ∧ היא משנה משהו.
+- כללי עצירה (החלטת משתמש 1): מגדל — עובדה סופית (C ריק) / ‏≥3 שידורים ∧ ≥12 בלוקים ∧ stat / 180ש'
+  (‏"time"); ATIS — ‏20 בלוקים / 30ש'; מסנן — ‏12 זוגות ∧ נבדק / 180ש'. **אין** extend.
 
 ---
 
@@ -783,6 +924,28 @@ timeout (`NET_TIMEOUT_GET`=8s / `NET_TIMEOUT_POST`=45s — תואם את חסם 
 משלו, ואין בו צורך (יש `/api/satcom/health` ייעודי). כל שינוי שנוגע לשלושת
 המופעים — בפקטורי, לא בקוד ACARS/VDL2/voice נפרד.
 
+**🩺 בדיקת RF (`#rfcBox` בפאנל ה-RF של הקול — *מחוץ* ל-`#rfPanel` כי האבחון זמין גם מ-standby;
+`#rfcBar` גלובלי מחוץ ל-`<main>` כמו `#expBar`; דף אישור `#rfcConfirm`).** `pollRfcheck` (GET
+‏`/api/rfcheck`, in-flight guard): כל 1ש' **בכל תצוגה** בזמן ריצה (מזין את `#rfcBar`), כל 15ש' בתצוגת
+הקול כשלא רץ, ומיד ב-`visibilitychange`/`showView("voice")`/אחרי כל פעולה. `renderRfcheck` ⇒
+זמינות (`#rfcUnavail` + הסיבה + `sudo ./install.sh`; 404 משרת ישן = "לא זמין"), תג/רשימת
+"🧪 ניסיוני" (`RFC_UNVERIFIED`), `renderRfcProgress` (שבבי מצב בשפת הסליידר — `lnaStep`,
+‎(9−state)/9 — עם ‎−GR dB, 📡/🔇, ⚠/✂, IF; השבב הנמדד פועם, כבוי ב-reduced-motion; "שידורים: n/3 ·
+בלוקים: b/12" (ATIS: b/20; מסנן: זוגות) ופס לעבר **היעד הסטטיסטי** (`progress` מהשרת), לא הזמן;
+"ממשיכים עד שיש מספיק נתונים (עד 3 דקות)" — **אין "⏱ עוד דקה"** (החלטת משתמש 1); הצעת ATIS
+רק כש-`offer_atis`, לעולם לא אוטומטית), ו-`renderRfcResult` (‏**`textContent` בלבד**: תג רמה,
+`rfcHeadline` מ-`headline`+`headline_params`, תווית ATIS, "על מה זה מבוסס" (`evidence`), "ⓘ מה לא
+נבדק / לא ודאי" (`untestable` + שורת היקף קבועה — תמיד), טבלאות מתקפלות, בדיקות עצמיות; עומס
+`null` ⇒ "לא נבדק" — לעולם לא ירוק). **"החל" (52px)** רק ב-fact/stat ∧ `apply_allowed` ∧ ההמלצה
+משנה ∧ התדר/AGC/מסנן לא השתנו ∧ **ההמלצה לא כבר בתוקף** (`lastGainState` — אותם תנאים שהשרת
+אוכף ב-409); באינדיקציה — "כיוון אפשרי" בלי כפתור (החלטת משתמש 5). **השמע:** ב-start נזכר
+`rfcPlay.wasPlaying` ו-`player.pause()`; ‏`reloadStream` חסום בזמן ריצה (‏▶ ממסך הנעילה היה שורף את
+ניסיונות החיבור על mount מת); בסוף (`rfcOnDone`) חוזר **רק** אם ניגן קודם **ו**-`restore.ok`,
+אחרת "⚠ השמע לא חזר אוטומטית". `pollGlobalState` **יוצא מוקדם** כש-`h.rf_check.running` (אחרת
+rtl_airband העצור בכוונה היה הופך את הממשק ל"מקלט בכיבוי"), ומגלה בדיקה שהופעלה מטלפון אחר.
+**"📏 כייל בסיס" נשאר** (החלטת משתמש 2) — כשהבדיקה זמינה הוא קישור משני קטן (`.fm-link`), ושורת
+הבסיס/פסק-הדין של `voiceFm` לעולם לא מוסתרת. חיווי ה-SDR ממפה `mode:"rfcheck"` ל-"🩺 בדיקת RF".
+
 **דוח סשן + התראות (`#sessionCard`, מסך הבית בלבד).** `pollSession()` (20s, רק
 במצב home + מיד ב-`showView("home")`) קורא `GET /api/session` ומציג כרטיס רק
 כשיש היעדרות משמעותית (`SESSION_MIN_DUR_SEC`=600) ותוכן ממשי; "✓ הבנתי" קורא
@@ -845,7 +1008,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/<path>` | נכסים סטטיים |
 | GET | `/live.m3u` | playlist לנגן חיצוני |
 | GET | `/stream` | proxy same-origin ל-Icecast (נדרש כש-HTTPS, mixed-content) |
-| GET | `/api/state` | המצב הנוכחי (תדר, mod, gain — `agc`/`if_gain`/`rf_gain`, `fm_notch`, squelch, app_mode, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `scan_plan`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`). ה-UI מאתחל ממנו את בקרי הרווח ומתג ה-FM בטעינה (`applyGainState`) |
+| GET | `/api/state` | המצב הנוכחי (תדר, mod, gain — `agc`/`if_gain`/`rf_gain`, `fm_notch`, squelch, app_mode, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `scan_plan`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`, `rf_check` — `{running, phase, kind, run_id}`; בזמן 🩺 `mode_ok`=True כשהשמור voice/off). ה-UI מאתחל ממנו את בקרי הרווח ומתג ה-FM בטעינה (`applyGainState`) |
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. ‏`rf_gain` (מצב LNA 0–9) נקלט ונשמר **גם כש-`agc=true`**; ‏`fm_notch` (bool, עמיד ל-`"false"` טקסטואלי) — **לפי נוכחות המפתח**: חסר ⇒ נשאר כפי שנשמר (לקוח ישן/curl לא מכבה מסנן בשקט); `null` מפורש ⇒ כבוי. שאר השדות — החלפה מלאה (חסר ⇒ ברירת מחדל) |
 | POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית), `skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12), `spectrum` (bool אופציונלי — `false` לכיבוי האבחון, ר' §9/§12) ו-`gain` (‏`null`=AGC (ברירת מחדל) או מספר=gRdB ידני 20–59, נחתך; ר' §12). לכולם: ברירת מחדל = הבחירה השמורה. ⚠ ב-`gain` בלבד `null` הוא **ערך משמעותי** (AGC מפורש) ולא היעדר — הזיהוי הוא לפי נוכחות המפתח בגוף הבקשה. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
@@ -882,10 +1045,12 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/sessions/<id>/track` | מסלול ה-ADS-B של הסשן, מפוענח מ-`track.jsonl.gz` |
 | GET | `/api/sessions/<id>/clips/<name>` | קליפ אודיו של הסשן — route ייעודי, לא הרחבת `/recordings/<name>` |
 | GET | `/api/sessions/<id>/export.zip` | ייצוא הסשן כולו (מטא-דאטה+מסלול+קליפים), אותו דפוס כמו `starred.zip` |
-| GET | `/api/sdr` | חיווי SDR: `state` (`missing`/`ours`/`switching`/`checking`/`api_down`/`api_error`/`free`/`busy`/`unavailable`/`unknown`), `usb`/`usb_desc`, `mode`+`service_state` כש-`ours`, `label` כש-`free`, `suspects` (לפי שם תהליך — רמז) כש-`busy`, `checked_age`. "פנוי" = ה-SDRplay API מציע אותו (`SoapySDRUtil --find`), נבדק רק כש-AIR-AM לא מחזיק בו |
+| GET | `/api/sdr` | חיווי SDR: `state` (`missing`/`ours`/`switching`/`checking`/`api_down`/`api_error`/`free`/`busy`/`unavailable`/`unknown`), `usb`/`usb_desc`, `mode`+`service_state` כש-`ours`, `label` כש-`free`, `suspects` (לפי שם תהליך — רמז) כש-`busy`, `checked_age`. "פנוי" = ה-SDRplay API מציע אותו (`SoapySDRUtil --find`), נבדק רק כש-AIR-AM לא מחזיק בו. בודק 🩺 שרץ = `ours` עם `mode:"rfcheck"` |
+| GET/POST | `/api/rfcheck` | 🩺 בדיקת RF. **GET:** זמינות (`available`, `reasons` — ‏`analysis_missing`/`probe_missing`/`unit_missing`/`numpy_missing`/`soapysdr_missing`/`sdrplay_module_missing`/`selftest_failed`, `install_hint`, `telemetry_expected`, `verified`, `experimental`=!verified, `selftest`); ריצה (`running`, `run_id`, `parent_id`, `kind` lna/notch/diagnose, `phase` = שלב הבקר starting/listening/atis/notch/diagnose/finishing/restoring/done/error, `ref`, `freq`, `atis_freq`, `elapsed`, `phase_elapsed`, `phase_max`, `hard_max`=180, `can_extend`=false); התקדמות מ-`live_summary` (`states` — צ'יפים, `current_state`, `production_state`, `last_slot`, `tx_captured`/`tx_target`, `full_blocks`/`blocks_target`, `pairs`/`pairs_target`, `configs`, `progress`, `level`, `stat_ready`, `telemetry`, `offer_atis`, `ifgr_ref`, `probe` — תמונת status.json); תוצאה (`result` — **`null` בזמן ריצה**, אחר כך מהזיכרון או `rfcheck_last.json`; `diagnose`, `diagnose_available`, `error` בעברית + `error_code`, `detail`, `ended`, `restore {ok, error}`). **POST** `{action}` (דרך `_guard`): `start` (`phase?`, `states?`, `from_run?`; 409 רץ/ניסוי/סריקה/מצב/תדר/`TUNE_LOCK`, 501 לא זמין + `reasons`, 400 קלט), `atis` (רק lna מול המגדל), `finish` (תוצאה חלקית), `abort` (שום דבר לא נשמר), `apply` `{run_id}` (‏`_voice_tune` — אותו חוזה כמו `/api/tune`; 409 רץ/לא-האחרונה/רמה/מצב/הגדרות-השתנו/כבר-בתוקף). `extend` ⇒ 400 (הוסר — החלטת משתמש 1) |
+| GET | `/api/rfcheck/export?kind=result\|rows\|diagnose` | 🩺 הורדת `rfcheck_last.json` / `rfcheck_last_rows.jsonl` (NDJSON: ctx, ואז meta/row/end מתויגים tower/atis/notch) / `rfcheck_diagnose.json`. 404 כשאין, 400 ל-kind לא מוכר |
 | GET | `/api/power` | מתח/טמפ' ה-Pi (`vcgencmd`), מוגש מ-cache בן ~2 שניות (`_POWER_TTL`) |
 | GET | `/api/metar` | METAR נתב"ג (LLBG) |
-| GET | `/api/health` | בריאות השירותים |
+| GET | `/api/health` | בריאות השירותים (כולל `airam-rfcheck` במפה) + `rf_check {running, phase}`; בזמן 🩺 `ok`=True כשהשמור voice/off; בודק יתום ב-standby ⇒ `ok`=False |
 
 **כלל:** כל route שמשנה מצב חומרה/קונפיג = `POST` + עובר `_guard` + (אם רלוונטי) `TUNE_LOCK`.
 
@@ -894,9 +1059,28 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 ## 9. מודל האבטחה (אל תשבור אותו)
 
 - **`airam-web` רץ כמשתמש לא-root (`airam`).** גישתו ל-root מוגבלת ל-sudoers ממוקד:
-  *רק* פקודות `systemctl` ספציפיות (restart rtl_airband, start/stop של המצבים).
-- **`acars.env`/`vdl2.env` מנותחים ע"י systemd (`EnvironmentFile`), לא ע"י shell** → קובץ
-  שכותב `airam` לא יכול להסליל הרצת קוד כ-root. **אל תעביר את הקבצים האלה דרך bash source.**
+  *רק* פקודות `systemctl` ספציפיות — `restart`/`stop` לכל צרכן SDR (כולל `airam-rfcheck` מאז
+  v2.27.0) ו-`reset-failed airam-satcom`; **11 שורות, אין `start` ואין wildcard** (נבדק ב-
+  `tests/test_install_rfcheck.py` + `visudo -cf`).
+- **⚠ תיקון (v2.27.0): `EnvironmentFile` שכותב `airam` *כן* יכול להוביל להרצת קוד כ-root.**
+  נכתב כאן בעבר ש-`acars.env`/`vdl2.env` "מנותחים ע"י systemd, לא ע"י shell ⇒ לא יכולים להסליל
+  הרצת קוד" — **זה לא נכון**: systemd מייצא *כל* מפתח בקובץ לסביבת תהליך ה-root, כולל
+  `LD_PRELOAD`/`LD_LIBRARY_PATH` (טוען הספריות הדינמי מכבד אותם — ה-Unit לא setuid) ו-
+  `SOAPY_SDR_PLUGIN_PATH` (‏`SoapySDR lib/Modules.in.cpp:146` — טוען מודול מתיקייה שרירותית),
+  ו-`/etc/airam` שייך ל-airam. כלומר הסלמה airam⇒root **מקומית** קיימת היום דרך
+  `acars.env`/`vdl2.env`/`satcom.env` (דורשת הרצת קוד מוקדמת כ-airam; לא ניתנת לניצול דרך
+  ה-API המאומת, שכותב רק ערכים מאומתים). **PR 6 יתקן את היחידות הקיימות** (פרמטרים כנתונים, לא
+  כסביבה). עד אז: **אל תוסיף `EnvironmentFile` חדש ליחידה שרצה כ-root**, ובוודאי אל תעביר את
+  הקבצים האלה דרך `bash source`. (`airam.env` של airam-web עצמו — לא root — אינו חלק מהבעיה.)
+- **🩺 בודק ה-RF (root) — קלט כנתונים בלבד.** ליחידה **אין** `EnvironmentFile`/`Environment=`
+  (ונבדק ב-`tests/test_systemd_units.py`). הקלט היחיד: `/var/lib/airam/rfcheck-params.json`, שהבודק
+  פותח עם `O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC` (symlink ⇒ `ELOOP`, FIFO לא חוסם), דורש `S_ISREG`, ≤4KiB,
+  בעלים root/airam, JSON בלי מפתחות כפולים ו-whitelist מדויק של 19 מפתחות עם טווחים — ומדווח
+  **קודים בלבד** (לעולם לא תוכן הקובץ), בלי לפתוח את המכשיר. מחרוזת ההתקן נבנית מבוליאנים מאומתים
+  (`driver=sdrplay,rfnotch_ctrl=…`). `ExecStart=/usr/bin/python3 -I` (בלי env/site/תיקיית הסקריפט),
+  והקובץ `root:root 0644` — airam לא יכול לשנות את הקוד שרץ כ-root. root כותב **רק** ל-
+  `/run/airam-rfcheck` (לעולם לא לתיקייה של airam — וקטור דריסה דרך symlink); airam-web מתעלם
+  מ-`run_id` זר. אין מאזין רשת ואין IPC אל תהליך ה-root; העצירה היא `systemctl stop`. IQ לא נשמר.
 - **מאזינים בלי סיסמה;** סיסמת ה-source ל-Icecast פנימית קבועה (`airam`).
 - **PIN אופציונלי** דרך `AIRAM_PIN` ב-`/etc/airam/airam.env` (כבוי כברירת מחדל, קובץ
   `chmod 640` — לא world-readable). השוואה בזמן-קבוע (`hmac.compare_digest`, לא `==`)
@@ -937,7 +1121,9 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 
 ## 10. `install.sh` — 8 שלבים (אידמפוטנטי)
 
-1. תלויות מערכת (Python/Flask, `libglib2.0-dev` ל-dumpvdl2 וכו'). 2. **SDRplay API**
+1. תלויות מערכת (Python/Flask, `libglib2.0-dev` ל-dumpvdl2 וכו'; ועוד קריאה **נפרדת וסובלנית**
+`apt-get install python3-numpy python3-soapysdr || warn` ל-🩺 — כשל לא עוצר את ההתקנה, הממשק
+מציג "בדיקת RF לא זמינה" + הסיבה). 2. **SDRplay API**
 (הורדת `.run`, חילוץ והתקנה ללא אישור רישיון ידני — `SDRPLAY_VER` בראש הקובץ).
 3. בניית `SoapySDRPlay3` — **נעוץ** ל-`SOAPYSDRPLAY_COMMIT` (‏48bd8b4 = tag ‏`soapy-sdrplay3-AI-0.6.0`,
 נעוץ לפי SHA) + **`patches/soapysdrplay3-airam-rf.patch`** (`git apply --check && git apply`, ואז grep
@@ -956,13 +1142,16 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 releases רשמיים לפרויקט — חתימת בנייה נכתבת *רק* כשתמיכת SDRplay אושרה בפועל
 מלוג ה-cmake, אחרת הרצה חוזרת תמיד תבנה מחדש**). 5. `Icecast2` (מאזין בלי
 סיסמה). 6. קונפיג התחלתי + state (6b: יצירת משתמש `airam` + sudoers ממוקד —
-**9 פקודות systemctl**: restart/stop × rtl_airband/airam-acars/airam-vdl2/
-airam-satcom, ועוד `reset-failed` ל-airam-satcom בלבד (מנקה תקרת-הפעלות אחרי
-קריסה — ר' §12); seeding של `acars.env`+`vdl2.env`+`satcom.env`). 7. שרת הווב
+**11 פקודות systemctl**: restart/stop × rtl_airband/airam-acars/airam-vdl2/
+airam-satcom/**airam-rfcheck**, ועוד `reset-failed` ל-airam-satcom בלבד (מנקה תקרת-הפעלות אחרי
+קריסה — ר' §12); אין `start` ואין wildcard; seeding של `acars.env`+`vdl2.env`+`satcom.env`).
+7. שרת הווב (‏`chown root:root` + `0644` ל-`rfcheck_probe.py` בכל הרצה — הוא רץ כ-root;
+`install -m755 scripts/airam-rfcheck-diag /usr/local/bin/`;
 (7b: תמלול whisper אופציונלי, `sudo INSTALL_WHISPER=1 ./install.sh` — ⚠ הסדר
 קריטי: `INSTALL_WHISPER=1 sudo ...` נבלע בשקט, `sudo` מאפס env כברירת מחדל
-ב-Debian; שני מודלים — `small.en`+`small`, ר' §5/§12). 8. שירותי systemd —
-**enabled רק `sdrplay`+`airam-web`**; אף צרכן SDR (כולל rtl_airband) לא
+ב-Debian; שני מודלים — `small.en`+`small`, ר' §5/§12). 8. שירותי systemd (כולל העתקת
+`airam-rfcheck.service` לפני `daemon-reload`) —
+**enabled רק `sdrplay`+`airam-web`**; אף צרכן SDR (כולל rtl_airband ו-airam-rfcheck) לא
 enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב משוחזר באתחול ע"י
 `_boot_restore` של airam-web — **חוץ מ-satcom**, שלא משוחזר אוטומטית מסיבות
 בטיחות (ר' §12).
@@ -983,8 +1172,15 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   ראה ה-CHANGELOG: כל גרסה כמעט הוסיפה בדיקות).
 - **CI** (`.github/workflows/ci.yml`): pytest על **Python 3.11 ו-3.13** (מטריצה —
   Pi OS Bookworm/Debian 12 מול Pi OS Trixie/Debian 13; שתיהן בשטח בפועל)
-  + `bash -n` (בדיקת תחביר) על `install.sh` ו-`airam-wait-sdrplay`. **שמור את שניהם ירוקים.**
+  + `bash -n` (בדיקת תחביר) ו-`shellcheck -S warning` על `install.sh`, `airam-wait-sdrplay` ו-
+  `airam-rfcheck-diag` + `systemd-analyze verify` על כל היחידות. **שמור את כולם ירוקים.**
+  ה-CI מתקין **numpy** (בדיקות ה-DSP/הבודק/קצה-לקצה של 🩺); בלעדיו הן מדלגות (`importorskip`),
+  לא נכשלות — ו-`app.py` עצמו נבדק שהוא עולה עם numpy חסום (`test_app_imports_without_numpy`).
+  ‏`python3-soapysdr` **לא** זמין ב-CI (ולא ב-venv) — כל בדיקה של הבודק רצה מול `tests/rfsim.FakeRadio`.
 - **בדיקה ידנית של adsb:** `python3 webtune/adsb.py --selftest` (בלי רשת).
+- **בדיקה ידנית של 🩺 על ה-Pi:** `sudo -u airam /usr/bin/python3 -I /opt/airam/webtune/rfcheck_probe.py --selftest`
+  (זמינות), `sudo airam-rfcheck-diag` (אבחון D1–D8 → `/var/lib/airam/rfcheck_diagnose.json`),
+  `journalctl -u airam-rfcheck -n 200`.
 
 ---
 
@@ -993,10 +1189,11 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
 - **כיוונון אחד בכל רגע:** RSP1B יחיד = תדר/מצב אחד פעיל. אל תנסה ריבוי ערוצים בו-זמני.
 - **שישה מצבי `app_mode`, שווי-מעמד:** `voice` (rtl_airband) · `acars` (acarsdec) ·
   `vdl2` (dumpvdl2) · `satcom` (inmarsat-sniffer — ACARS דרך לוויין Inmarsat, ר' §5/
-  docs/satcom-feasibility.md) · `off` (standby — **ארבעת** הצרכנים עצורים, ה-SDR פנוי
-  ליישום אחר) · `scan` (סבב אוטומטי — **לא** צרכן/שירות נוסף, אלא thread שמסתובב בין
+  docs/satcom-feasibility.md) · `off` (standby — **כל** הצרכנים עצורים, כולל בודק 🩺 יתום, ה-SDR
+  פנוי ליישום אחר) · `scan` (סבב אוטומטי — **לא** צרכן/שירות נוסף, אלא thread שמסתובב בין
   קריאות ל-`_enter_voice`/`_enter_acars`/`_enter_vdl2` הקיימים; ראו §5. `satcom` **אינו**
-  scannable כרגע — MVP מכוון).
+  scannable כרגע — MVP מכוון). **🩺 בדיקת RF אינה מצב שביעי** — פעולת אבחון זמנית תחת
+  `TUNE_LOCK` שחוזרת למצב הקודם (ר' הבולט עליה למטה).
   **אין "מצב ראשי"**: כל המצבים (כולל `off`/`scan`) **שורדים reboot** — אף צרכן לא
   enabled, `_boot_restore` של airam-web משחזר את המצב השמור באתחול (עבור `scan`:
   מוצא מחדש את הרגל הראשונה שבחלון השעות שלה — לא ממשיך מהאינדקס שבו נעצר, פשטות
@@ -1294,6 +1491,50 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   ה-LNA; בסיס מקונפיגורציה אחרת (או ישן, בלי תיוג) ⇒ `no_baseline` + `verdict_reason`, לעולם לא
   השוואה. לכן הבדיקה/הניסוי מודדים ב-LNA/מסנן *השמורים של הקול* (`_probe_frontend`), ושינוי שלהם
   מבטל את הבסיס בגלוי. אחרי שדרוג ל-v2.26.0 כל בסיס קיים דורש כיול מחדש.
+- **🩺 בדיקת RF היא *פעולה* של המתזמר, לא `app_mode`.** `airam-rfcheck` לא ב-`MODE_SERVICE`/
+  `_live_mode` (בזמן בדיקה `_live_mode()` מחזיר None — ולכן `api_state`/`api_health` מטפלים בה
+  במפורש, `pollGlobalState` יוצא מוקדם, ו-`_mode_reconcile_once` מדלג כי `TUNE_LOCK` תפוס). ה-thread
+  מחזיק את `TUNE_LOCK` **לכל אורך הבדיקה, כולל מעבר ATIS** (בלי שחזור באמצע), ובכל מסלול יציאה
+  קורא `_restore_after_probe` **בדיוק פעם אחת** — האינווריאנטה שכל בדיקה ב-`test_rfcheck_api.py`/
+  `test_rfcheck_e2e.py` מאמתת. הבודק לעולם לא נוגע ב-state/פריסטים/airband.conf; רק "החל" (בקשה
+  נפרדת, דרך `_voice_tune`) משנה הגדרות. **אל תוסיף אותה ל-MODE_SERVICE** — היא הייתה "שורדת reboot"
+  ונכנסת ל-reconcile.
+- **airam-web לעולם לא מייבא את `rfcheck_probe`, numpy או SoapySDR** (נבדק בגרפ + import עם numpy
+  חסום). קריסה נייטיבית או deadlock ב-libsdrplay_api לא יכולים להפיל את משטח הבקרה היחיד. הבודק הוא
+  **קובץ יחיד** (‏`python3 -I` ⇒ `-P` ⇒ import של קובץ שכן נכשל) ורץ ב-**`/usr/bin/python3`** בדיוק
+  (python3-soapysdr בנוי רק לפייתון ברירת-המחדל של ההפצה). הבדיקות מריצות אותו מול
+  `tests/rfsim.FakeRadio` — python3-soapysdr לא זמין ב-CI.
+- **`airam-rfcheck.service`: `Wants=sdrplay` — לא `PartOf`/`Requires`** (בעיטת `airam-wait-sdrplay`
+  ב-sdrplay הייתה מפעילה מחדש בדיקה עם פרמטרים ישנים); **`RuntimeDirectoryPreserve=yes`** (אחרת
+  end.json נמחק ברגע העצירה, לפני שהמתזמר קורא); **בלי `EnvironmentFile`** (ר' §9); `Restart=no`.
+  קובץ הפרמטרים נמחק אחרי כל ריצה.
+- **עובדה "פוסלת" רק ב-IFGR ‏59** (גם ה-AGC לא היה מציל) וב-≥2 סבבים. חיתוך/עומס ב-IF נמוך יותר הוא
+  תוצר של תנאי הבדיקה ⇒ ratchet + `probe_only`, **לא** עובדה. עומס `null` ("לא נבדק") בכל פעם
+  שהטלמטריה אינה `ok` — ובבודק עצמו `None` **עד** `AIRAM_RF stream=start`, כמו ב-PR 1. "לא נבדק" ≠
+  "לא נצפה" ≠ "אין עומס" — ו"לא נצפה" מלווה ב-`overload_semantics_unverified` עד שהאבחון (D5) יאמת
+  שהחומרה מדווחת עומס כש-AGC כבוי.
+- **⚠ Holm על *כל הזוגות*, לא "המיטבי מול השאר" — אל "תפשט" חזרה.** המפרט בחר להשוות כל מצב מול
+  ה-best, עם קריטריון קבלה מוגדר מראש (שיעור טענות-שווא ≤5% תחת השערת אפס גלובלית, 500 זרעים) וגיבוי
+  מתועד. **הקריטריון נכשל**: בחירת ה-best מאותם נתונים ("קללת המנצח") נתנה 4.2% ב-K=5/n=12 אבל
+  ‏7.8% ב-K=7/n=12 ו-13.6% ב-K=7/n=20 — בדיוק ברירת המחדל (עד 7 מצבים) וכלל העצירה (n גדל). Holm על כל
+  הזוגות: ‎0.4%–2%. המחיר הוא עוצמה: עם 7 מצבים ו-12 בלוקים זוג מובהק רק כשכל ההפרשים באותו סימן, כך
+  שהבדל רגישות אמיתי קטן עלול להיראות "שוויון" ⇒ "יותר הנחתה". השומר המונוטוני (שוויון לא קופץ
+  מעל מצב עם עלות-רגישות מוכחת) מצמצם, לא מבטל — מוצהר ב-docs/rf-check-design.md §14.
+- **"החל" רק ברמת fact/stat** (החלטת משתמש 5), רק בקול, רק כשהתדר/AGC/(מסנן בתוצאת LNA) לא השתנו,
+  ו**לא כשההמלצה כבר בתוקף** (409 — אחרת "החל" שני אחרי reload היה מפעיל מחדש את rtl_airband בשביל
+  כלום). תמיד דרך `_voice_tune` — לא מסלול כתיבת-קונפיג נפרד.
+- **יישור ה-bin:** הבודק דורש `(center_hz − freq_hz) % 5000 == 0` (‏rate/N = 5kHz; bin מדויק, לא
+  ‏`ceil(x−1)` של rtl_airband). `center_hz` מגיע מ-`_voice_centerfreq` — **PR 3, שישנה את הפונקציה,
+  חייב לשמור על היישור או לעדכן את הבודק ואת הסירוב ב-`_rfcheck_start` יחד** (תדר לא מיושר ⇒ 409,
+  לא ניחוש).
+- **IFGR הוא *הנחתה*:** `clamped_low` = הפיצוי דרש IFGR <20 ונחתך ל-20 ⇒ **יותר** הנחתה ⇒ רווח כולל
+  *נמוך* מהייצור (ו-`clamped_high` להפך). טקסט ה-UI היה הפוך בגרסת הפיתוח — שים לב בכל ניסוח חדש.
+- **"🧪 ניסיוני" עד ש-`RFCHECK_VERIFIED` נכתב — ע"י אדם, מקובץ האבחון.** ה-`suggested` של האבחון
+  הן הצעות; הערכים הנבחרים נכנסים לקוד (v2.27.1) קשורים ל**חתימת הבנייה** של SoapySDRPlay3 ולגרסת
+  ה-API — בנייה מחדש מחזירה את התג אוטומטית. לא קובץ כיול שמוחל לבד.
+- **סימולציה — שני שעונים:** בבדיקות הבודק רץ על השעון הווירטואלי של FakeRadio (`clock=`), אבל
+  כלב-השמירה של המתזמר משווה את `t_wall` של status.json לשעון-הקיר שלו — לכן בדיקת קצה-לקצה חייבת
+  להעביר `wall=time.time` אמיתי (ר' `tests/test_rfcheck_e2e.py`).
 - **בידוד מקורות חיצוניים:** כל קריאת רשת (ADS-B, METAR) חייבת לרוץ ב-thread ולהיכשל
   חיננית — **הרדיו לעולם לא תלוי באינטרנט.**
 - **כתיבה אטומית + עמידה בניתוק חשמל** לקבצי קונפיג/state (`_atomic_write`) — אסור

@@ -194,3 +194,65 @@ def test_overload_ui_uses_hardware_rf_not_old_dbfs_rule():
     assert "overload_dbfs" not in js
     assert "!m.overload" not in js, "השדה העליון הישן לא משמש עוד להדלקת החיווי"
     assert '$("overload").hidden = over !== true' in js
+
+
+# --- PR 2 (v2.27.0): 🩺 בדיקת RF ----------------------------------------------------
+
+def test_rfcheck_ui_elements_exist():
+    """מפרט §7.1: האלמנטים שהקוד והבדיקות בדפדפן נשענים עליהם."""
+    html = INDEX.read_text(encoding="utf-8")
+    for el in ("rfcBox", "rfcStart", "rfcHint", "rfcUnavail", "rfcExperimental", "rfcExpList",
+               "rfcBadge", "rfcProgress", "rfcUntil", "rfcCounters", "rfcChips", "rfcStatus",
+               "rfcAtisOffer", "rfcFinish", "rfcAbort", "rfcNet", "rfcResult", "rfcMsg",
+               "rfcDiagBtn", "rfcBar", "rfcBarFinish", "rfcConfirm", "rfcConfirmOk"):
+        assert f'id="{el}"' in html, f"#{el} חסר ב-index.html"
+    # הסרגל הגלובלי מחוץ ל-<main> (כמו #expBar) — גלוי בכל תצוגה
+    assert html.index('id="rfcBar"') > html.index("</main>")
+
+
+def test_rfcheck_lna_labels_match_slider():
+    """מפרט §7.2: תווית ה-LNA זהה לסליידר — ‎(9 − state)/9 דרך lnaStep, לא ה-state הגולמי."""
+    js = _inline_js()
+    assert "const lnaStep = (state) => 9 - state;" in js
+    assert 'const rfcLna = (s) => bidi("LNA " + lnaStep(s) + "/9");' in js
+    assert 'bidi(lnaStep(s.lna) + "/9")' in js          # צ'יפ ההתקדמות
+    assert 'bidi(lnaStep(p.lna) + "/9")' in js          # טבלת המצבים
+
+
+def test_rfcheck_user_decisions_in_ui():
+    """החלטות משתמש: (1) אין "הארך"/"עוד דקה" — ממשיכים עד שיש מספיק נתונים, עד 3 דקות;
+    (2) "כייל בסיס" ושורת הבסיס/פסק-הדין לעולם לא מוסתרים ע"י הבדיקה; (5) "החל" רק ב-fact/stat."""
+    js = _inline_js()
+    html = INDEX.read_text(encoding="utf-8")
+    assert '"extend"' not in js and "can_extend" not in js
+    assert "ממשיכים עד שיש מספיק נתונים (עד 3 דקות)." in js
+    for el in ("voiceFmCalBtn", "voiceFmBaseline", "voiceFmVerdict", "voiceFmHint"):
+        assert f'$("{el}").classList.toggle("hidden"' not in js, f"#{el} לא אמור להיות מוסתר"
+        assert f'$("{el}").classList.add("hidden"' not in js
+    assert 'id="voiceFmCalBtn"' in html
+    body = re.search(r"function renderRfcResult\(d\) \{(.*?)\n    \}\n", js, re.S)
+    assert body, "renderRfcResult לא נמצא"
+    assert '(r.level === "fact" || r.level === "stat")' in body.group(1), \
+        '"החל" חייב להיות מותנה ברמת fact/stat'
+    assert "כיוון אפשרי" in body.group(1)
+
+
+def test_rfcheck_unknown_overload_never_shown_as_ok():
+    """§12: overload=null (אין טלמטריה מאומתת) ⇒ "לא נבדק", לא "לא נצפה" ולא ירוק."""
+    js = _inline_js()
+    body = re.search(r"function rfcObs\(st, k\) \{(.*?)\n    \}", js, re.S)
+    assert body
+    assert 'if (st === "not_observed") return "לא נצפה";' in body.group(1)
+    assert body.group(1).rstrip().endswith('return "לא נבדק";            // null — אין טלמטריה מאומתת: לעולם לא "תקין"')
+
+
+def test_rfcheck_global_state_and_sdr_chip_know_the_check():
+    """בזמן בדיקה rtl_airband עצור בכוונה: pollGlobalState לא הופך את הממשק ל-standby,
+    וחיווי ה-SDR מציג "בדיקת RF" (mode=rfcheck מ-/api/sdr)."""
+    js = _inline_js()
+    poll = re.search(r"async function pollGlobalState\(\) \{(.*?)\n    \}", js, re.S)
+    assert poll and "h.rf_check && h.rf_check.running" in poll.group(1)
+    assert poll.group(1).index("h.rf_check") < poll.group(1).index("sdrOff = !live")
+    assert 'rfcheck: "🩺 בדיקת RF"' in js
+    reload_ = re.search(r"function reloadStream\(tries = 10\) \{(.*?)\n    \}", js, re.S)
+    assert reload_ and "if (rfcRunning)" in reload_.group(1)

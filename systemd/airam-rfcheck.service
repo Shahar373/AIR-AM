@@ -1,0 +1,65 @@
+[Unit]
+Description=AIR-AM - RF check probe (live LNA comparison, SDRplay RSP1B)
+Documentation=file:///opt/airam/webtune/rfcheck_probe.py
+# 🩺 בדיקת RF (PR 2, docs/rf-check-design.md §4.1): צרכן SDR *חמישי* שמחזיק את
+# ה-RSP1B לכמה עשרות שניות, מחליף מצבי LNA תוך כדי קליטה וכותב מדדים פר-סלוט
+# ל-/run/airam-rfcheck. airam-web (המתזמר) מפעיל ועוצר אותו — הוא לעולם לא עולה לבד.
+#
+# ‏Wants — **לא** Requires/PartOf (בניגוד לארבעת הצרכנים האחרים, ובכוונה):
+# ‏airam-wait-sdrplay "בועט" ב-sdrplay בניסיון 8 (scripts/airam-wait-sdrplay:43), וכך גם
+# כלל ה-udev ו-install.sh. עם PartOf כל בעיטה כזו הייתה מפעילה את הבודק *מחדש* עם קובץ
+# הפרמטרים הישן, באמצע ריצה שהמתזמר עוקב אחריה (run_id חדש שהוא לא הזמין, ה-SDR נתפס
+# שוב בלי שאף אחד ביקש). בלי PartOf, הפעלה מחדש של ה-API פשוט מפילה את הריצה
+# (device_lost), והמתזמר מסיים, משחזר את הקול ומדווח.
+Wants=sdrplay.service
+After=sdrplay.service rtl_airband.service airam-acars.service airam-vdl2.service airam-satcom.service
+# ‏Conflicts לבדו לא קובע סדר. יחד עם After= (מכל כיוון) עצירת הצד השני מסודרת לפני
+# ההפעלה שלנו, ועצירתנו לפני ההפעלה שלהם (systemd.unit(5): "If one unit with an
+# ordering dependency on another unit is shut down while the latter is started up, the
+# shut down is ordered before the start-up regardless of ...") — "SDR אחד, בהחלפה" (§2).
+# ההצהרה כאן מכסה את כל ארבעת הזוגות (Conflicts דו-כיווני) — אין צורך לגעת ביחידות האחרות.
+Conflicts=rtl_airband.service airam-acars.service airam-vdl2.service airam-satcom.service
+# אין תקרת הפעלות: כל ריצה היא בקשה מפורשת מהמתזמר (Restart=no — אין לולאת קריסה
+# שצריך לבלום, בניגוד ל-airam-satcom).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# root — כמו ארבעת הצרכנים: שאלת "האם airam יכול לפתוח את ה-API" נעלמת, ו-Conflicts
+# נותן את אותה ערבות בלעדיות (design §4.1).
+User=root
+# אותו שער מוכנות כמו שאר הצרכנים: ה-API באמת עונה ומכשיר נמצא. ‏systemctl restart
+# של המתזמר חוזר אחרי השלב הזה => rc!=0 = "ה-SDR לא נפתח לבדיקה".
+ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
+# ‏/usr/bin/python3 בדיוק: python3-soapysdr בונה את ההרחבה רק לפייתון ברירת-המחדל של
+# ההפצה (נבדק: ‎_SoapySDR.cpython-312 קיים, ו-python 3.11 אחר נכשל ב-ModuleNotFoundError).
+# ‏-I (מבודד: ‎-E -s, וב-3.11+ גם ‎-P) => שום משתנה סביבה ושום קובץ לצד הסקריפט לא נטען —
+# ולכן הבודק הוא קובץ יחיד (ייבוא מקובץ שכן היה נכשל בכל מקרה).
+ExecStart=/usr/bin/python3 -I /opt/airam/webtune/rfcheck_probe.py
+# המתזמר הוא שמחליט מתי לרוץ ומתי לעצור; קריסה = סוף הריצה, לא "נסה שוב".
+Restart=no
+# הבודק כותב *רק* לכאן (root, ‏0755 => airam קורא, לא כותב). root לעולם לא כותב לתיקייה
+# של airam — זה וקטור דריסה דרך symlink (design §4.3).
+RuntimeDirectory=airam-rfcheck
+RuntimeDirectoryMode=0755
+# בלי זה systemd מוחק את /run/airam-rfcheck ברגע שהיחידה נעצרת — כלומר בדיוק לפני
+# שהמתזמר מספיק לקרוא את end.json/השורות האחרונות.
+RuntimeDirectoryPreserve=yes
+# רשת ביטחון גם כש-airam-web מת באמצע: הבודק עצמו נעצר ב-max_sec (‏≤180), המתזמר עוצר
+# אותו מוקדם יותר, ו-_boot_restore עוצר בודק יתום — ואם כל אלה נכשלו, systemd הורג אותו.
+RuntimeMaxSec=240
+# SIGTERM => דגל => deactivate/closeStream/שחרור ההתקן => end.json => יציאה 0. ‏mixed: SIGTERM
+# לתהליך הראשי בלבד (ת'רדי ה-API לא נקטעים באמצע), SIGKILL לשאר אחרי TimeoutStopSec.
+TimeoutStopSec=10
+KillMode=mixed
+NoNewPrivileges=yes
+UMask=0022
+# ⚠ בכוונה **אין** EnvironmentFile= ואין Environment=. הפרמטרים מגיעים מקובץ נתונים JSON
+# (/var/lib/airam/rfcheck-params.json), שהבודק פותח עם O_NOFOLLOW ומאמת מול whitelist
+# (rfcheck_probe.py, ‏load_params). ‏EnvironmentFile שמשתמש airam יכול לכתוב היה מייצא
+# לתהליך ה-root גם LD_PRELOAD/LD_LIBRARY_PATH/SOAPY_SDR_PLUGIN_PATH — ‏-I לא מנטרל את
+# אלה (design §3, "ממצא אבטחה"). אל תוסיף כאן.
+# אל תוסיף PrivateTmp/PrivateDevices/ProtectSystem לפני שהאבחון (D1) תיעד את נתיבי ה-IPC
+# של ה-SDRplay API (‏/dev/shm וכו') — חיזוק עיוור עלול לשבור את הפתיחה בלי סימן ברור.
+
+# אין [Install] בכוונה: היחידה לעולם לא enabled. airam-web מפעיל אותה לפי בקשה בלבד.
