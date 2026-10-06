@@ -484,7 +484,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   תוצאה נשמרת ל-`state["rf_check_last"]` רק בסיום תקין), `_rfcheck_measure` (מצב אחד דרך `_enter_voice`+
   `_probe_params` — מקבל רק כתיבות stats מאחרי `_rtl_airband_start_wall`; עומס מ-`_rf_window_summary`,
   None = לא ידוע), `_rfcheck_recommend` (טהורה: עומס מוכח פוסל; שוויון = הפרש ≤ פיזור המדידה (`_spread`,
-  IQR) ⇒ יותר הנחתה; עומס לא-ידוע ⇒ `confidence="partial"`), `_rfcheck_apply` (דרך `_voice_tune` בקול
+  IQR) ⇒ יותר הנחתה, בהליכה מהמיטבי ועצירה במצב הראשון שאינו בשוויון; עומס לא-ידוע ⇒ `confidence="partial"`), `_rfcheck_apply` (דרך `_voice_tune` בקול
   חי, אחרת רק state; 409 כשההמלצה כבר בתוקף). `api_health` מחזיר `rf_check` ו-`ok=True` בזמן ריצה.
   ⚠ גרסה גדולה (בודק root ייעודי) נכתבה ונדחתה — `docs/rf-check-design.md`, ‏78eb0a8.
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
@@ -902,10 +902,10 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/sessions/<id>/clips/<name>` | קליפ אודיו של הסשן — route ייעודי, לא הרחבת `/recordings/<name>` |
 | GET | `/api/sessions/<id>/export.zip` | ייצוא הסשן כולו (מטא-דאטה+מסלול+קליפים), אותו דפוס כמו `starred.zip` |
 | GET | `/api/sdr` | חיווי SDR: `state` (`missing`/`ours`/`switching`/`checking`/`api_down`/`api_error`/`free`/`busy`/`unavailable`/`unknown`), `usb`/`usb_desc`, `mode`+`service_state` כש-`ours`, `label` כש-`free`, `suspects` (לפי שם תהליך — רמז) כש-`busy`, `checked_age`. "פנוי" = ה-SDRplay API מציע אותו (`SoapySDRUtil --find`), נבדק רק כש-AIR-AM לא מחזיק בו |
-| GET/POST | `/api/rfcheck` | 🩺 בדיקת RF. GET: `running`/`step`/`states`/`rows` (חלקי בזמן ריצה)/`error`/`est_sec`/`result` (= `state["rf_check_last"]`). POST `{action}`: `start` (409 כשרץ/ניסוי/סריקה/SATCOM חי/`TUNE_LOCK` תפוס), `abort`, `apply` (409 בלי המלצה/כשרץ/כשכבר בתוקף). דרך `_guard` |
+| GET/POST | `/api/rfcheck` | 🩺 בדיקת RF. GET: `running`/`step`/`states`/`rows` (חלקי בזמן ריצה)/`error`/`est_sec`/`result` (= `state["rf_check_last"]`). POST `{action}`: `start` (409 כשרץ/ניסוי/סריקה/SATCOM חי/`TUNE_LOCK` תפוס), `abort`, `apply` (409 בלי המלצה/כשרץ/כשכבר בתוקף/כשמסנן ה-FM השתנה מאז הבדיקה/ברווח ידני — נמדד תחת AGC). דרך `_guard` |
 | GET | `/api/power` | מתח/טמפ' ה-Pi (`vcgencmd`), מוגש מ-cache בן ~2 שניות (`_POWER_TTL`) |
 | GET | `/api/metar` | METAR נתב"ג (LLBG) |
-| GET | `/api/health` | בריאות השירותים |
+| GET | `/api/health` | בריאות השירותים + `rf_check` (🩺 רצה). בזמן בדיקה `ok`=True כל עוד sdrplay חי — ההחלפה של rtl_airband בין מצבי ה-LNA אינה תקלה |
 
 **כלל:** כל route שמשנה מצב חומרה/קונפיג = `POST` + עובר `_guard` + (אם רלוונטי) `TUNE_LOCK`.
 

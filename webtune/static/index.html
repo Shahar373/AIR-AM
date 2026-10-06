@@ -3248,7 +3248,12 @@
     }
     $("rfcBtn").addEventListener("click", async () => {
       const action = rfcRunning ? "abort" : "start";
-      if (action === "start") rfcWasPlaying = !player.paused;
+      if (action === "start") {
+        rfcWasPlaying = !player.paused;
+        // rtl_airband עולה ויורד בין המצבים — עוצרים כאן במקום שהנגן ינסה להתחבר
+        // מחדש שוב ושוב (ויתקע על "הסטרים לא זמין"); חוזר בסוף אם ניגן קודם
+        if (rfcWasPlaying) player.pause();
+      }
       try {
         const res = await apiSend("POST", "/api/rfcheck", { action });
         const j = await res.json();

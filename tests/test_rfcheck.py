@@ -234,7 +234,7 @@ def test_apply_without_recommendation(client):
 
 def test_health_ok_while_running(client, monkeypatch):
     monkeypatch.setattr(app, "_services_status",
-                        lambda svcs: {s: "inactive" for s in svcs})
+                        lambda svcs: {s: ("active" if s == "sdrplay" else "inactive") for s in svcs})
     monkeypatch.setattr(app, "_sdr_present", lambda: True)
     app.save_state({**app.DEFAULT_STATE, "app_mode": "voice"})
     with app._rfc_lock:
@@ -245,3 +245,48 @@ def test_health_ok_while_running(client, monkeypatch):
     finally:
         with app._rfc_lock:
             app._rfc["running"] = False
+
+
+def test_health_still_reports_sdrplay_down_during_check(client, monkeypatch):
+    monkeypatch.setattr(app, "_services_status", lambda svcs: {s: "inactive" for s in svcs})
+    monkeypatch.setattr(app, "_sdr_present", lambda: True)
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "voice"})
+    with app._rfc_lock:
+        app._rfc["running"] = True
+    try:
+        assert client.get("/api/health").get_json()["ok"] is False
+    finally:
+        with app._rfc_lock:
+            app._rfc["running"] = False
+
+
+def test_recommend_tie_does_not_jump_over_worse_middle_state():
+    # 4 גרוע בבירור; 8 במקרה בשוויון עם המיטבי (2) — לא "קופצים" אליו מעל 4
+    rows = [_row(2, 24.0, spread=1.0), _row(4, 18.0), _row(8, 23.5)]
+    assert app._rfcheck_recommend(rows)["rf_gain"] == 2
+
+
+def test_sdr_down_stops_the_run(client, monkeypatch):
+    restores, measured = [], []
+    monkeypatch.setattr(app, "_live_mode", lambda: "voice")
+    monkeypatch.setattr(app, "_restore_after_probe", lambda prev, live: restores.append(live))
+
+    def down(lna, notch, stop):
+        measured.append(lna)
+        return {**_row(lna, None, error="SDR"), "sdr_down": True}
+
+    monkeypatch.setattr(app, "_rfcheck_measure", down)
+    client.post("/api/rfcheck", json={"action": "start"})
+    _wait_done()
+    assert measured == [0] and restores == ["voice"]
+    d = client.get("/api/rfcheck").get_json()
+    assert "SDR" in d["error"] and d["result"] is None
+
+
+def test_apply_refuses_when_frontend_changed(client):
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "off", "rf_gain": 4, "fm_notch": True,
+                    "rf_check_last": {"fm_notch": False, "recommendation": {"rf_gain": 6}}})
+    assert client.post("/api/rfcheck", json={"action": "apply"}).status_code == 409
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "off", "rf_gain": 4, "agc": False,
+                    "rf_check_last": {"fm_notch": False, "recommendation": {"rf_gain": 6}}})
+    assert client.post("/api/rfcheck", json={"action": "apply"}).status_code == 409

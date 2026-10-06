@@ -3561,8 +3561,8 @@ def api_health():
     # תקלה; ה-UI מקבל rf_check=True ומציג "בדיקת RF" במקום "תקלה"/"קול".
     with _rfc_lock:
         rf_check = _rfc["running"]
-    if rf_check:
-        ok = True
+    if rf_check and services.get("sdrplay") == "active":
+        ok = True   # רק ההחלפה של rtl_airband מוסתרת — sdrplay שנפל עדיין תקלה
     return jsonify(ok=ok, app_mode=mode, rf_check=rf_check,
                    services=services, sdr_present=_sdr_present(), stats_age=stats_age)
 
@@ -5388,9 +5388,10 @@ def _rfcheck_measure(lna, fm_notch, stop_evt):
     row = {"lna": lna, "snr": None, "snr_spread": None, "signal": None, "noise": None,
            "samples": 0, "overload": None, "overload_events": None,
            "ifgr_min": None, "ifgr_max": None, "error": None}
-    err, _detail, _sdr_down = _enter_voice(_probe_params(RFCHECK_FREQ, lna, fm_notch))
+    err, _detail, sdr_down = _enter_voice(_probe_params(RFCHECK_FREQ, lna, fm_notch))
     if err:
         row["error"] = err
+        row["sdr_down"] = bool(sdr_down)   # ה-SDR לא נוכח — אין טעם להמשיך למצב הבא
         return row
     want = f"{RFCHECK_FREQ:.3f}"
     # ⚠ לא כל דגימה טרייה: ה-flush של התהליך *הקודם* נכתב אחרי הקונפיג החדש (ר'
@@ -5450,7 +5451,13 @@ def _rfcheck_recommend(rows):
         tol = max(best.get("snr_spread") or 0.0, r.get("snr_spread") or 0.0)
         return best["snr"] - r["snr"] <= tol
 
-    rec = max((r for r in clean if tie(r)), key=lambda r: r["lna"])
+    # הולכים מהמיטבי לכיוון יותר הנחתה ועוצרים במצב הראשון שאינו בשוויון — לא "קופצים"
+    # מעל מצב ביניים גרוע בבירור אל מצב רחוק שבמקרה יצא בשוויון.
+    rec = best
+    for r in sorted((r for r in clean if r["lna"] > best["lna"]), key=lambda r: r["lna"]):
+        if not tie(r):
+            break
+        rec = r
     known = all(r.get("overload") is not None for r in valid)
     overloaded = sorted(r["lna"] for r in valid if r.get("overload") is True)
     return {"rf_gain": rec["lna"], "reason": "tie_more_attenuation" if rec is not best else "best_snr",
@@ -5472,6 +5479,10 @@ def _rfcheck_run(prev, prev_live, stop_evt):
             rows.append(_rfcheck_measure(lna, fm_notch, stop_evt))
             with _rfc_lock:
                 _rfc["rows"] = list(rows)
+            if rows[-1].get("sdr_down"):
+                # בלי זה כל מצב נוסף היה מחכה ~45ש' ל-_enter_voice — דקות של TUNE_LOCK תפוס
+                err = "ה-SDR לא נמצא — בדוק את חיבור ה-USB"
+                break
     except Exception:
         log.warning("🩺 בדיקת RF נכשלה", exc_info=True)
         err = "הבדיקה נכשלה — ר' journalctl -u airam-web"
@@ -5499,7 +5510,7 @@ def _rfcheck_status():
     with _rfc_lock:
         s = {k: _rfc[k] for k in ("running", "started_at", "finished_at", "step", "rows", "error")}
     s.update(freq=RFCHECK_FREQ, states=list(RFCHECK_STATES),
-             est_sec=int(len(RFCHECK_STATES) * (4 + RFCHECK_SETTLE_SEC + RFCHECK_MEASURE_SEC)),
+             est_sec=int(len(RFCHECK_STATES) * (7 + RFCHECK_SETTLE_SEC + RFCHECK_MEASURE_SEC)),   # restart+אימות ~7ש'
              result=load_state().get("rf_check_last"))
     return s
 
@@ -5525,15 +5536,18 @@ def api_rfcheck():
     with _exp_lock:
         if _exp["running"]:
             return jsonify(ok=False, error="ניסוי הכיול רץ — המתן לסיומו"), 409
-    with _scan_lock:
-        if _scan_thread is not None and _scan_thread.is_alive():
-            return jsonify(ok=False, error="עצור את הסריקה לפני הבדיקה"), 409
-    prev_live = _live_mode()
-    if prev_live == "satcom":
-        return jsonify(ok=False, error="SATCOM פעיל — עצור אותו וחבר את אנטנת ה-VHF"), 409
     if not TUNE_LOCK.acquire(blocking=False):
         return jsonify(ok=False, error="פעולה אחרת מתבצעת כרגע — נסה שוב בעוד רגע"), 409
     try:
+        # תחת הנעילה: מעבר מצב/סריקה שהסתיימו רגע לפני כן היו נותנים prev_live ישן
+        # (שחזור למצב הלא-נכון בסוף הבדיקה)
+        with _scan_lock:
+            scanning = _scan_thread is not None and _scan_thread.is_alive()
+        prev_live = _live_mode()
+        if scanning or prev_live == "satcom":
+            TUNE_LOCK.release()
+            return jsonify(ok=False, error=("עצור את הסריקה לפני הבדיקה" if scanning else
+                                            "SATCOM פעיל — עצור אותו וחבר את אנטנת ה-VHF")), 409
         stop_evt = threading.Event()
         with _rfc_lock:
             _rfc.update(running=True, started_at=time.time(), finished_at=None, step=0,
@@ -5550,22 +5564,36 @@ def api_rfcheck():
 
 def _rfcheck_apply():
     """מחיל את ה-LNA המומלץ. בקול חי — דרך _voice_tune (אותו חוזה ורולבק כמו /api/tune);
-    אחרת רק נשמר ב-state ויחול בכניסה הבאה לקול."""
-    st = load_state()
-    rec = ((st.get("rf_check_last") or {}).get("recommendation") or {}).get("rf_gain")
-    if rec is None:
-        return jsonify(ok=False, error="אין המלצה להחיל"), 409
+    אחרת רק נשמר ב-state ויחול בכניסה הבאה לקול. מסרב כשהתוצאה כבר לא מתאימה להגדרות
+    (מסנן FM השתנה / רווח ידני — נמדד תחת AGC), במקום להחיל מדידה של קצה-קדמי אחר."""
     with _rfc_lock:
         if _rfc["running"]:
             return jsonify(ok=False, error="הבדיקה עדיין רצה"), 409
+    st = load_state()
+    res = st.get("rf_check_last") or {}
+    rec = (res.get("recommendation") or {}).get("rf_gain")
+    if rec is None:
+        return jsonify(ok=False, error="אין המלצה להחיל"), 409
+    if "fm_notch" in res and bool(res["fm_notch"]) != bool(st.get("fm_notch", False)):
+        return jsonify(ok=False, error="מסנן ה-FM השתנה מאז הבדיקה — הרץ אותה שוב"), 409
+    if not st.get("agc", True):
+        return jsonify(ok=False, error="הבדיקה נמדדה תחת AGC — הדלק AGC או קבע את ה-LNA ידנית"), 409
     if int(st.get("rf_gain", RF_GAIN_DEFAULT)) == int(rec):
         return jsonify(ok=False, error="ההמלצה כבר בתוקף"), 409
     if st.get("app_mode") == "voice" and _live_mode() == "voice":
-        params = {k: st[k] for k in ("freq", "mod", "agc", "if_gain", "squelch_mode", "squelch_snr")}
-        params.update(rf_gain=int(rec), fm_notch=bool(st.get("fm_notch", False)))
+        # _voice_tune תופס את TUNE_LOCK וממזג על state טרי; params מ-_parse_tune כדי
+        # שכיוונון שהושלם רגע לפני לא יידרס בערכים ישנים (פרט ל-rf_gain עצמו)
+        params, perr = _parse_tune({**st, "rf_gain": int(rec)})
+        if perr:
+            return jsonify(ok=False, error=perr), 400
         payload, status = _voice_tune(params)
         return jsonify(payload), status
-    save_state({**st, "rf_gain": int(rec)})
+    if not TUNE_LOCK.acquire(blocking=False):
+        return jsonify(ok=False, error="פעולה אחרת מתבצעת כרגע — נסה שוב בעוד רגע"), 409
+    try:
+        save_state({**load_state(), "rf_gain": int(rec)})   # טרי, תחת הנעילה
+    finally:
+        TUNE_LOCK.release()
     return jsonify(ok=True, applied=int(rec), note="נשמר — יחול בכניסה הבאה לקול")
 
 
