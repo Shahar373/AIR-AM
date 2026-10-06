@@ -243,7 +243,16 @@ s/lame_set_VBR(lame, vbr_mtrh);/lame_set_VBR(lame, vbr_off);/
 s/lame_set_brate(lame, 16);/lame_set_brate(lame, 48);/
 s/lame_set_out_samplerate(lame, MP3_RATE);/lame_set_out_samplerate(lame, 16000);/
 s/sprintf(samplerates, "%d", MP3_RATE);/sprintf(samplerates, "%d", 16000);/
-s/static const double STATS_FILE_TIMING = 15.0;/static const double STATS_FILE_TIMING = 1.0;/'
+s/static const double STATS_FILE_TIMING = 15.0;/static const double STATS_FILE_TIMING = 1.0;/
+s|^#include <sys/stat.h>$|#include <fcntl.h>\n#include <sys/stat.h>|
+s|^int rename_if_exists(char const\* oldpath, char const\* newpath) {$|static FILE* airam_fopen_nofollow(char const* path, int flags) {  /* AIRAM_NOFOLLOW */\n    int fd = open(path, flags \| O_NOFOLLOW \| O_NONBLOCK \| O_CLOEXEC, 0644);\n    if (fd < 0) return NULL;\n    struct stat sb;\n    if (fstat(fd, \&sb) != 0 \|\| !S_ISREG(sb.st_mode)) { close(fd); errno = EINVAL; return NULL; }\n    FILE* f = fdopen(fd, (flags \& O_RDWR) ? "r+" : "w");\n    if (f == NULL) close(fd);\n    return f;\n}\n\n&|
+s|fdata->f = fopen(fdata->file_path_tmp.c_str(), "r+");|fdata->f = airam_fopen_nofollow(fdata->file_path_tmp.c_str(), O_RDWR);|
+s|fdata->f = fopen(fdata->file_path_tmp.c_str(), "w");|fdata->f = airam_fopen_nofollow(fdata->file_path_tmp.c_str(), O_WRONLY \| O_CREAT \| O_TRUNC);|'
+# patch שלישי (AIRAM_NOFOLLOW, v2.30.0 — אבטחה): rtl_airband רץ כ-root וכותב את קובצי
+# ההקלטה (*.mp3.tmp) לתיקייה של airam (/var/lib/airam/recordings). fopen רגיל *עוקב*
+# אחרי symlink — airam היה יכול להשתיל symlink בשם הקובץ הבא ולגרום ל-root לדרוס כל
+# קובץ במערכת. שלוש קריאות fopen של file_path_tmp ⇒ open(...|O_NOFOLLOW|O_NONBLOCK)
+# + בדיקת S_ISREG. ⚠ לא סוגר החלפה של התיקייה עצמה (שייכת ל-airam) — ר' CLAUDE.md §9.
 # -DNFM=ON: תמיכת NFM כבויה כברירת מחדל; הממשק מציע NFM אז חובה להפעיל,
 # אחרת בחירת NFM => "unknown modulation" וקריסה.
 # RTL_VER נעוץ ל-release ידוע-טוב: ה-patch הוא sed על המקור, ו-clone של ענף
@@ -279,9 +288,13 @@ else
   PATCH_OK=1
   for pat in 'lame_set_VBR(lame, vbr_off);' 'lame_set_brate(lame, 48);' \
              'lame_set_out_samplerate(lame, 16000);' 'sprintf(samplerates, "%d", 16000);' \
-             'static const double STATS_FILE_TIMING = 1.0;'; do
+             'static const double STATS_FILE_TIMING = 1.0;' 'AIRAM_NOFOLLOW'; do
     grep -qF "$pat" src/output.cpp || { PATCH_OK=0; warn "ה-patch לא נתפס: '$pat' (הקוד השתנה ב-upstream?)"; }
   done
+  # ...וגם שלא נשארה אף פתיחה עוקבת-symlink של קובץ הקלטה
+  if grep -qF 'fopen(fdata->file_path_tmp' src/output.cpp; then
+    PATCH_OK=0; warn "ה-patch AIRAM_NOFOLLOW לא החליף את כל קריאות fopen של קובצי ההקלטה."
+  fi
   rm -rf build && mkdir build && cd build
   # ⚠ "|| die" הכרחי: בלעדיו כשל cmake/make היה מדולג בשקט (set -e לא תופס
   # כשל של פקודה לא-אחרונה ברשימת &&) וה-marker למטה נכתב על סמך PATCH_OK
@@ -584,6 +597,14 @@ log "מתקין את שרת הווב ל-/opt/airam ..."
 mkdir -p /opt/airam/webtune
 cp -r "$REPO_DIR/webtune/." /opt/airam/webtune/   # אידמפוטנטי (לא יוצר webtune/webtune)
 [[ -f "$REPO_DIR/VERSION" ]] && cp "$REPO_DIR/VERSION" /opt/airam/webtune/VERSION   # הגרסה להצגה בממשק
+# ⚠ airam_launch.py רץ כ-root (ExecStart של ארבעת צרכני ה-SDR) ו-app.py מייבא ממנו — הקוד
+# הפרוס חייב להיות root:root בלי הרשאת כתיבה לאחרים, אחרת airam (משתמש שרת הווב) היה יכול
+# לשנות קוד שרץ כ-root. מוחל בכל הרצה (גם על עץ מגרסה קודמת). /opt/airam/models נשאר של airam.
+chown -R root:root /opt/airam/webtune
+chmod -R go-w /opt/airam/webtune
+chown root:root /opt/airam && chmod 755 /opt/airam
+/usr/bin/python3 -I /opt/airam/webtune/airam_launch.py --selftest \
+  || die "airam_launch.py --selftest נכשל — צרכני ה-SDR לא יעלו. בדוק את /opt/airam/webtune."
 # שער המוכנות ל-SDRplay (ExecStartPre של rtl_airband)
 cp "$REPO_DIR/scripts/airam-wait-sdrplay" /usr/local/bin/
 chmod 755 /usr/local/bin/airam-wait-sdrplay

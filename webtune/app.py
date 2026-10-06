@@ -42,39 +42,13 @@ log = logging.getLogger("airam")
 # --- קבועים ---------------------------------------------------------------
 CONFIG_PATH = Path("/etc/rtl_airband/airband.conf")
 STATE_PATH = Path("/var/lib/airam/state.json")
-MOUNT = "live.mp3"          # שם ה-stream הקבוע ב-Icecast
-ICECAST_PORT = 8000
-SOURCE_PW = "airam"         # חייבת להיות זהה ל-SOURCE_PW ב-install.sh (נכתבת ל-Icecast שם)
-SAMPLE_RATE = 2.56          # Msps - ערוץ יחיד, חלון צר מספיק
-# MHz — מזיזים את centerfreq מהתדר כדי להתרחק מ-spike ה-DC. ⚠ **לא 0.3 עגול** (v2.28.0):
-# rtl_airband v5.2.0 בוחר את ה-bin ב-ceil(x−1) (config.cpp:670), כש-x = (freq+rate−center)/
-# (rate/fft_size). ‏0.3MHz = בדיוק 60 bins של 5kHz ⇒ x שלם ⇒ נבחר bin אחד *מתחת* — כל ערוץ
-# נדגם 5kHz מתחת לתדר (סימולציה מלאה: עיוות גבוה יותר, ודחיית הערוץ השכן מלמטה ‎-34dB
-# במקום ‎-57dB). ב-0.2999 ‏x≈452.02 ⇒ ה-bin הנכון (452), 100Hz ממרכזו — מרווח שבולע את
-# קיטום (int)(MHz·1e6) של שני הערכים (parse_anynum2int, config.cpp:298-310). אל "תעגל" ל-0.3.
-DC_OFFSET = 0.2999
-CHANNEL_BW_NARROW = 7000    # Hz — `bandwidth` לערוץ (מסנן Bessel מסדר 2 ב-bw/2, config.cpp:595-618)
-AUDIO_LOWPASS_DEFAULT = 2500   # Hz — ברירת המחדל של rtl_airband (config.cpp:328)
-AUDIO_LOWPASS_OPTIONS = (2500, 3000)
-# רווח SDRplay (מודל legacy של SoapySDRPlay3): שני אלמנטים נפרדים, וקטן יותר = רווח גדול יותר.
-#   IFGR - הפחתת רווח בתדר הביניים, 20–59 dB.
-#   RFGR - מצב ה-LNA (הפחתת רווח RF), 0–9 (לא-לינארי, ~7dB לצעד).
-# כש-AGC כבוי כותבים gain = "IFGR=..,RFGR=.."; כש-AGC דלוק משמיטים את gain => AGC חומרתי.
-IFGR_MIN, IFGR_MAX = 20, 59
-RFGR_MIN, RFGR_MAX = 0, 9
-IF_GAIN_DEFAULT = 40            # IFGR - אמצע הטווח, בטוח מפני עומס יתר
-# RFGR - מצב LNA בינוני. ⚠ עד v2.26.0 הקבוע הזה **לא נאכף במצב AGC** (בלי שורת
-# gain הדרייבר השאיר LNAstate=0 — רווח RF מקסימלי, ר' render_config). מאז
-# הוא נכתב גם תחת AGC (‎rfgain_sel ב-device_string) — docs/voice-rf-quality-plan.md §2.2/1.
-RF_GAIN_DEFAULT = 4
-# ⚠ הוסר: OVERLOAD_DBFS (‎-3dBFS על רמת *הערוץ* מה-stats). הערוץ נמדד אחרי
-# ה-AGC ובתוך bin אחד — הוא לא רואה את ה-ADC/LNA, ולכן שתק בעומס אמיתי
-# (docs/voice-rf-quality-plan.md §2.2/3). חיווי העומס מגיע עכשיו מאירועי
-# החומרה עצמם (‎AIRAM_RF, ר' "טלמטריית RF מהחומרה" למטה), או "לא ידוע".
-SQUELCH_MODES = {"auto", "open", "manual"}
-SNR_MIN, SNR_MAX = 0.0, 60.0   # dB - תחום clamp ל-SNR ידני
-SNR_DEFAULT = 9.0              # ≈ סף ה-auto הפנימי של rtl_airband (~9.54 dB)
-STATS_PATH = Path("/run/rtl_airband_stats.txt")   # tmpfs - בלי שחיקת SD
+# קבועי הקול והרינדור של airband.conf גרים ב-airam_launch.py (PR 6, v2.30.0): ה-launcher
+# שרץ כ-root מרנדר מהם את הקונפיג שבאמת רץ, ו-app.py מייבא אותם משם — מקור-אמת יחיד.
+from airam_launch import (  # noqa: E402  (קובץ שכן ב-webtune/)
+    MOUNT, ICECAST_PORT, SOURCE_PW, SAMPLE_RATE, DC_OFFSET, CHANNEL_BW_NARROW,
+    AUDIO_LOWPASS_DEFAULT, AUDIO_LOWPASS_OPTIONS, IFGR_MIN, IFGR_MAX, RFGR_MIN, RFGR_MAX,
+    IF_GAIN_DEFAULT, RF_GAIN_DEFAULT, SQUELCH_MODES, SNR_MIN, SNR_MAX, SNR_DEFAULT, STATS_PATH,
+    REC_DIR, REC_BASENAME, _squelch_line, _device_string, render_config)
 STATS_MAX_AGE = 5.0            # rtl_airband כותב כל ~1 שנייה; ~5 כתיבות => סובל ג'יטר אך עדיין מזהה restart
 
 # --- טלמטריית RF מהחומרה (docs/voice-rf-quality-plan.md, PR 1 · 1.4/1.5) -------
@@ -360,11 +334,7 @@ SATCOM_BUF_MAX = 500                  # הודעות אחרונות בזיכרו
 SATCOM_LOG_PATH = Path("/var/lib/airam/satcom.jsonl")
 SATCOM_LOG_KEEP = 5000                # retention על הדיסק (זנב נשמר; ייצוא לניתוח)
 
-# הקלטות: rtl_airband כותב קובץ MP3 לכל שידור (split_on_transmission) בשם
-# <REC_BASENAME>_YYYYMMDD_HHMMSS_<Hz>.mp3 (.tmp בזמן כתיבה, rename בסגירה
-# ~0.5ש' אחרי שהסקוולץ' נסגר). קובץ שהסתיים = אירוע ביומן השידורים.
-REC_DIR = Path("/var/lib/airam/recordings")
-REC_BASENAME = "airam"         # filename_template ב-config וגם עוגן הפרסור של השמות
+# הקלטות: rtl_airband כותב קובץ MP3 לכל שידור ב-REC_DIR (ר' airam_launch — שם התבנית).
 REC_BYTES_PER_SEC = 6000       # CBR 48kbps (ה-patch ב-install.sh) => הערכת משך מגודל
 # retention (הקלטות *לא* מסומנות בלבד — ר' _sweep_recordings). ⚠ 500 ולא 200:
 # 200 שידורים ≈ 17 דק' אודיו בלבד בתדר עמוס — פחות מהחלון הרטרואקטיבי שכפתור
@@ -669,129 +639,6 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  "transcribe_lang": TX_LANG_DEFAULT}
 
 
-# --- שורת ה-squelch: מקור אמת יחיד -----------------------------------------
-def _squelch_line(squelch_mode, squelch_snr):
-    """מחזיר את שורת ה-squelch (או None) לכל מצב. שנה כאן בלבד.
-      auto   -> None  (ללא שורה => squelch אוטומטי, ~9.54 dB מעל הרעש)
-      open   -> תמיד פתוח (ל-ATIS / שידור רציף)
-      manual -> סף SNR ידני ב-dB
-    תמיד squelch_snr_threshold (לא dBFS) => בלתי תלוי ב-gain/AGC, ואף פעם לא שני
-    הפרמטרים יחד.
-    """
-    if squelch_mode == "manual":
-        return f"        squelch_snr_threshold = {float(squelch_snr):.1f};"
-    if squelch_mode == "open":
-        return "        squelch_snr_threshold = 0;"   # 0 = תמיד פתוח
-    return None  # auto
-
-
-# --- בניית קובץ ההגדרות ל-rtl_airband ------------------------------------
-def _device_string(agc, rf_gain, fm_notch):
-    """ה-device_string של SoapySDR — מקור-אמת יחיד (גם _parse_airband_conf/_config_stale
-    נשענים על הצורה שלו).
-    ⚠ למה מפתחות נוספים ב-device_string *מגיעים* לדרייבר (מאומת מהמקור, לא הנחה):
-      1. rtl_airband v5.2.0 מעביר את המחרוזת כמות שהיא ל-SoapySDRDevice_makeStrArgs —
-         ‏input-soapysdr.cpp:196 (בדיקת יכולות, ואז unmake) ו-:220 (הפתיחה האמיתית).
-      2. SoapySDR (Factory.cpp:154-157) ממזג את כל ה-kwargs של הקלט מעל תוצאת
-         ה-enumerate ‏(hybridArgs) ומעביר אותם ל-make של הדרייבר (:177). ה-find של
-         sdrplay מסנן רק לפי serial/mode (Registration.cpp:55,100) — מפתחות אחרים
-         לא מפילים את ההתאמה.
-      3. הבנאי של SoapySDRPlay3 (Settings.cpp:105-114) קורא writeSetting(key, value)
-         לכל kwarg שאינו driver/label/mode/serial/soapy — בכל אחת משתי הפתיחות של
-         rtl_airband, כך שגם המכשיר שבאמת מזרים מקבל אותם.
-      4. writeSetting: ‏"rfgain_sel" => tunerParams.gain.LNAstate (Settings.cpp:1628-1630,
-         תחת RF_GAIN_IN_MENU — ON כברירת מחדל ב-CMakeLists.txt:36); "rfnotch_ctrl" ל-RSP1B
-         => rsp1aParams.rfNotchEnable (Settings.cpp:1745-1748,1777-1783; "false"=>0, כל
-         ערך אחר=>1).
-    ⚠ ולמה ה-LNA לא נדרס אחר כך תחת AGC: LNAstate נכתב **רק** ב-writeSetting
-    (rfgain_sel) וב-setGain("RFGR") (Settings.cpp:597-601). rtl_airband קורא
-    setGainMode(agc) תמיד, אבל setGain/setGainElement **רק כש-AGC כבוי**
-    (input-soapysdr.cpp:247-270); setGainMode עצמו נוגע רק ב-agc.enable
-    (Settings.cpp:553-566). ה-AGC של ה-API פועל על gRdB בלבד — אין שדה LNA ב-
-    sdrplay_api_AgcT (sdrplay_api_control.h:36-45). ‏selectDevice() החוזר (מ-getSettingInfo)
-    בוחר מחדש רק כשמכשיר *אחר* נבחר באותו תהליך (Settings.cpp:2031-2038) — לא אצלנו
-    (RSP1B יחיד). לכן עד v2.26.0 (בלי rfgain_sel)
-    ה-AGC רץ עם LNAstate=0 של ברירת-המחדל (sdrplay_api_tuner.h:63) — רווח RF מרבי
-    ורוויה *לפני* ה-AGC (docs/voice-rf-quality-plan.md §2.2/1).
-    ⚠ ברווח ידני לא מוסיפים rfgain_sel: ה-LNA נקבע שם ע"י RFGR בשורת gain
-    (setGainElement אחרי הבנאי) — שני מקורות לאותו ערך היו מזמינים סתירה."""
-    parts = ["driver=sdrplay", f"rfnotch_ctrl={'true' if fm_notch else 'false'}"]
-    if agc:
-        parts.append(f"rfgain_sel={int(rf_gain)}")
-    return ",".join(parts)
-
-
-def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
-                  fm_notch=False, narrow=False, lowpass=AUDIO_LOWPASS_DEFAULT):
-    # מעגלים *פעם אחת* ובונים את שני הערכים מאותו מספר: עיגול נפרד של freq ושל freq+DC_OFFSET
-    # בתדר חופשי עם 5 ספרות (למשל 132.28125) נתן הפרש 0.3000 — שוב ה-bin הלא-נכון
-    f = round(float(freq), 4)
-    lines = [
-        "# נוצר אוטומטית ע\"י AIR-AM web tuner. שינויים ידניים נדרסים בכל כיוונון.",
-        "localtime = true;   # חותמות הזמן בשמות קובצי ההקלטה בזמן מקומי",
-        f'stats_filepath = "{STATS_PATH}";   # מדדי RF (signal/noise) ל-/api/metrics',
-        "devices:",
-        "(",
-        "  {",
-        '    type = "soapysdr";',
-        f'    device_string = "{_device_string(agc, rf_gain, fm_notch)}";',
-    ]
-    if not agc:
-        # רווח ידני => שני אלמנטים. הגדרת gain מבטלת אוטומטית את ה-AGC בדרייבר.
-        lines.append(f'    gain = "IFGR={int(if_gain)},RFGR={int(rf_gain)}";')  # אחרת AGC אוטומטי
-    lines += [
-        f"    sample_rate = {SAMPLE_RATE};",
-        '    mode = "multichannel";',
-        f"    centerfreq = {f + DC_OFFSET:.4f};",   # מוסט מהערוץ כדי להימנע מ-spike ה-DC
-        "    channels:",
-        "    (",
-        "      {",
-        f"        freq = {f:.4f};",
-        f'        modulation = "{mod}";',
-    ]
-    if narrow and mod == "am":
-        # רק ב-AM: ב-NFM מסנן ב-3.5kHz לפני הדיסקרימינטור היה חותך את הסטייה ומעוות
-        # מסנן ערוץ לפני גלאי המעטפה — דוחה ערוצים צמודים (25/8.33kHz) שה-bin הרחב
-        # (‎-3dB ב-±6.2kHz) מעביר; לא משפר SNR בתוך הערוץ. כבוי כברירת מחדל עד A/B בשטח.
-        lines.append(f"        bandwidth = {CHANNEL_BW_NARROW};")
-    if int(lowpass) != AUDIO_LOWPASS_DEFAULT:
-        lines.append(f"        lowpass = {int(lowpass)};")   # רוחב השמע (LAME) — ברירת המחדל לא נכתבת
-    sq = _squelch_line(squelch_mode, squelch_snr)
-    if sq is not None:
-        lines.append(sq)
-    record = squelch_mode != "open"   # "פתוח" (ATIS) => הסקוולץ' לא נסגר לעולם
-    lines += [
-        "        outputs:",
-        "        (",
-        "          {",
-        '            type = "icecast";',
-        '            server = "127.0.0.1";',
-        f"            port = {ICECAST_PORT};",
-        f'            mountpoint = "{MOUNT}";',
-        f'            name = "AIR-AM {f:.3f}";',
-        '            username = "source";',
-        f'            password = "{SOURCE_PW}";',
-        "          }" + ("," if record else ""),
-    ]
-    if record:
-        lines += [
-            "          {",
-            '            type = "file";',
-            f'            directory = "{REC_DIR}";',
-            f'            filename_template = "{REC_BASENAME}";',
-            "            split_on_transmission = true;   # קובץ MP3 נפרד לכל שידור",
-            "            include_freq = true;            # התדר (Hz) בשם הקובץ",
-            "          }",
-        ]
-    lines += [
-        "        );",
-        "      }",
-        "    );",
-        "  }",
-        ");",
-        "",
-    ]
-    return "\n".join(lines)
 
 
 def _atomic_write(path, text):

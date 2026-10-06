@@ -114,3 +114,4 @@ power-save כבוי · proxy `read1` · מוני overflow/overrun.
 | PR 3 (v2.28.0) | **מומש:** `DC_OFFSET`=0.2999 (bin נכון בכל הערוצים — נבדק מול הנוסחה של rtl_airband); מתגי `bandwidth`=7000 ו-`lowpass` 2500/3000 כבויים — לבדוק A/B בשטח. לדווח upstream על `ceil(x−1)` |
 | PR 4 (v2.29.0) | **מומש (פשוט):** פרופילים בשם מההגדרות הנוכחיות, החלה בנגיעה. קישור פריסט⇐פרופיל לא מומש |
 | PR 5 (v2.29.1) | **מומש:** watchdog בנגן, Icecast queue 192KB, Wi-Fi powersave כבוי, `read1` ב-proxy, מוני איבוד. לאמת בשטח: האם הגמגומים נעלמו |
+| PR 6 (v2.30.0) | **מומש (מצומצם) — אבטחה:** `airam_launch.py` (root) קורא את קובצי ה-env/conf של airam כנתונים בלבד; היחידות בלי `EnvironmentFile`; rtl_airband עם `O_NOFOLLOW` בהקלטות. לאמת ב-Pi: כל המצבים עולים, `AIRAM_RF stream=start` עדיין מגיע, הקלטות מתנגנות. שארית: החלפת תיקיית ההקלטות (מפענחים לא-root — המשך) |

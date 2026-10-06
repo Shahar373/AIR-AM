@@ -22,8 +22,23 @@ ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
 # "AIRAM_RF ..." (stderr, טלמטריית ה-RF — ר' SOAPY_RF_MARK ב-app.py) הייתה נדבקת
 # לסוף גוש waterfall ארוך, ובפיצול LineMax של journald הטוקן עלול היה להיחתך. גם
 # _journal_tail (הודעות שגיאה בממשק) מציג מאז שורות אמיתיות במקום זבל-ANSI.
-ExecStart=/usr/local/bin/rtl_airband -F -c /etc/rtl_airband/airband.conf
-# rtl_airband זקוק להרשאות root לגישת חומרה ולעדיפות זמן-אמת
+# ⚠ (v2.30.0, PR 6) לא מריצים את המפענח ישירות: airam_launch.py (root, ספריית תקן בלבד)
+# קורא את /etc/rtl_airband/airband.conf *כנתונים* — מאמת כל ערך, בונה את ה-argv בעצמו מקבועים
+# ומבצע execve (אותו PID) עם סביבה נקייה. הקובץ בשליטת airam, ולכן *אסור* שיגיע לתהליך
+# root כ-EnvironmentFile (systemd מייצא כל מפתח — LD_PRELOAD/SOAPY_SDR_PLUGIN_PATH ⇒ קוד
+# כ-root) או כקונפיג ישיר של rtl_airband (stats_filepath / directory של פלט קובץ ⇒ כתיבה
+# כ-root לכל נתיב). הקונפיג שרץ מרונדר מחדש מהמספרים ל-/run/airam-voice/airband.conf.
+# קלט פסול ⇒ יציאה 78 + קוד שגיאה ביומן (בלי התוכן).
+# שקול ל-(לפני v2.30.0): /usr/local/bin/rtl_airband -F -c /etc/rtl_airband/airband.conf
+ExecStart=/usr/bin/python3 -I /opt/airam/webtune/airam_launch.py voice
+# שורות היומן מתויגות בשם המפענח (לא python3) גם לפני ה-execve
+SyslogIdentifier=rtl_airband
+RestartPreventExitStatus=78
+# תיקיית הקונפיג המרונדר — root בלבד כותב; airam-web קורא (0755/0644).
+RuntimeDirectory=airam-voice
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# root — גישה ל-SDR דרך ה-SDRplay API (מפענחים לא-root: צעד המשך, ר' CLAUDE.md §9)
 User=root
 Restart=always
 RestartSec=10

@@ -9,6 +9,28 @@
 
 ## [Unreleased]
 
+### אבטחה
+- **סגירת הסלמה airam⇒root דרך קובצי הקונפיג של צרכני ה-SDR (v2.30.0, PR 6).** משתמש שרת הווב
+  (`airam`) כותב את `/etc/airam/{acars,vdl2,satcom}.env` ואת `/etc/rtl_airband/airband.conf`, ושלושת
+  ה-env נטענו כ-`EnvironmentFile` לתהליכי root — systemd מייצא *כל* מפתח (`LD_PRELOAD`,
+  `SOAPY_SDR_PLUGIN_PATH` ⇒ קוד כ-root); ו-rtl_airband (root) קרא את airband.conf ישירות
+  (`stats_filepath`/`directory` ⇒ כתיבה כ-root לכל נתיב). ההערות ב-CLAUDE.md וביחידות שטענו
+  ש"systemd מנתח בבטחה ⇒ אין הרצת קוד" היו שגויות. (מקומי בלבד: דרש הרצת קוד מוקדמת כ-airam; ה-API
+  עצמו כותב רק ערכים מאומתים.)
+  - **`webtune/airam_launch.py`** (root, ספריית תקן בלבד): ארבע היחידות מריצות אותו במקום את
+    המפענח. קורא את הקבצים *כנתונים* (‏`O_NOFOLLOW`, קובץ רגיל, קישור יחיד, ≤16KiB), רשימת מפתחות
+    סגורה + תבנית/טווח לכל ערך, מרנדר את קונפיג הקול מחדש מהמספרים ל-`/run/airam-voice`, בונה את
+    ה-argv מקבועים — **זהה** להרחבה הישנה של systemd (נבדק על כל הבנקים ו-128 צירופי SATCOM) —
+    ו-`execve` עם סביבה נקייה (אותו PID, אותו יומן). קלט פסול ⇒ יציאה 78 + קוד שגיאה ביומן, בלי התוכן.
+  - **היחידות:** בלי `EnvironmentFile`; `SyslogIdentifier` בשם המפענח; `RestartPreventExitStatus=78`.
+  - **rtl_airband:** patch שלישי (`AIRAM_NOFOLLOW`) — קובצי ההקלטה נפתחים עם `O_NOFOLLOW` (symlink
+    שהושתל בתיקיית ההקלטות לא יגרום ל-root לדרוס קובץ). ⇒ **בנייה מחדש אחת** של rtl_airband בעדכון.
+  - **install.sh:** `/opt/airam/webtune` נעול `root:root` בלי go-w בכל הרצה, ו-`--selftest` של ה-launcher
+    לפני הפעלת השירותים.
+  - ⚠ **שארית מוצהרת:** airam עדיין יכול להחליף את *תיקיית* ההקלטות ב-symlink (‏`/var/lib/airam` שלו) —
+    root ייצור קובצי `airam_*.mp3` בתיקייה אחרת. הסגירה המלאה (מפענחים לא-root / sandbox) דורשת אימות
+    על החומרה — צעד המשך. ⚠ **לא נבדק על ה-Pi** — ר' "אימות שטח" ב-CLAUDE.md §9.
+
 ### תוקן
 - **מסירת השמע לטלפון — תקיעות כבר לא נראות כ"משדר · live" (v2.29.1, PR 5).**
   - **watchdog בנגן:** עד כאן היה רק `onerror`. תקיעה (`waiting`/`stalled` בלי error), ניתוק

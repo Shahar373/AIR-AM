@@ -25,10 +25,6 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-# קובץ ההגדרות (אופציונלי, '-') - airam-web כותב אותו במעבר למצב SATCOM.
-# systemd מנתח KEY=VALUE *בבטחה* (לא מריץ shell) => קובץ הניתן-לכתיבה ע"י airam
-# לא יכול להסליל הרצת קוד כ-root (בניגוד ל-source ב-bash).
-EnvironmentFile=-/etc/airam/satcom.env
 # שער מוכנות: מחכה שה-SDRplay API באמת יענה לפני הרצת inmarsat-sniffer (כמו
 # rtl_airband). %n (שם היחידה הזו) מועבר לשער כדי שהוא ידע לדלג על "בעיטת"
 # ה-restart ל-sdrplay.service במקרה הזה בלבד — היחידה הזו (בניגוד לשלושת
@@ -62,7 +58,16 @@ ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
 # הרציפה אפס: web_get_spectrum_by_channel קורא את מצב הדמודולטור הקיים, בלי
 # ring buffer ובלי FFT מתמשך (אומת ב-web.c/main.c). ⚠ הדגל מוסיף גם
 # GET /api/tune?ch=N&hz=X (משנה-מצב) לפורט הלא-מאומת הזה — ר' §9 ב-CLAUDE.md.
-ExecStart=/usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero $SATCOM_GAIN $SATCOM_BIAS_TEE $SATCOM_SKIP_C $SATCOM_SPECTRUM --udp=${SATCOM_UDP} --web=${SATCOM_WEB_PORT} --station-id=airam
+# ⚠ (v2.30.0, PR 6) לא מריצים את המפענח ישירות: airam_launch.py (root, ספריית תקן בלבד)
+# קורא את /etc/airam/satcom.env *כנתונים* — מאמת כל ערך, בונה את ה-argv בעצמו מקבועים
+# ומבצע execve (אותו PID) עם סביבה נקייה. הקובץ בשליטת airam, ולכן *אסור* שיגיע לתהליך
+# root כ-EnvironmentFile (systemd מייצא כל מפתח — LD_PRELOAD/SOAPY_SDR_PLUGIN_PATH ⇒ קוד
+# כ-root). קלט פסול ⇒ יציאה 78 + קוד שגיאה ביומן (בלי התוכן).
+# שקול ל-(לפני v2.30.0): /usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero $SATCOM_GAIN $SATCOM_BIAS_TEE $SATCOM_SKIP_C $SATCOM_SPECTRUM --udp=${SATCOM_UDP} --web=${SATCOM_WEB_PORT} --station-id=airam
+ExecStart=/usr/bin/python3 -I /opt/airam/webtune/airam_launch.py satcom
+# שורות היומן מתויגות בשם המפענח (לא python3) גם לפני ה-execve
+SyslogIdentifier=inmarsat-sniffer
+RestartPreventExitStatus=78
 # גישת חומרה (SDR) => כמו rtl_airband, רץ כ-root
 User=root
 Restart=always

@@ -94,6 +94,11 @@ webtune/
   adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS + סדרת סשן +
                             #   buffer מתגלגל לשחזור-סשן (docs/session-replay-design.md,
                             #   שלב 1). thread נפרד. ניתן להרצה ידנית: `python3 adsb.py [--selftest]`.
+  airam_launch.py           # ★ המפעיל של ארבעת צרכני ה-SDR — רץ כ-root (`python3 -I ... <mode>`,
+                            #   ספריית תקן בלבד). קורא את airband.conf/‏*.env של airam *כנתונים*,
+                            #   מרנדר את קונפיג הקול ל-/run/airam-voice, בונה argv ו-execve עם סביבה
+                            #   נקייה (ר' §9). מכיל גם את render_config וקבועי הקול — app.py מייבא.
+                            #   `--selftest` ל-install.sh. ⚠ בלי תופעות-לוואי ב-import, בלי קובץ שכן.
   static/
     index.html              # ה-UI כולו (HTML+CSS+JS inline, ~6800 שורות). PWA. 5 תצוגות:
                             #   🏠 מרכז (בית/standby/scan, כולל דוח סשן+התראות) + קול + ACARS +
@@ -110,10 +115,11 @@ config/
   airband.conf             # קונפיג ברירת-מחדל ל-rtl_airband (ATIS 132.5). ⚠ נדרס ע"י app.py בכל tune.
                            #   חייב להיות זהה לפלט render_config(DEFAULT_STATE) (נבדק) — כולל
                            #   device_string עם rfnotch_ctrl+rfgain_sel (ר' §5, _device_string).
-  acars.env               # ברירת-מחדל ל-acarsdec (EnvironmentFile). ⚠ נדרס ע"י app.py בכל מעבר ACARS.
-  vdl2.env                # ברירת-מחדל ל-dumpvdl2 (EnvironmentFile). ⚠ נדרס ע"י app.py בכל מעבר VDL2.
+  acars.env               # ברירת-מחדל ל-acarsdec (KEY=VALUE — נקרא ע"י airam_launch, *לא* EnvironmentFile).
+                          #   ⚠ נדרס ע"י app.py בכל מעבר ACARS.
+  vdl2.env                # ברירת-מחדל ל-dumpvdl2 (כנ"ל). ⚠ נדרס ע"י app.py בכל מעבר VDL2.
                           #   ⚠ התדרים ב-Hz (dumpvdl2), בעוד state/UI ב-MHz.
-  satcom.env              # ברירת-מחדל ל-inmarsat-sniffer (EnvironmentFile). ⚠ נדרס ע"י app.py
+  satcom.env              # ברירת-מחדל ל-inmarsat-sniffer (כנ"ל). ⚠ נדרס ע"י app.py
                           #   בכל מעבר SATCOM. לוויין (AF1 ברירת מחדל), gain, bias-tee.
 
 systemd/
@@ -125,6 +131,9 @@ systemd/
   airam-vdl2.service       # VDL2 (dumpvdl2). Conflicts=rtl_airband+airam-acars. *לא* enabled. root.
   airam-satcom.service     # SATCOM (inmarsat-sniffer). Conflicts=שלושת האחרים. *לא* enabled. root.
                            #   אף צרכן SDR לא עולה באתחול — airam-web (המתזמר) משחזר את המצב השמור.
+                           #   ארבעתם: ExecStart = airam_launch.py <mode> (‏SyslogIdentifier בשם המפענח,
+                           #   RestartPreventExitStatus=78), **בלי EnvironmentFile** (ר' §9). rtl_airband
+                           #   גם RuntimeDirectory=airam-voice (הקונפיג המרונדר).
   airam-web.service        # שרת הווב + המתזמר. enabled. User=airam (לא-root). Restart=always.
 
 patches/
@@ -144,6 +153,9 @@ udev/
 
 tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/systemd ממוקפים).
   conftest.py              # מוסיף webtune/ ל-sys.path.
+  test_launch.py           # airam_launch (PR 6): argv זהה להרחבת ה-ExecStart הישנה (כל הבנקים, 128 צירופי
+                           #   SATCOM), round-trip קונפיג הקול, סירובים (LD_PRELOAD, הזרקת דגלים, symlink/FIFO/
+                           #   hardlink), סביבה נקייה, יחידות root בלי EnvironmentFile, ה-patch ל-rtl_airband.
   test_app.py              # render_config, parse, presets, מדדים, יומן, רולבק/נפילה-ל-off.
   test_acars.py            # נרמול ACARS, latlon, labels, ATIS, OOOI, actype, מעברי מצב.
   test_vdl2.py             # נרמול VDL2 (מסלול A/B), env, מעברי מצב, ייצוא, health.
@@ -218,7 +230,8 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | נתיב | תוכן | נכתב ע"י |
 |------|------|----------|
 | `/opt/airam/webtune/` | הקוד הפרוס (app.py, adsb.py, static) | install.sh |
-| `/etc/rtl_airband/airband.conf` | קונפיג קול חי (תדר נבחר) | app.py בכל `/api/tune` |
+| `/etc/rtl_airband/airband.conf` | קונפיג הקול *המבוקש* (תדר נבחר) — בבעלות airam; root קורא ממנו רק מספרים | app.py בכל `/api/tune` |
+| `/run/airam-voice/airband.conf` | הקונפיג ש-rtl_airband **באמת** קורא — מרונדר מחדש מהמספרים (root, 0644, RuntimeDirectory) | airam_launch.py (root) |
 | `/etc/airam/acars.env` | תדרי ACARS חיים | app.py בכל מעבר ל-ACARS |
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
 | `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain (`--sdrplay-gain=N` או ריק=AGC), bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
@@ -928,9 +941,36 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 ## 9. מודל האבטחה (אל תשבור אותו)
 
 - **`airam-web` רץ כמשתמש לא-root (`airam`).** גישתו ל-root מוגבלת ל-sudoers ממוקד:
-  *רק* פקודות `systemctl` ספציפיות (restart rtl_airband, start/stop של המצבים).
-- **`acars.env`/`vdl2.env` מנותחים ע"י systemd (`EnvironmentFile`), לא ע"י shell** → קובץ
-  שכותב `airam` לא יכול להסליל הרצת קוד כ-root. **אל תעביר את הקבצים האלה דרך bash source.**
+  *רק* פקודות `systemctl` ספציפיות (restart/stop לכל צרכן, reset-failed ל-satcom) — 9 שורות.
+- **⚠ תוקן ב-v2.30.0 (PR 6): קובץ ש-`airam` כותב *כן* הוביל להרצת קוד כ-root.** נכתב כאן בעבר
+  ש-`acars.env`/`vdl2.env` "מנותחים ע"י systemd ⇒ לא יכולים להסליל הרצת קוד" — **שגוי**: systemd
+  מייצא *כל* מפתח ב-`EnvironmentFile` לתהליך ה-root (`LD_PRELOAD`, `SOAPY_SDR_PLUGIN_PATH` ⇒
+  קוד כ-root), ו-`airband.conf` (בבעלות airam) נקרא ישירות ע"י rtl_airband כ-root
+  (`stats_filepath`/`directory` של פלט קובץ ⇒ כתיבה כ-root לכל נתיב). הסלמה airam⇒root מקומית
+  (דרשה הרצת קוד מוקדמת כ-airam — לא דרך ה-API, שכותב רק ערכים מאומתים).
+  **התיקון — `webtune/airam_launch.py`:** ארבע יחידות הצרכנים מריצות `python3 -I airam_launch.py
+  <mode>` (root, ספריית תקן בלבד, `root:root` — install.sh נועל את `/opt/airam/webtune`). הוא
+  קורא את קבצי airam **כנתונים בלבד** (`O_NOFOLLOW|O_NONBLOCK`, קובץ רגיל, קישור יחיד, ≤16KiB):
+  רשימת מפתחות סגורה (מפתח לא מוכר ⇒ סירוב), כל ערך מול תבנית/טווח/רשימה; ערכים ש-app.py
+  כותב קבועים (יעדי UDP, msg-filter, פורט האבחון) **נעוצים** — נבדקים, לא נלקחים. קונפיג הקול
+  **מרונדר מחדש** מהמספרים (`render_config` גר שם; app.py מייבא) ל-`/run/airam-voice` (root),
+  ה-argv נבנה מקבועים, והמפענח מקבל `execve` עם סביבה נקייה (אותו PID). קלט פסול ⇒ יציאה 78
+  (`RestartPreventExitStatus`) + **קוד** ביומן, לעולם לא התוכן (airam קורא את היומן).
+  rtl_airband עצמו פותח את קובצי ההקלטה עם `O_NOFOLLOW` (patch `AIRAM_NOFOLLOW` ב-install.sh).
+  **כללים:** (1) **לעולם לא `EnvironmentFile`/`Environment` על יחידה שרצה כ-root** (נבדק ב-
+  `tests/test_launch.py`); (2) קובץ ש-airam כותב מגיע ל-root רק דרך ה-launcher, כמספרים;
+  (3) פרמטר חדש לצרכן = מפתח ברשימה + תבנית + golden test, לא "עוד משתנה ב-env";
+  (4) אל תעביר את הקבצים האלה דרך `bash source`.
+  **שארית מוצהרת:** `/var/lib/airam` שייך ל-airam, כך ש-airam יכול להחליף את *התיקייה*
+  `recordings` ב-symlink; ‏O_NOFOLLOW מגן רק על הרכיב האחרון ⇒ root עדיין ייצור קבצים
+  `airam_*.mp3(.tmp)` (שם ותוכן לא בשליטה) בתיקייה אחרת. הסגירה המלאה — מפענחים לא-root
+  (משתמש SDR ייעודי) או sandbox של systemd — דורשת אימות על החומרה (IPC של ה-SDRplay API) ⇒
+  צעד המשך, לא כאן.
+  **אימות שטח (טרם בוצע):** `systemctl cat airam-acars` בלי EnvironmentFile; `journalctl -u
+  rtl_airband -n 20` מציג `airam-launch: voice: exec /usr/local/bin/rtl_airband -F -c
+  /run/airam-voice/airband.conf` ואחריו `AIRAM_RF stream=start`; ‏`tr '\0' '\n' </proc/$(systemctl
+  show -p MainPID --value rtl_airband)/environ` — רק PATH/HOME/INVOCATION_ID/JOURNAL_STREAM; כל ארבעת
+  המצבים + סריקה + reboot עובדים כמו קודם; הקלטות נוצרות ומתנגנות.
 - **מאזינים בלי סיסמה;** סיסמת ה-source ל-Icecast פנימית קבועה (`airam`).
 - **PIN אופציונלי** דרך `AIRAM_PIN` ב-`/etc/airam/airam.env` (כבוי כברירת מחדל, קובץ
   `chmod 640` — לא world-readable). השוואה בזמן-קבוע (`hmac.compare_digest`, לא `==`)
@@ -979,7 +1019,8 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 כשהמודול נטען **וגם** ה-marker תואם. ה-marker (`/usr/local/share/airam/soapysdrplay3.build-sig`)
 נמחק בתחילת כל בנייה ונכתב **רק** אחרי patch מאומת + בנייה מוצלחת — patch שנכשל ⇒ בנייה בלעדיו,
 בלי marker (רדיו עובד, טלמטריה "לא זמינה"). clone לתיקייה זמנית ⇒ בלי רשת מקור/מודול קיים נשארים
-(ובלי מודול כלל — die). ‏`checkout -f` מנקה patch מריצה קודמת. 4. בניית `rtl_airband` (4b: `libacars` ≥2.1.0 + `acarsdec`
+(ובלי מודול כלל — die). ‏`checkout -f` מנקה patch מריצה קודמת. 4. בניית `rtl_airband` (patch sed על `output.cpp`: CBR 48k, stats כל 1ש', ו-**`AIRAM_NOFOLLOW`** —
+פתיחת קובצי ההקלטה עם `O_NOFOLLOW`; ה-PATCH_OK בודק גם שלא נשארה פתיחת `fopen(fdata->file_path_tmp`) (4b: `libacars` ≥2.1.0 + `acarsdec`
 ל-ACARS — הגייט בודק גם `command -v decode_acars_apps` (כלי ה-CLI הרשמי, מותקן
 ללא-תנאי ע"י `examples/CMakeLists.txt` של libacars) לצד `pkg-config`, כי
 `_decode_libacars_app` ב-`app.py` תלוי בו לפענוח SATCOM CPDLC/ADS-C בכיוון הנכון
@@ -994,7 +1035,8 @@ releases רשמיים לפרויקט — חתימת בנייה נכתבת *רק*
 **9 פקודות systemctl**: restart/stop × rtl_airband/airam-acars/airam-vdl2/
 airam-satcom, ועוד `reset-failed` ל-airam-satcom בלבד (מנקה תקרת-הפעלות אחרי
 קריסה — ר' §12); seeding של `acars.env`+`vdl2.env`+`satcom.env`). 7. שרת הווב
-(7b: תמלול whisper אופציונלי, `sudo INSTALL_WHISPER=1 ./install.sh` — ⚠ הסדר
+— **`/opt/airam/webtune` נעול `root:root` בלי go-w בכל הרצה** (‏airam_launch.py רץ כ-root),
+ואז `airam_launch.py --selftest` (כשל ⇒ die) (7b: תמלול whisper אופציונלי, `sudo INSTALL_WHISPER=1 ./install.sh` — ⚠ הסדר
 קריטי: `INSTALL_WHISPER=1 sudo ...` נבלע בשקט, `sudo` מאפס env כברירת מחדל
 ב-Debian; שני מודלים — `small.en`+`small`, ר' §5/§12). 8. שירותי systemd —
 **enabled רק `sdrplay`+`airam-web`**; אף צרכן SDR (כולל rtl_airband) לא
@@ -1288,6 +1330,10 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
 - **⚠ VDL2 env ב-Hz, state/UI ב-MHz:** dumpvdl2 מקבל תדרים ב-Hz. `write_vdl2_env` הוא
   **המקום היחיד** שממיר MHz→Hz; בכל שאר המקומות (state, `VDL2_BANKS`, UI, `_sanitize_freqs`)
   התדרים הם מחרוזות MHz — כמו ACARS. אל תערבב.
+- **🔒 יחידה שרצה כ-root לעולם לא מקבלת `EnvironmentFile`/`Environment`, ולעולם לא קוראת
+  קובץ של airam כקונפיג** — רק דרך `airam_launch.py`, כמספרים מאומתים (ר' §9). פרמטר חדש לצרכן
+  SDR = מפתח ב-`ENV_KEYS` + תבנית + golden ב-`tests/test_launch.py`. שינוי ב-`render_config` —
+  ב-`airam_launch.py` (וה-round-trip `parse_voice_conf`⇄`render_config` חייב להישאר זהה).
 - **`config/airband.conf` · `config/acars.env` · `config/vdl2.env` נדרסים** ע"י `app.py`
   בזמן ריצה. לשנות ברירת מחדל קבועה — ערוך גם את הדיפולט בקוד (`ACARS_BANKS`/`VDL2_BANKS`/
   `ACARS_FREQS_DEFAULT`/`VDL2_FREQS_DEFAULT` וכו').

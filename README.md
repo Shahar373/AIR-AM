@@ -361,8 +361,9 @@ SATCOM ואפילו כיבוי. שרת הווב (airam-web) הוא "המתזמר
 
 בחירת בנק בזמן קליטה חיה מחליפה מיד את החלון. לשינוי **ברירת מחדל קבועה** ערוך את
 `config/acars.env` בריפו (או את `ACARS_BANKS` ב-`webtune/app.py`). עריכה ידנית של
-`/etc/airam/acars.env` אפשרית (פורמט EnvironmentFile של systemd), אך **כל מעבר ל-ACARS
-מהממשק דורס אותה**:
+`/etc/airam/acars.env` אפשרית (שורות `KEY=VALUE` בלי מירכאות — נבדקות בקפדנות לפני
+ההפעלה; ערך לא תקין ⇒ השירות לא עולה, והסיבה ב-`journalctl -u airam-acars`), אך **כל מעבר
+ל-ACARS מהממשק דורס אותה**:
 
 ```bash
 ACARS_FREQS=130.450 131.425 131.525 131.550 131.725 131.825 131.850   # MHz, מופרדים ברווח
@@ -758,16 +759,20 @@ AIR-AM בנוי לרוץ **לבד** לאורך זמן (שרידות reboot, סר
 - **`webtune/adsb.py`** — ניתוח ADS-B (מסלול פעיל + GPS) ב-thread נפרד; מגיש את
   `GET /api/airspace` מהזיכרון בלבד, כך שתקלת רשת לא נוגעת בנתיב הרדיו.
 - **`config/airband.conf`** — קובץ ברירת מחדל לאתחול ראשון (ATIS 132.5). נדרס ע"י הבורר בכל כיוונון.
+- **`webtune/airam_launch.py`** — המפעיל (root) של ארבעת צרכני ה-SDR: קורא את בחירות הממשק
+  (`airband.conf`, ‏`/etc/airam/*.env`) כמספרים מאומתים בלבד, מרנדר את קונפיג הקול ל-
+  `/run/airam-voice/` ומריץ את המפענח עם סביבה נקייה — כך ששרת הווב (לא-root) לא יכול
+  להשפיע על תהליך ה-root מעבר לתדר/רווח (v2.30.0).
 - **מצב ACARS:** `airam-web` כותב `/etc/airam/acars.env` ומפעיל את `airam-acars`
-  (`acarsdec` דרך `EnvironmentFile`). acarsdec שולח כל הודעה כ-JSON ב-UDP ל-`airam-web`
+  (`acarsdec` דרך `airam_launch.py`). acarsdec שולח כל הודעה כ-JSON ב-UDP ל-`airam-web`
   (פורט פנימי 5556), והדף מושך מ-`GET /api/acars`. ה-unit מוגדר `Conflicts=rtl_airband`
   => הפעלתו עוצרת אוטומטית את הקול (מקלט אחד).
 - **מצב VDL2:** אותו דפוס בדיוק — `airam-web` כותב `/etc/airam/vdl2.env` ומפעיל את
-  `airam-vdl2` (`dumpvdl2` דרך `EnvironmentFile`). הפלט זורם כ-JSON ב-UDP (פורט 5557),
+  `airam-vdl2` (`dumpvdl2` דרך `airam_launch.py`). הפלט זורם כ-JSON ב-UDP (פורט 5557),
   והדף מושך מ-`GET /api/vdl2`. ה-unit מוגדר `Conflicts=rtl_airband airam-acars` =>
   הפעלתו עוצרת אוטומטית את שני הצרכנים האחרים.
 - **מצב SATCOM:** אותו דפוס — `airam-web` כותב `/etc/airam/satcom.env` (לוויין +
-  bias-tee) ומפעיל את `airam-satcom` (`inmarsat-sniffer` דרך `EnvironmentFile`). הפלט
+  bias-tee) ומפעיל את `airam-satcom` (`inmarsat-sniffer` דרך `airam_launch.py`). הפלט
   זורם כ-JSON ב-UDP (פורט 5558) ל-`GET /api/satcom`. ה-unit `Conflicts` את שלושת
   הצרכנים האחרים.
 - **שישה שירותים:** `sdrplay` (שירות ה-API), `rtl_airband` (קול), `airam-web` (הממשק

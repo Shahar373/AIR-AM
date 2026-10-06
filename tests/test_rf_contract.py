@@ -132,8 +132,11 @@ def test_journal_follower_reads_the_unit_that_runs_rtl_airband():
 def test_rtl_airband_unit_runs_without_textual_waterfall():
     """‏-f מצייר waterfall ל-stdout בלי '\\n' (rtl_airband.cpp:657-667), באותו זרם journald
     כמו ה-stderr שבו שורות AIRAM_RF מגיעות — ‏-F הוא מצב החזית בלי waterfall (:768-773)."""
+    # מאז v2.30.0 ה-argv נבנה ב-airam_launch.py (ה-ExecStart מריץ את ה-launcher)
+    import airam_launch
     m = re.search(r"^ExecStart=(.*)$", UNIT.read_text(), re.M)
-    args = m.group(1).split()
+    assert m.group(1).split()[-1] == "voice"
+    args = airam_launch.build_argv("voice", airam_launch.VOICE_CONF_OUT)
     assert "-F" in args and "-f" not in args
 
 
