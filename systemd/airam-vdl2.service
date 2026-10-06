@@ -34,7 +34,7 @@ ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
 # root כ-EnvironmentFile (systemd מייצא כל מפתח — LD_PRELOAD/SOAPY_SDR_PLUGIN_PATH ⇒ קוד
 # כ-root). קלט פסול ⇒ יציאה 78 + קוד שגיאה ביומן (בלי התוכן).
 # שקול ל-(לפני v2.30.0): /usr/local/bin/dumpvdl2 --soapysdr driver=sdrplay --oversample 20 $VDL2_GAIN --msg-filter ${VDL2_MSG_FILTER} --output decoded:json:udp:address=127.0.0.1,port=5557 $VDL2_FREQS
-ExecStart=/usr/bin/python3 -I /opt/airam/webtune/airam_launch.py vdl2
+ExecStart=/usr/bin/python3 -I -S /opt/airam/webtune/airam_launch.py vdl2
 # שורות היומן מתויגות בשם המפענח (לא python3) גם לפני ה-execve
 SyslogIdentifier=dumpvdl2
 RestartPreventExitStatus=78

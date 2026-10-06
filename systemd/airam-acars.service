@@ -28,7 +28,7 @@ ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
 # root כ-EnvironmentFile (systemd מייצא כל מפתח — LD_PRELOAD/SOAPY_SDR_PLUGIN_PATH ⇒ קוד
 # כ-root). קלט פסול ⇒ יציאה 78 + קוד שגיאה ביומן (בלי התוכן).
 # שקול ל-(לפני v2.30.0): /usr/local/bin/acarsdec -g ${ACARS_GAIN} -m ${ACARS_RATEMULT} -o 1 -j ${ACARS_UDP} -d driver=sdrplay $ACARS_FREQS
-ExecStart=/usr/bin/python3 -I /opt/airam/webtune/airam_launch.py acars
+ExecStart=/usr/bin/python3 -I -S /opt/airam/webtune/airam_launch.py acars
 # שורות היומן מתויגות בשם המפענח (לא python3) גם לפני ה-execve
 SyslogIdentifier=acarsdec
 RestartPreventExitStatus=78

@@ -219,12 +219,13 @@ SATCOM_WEB_PORT = "8888"           # = SATCOM_WEB_PORT ב-app.py
 SATCOM_SATELLITES = ("AF1", "4F3", "3F5", "F1")   # = SATCOM_BANKS ב-app.py (נבדק)
 MAX_CHANNELS = 8
 
-FREQ_MHZ_RE = re.compile(r"\d{2,3}\.\d{1,3}")      # = _FREQ_RE ב-app.py (נבדק)
-FREQ_HZ_RE = re.compile(r"\d{9}")                  # VDL2 ב-Hz (136975000)
-INT_RE = re.compile(r"-?\d{1,4}")
-VDL2_GAIN_RE = re.compile(r"--soapy-gain IFGR=(\d{2}),RFGR=(\d)")
-SATCOM_GAIN_RE = re.compile(r"--sdrplay-gain=(\d{2})")
-ENV_KEY_RE = re.compile(r"[A-Z][A-Z0-9_]{0,31}")
+# ⚠ re.ASCII בכל תבנית: בלעדיו ‎\d תופס גם ספרות לא-לטיניות (١٣١.٥٥٠), שהיו עוברות כמות שהן
+FREQ_MHZ_RE = re.compile(r"\d{2,3}\.\d{1,3}", re.ASCII)   # = _FREQ_RE ב-app.py (נבדק)
+FREQ_HZ_RE = re.compile(r"\d{7,9}", re.ASCII)             # VDL2 ב-Hz (136975000)
+INT_RE = re.compile(r"-?\d{1,4}", re.ASCII)
+VDL2_GAIN_RE = re.compile(r"--soapy-gain IFGR=(\d{2}),RFGR=(\d)", re.ASCII)
+SATCOM_GAIN_RE = re.compile(r"--sdrplay-gain=(\d{2})", re.ASCII)
+ENV_KEY_RE = re.compile(r"[A-Z][A-Z0-9_]{0,31}", re.ASCII)
 
 # מפתחות לכל מצב: (חובה, רשות). מפתח אחר כלשהו (LD_PRELOAD...) ⇒ סירוב — לא "מתעלמים".
 ENV_KEYS = {
@@ -273,8 +274,8 @@ def read_input(path):
 def _one(text, key, value, required=True):
     """ערך יחיד של `key` בשורה מעוגנת. כל שורה שמתחילה ב-`key =` חייבת להתאים לתבנית
     המדויקת (אחרת שורה בפורמט אחר הייתה "נעלמת" בשקט ברינדור מחדש); שתי הופעות ⇒ דו-משמעי."""
-    loose = re.findall(r"^\s*%s\s*=" % key, text, re.M)
-    found = re.findall(r"^\s*%s = %s;[^\n]*$" % (key, value), text, re.M)
+    loose = re.findall(r"^\s*%s\s*=" % key, text, re.M | re.ASCII)
+    found = re.findall(r"^\s*%s = %s;[^\n]*$" % (key, value), text, re.M | re.ASCII)
     if len(loose) != len(found):
         raise LaunchError("bad:" + key)
     if len(found) > 1:
@@ -292,7 +293,7 @@ def parse_voice_conf(text):
     לא נקרא בכלל — הקונפיג שרץ מרונדר מחדש מקבועים. סובל קונפיג מגרסה קודמת (בלי
     rfnotch_ctrl/rfgain_sel, centerfreq ישן) — את אלה airam-web ממילא משכתב (_config_stale)."""
     dev = _one(text, "device_string", r'"([^"\n]*)"')
-    m = re.fullmatch(r"driver=sdrplay(?:,rfnotch_ctrl=(true|false))?(?:,rfgain_sel=(\d))?", dev)
+    m = re.fullmatch(r"driver=sdrplay(?:,rfnotch_ctrl=(true|false))?(?:,rfgain_sel=(\d))?", dev, re.ASCII)
     if not m:
         raise LaunchError("bad:device_string")
     fm_notch = m.group(1) == "true"
@@ -390,13 +391,12 @@ def parse_env(text, mode):
     return vals
 
 
-def _freq_list(value, rx, lo, hi):
+def _freq_list(value, rx):
+    """התבנית לבדה (ספרות ASCII + נקודה) מספיקה: כל טוקן הוא ארגומנט יחיד שלא מתחיל ב-'-'.
+    בלי בדיקת טווח/כפילויות — app.py לא אוכף אותן, ותדר "מוזר" הוא בעיה של המפענח, לא של root."""
     toks = value.split(" ")
-    if not 1 <= len(toks) <= MAX_CHANNELS or len(set(toks)) != len(toks):
+    if not 1 <= len(toks) <= MAX_CHANNELS or not all(rx.fullmatch(t) for t in toks):
         raise LaunchError("bad:freqs")
-    for t in toks:
-        if not rx.fullmatch(t) or not lo <= float(t) <= hi:
-            raise LaunchError("bad:freqs")
     return toks
 
 
@@ -425,7 +425,7 @@ def build_argv(mode, vals):
                 "-o", "1",
                 "-j", _exact(vals["ACARS_UDP"], {ACARS_UDP}, "udp"),
                 "-d", "driver=sdrplay",
-                *_freq_list(vals["ACARS_FREQS"], FREQ_MHZ_RE, 100.0, 1000.0)]
+                *_freq_list(vals["ACARS_FREQS"], FREQ_MHZ_RE)]
     if mode == "vdl2":
         gain = []
         g = vals.get("VDL2_GAIN", "")
@@ -438,7 +438,7 @@ def build_argv(mode, vals):
         return [BIN["vdl2"], "--soapysdr", "driver=sdrplay", "--oversample", "20", *gain,
                 "--msg-filter", _exact(vals["VDL2_MSG_FILTER"], {VDL2_MSG_FILTER}, "msg_filter"),
                 "--output", "decoded:json:udp:address=127.0.0.1,port=%d" % VDL2_UDP_PORT,
-                *_freq_list(vals["VDL2_FREQS"], FREQ_HZ_RE, 100e6, 1000e6)]
+                *_freq_list(vals["VDL2_FREQS"], FREQ_HZ_RE)]
     if mode == "satcom":
         gain = []
         g = vals.get("SATCOM_GAIN", "")
@@ -470,7 +470,7 @@ def clean_env(environ):
     if re.fullmatch(r"[0-9a-f]{32}", inv):
         env["INVOCATION_ID"] = inv
     js = environ.get("JOURNAL_STREAM", "")
-    if re.fullmatch(r"\d{1,20}:\d{1,20}", js):
+    if re.fullmatch(r"\d{1,20}:\d{1,20}", js, re.ASCII):
         env["JOURNAL_STREAM"] = js
     return env
 

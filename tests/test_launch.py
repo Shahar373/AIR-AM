@@ -188,6 +188,8 @@ GOOD = {
     ("acars", GOOD["acars"].replace("131.550 131.725", "-131.550"), "bad:freqs"),
     ("acars", GOOD["acars"].replace("131.550 131.725", "131.550  131.725"), "bad:freqs"),
     ("acars", GOOD["acars"].replace("131.550 131.725", " ".join(["131.55%d" % i for i in range(9)])), "bad:freqs"),
+    ("acars", GOOD["acars"].replace("131.550 131.725", "\u0661\u0663\u0661.\u0665\u0665\u0660"), "bad:freqs"),
+    ("vdl2", GOOD["vdl2"].replace("136975000", "\uff11\uff13\uff16975000"), "bad:freqs"),
     ("acars", GOOD["acars"].replace("ACARS_UDP=127.0.0.1:5556", "ACARS_UDP=10.0.0.1:5556"), "bad:udp"),
     ("acars", GOOD["acars"].replace("ACARS_GAIN=-10", 'ACARS_GAIN="-10"'), "bad:gain"),
     ("acars", 'ACARS_FREQS="131.550"\n' + GOOD["acars"].split("\n", 1)[1], "bad:freqs"),
@@ -204,6 +206,16 @@ GOOD = {
 def test_env_rejections(mode, text, code):
     with pytest.raises(L.LaunchError, match="^" + re.escape(code) + "$"):
         L.build_argv(mode, L.parse_env(text, mode))
+
+
+def test_duplicate_freqs_still_launch():
+    """app.py לא מסיר כפילויות — לפני v2.30.0 הן הגיעו למפענח, ולא ניתן לסרב להן עכשיו."""
+    text = GOOD["acars"].replace("131.550 131.725", "131.550 131.550")
+    assert L.build_argv("acars", L.parse_env(text, "acars"))[-2:] == ["131.550", "131.550"]
+
+
+def test_app_freq_regex_is_ascii_only():
+    assert not app._FREQ_RE.match("\u0661\u0663\u0661.\u0665\u0665\u0660")
 
 
 @pytest.mark.parametrize("mode", ["acars", "vdl2", "satcom"])
@@ -309,7 +321,7 @@ def test_main_usage():
 
 
 def test_selftest_runs_isolated():
-    r = subprocess.run([sys.executable, "-I", str(LAUNCH_SRC), "--selftest"],
+    r = subprocess.run([sys.executable, "-I", "-S", str(LAUNCH_SRC), "--selftest"],
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
 
@@ -339,7 +351,7 @@ def _directives(name):
 def test_consumer_units_run_the_launcher(unit):
     mode, ident = UNITS[unit]
     d = _directives(unit)
-    assert d["ExecStart"] == [f"/usr/bin/python3 -I /opt/airam/webtune/airam_launch.py {mode}"]
+    assert d["ExecStart"] == [f"/usr/bin/python3 -I -S /opt/airam/webtune/airam_launch.py {mode}"]
     assert d["SyslogIdentifier"] == [ident] and d["RestartPreventExitStatus"] == ["78"]
 
 
@@ -371,6 +383,7 @@ def test_install_locks_code_dir_and_runs_selftest():
     assert "chown -R root:root /opt/airam/webtune" in INSTALL
     assert "chmod -R go-w /opt/airam/webtune" in INSTALL
     i = INSTALL.index("airam_launch.py --selftest")
+    assert "python3 -I -S /opt/airam/webtune/airam_launch.py --selftest" in INSTALL
     assert "die" in INSTALL[i:i + 200]
     assert INSTALL.index("chown -R root:root /opt/airam/webtune") < i
 
@@ -378,7 +391,10 @@ def test_install_locks_code_dir_and_runs_selftest():
 def test_install_rtl_patch_nofollow():
     patch = INSTALL[INSTALL.index("RTL_PATCH='"):INSTALL.index("RTL_CMAKE_FLAGS=")]
     assert "AIRAM_NOFOLLOW" in patch and "O_NOFOLLOW" in patch
-    assert "'AIRAM_NOFOLLOW'" in INSTALL and "fopen(fdata->file_path_tmp" in INSTALL
+    # כשל ה-patch האבטחתי ⇒ die (לא "רדיו עובד עדיף" כמו ב-CBR)
+    i = INSTALL.index("grep -qF 'AIRAM_NOFOLLOW' src/output.cpp")
+    assert "fopen(fdata->file_path_tmp" in INSTALL[i:i + 200] and "die " in INSTALL[i:i + 400]
+    assert "sb.st_nlink != 1" in patch and "ftruncate" in patch and "~O_TRUNC" in patch
 
 
 def test_rtl_patch_applies_to_real_source(tmp_path):

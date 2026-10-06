@@ -30,11 +30,11 @@ ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
 # כ-root לכל נתיב). הקונפיג שרץ מרונדר מחדש מהמספרים ל-/run/airam-voice/airband.conf.
 # קלט פסול ⇒ יציאה 78 + קוד שגיאה ביומן (בלי התוכן).
 # שקול ל-(לפני v2.30.0): /usr/local/bin/rtl_airband -F -c /etc/rtl_airband/airband.conf
-ExecStart=/usr/bin/python3 -I /opt/airam/webtune/airam_launch.py voice
+ExecStart=/usr/bin/python3 -I -S /opt/airam/webtune/airam_launch.py voice
 # שורות היומן מתויגות בשם המפענח (לא python3) גם לפני ה-execve
 SyslogIdentifier=rtl_airband
 RestartPreventExitStatus=78
-# תיקיית הקונפיג המרונדר — root בלבד כותב; airam-web קורא (0755/0644).
+# תיקיית הקונפיג המרונדר — root בלבד כותב (0755/0644 — קריא לאבחון ידני).
 RuntimeDirectory=airam-voice
 RuntimeDirectoryMode=0755
 RuntimeDirectoryPreserve=yes

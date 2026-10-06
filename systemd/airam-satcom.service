@@ -64,7 +64,7 @@ ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
 # root כ-EnvironmentFile (systemd מייצא כל מפתח — LD_PRELOAD/SOAPY_SDR_PLUGIN_PATH ⇒ קוד
 # כ-root). קלט פסול ⇒ יציאה 78 + קוד שגיאה ביומן (בלי התוכן).
 # שקול ל-(לפני v2.30.0): /usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero $SATCOM_GAIN $SATCOM_BIAS_TEE $SATCOM_SKIP_C $SATCOM_SPECTRUM --udp=${SATCOM_UDP} --web=${SATCOM_WEB_PORT} --station-id=airam
-ExecStart=/usr/bin/python3 -I /opt/airam/webtune/airam_launch.py satcom
+ExecStart=/usr/bin/python3 -I -S /opt/airam/webtune/airam_launch.py satcom
 # שורות היומן מתויגות בשם המפענח (לא python3) גם לפני ה-execve
 SyslogIdentifier=inmarsat-sniffer
 RestartPreventExitStatus=78

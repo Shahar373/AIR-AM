@@ -231,7 +231,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 |------|------|----------|
 | `/opt/airam/webtune/` | הקוד הפרוס (app.py, adsb.py, static) | install.sh |
 | `/etc/rtl_airband/airband.conf` | קונפיג הקול *המבוקש* (תדר נבחר) — בבעלות airam; root קורא ממנו רק מספרים | app.py בכל `/api/tune` |
-| `/run/airam-voice/airband.conf` | הקונפיג ש-rtl_airband **באמת** קורא — מרונדר מחדש מהמספרים (root, 0644, RuntimeDirectory) | airam_launch.py (root) |
+| `/run/airam-voice/airband.conf` | הקונפיג ש-rtl_airband **באמת** קורא — מרונדר מחדש מהמספרים (root, 0644, RuntimeDirectory). app.py לא קורא אותו — הוא קורא את ‎/etc (שקול מספרית) | airam_launch.py (root) |
 | `/etc/airam/acars.env` | תדרי ACARS חיים | app.py בכל מעבר ל-ACARS |
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
 | `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain (`--sdrplay-gain=N` או ריק=AGC), bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
@@ -263,7 +263,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   בקליטת SATCOM ראשונה מוצלחת ולא היו מתועדים קודם; ר' §12), הקלטות, whisper.
 - **`_guard` (before_request):** אכיפת אבטחה לכל בקשה משנת-מצב — בדיקת `Origin==Host`
   (CSRF/DNS-rebind) + PIN אופציונלי. **כל route שמשנה מצב חייב לעבור דרכו.**
-- **בניית קונפיג קול:** `render_config` → `write_config` (כתיבה אטומית), `_squelch_line`
+- **בניית קונפיג קול:** `render_config` (⚠ מאז v2.30.0 גר ב-`airam_launch.py` יחד עם `_squelch_line`/`_device_string` וקבועי הקול — app.py מייבא; ר' §9) → `write_config` (כתיבה אטומית), `_squelch_line`
   (מקור-אמת יחיד לשורת ה-squelch), `_device_string(agc, rf_gain, fm_notch)` (מקור-אמת יחיד
   ל-`device_string`: `rfnotch_ctrl=<bool>` תמיד, `rfgain_sel=<rf_gain>` **רק תחת AGC** — ברווח
   ידני ה-LNA הוא `RFGR` בשורת `gain`; ר' §12 *למה*, ו-docstring עם file:line מהמקור).
@@ -955,7 +955,8 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
   כותב קבועים (יעדי UDP, msg-filter, פורט האבחון) **נעוצים** — נבדקים, לא נלקחים. קונפיג הקול
   **מרונדר מחדש** מהמספרים (`render_config` גר שם; app.py מייבא) ל-`/run/airam-voice` (root),
   ה-argv נבנה מקבועים, והמפענח מקבל `execve` עם סביבה נקייה (אותו PID). קלט פסול ⇒ יציאה 78
-  (`RestartPreventExitStatus`) + **קוד** ביומן, לעולם לא התוכן (airam קורא את היומן).
+  (`RestartPreventExitStatus`) + **קוד** ביומן — לעולם לא תוכן הקובץ (airam קורא את היומן); שורת
+  ה-`exec` מדפיסה רק את ה-argv המאומת. ‏`python3 -I -S` (בלי site/‏.pth). ספרות ASCII בלבד (`re.ASCII`).
   rtl_airband עצמו פותח את קובצי ההקלטה עם `O_NOFOLLOW` (patch `AIRAM_NOFOLLOW` ב-install.sh).
   **כללים:** (1) **לעולם לא `EnvironmentFile`/`Environment` על יחידה שרצה כ-root** (נבדק ב-
   `tests/test_launch.py`); (2) קובץ ש-airam כותב מגיע ל-root רק דרך ה-launcher, כמספרים;
@@ -963,7 +964,9 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
   (4) אל תעביר את הקבצים האלה דרך `bash source`.
   **שארית מוצהרת:** `/var/lib/airam` שייך ל-airam, כך ש-airam יכול להחליף את *התיקייה*
   `recordings` ב-symlink; ‏O_NOFOLLOW מגן רק על הרכיב האחרון ⇒ root עדיין ייצור קבצים
-  `airam_*.mp3(.tmp)` (שם ותוכן לא בשליטה) בתיקייה אחרת. הסגירה המלאה — מפענחים לא-root
+  `airam_<תאריך>_<שעה>_<Hz>.mp3(.tmp)` (תוכן לא בשליטה; השם צפוי — airam בוחר את התדר) בתיקייה
+  אחרת. (ה-patch גם מסרב ל-hardlink ומבצע truncate רק אחרי הבדיקה.) תיקון זול אפשרי: תיקיית
+  ההקלטות תחת הורה בבעלות root. הסגירה המלאה — מפענחים לא-root
   (משתמש SDR ייעודי) או sandbox של systemd — דורשת אימות על החומרה (IPC של ה-SDRplay API) ⇒
   צעד המשך, לא כאן.
   **אימות שטח (טרם בוצע):** `systemctl cat airam-acars` בלי EnvironmentFile; `journalctl -u

@@ -245,7 +245,7 @@ s/lame_set_out_samplerate(lame, MP3_RATE);/lame_set_out_samplerate(lame, 16000);
 s/sprintf(samplerates, "%d", MP3_RATE);/sprintf(samplerates, "%d", 16000);/
 s/static const double STATS_FILE_TIMING = 15.0;/static const double STATS_FILE_TIMING = 1.0;/
 s|^#include <sys/stat.h>$|#include <fcntl.h>\n#include <sys/stat.h>|
-s|^int rename_if_exists(char const\* oldpath, char const\* newpath) {$|static FILE* airam_fopen_nofollow(char const* path, int flags) {  /* AIRAM_NOFOLLOW */\n    int fd = open(path, flags \| O_NOFOLLOW \| O_NONBLOCK \| O_CLOEXEC, 0644);\n    if (fd < 0) return NULL;\n    struct stat sb;\n    if (fstat(fd, \&sb) != 0 \|\| !S_ISREG(sb.st_mode)) { close(fd); errno = EINVAL; return NULL; }\n    FILE* f = fdopen(fd, (flags \& O_RDWR) ? "r+" : "w");\n    if (f == NULL) close(fd);\n    return f;\n}\n\n&|
+s|^int rename_if_exists(char const\* oldpath, char const\* newpath) {$|static FILE* airam_fopen_nofollow(char const* path, int flags) {  /* AIRAM_NOFOLLOW */\n    int fd = open(path, (flags \& ~O_TRUNC) \| O_NOFOLLOW \| O_NONBLOCK \| O_CLOEXEC, 0644);\n    if (fd < 0) return NULL;\n    struct stat sb;\n    if (fstat(fd, \&sb) != 0 \|\| !S_ISREG(sb.st_mode) \|\| sb.st_nlink != 1) { close(fd); errno = EINVAL; return NULL; }\n    if ((flags \& O_TRUNC) \&\& ftruncate(fd, 0) != 0) { close(fd); return NULL; }\n    FILE* f = fdopen(fd, (flags \& O_RDWR) ? "r+" : "w");\n    if (f == NULL) close(fd);\n    return f;\n}\n\n&|
 s|fdata->f = fopen(fdata->file_path_tmp.c_str(), "r+");|fdata->f = airam_fopen_nofollow(fdata->file_path_tmp.c_str(), O_RDWR);|
 s|fdata->f = fopen(fdata->file_path_tmp.c_str(), "w");|fdata->f = airam_fopen_nofollow(fdata->file_path_tmp.c_str(), O_WRONLY \| O_CREAT \| O_TRUNC);|'
 # patch שלישי (AIRAM_NOFOLLOW, v2.30.0 — אבטחה): rtl_airband רץ כ-root וכותב את קובצי
@@ -288,12 +288,13 @@ else
   PATCH_OK=1
   for pat in 'lame_set_VBR(lame, vbr_off);' 'lame_set_brate(lame, 48);' \
              'lame_set_out_samplerate(lame, 16000);' 'sprintf(samplerates, "%d", 16000);' \
-             'static const double STATS_FILE_TIMING = 1.0;' 'AIRAM_NOFOLLOW'; do
+             'static const double STATS_FILE_TIMING = 1.0;'; do
     grep -qF "$pat" src/output.cpp || { PATCH_OK=0; warn "ה-patch לא נתפס: '$pat' (הקוד השתנה ב-upstream?)"; }
   done
-  # ...וגם שלא נשארה אף פתיחה עוקבת-symlink של קובץ הקלטה
-  if grep -qF 'fopen(fdata->file_path_tmp' src/output.cpp; then
-    PATCH_OK=0; warn "ה-patch AIRAM_NOFOLLOW לא החליף את כל קריאות fopen של קובצי ההקלטה."
+  # ⚠ ה-patch האבטחתי (AIRAM_NOFOLLOW) — בניגוד ל-CBR/stats, *לא* "רדיו עובד עדיף": בינארי root
+  # שעוקב אחרי symlink בתיקייה של airam הוא בדיוק החור שה-patch סוגר. לא מתקינים בלעדיו.
+  if ! grep -qF 'AIRAM_NOFOLLOW' src/output.cpp || grep -qF 'fopen(fdata->file_path_tmp' src/output.cpp; then
+    die "ה-patch האבטחתי AIRAM_NOFOLLOW לא חל על src/output.cpp (upstream השתנה?) — לא מתקין rtl_airband בלעדיו."
   fi
   rm -rf build && mkdir build && cd build
   # ⚠ "|| die" הכרחי: בלעדיו כשל cmake/make היה מדולג בשקט (set -e לא תופס
@@ -603,7 +604,7 @@ cp -r "$REPO_DIR/webtune/." /opt/airam/webtune/   # אידמפוטנטי (לא �
 chown -R root:root /opt/airam/webtune
 chmod -R go-w /opt/airam/webtune
 chown root:root /opt/airam && chmod 755 /opt/airam
-/usr/bin/python3 -I /opt/airam/webtune/airam_launch.py --selftest \
+/usr/bin/python3 -I -S /opt/airam/webtune/airam_launch.py --selftest \
   || die "airam_launch.py --selftest נכשל — צרכני ה-SDR לא יעלו. בדוק את /opt/airam/webtune."
 # שער המוכנות ל-SDRplay (ExecStartPre של rtl_airband)
 cp "$REPO_DIR/scripts/airam-wait-sdrplay" /usr/local/bin/
