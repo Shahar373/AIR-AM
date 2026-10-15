@@ -411,6 +411,7 @@ def test_scan_activate_waits_when_no_leg_active(paths, no_sleep, monkeypatch):
     assert err is None
     assert calls == []                     # לא ניסינו להיכנס לשום רגל
     assert app._scan_status["idx"] == -1 and app._scan_status["leg"] is None
+    assert app._scan_status["wait"] == "window"   # ה-UI: "ממתין לחלון" — לא תקלה
     assert app._scan_thread is not None and app._scan_thread.is_alive()
 
 
@@ -742,6 +743,8 @@ def test_boot_restore_scan_sdr_absent_waits_and_reports_fault(client, paths, no_
     assert app.load_state()["app_mode"] == "scan"
     assert app._scan_thread is not None and app._scan_thread.is_alive()
     assert app._scan_status["idx"] == -1 and app._scan_status["leg"] is None
+    # ה-UI מבדיל בין "ממתין ל-SDR" (תקלה) ל"ממתין לחלון" (לא תקלה) לפי השדה הזה
+    assert client.get("/api/scan").get_json()["wait"] == "sdr"
 
     def fake_run(cmd, **kw):
         return types.SimpleNamespace(stdout="\n".join("inactive" for _ in cmd[2:]),

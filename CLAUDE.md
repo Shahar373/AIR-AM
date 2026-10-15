@@ -148,6 +148,10 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
                            #   תמלול (5 מצבי tx.state, תור מבוסס-sidecar ששורד restart, שתי
                            #   שפות/מודלים, fallback מודל, retention עמיד ל-stat שנכשל).
   test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
+  test_frontend.py         # UI בלי דפדפן: `node --check` על הסקריפט ה-inline + בדיקות סטטיות.
+  test_ui_browser.py       # ★ UI בדפדפן אמיתי (Playwright, API מזויף ב-route interception):
+                           #   אישור bias-T ב-SATCOM, כישלון כניסה⇒בית, הודעות SDR-חסר, ארכיון,
+                           #   ניסוי כיול, חיווי SDR. job נפרד ב-CI; מדלג כש-playwright חסר.
   test_corrupt_logs.py     # ★ JSONL אחרי כיבוי פתאומי: שורה שאינה אובייקט, תו UTF-8 קטוע (הפיל
                            #   את airam-web בעלייה), append אחרי שורה קטועה, stats קרוע.
   test_signal.py           # מד שדה: _signal_verdict, /api/signal (voice/acars/vdl2/satcom/off), /api/antenna/check.
@@ -780,7 +784,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
 | POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית), `skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12), `spectrum` (bool אופציונלי — `false` לכיבוי האבחון, ר' §9/§12) ו-`gain` (‏`null`=AGC (ברירת מחדל) או מספר=gRdB ידני 20–59, נחתך; ר' §12). לכולם: ברירת מחדל = הבחירה השמורה. ⚠ ב-`gain` בלבד `null` הוא **ערך משמעותי** (AGC מפורש) ולא היעדר — הזיהוי הוא לפי נוכחות המפתח בגוף הבקשה. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
-| GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור) |
+| GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור), `wait` (כש-`leg=None`: ‏`"window"` = אף רגל לא בחלון, לא תקלה / `"sdr"` = ה-SDR לא ב-USB, תקלה) |
 | GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון; `?day=YYYY-MM-DD` ארכיון מהדיסק, snapshot סטטי) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט; לא ב-`?day=`). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM, עמודות `level`+`snr`) |
 | GET | `/api/vdl2` | הודעות VDL2 אחרונות (**היום בלבד**; `?all=1`; `?day=YYYY-MM-DD` ארכיון) + שדה `adsb`. אותה סכמת כרטיס כמו ACARS + `icao`; `snr` תמיד אמיתי (dumpvdl2 מספק רצפת רעש) |

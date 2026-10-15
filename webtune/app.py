@@ -2937,7 +2937,8 @@ _scan_lock = threading.Lock()      # מגן על _scan_thread/_scan_thread_stop/
 _scan_thread = None
 _scan_thread_stop = None           # Event של ה-thread *הפעיל* הנוכחי (לא גלובלי משותף —
                                     # כל thread מקבל Event משלו, כדי שסבב חדש לא "יבטל" ישן)
-_scan_status = {"idx": -1, "leg": None, "next_switch_at": None, "plan": []}
+_scan_status = {"idx": -1, "leg": None, "next_switch_at": None, "plan": [],
+                "wait": None}   # "window" (אף רגל לא בחלון — לא תקלה) / "sdr" (ה-SDR לא ב-USB — תקלה)
 
 
 def _validate_scan_plan(raw):
@@ -3012,7 +3013,7 @@ def _scan_stop_thread():
         thread.join(timeout=15)
     if thread:
         with _scan_lock:
-            _scan_status.update(idx=-1, leg=None, next_switch_at=None)
+            _scan_status.update(wait=None, idx=-1, leg=None, next_switch_at=None)
 
 
 def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
@@ -3051,7 +3052,7 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
             consecutive_skip += 1
             idx += 1
             with _scan_lock:
-                _scan_status.update(idx=-1, leg=None, next_switch_at=None)
+                _scan_status.update(wait="window", idx=-1, leg=None, next_switch_at=None)
             if consecutive_skip >= len(plan):
                 # סבב שלם בלי אף רגל בחלון => אין מה לשדר עכשיו, מכבים בפועל
                 # (לא רק מסתירים מה-UI) — אחרת הרגל האחרונה שרצה ממשיכה לשדר
@@ -3094,7 +3095,7 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
                 last_entered = None
                 consecutive_fail = 0
             with _scan_lock:
-                _scan_status.update(idx=-1, leg=None, next_switch_at=None)
+                _scan_status.update(wait="sdr", idx=-1, leg=None, next_switch_at=None)
             remaining = SCAN_WINDOW_RECHECK_SEC
             continue
         same = (last_entered is not None and last_entered["mode"] == leg["mode"]
@@ -3104,7 +3105,7 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
             # רק מרעננים את הטיימר. חוסך נתק שמע/הקלטות כל dwell בלוח עם רגל
             # יחידה (או רגלים חוזרות) בעלת חלון שעות.
             with _scan_lock:
-                _scan_status.update(idx=idx % len(plan), leg=leg,
+                _scan_status.update(wait=None, idx=idx % len(plan), leg=leg,
                                     next_switch_at=time.time() + leg["dwell_sec"])
             remaining = leg["dwell_sec"]
             idx += 1
@@ -3144,7 +3145,7 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
                 finally:
                     TUNE_LOCK.release()
                 with _scan_lock:
-                    _scan_status.update(idx=-1, leg=None, next_switch_at=None)
+                    _scan_status.update(wait=None, idx=-1, leg=None, next_switch_at=None)
                 return
             idx += 1
             remaining = 1     # מנסים את הבאה כמעט מיד — לא ממתינים dwell מלא אחרי כשל
@@ -3155,7 +3156,7 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
         if stop_evt.is_set():
             return   # נעצרנו בדיוק אחרי כניסה מוצלחת — לא כותבים סטטוס של סבב שכבר בוטל
         with _scan_lock:
-            _scan_status.update(idx=idx % len(plan), leg=leg,
+            _scan_status.update(wait=None, idx=idx % len(plan), leg=leg,
                                 next_switch_at=time.time() + leg["dwell_sec"])
         remaining = leg["dwell_sec"]
         idx += 1
@@ -3179,7 +3180,7 @@ def _scan_activate(plan, wait_for_sdr=False):
         stop_evt = threading.Event()
         thread = threading.Thread(target=_scan_loop, args=(stop_evt, plan, 0, 0, False), daemon=True)
         with _scan_lock:
-            _scan_status.update(idx=-1, leg=None, next_switch_at=None, plan=plan)
+            _scan_status.update(wait="window", idx=-1, leg=None, next_switch_at=None, plan=plan)
             _scan_thread, _scan_thread_stop = thread, stop_evt
         thread.start()
         return None, None
@@ -3198,7 +3199,7 @@ def _scan_activate(plan, wait_for_sdr=False):
                                   args=(stop_evt, plan, active_idx, SCAN_WINDOW_RECHECK_SEC, False),
                                   daemon=True)
         with _scan_lock:
-            _scan_status.update(idx=-1, leg=None, next_switch_at=None, plan=plan)
+            _scan_status.update(wait="sdr", idx=-1, leg=None, next_switch_at=None, plan=plan)
             _scan_thread, _scan_thread_stop = thread, stop_evt
         thread.start()
         return None, None
@@ -3209,7 +3210,7 @@ def _scan_activate(plan, wait_for_sdr=False):
                               args=(stop_evt, plan, active_idx + 1, plan[active_idx]["dwell_sec"], True),
                               daemon=True)
     with _scan_lock:
-        _scan_status.update(idx=active_idx, leg=plan[active_idx],
+        _scan_status.update(wait=None, idx=active_idx, leg=plan[active_idx],
                             next_switch_at=time.time() + plan[active_idx]["dwell_sec"], plan=plan)
         _scan_thread, _scan_thread_stop = thread, stop_evt
     thread.start()

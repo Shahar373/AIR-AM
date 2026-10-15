@@ -557,3 +557,173 @@ def test_sdr_chip_reports_detected_busy_and_free(page):
     sdr.update(state="missing", usb=False, usb_desc=None, label=None)
     page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
     expect(chip).to_have_text("SDR לא מזוהה")
+
+
+# --- SDR שלא ב-USB: הממשק אומר *מה* קרה ו*מה יקרה* --------------------------
+#
+#  מאז v2.25.1 מצב שמור לא נופל ל-off כשה-SDR חסר (אתחול בלי SDR / ניתוק USB
+#  בסריקה) — הוא ממתין לו, ו-health מדווח ok=False. בלי הבדיקות האלה הממשק
+#  הציג "ממתין לחלון הזמן הבא" (שקר — אין קשר לחלון שעות) או "בדוק את המערכת"
+#  (בלי לומר שהמצב יחזור לבד כשיחברו את הכבל).
+
+_ALL_DOWN = {"rtl_airband": "inactive", "icecast2": "active", "sdrplay": "active",
+             "airam-acars": "inactive", "airam-vdl2": "inactive",
+             "airam-satcom": "inactive"}
+
+
+def _sdr_missing_api(mode, sdr_present=False, scan_wait=None):
+    st = _default_api()["/api/state"]
+    over = {
+        "/api/state": {**st, "app_mode": mode, "mode_ok": False,
+                       "scan_plan": [{"mode": "acars", "dwell_sec": 60}]},
+        "/api/health": {"ok": False, "app_mode": mode, "mode_ok": False,
+                        "services": _ALL_DOWN, "sdr_present": sdr_present,
+                        "stats_age": None},
+    }
+    if scan_wait:
+        over["/api/scan"] = {"ok": True, "active": True, "idx": -1, "leg": None,
+                             "next_switch_at": None, "wait": scan_wait,
+                             "plan": [{"mode": "acars", "dwell_sec": 60}], "now": 0}
+    return over
+
+
+def test_scan_waiting_for_sdr_is_not_reported_as_waiting_for_window(page):
+    _mount(page, overrides=_sdr_missing_api("scan", scan_wait="sdr"))
+    state = page.locator("#homeStateTxt")
+    expect(state).to_contain_text("ממתין ל-SDR", timeout=10000)
+    expect(state).not_to_contain_text("חלון")
+    expect(page.locator("#status")).to_contain_text("יחזור לבד כשיחובר")
+
+
+def test_scan_waiting_for_window_still_says_window(page):
+    """הצד השני: המתנה לחלון שעות אינה תקלה ונשארת בניסוח הקיים."""
+    st = _default_api()["/api/state"]
+    plan = [{"mode": "acars", "dwell_sec": 60, "active_from": "03:00", "active_to": "04:00"}]
+    _mount(page, overrides={
+        "/api/state": {**st, "app_mode": "scan", "mode_ok": True, "scan_plan": plan},
+        "/api/health": {"ok": True, "app_mode": "scan", "services": _ALL_DOWN,
+                        "sdr_present": True, "stats_age": None},
+        "/api/scan": {"ok": True, "active": True, "idx": -1, "leg": None,
+                      "next_switch_at": None, "wait": "window", "plan": plan, "now": 0},
+    })
+    expect(page.locator("#homeStateTxt")).to_contain_text("ממתין לחלון", timeout=10000)
+    expect(page.locator("#status")).not_to_contain_text("תקלה")
+
+
+@pytest.mark.parametrize("mode,sdr_present,expected", [
+    ("acars", False, "המצב (acars) יחזור לבד כשיחובר"),
+    ("vdl2", False, "המצב (vdl2) יחזור לבד כשיחובר"),
+    # SATCOM לא חוזר לבד (StartLimitBurst — בטיחות bias-T): הוראה אחרת
+    ("satcom", False, "היכנס שוב ל-SATCOM"),
+    # SDR נוכח => זו תקלה אחרת; לא טוענים שום דבר על USB
+    ("acars", True, "בדוק את המערכת"),
+])
+def test_fault_message_names_missing_sdr_and_what_happens_next(page, mode, sdr_present, expected):
+    _mount(page, overrides=_sdr_missing_api(mode, sdr_present=sdr_present))
+    # מיד — לא אחרי 10ש' של poll תקופתי (האתחול קורא ל-pollGlobalState כש-mode_ok=false)
+    expect(page.locator("#status")).to_contain_text(expected, timeout=5000)
+    if sdr_present:
+        expect(page.locator("#status")).not_to_contain_text("USB")
+
+
+# --- כניסה ל-SATCOM: אישור bias-T (סיכון חומרה) ------------------------------
+#
+#  זה המסלול היחיד בממשק שמדליק מתח (‎+4.7V) על מחבר האנטנה. החוזה (§12):
+#  דיאלוג חוסם *לפני* הבקשה, בכל נקודות הכניסה; ביטול לא שולח כלום; והטקסט
+#  והבקשה תואמים את "הזנת LNA חיצונית" — לעולם לא טוענים שה-bias-T ידלק כשלא.
+
+def _standby_api(**state_extra):
+    st = _default_api()["/api/state"]
+    return {
+        "/api/state": {**st, "app_mode": "off", "mode_ok": True, **state_extra},
+        "/api/health": {"ok": True, "app_mode": "off", "services": _ALL_DOWN,
+                        "sdr_present": True, "stats_age": None},
+    }
+
+
+def _record_mode_posts(posts, reply=None):
+    def handler(route, url):
+        posts.append(json.loads(route.request.post_data or "{}"))
+        body = reply or {"ok": True, "app_mode": "satcom"}
+        route.fulfill(status=200 if body.get("ok") else 500,
+                      content_type="application/json", body=json.dumps(body))
+    return handler
+
+
+def test_satcom_entry_cancelled_sends_nothing(page):
+    posts, dialogs = [], []
+    page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
+    _mount(page, overrides={**_standby_api(), "/api/mode": _record_mode_posts(posts)})
+    expect(page.locator("#homeGoSatcom")).to_be_visible()
+    page.locator("#homeGoSatcom").click()
+    page.evaluate("1")                    # סיבוב event-loop אחרי הדיאלוג
+    assert len(dialogs) == 1 and "bias-T" in dialogs[0]
+    assert posts == []                    # ביטול => שום בקשה, שום מתח
+
+
+@pytest.mark.parametrize("external,bias_tee,must,must_not", [
+    (False, True, "ידליק את ה-bias-T", "יישאר כבוי"),
+    (True, False, "יישאר כבוי", "ידליק את ה-bias-T"),
+])
+def test_satcom_confirm_text_and_request_match_external_lna(page, external, bias_tee, must, must_not):
+    """⚠ ה-checkbox מאותחל מה-state *בטעינת הדף* — לא רק בביקור בתצוגת SATCOM —
+    כי הכניסה כאן היא מכרטיס הבית. אחרת משתמש שבחר הזנה חיצונית היה שולח
+    בשקט bias_tee=true (ר' §12, בטיחות bias-T, סעיף 4)."""
+    posts, dialogs = [], []
+    page.on("dialog", lambda d: (dialogs.append(d.message), d.accept()))
+    _mount(page, overrides={**_standby_api(satcom_bias_tee=not external),
+                            "/api/mode": _record_mode_posts(posts)})
+    expect(page.locator("#homeGoSatcom")).to_be_visible()
+    page.locator("#homeGoSatcom").click()
+    expect(page.locator("#status")).to_contain_text("מצב SATCOM פעיל", timeout=5000)
+    assert len(dialogs) == 1
+    assert must in dialogs[0] and must_not not in dialogs[0]
+    assert len(posts) == 1 and posts[0]["mode"] == "satcom"
+    assert posts[0]["bias_tee"] is bias_tee
+
+
+def test_power_button_back_to_satcom_also_asks_for_confirmation(page):
+    """⏻ מ-standby מחזיר את prev_mode. כשזה SATCOM — אותו אישור, לא קיצור דרך."""
+    posts, dialogs = [], []
+    page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
+    _mount(page, overrides={**_standby_api(prev_mode="satcom"),
+                            "/api/mode": _record_mode_posts(posts)})
+    expect(page.locator("#powerBtnLbl")).to_contain_text("הפעלה")
+    page.locator("#powerBtn").click()
+    page.evaluate("1")
+    assert len(dialogs) == 1 and posts == []
+
+
+# --- כישלון כניסה למצב: נוחתים בבית עם השגיאה, לעולם לא בקול -----------------
+
+def test_mode_entry_failure_lands_home_with_error_not_voice(page):
+    st = _default_api()["/api/state"]
+    fail = {"ok": False, "error": "acarsdec נכשל לעלות", "detail": "journal tail…",
+            "app_mode": "off", "state": {**st, "app_mode": "off", "prev_mode": "acars"}}
+    posts = []
+    _mount(page, overrides={**_standby_api(), "/api/mode": _record_mode_posts(posts, fail)})
+    expect(page.locator("#homeGoAcars")).to_be_visible()
+    page.locator("#homeGoAcars").click()
+    expect(page.locator("#homeErrBox")).to_be_visible(timeout=5000)
+    expect(page.locator("#homeErrBox summary")).to_contain_text("acarsdec נכשל לעלות")
+    expect(page.locator("#homeView")).to_be_visible()
+    expect(page.locator("#voiceView")).to_be_hidden()        # אין fallback לקול
+    expect(page.locator("#powerBtnLbl")).to_contain_text("הפעלה")   # standby, לא "פעיל"
+    assert [p["mode"] for p in posts] == ["acars"]
+
+
+@pytest.mark.parametrize("mode,card,label", [
+    ("acars", "#homeGoAcars", "ACARS"),
+    ("vdl2", "#homeGoVdl2", "VDL2"),
+])
+def test_successful_data_mode_entry_does_not_leave_status_stuck(page, mode, card, label):
+    """⚠ רגרסיה: אחרי כניסה *מוצלחת* ל-ACARS/VDL2/SATCOM מה-UI, שורת הסטטוס
+    נשארה "מפעיל ACARS…" עד טעינה מחדש — אף poller לא דורס אותה בהצלחה. נראה
+    כמו מעבר תקוע, בדיוק כשהכול עובד. (קול לא הושפע — יש לו מסלול סטטוס משלו.)"""
+    posts = []
+    _mount(page, overrides={**_standby_api(),
+                            "/api/mode": _record_mode_posts(posts, {"ok": True, "app_mode": mode})})
+    expect(page.locator(card)).to_be_visible()
+    page.locator(card).click()
+    expect(page.locator("#status")).to_contain_text(f"מצב {label} פעיל", timeout=5000)
+    assert [p["mode"] for p in posts] == [mode]
