@@ -494,9 +494,19 @@ def _build_track_row():
 def _append_track(row):
     """מוסיף שורה אחת ל-track.jsonl (append גולמי, לא rewrite של הקובץ כולו).
     כשל כתיבה (דיסק מלא/הרשאה) נבלע — buffer אפמרי, לא שווה להפיל עליו poll."""
+    data = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
     try:
-        with open(TRACK_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        with open(TRACK_PATH, "a+b") as f:
+            # ⚠ כיבוי פתאומי משאיר שורה קטועה בלי \n (או זנב NUL של ext4);
+            # append רגיל היה מדביק אליה את השורה הבאה, והקורא מדלג על השתיים
+            # יחד — אובדת הדגימה הראשונה אחרי כל כיבוי. אותה לוגיקה כמו
+            # _append_line_on_boundary ב-app.py (המודול הזה עצמאי בכוונה).
+            f.seek(0, os.SEEK_END)
+            if f.tell() > 0:
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":
+                    data = b"\n" + data
+            f.write(data)
     except OSError:
         return
     _S["track_appends"] += 1

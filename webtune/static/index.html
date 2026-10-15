@@ -4331,8 +4331,17 @@
         }
         if (appMode === "home") renderHome();
         // הודעת תקלה רק במסך הבית — לא דורסים סטטוס חי של סטרים/פיד בתצוגות אחרות
-        if (!h.ok && appMode === "home")
-          setStatus("תקלה: המצב (" + (h.app_mode || "?") + ") לא רץ — בדוק את המערכת", "err");
+        if (!h.ok && appMode === "home") {
+          const m = h.app_mode || "?";
+          // SDR שלא ב-USB הוא תקלה עם טיפול ברור — לא "בדוק את המערכת". קול/ACARS/
+          // VDL2/סריקה חוזרים לבד כשהוא מחובר (_mode_reconcile_loop / thread הסריקה);
+          // SATCOM לא (StartLimitBurst — בטיחות bias-T), ולכן ההוראה שונה.
+          setStatus(h.sdr_present !== false
+            ? "תקלה: המצב (" + m + ") לא רץ — בדוק את המערכת"
+            : m === "satcom"
+              ? "תקלה: ה-SDR לא מזוהה ב-USB — חבר אותו והיכנס שוב ל-SATCOM"
+              : "תקלה: ה-SDR לא מזוהה ב-USB — המצב (" + m + ") יחזור לבד כשיחובר", "err");
+        }
       } catch (e) { /* offline — הסטטוס הראשי כבר מציג שגיאת רשת במקומות אחרים */ }
     }
     // ⚠ document.hidden כמו בכל שאר ה-pollers: זה היה ה-poller היחיד בלי הבדיקה,
@@ -4470,6 +4479,9 @@
           if (data.vdl2_freqs) { vdl2.setSelFreqs(data.vdl2_freqs); vdl2.renderFreqs(data.vdl2_freqs); vdl2.renderBanks(); }
           vdl2.setActive(true);
           renderPower();
+          // ⚠ בלי זה "מפעיל VDL2…" נשאר בשורת הסטטוס לנצח (עד טעינה מחדש) — אף
+          // poller לא דורס אותו בהצלחה. אותו ניסוח כמו בטעינת הדף.
+          setStatus("מצב VDL2 פעיל", "live");
           vdl2.poll();                        // רענון מיידי אחרי ש-dumpvdl2 עלה
           vdl2Fm.poll();
         } else if (mode === "satcom") {
@@ -4488,6 +4500,7 @@
           }
           satcom.setActive(true);
           renderPower();
+          setStatus("מצב SATCOM פעיל", "live");   // ר' VDL2 למעלה
           satcom.poll();                       // רענון מיידי אחרי ש-inmarsat-sniffer עלה
         } else {   // acars
           sdrOff = false;
@@ -4496,6 +4509,7 @@
           if (data.acars_freqs) { acars.setSelFreqs(data.acars_freqs); acars.renderFreqs(data.acars_freqs); acars.renderBanks(); }
           acars.setActive(true);
           renderPower();
+          setStatus("מצב ACARS פעיל", "live");    // ר' VDL2 למעלה
           acars.poll();                        // רענון מיידי אחרי ש-acarsdec עלה
           acarsFm.poll();
         }
@@ -4612,7 +4626,11 @@
       const txt = $("homeStateTxt");
       if (scanning) {
         const leg = scanStatus.leg;
-        if (!leg && !live) {
+        if (!leg && !live && scanStatus.wait === "sdr") {
+          // ⚠ השרת אומר *למה* אין רגל — "ממתין לחלון" כאן היה שקר: ה-SDR לא ב-USB
+          // (ניתוק, או אתחול בלי SDR) והסבב ממשיך לבד כשהוא חוזר (ר' _scan_loop)
+          txt.innerHTML = "🔁 <b>סורק</b> — ⚠ ממתין ל-SDR: לא מזוהה ב-USB. הסבב ימשיך לבד כשיחובר";
+        } else if (!leg && !live) {
           // אף רגל לא בחלון השעות שלה כרגע — לא תקלה, רק ממתין (ר' _leg_active_now)
           txt.innerHTML = "🔁 <b>סורק</b> — ממתין לחלון הזמן הבא של אחת הרגלים";
         } else {
@@ -6585,6 +6603,9 @@
         showView("home");
         renderPower();
         setStatus("המצב השמור (" + st.app_mode + ") לא רץ — ממתין לשחזור…", "err");
+        // מיד ולא בעוד 10ש': health יודע *למה* (למשל SDR לא ב-USB — ואז המצב חוזר
+        // לבד), ובסריקה גם מדליק scanning ומושך את סיבת ההמתנה מ-/api/scan.
+        pollGlobalState();
       } else {
         updateSdrPip();                     // pip על "קול" מיד בטעינה (לפני poll ראשון)
         showView("voice");

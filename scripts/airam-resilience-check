@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  AIR-AM  -  תמונת מצב לבדיקות עמידות (reboot / ניתוק USB / כיבוי פתאומי)
+# ----------------------------------------------------------------------------
+#  קריאה בלבד: לא עוצר, לא מפעיל ולא כותב כלום. מריצים לפני ואחרי כל תרחיש
+#  ב-docs/resilience-test.md ומדביקים את הפלט — הוא קצר בכוונה.
+#
+#    sudo ~/AIR-AM/scripts/airam-resilience-check
+#
+#  sudo לא חובה, אבל בלעדיו journalctl ו-vcgencmd עלולים להיחסם (תלוי בקבוצות
+#  של המשתמש) — הסקריפט אומר מה חסר במקום להיכשל.
+# ============================================================================
+set -u
+
+API="${AIRAM_API:-http://127.0.0.1:8080}"
+DATA="${AIRAM_DATA:-/var/lib/airam}"
+SERVICES="sdrplay rtl_airband airam-acars airam-vdl2 airam-satcom airam-web icecast2"
+
+echo "=== AIR-AM resilience snapshot  $(date '+%F %T')"
+echo "boot: $(uptime -s 2>/dev/null || echo '?')   ($(uptime -p 2>/dev/null || echo '?'))"
+
+# --- המצב השמור (הכוונה) מול מה שרץ בפועל ------------------------------------
+if [ -r "$DATA/state.json" ]; then
+  python3 - "$DATA/state.json" <<'PY'
+import json, sys
+try:
+    st = json.load(open(sys.argv[1], encoding="utf-8"))
+    print(f"state.json: app_mode={st.get('app_mode')}  prev_mode={st.get('prev_mode')}")
+except Exception as e:
+    print(f"state.json: לא קריא ({type(e).__name__}) — האם יש state.json.corrupt?")
+PY
+else
+  echo "state.json: חסר או לא קריא ($DATA/state.json)"
+fi
+
+echo "--- services (Active/Sub · restarts · result)"
+for s in $SERVICES; do
+  props="$(systemctl show "$s" -p ActiveState -p SubState -p NRestarts -p Result 2>/dev/null)"
+  active="$(printf '%s\n' "$props" | sed -n 's/^ActiveState=//p')"
+  sub="$(printf '%s\n' "$props" | sed -n 's/^SubState=//p')"
+  nres="$(printf '%s\n' "$props" | sed -n 's/^NRestarts=//p')"
+  res="$(printf '%s\n' "$props" | sed -n 's/^Result=//p')"
+  printf '  %-13s %-10s %-12s restarts=%-4s %s\n' "$s" "${active:-?}" "${sub:-?}" "${nres:-?}" "${res:-?}"
+done
+
+# --- SDR -------------------------------------------------------------------
+if command -v lsusb >/dev/null 2>&1; then
+  usb="$(lsusb -d 1df7: 2>/dev/null)"
+  echo "usb: ${usb:-SDRplay לא נראה ב-USB}"
+else
+  echo "usb: lsusb לא מותקן"
+fi
+
+# --- מה airam-web עצמו מדווח (אותו מקור שה-UI רואה) --------------------------
+python3 - "$API" <<'PY'
+import json, sys, urllib.request
+api = sys.argv[1]
+def get(path):
+    try:
+        with urllib.request.urlopen(api + path, timeout=5) as r:
+            return json.load(r)
+    except Exception:
+        return None
+h = get("/api/health")
+if h is None:
+    print(f"api: אין תשובה מ-{api} (airam-web לא עלה? ר' journalctl -u airam-web)")
+    sys.exit(0)
+print(f"api/health: ok={h.get('ok')}  app_mode={h.get('app_mode')}  sdr_present={h.get('sdr_present')}")
+s = get("/api/scan") or {}
+if s.get("active"):
+    leg = s.get("leg") or {}
+    print(f"api/scan: active  leg={leg.get('mode', '— (ממתין: חלון שעות או SDR)')}")
+sdr = get("/api/sdr") or {}
+print(f"api/sdr: state={sdr.get('state')}")
+PY
+
+# --- חשמל ושעון ------------------------------------------------------------
+if command -v vcgencmd >/dev/null 2>&1; then
+  thr="$(vcgencmd get_throttled 2>/dev/null)"
+  echo "power: ${thr:-vcgencmd נחסם (הרץ עם sudo)}  (0x0 = תקין; ביט 16 = under-voltage מאז האתחול)"
+  volt="$(vcgencmd pmic_read_adc EXT5V_V 2>/dev/null)"
+  [ -n "$volt" ] && echo "       $volt"
+fi
+echo "clock: NTPSynchronized=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo '?')  (no = השעון לא סונכרן; חותמות זמן עלולות להיות שגויות)"
+
+# --- שלמות קובצי הלוג (אחרי כיבוי פתאומי) -----------------------------------
+echo "--- logs (lines · bad JSON · invalid UTF-8 · ends with newline)"
+python3 - "$DATA" <<'PY'
+import json, os, sys
+d = sys.argv[1]
+for name in ("acars.jsonl", "vdl2.jsonl", "satcom.jsonl", "track.jsonl", "activity.jsonl", "rf_log.jsonl"):
+    p = os.path.join(d, name)
+    try:
+        raw = open(p, "rb").read()
+    except FileNotFoundError:
+        continue
+    except OSError as e:
+        print(f"  {name:15s} לא קריא ({e.strerror})")
+        continue
+    lines = raw.splitlines()
+    bad = utf = 0
+    for ln in lines:
+        try:
+            s = ln.decode("utf-8")
+        except UnicodeDecodeError:
+            utf += 1
+            continue
+        try:
+            if not isinstance(json.loads(s), dict):
+                bad += 1
+        except ValueError:
+            bad += 1
+    end = "yes" if not raw or raw.endswith(b"\n") else "NO"
+    print(f"  {name:15s} {len(lines):6d}  bad={bad:<3d} utf8={utf:<3d} newline={end}")
+leftovers = [f for f in os.listdir(d) if ".tmp" in f or f.endswith(".corrupt")] if os.path.isdir(d) else []
+if leftovers:
+    print("  leftovers: " + ", ".join(sorted(leftovers)))
+PY
+
+# --- מה המתזמר עשה מאז האתחול ----------------------------------------------
+echo "--- airam-web since boot (restore / reconcile / scan / errors)"
+if out="$(journalctl -u airam-web -b --no-pager -o cat 2>/dev/null)"; then
+  printf '%s\n' "$out" \
+    | grep -E "boot restore|mode reconcile|scan:|SDR לא נוכח|Traceback|Error|נכשל" \
+    | tail -n 8 | sed 's/^/  /'
+  [ -z "$out" ] && echo "  (ריק — אולי אין הרשאה; הרץ עם sudo)"
+else
+  echo "  journalctl נחסם — הרץ עם sudo"
+fi
+echo "=== end"

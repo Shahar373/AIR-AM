@@ -126,6 +126,8 @@ systemd/
 scripts/
   airam-wait-sdrplay       # שער מוכנות (ExecStartPre): מחכה שה-API *באמת* יענה, ומרים
                            # מחדש את sdrplay אם הוא "active" אבל ServiceNotResponding.
+  airam-resilience-check   # תמונת מצב לקריאה בלבד לבדיקות עמידות בבית (ר' docs/resilience-test.md).
+                           # לא מותקן — מריצים מהעותק: sudo ~/AIR-AM/scripts/airam-resilience-check
 
 udev/
   99-airam.rules           # חיבור RSP1B (Vendor 1df7) → restart אוטומטי לשירותי SDR.
@@ -146,6 +148,12 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
                            #   תמלול (5 מצבי tx.state, תור מבוסס-sidecar ששורד restart, שתי
                            #   שפות/מודלים, fallback מודל, retention עמיד ל-stat שנכשל).
   test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
+  test_frontend.py         # UI בלי דפדפן: `node --check` על הסקריפט ה-inline + בדיקות סטטיות.
+  test_ui_browser.py       # ★ UI בדפדפן אמיתי (Playwright, API מזויף ב-route interception):
+                           #   אישור bias-T ב-SATCOM, כישלון כניסה⇒בית, הודעות SDR-חסר, ארכיון,
+                           #   ניסוי כיול, חיווי SDR. job נפרד ב-CI; מדלג כש-playwright חסר.
+  test_corrupt_logs.py     # ★ JSONL אחרי כיבוי פתאומי: שורה שאינה אובייקט, תו UTF-8 קטוע (הפיל
+                           #   את airam-web בעלייה), append אחרי שורה קטועה, stats קרוע.
   test_signal.py           # מד שדה: _signal_verdict, /api/signal (voice/acars/vdl2/satcom/off), /api/antenna/check.
   test_rflog.py            # רשם ניסוי RF: פענוח airband.conf, דגימה רק על כתיבה חדשה, start/mark/stop/
                            #   export, כיבוי אוטומטי, רישום בדיקת-אנטנה.
@@ -167,10 +175,14 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   satcom-feasibility.md     # היתכנות ואפיון מצב SATCOM (מומש).
   antenna-calibration-experiment.md  # ניסוי: האם "בדוק אנטנה" מזהה ניתוק ב-VHF תחת AGC? מה ידוע
                             #   מהמקור (rtl_airband/SoapySDRPlay3), נוהל ליד נתב"ג, והחלטות לפי תוצאה.
+  intelligence-design.md    # תכנון "תמונת מצב מתכללת": אירועים עם רמת טענה (נצפה/הוסק/אפשרי) וראיות,
+                            #   יומן כיסוי, intel.py, קישור קול⇐מטוס דרך אימות (squawk/MCP). טרם מומש.
+  resilience-test.md        # נוהל בדיקות עמידות בבית: reboot בכל מצב, ניתוק USB, אתחול בלי SDR,
+                            #   ניתוק חשמל. השאלה הפתוחה: מפענח שה-USB שלו נעלם — יוצא או נתקע?
   session-replay-design.md  # ★ תכנון "שחזור סשן" (מפה+אודיו על ציר זמן). שלבים 0–2 בוצעו
                             #   (buffer מתגלגל + POST /api/sessions) — ר' §11 למימוש שנותר (UI).
 
-.github/workflows/ci.yml   # pytest + `bash -n` על install.sh ו-airam-wait-sdrplay.
+.github/workflows/ci.yml   # pytest + `bash -n`/shellcheck על install.sh ושני הסקריפטים.
 ```
 
 > **`app.py` ו-`index.html` הם הקבצים שתיגע בהם הכי הרבה.** ה-UI כולו inline ב-HTML
@@ -242,7 +254,12 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   החיווי) ומחכה `SCAN_WINDOW_RECHECK_SEC`=30 שניות לפני שבודק שוב, במקום
   busy-loop; רגל שזהה בדיוק (מצב+תדרים) לרגל שכבר רצה לא נכנסת מחדש — נמנעים
   מ-`systemctl restart` מיותר בלוח עם רגל יחידה/חוזרת; כשל *כניסה* ברגל ⇒
-  דילוג לבאה; כשל של *כל* הרגלים ברצף ⇒ `off`, כמו כל מצב), `_scan_stop_thread`
+  דילוג לבאה; כשל של *כל* הרגלים ברצף ⇒ `off`, כמו כל מצב — **אלא אם ה-SDR לא
+  נוכח**: אז זה ניתוק USB ולא כשל של הלוח. `_sdr_present()` נבדק **לפני** כל
+  רגל: בלי SDR עוצרים את הצרכן וממתינים `SCAN_WINDOW_RECHECK_SEC` **בלי לנסות
+  להיכנס** (כל ניסיון חוסם עד ~45ש' תחת `TUNE_LOCK` ⇒ ה-UI היה מקבל 409);
+  health מדווח תקלה בינתיים. `_scan_activate(plan, wait_for_sdr=True)`
+  — רק מ-`_boot_restore` — מתחיל באותו מצב המתנה כשה-SDR חסר באתחול), `_scan_stop_thread`
   (עוצר את הסבב הפעיל — נקרא ב-`/api/mode` **רק אחרי** שהבקשה עברה ולידציה
   סטטית ותפיסת TUNE_LOCK, לא לפני — אחרת בקשה שנכשלת ב-400/409 הייתה עוצרת
   סבב תקין בחינם ("scan זומבי": משאירה צרכן רץ בלי thread שממשיך אותו).
@@ -769,7 +786,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
 | POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית), `skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12), `spectrum` (bool אופציונלי — `false` לכיבוי האבחון, ר' §9/§12) ו-`gain` (‏`null`=AGC (ברירת מחדל) או מספר=gRdB ידני 20–59, נחתך; ר' §12). לכולם: ברירת מחדל = הבחירה השמורה. ⚠ ב-`gain` בלבד `null` הוא **ערך משמעותי** (AGC מפורש) ולא היעדר — הזיהוי הוא לפי נוכחות המפתח בגוף הבקשה. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
-| GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור) |
+| GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור), `wait` (כש-`leg=None`: ‏`"window"` = אף רגל לא בחלון, לא תקלה / `"sdr"` = ה-SDR לא ב-USB, תקלה) |
 | GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון; `?day=YYYY-MM-DD` ארכיון מהדיסק, snapshot סטטי) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט; לא ב-`?day=`). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM, עמודות `level`+`snr`) |
 | GET | `/api/vdl2` | הודעות VDL2 אחרונות (**היום בלבד**; `?all=1`; `?day=YYYY-MM-DD` ארכיון) + שדה `adsb`. אותה סכמת כרטיס כמו ACARS + `icao`; `snr` תמיד אמיתי (dumpvdl2 מספק רצפת רעש) |
@@ -923,7 +940,12 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   עליונות-מצב), וגם הוא מאומת; (2) כשל ברגל *בודדת* בסריקה מדלג לרגל הבאה — רק
   כשל של *כל* הרגלים ברצף נופל ל-off; (3) רגל מחוץ לחלון השעות שלה (`active_from`/
   `active_to`) מדולגת בשקט — **גם זו לא תקלה**, ואם אף רגל לא בחלון כרגע ה-SDR
-  נשאר כבוי ו-`mode_ok`/`ok` נשארים `True` ("ממתין", כמו standby מכוון).
+  נשאר כבוי ו-`mode_ok`/`ok` נשארים `True` ("ממתין", כמו standby מכוון);
+  (4) **SDR שלא נוכח ב-USB אינו כשל של המצב** — באתחול (voice/acars/vdl2/scan)
+  ובסריקה באמצע סשן הכוונה נשמרת, `mode_ok`/`ok`=`False` (תקלה מדווחת, לא
+  "ממתין"), והמצב חוזר כשה-SDR מופיע (`_mode_reconcile_loop`, או ה-thread של
+  הסריקה). כניסה *ידנית* מה-UI עם SDR מנותק עדיין נופלת ל-off עם שגיאה מיידית —
+  המשתמש מול המסך. (עד v2.25.1 רק voice קיבל את היחס הזה.)
   `api_state`/`api_health` גוזרים את המצב מהמציאות, ובאין צרכן פעיל — מהכוונה
   השמורה; מצב שמור שלא רץ = תקלה (`mode_ok=False`/`ok=False`), standby ≠ תקלה.
   ב-`scan` ה"מצב" המדווח הוא `scan` עצמו (לא הרגל הנוכחית) — ראו `/api/scan`.
@@ -1186,6 +1208,12 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   התקנה טרייה) מקובץ-פגום (לוג אזהרה + עותק `.corrupt` לאבחון, **פעם אחת לאירוע**
   דרך flag גלובלי שמתאפס בקריאה תקינה הבאה — לא לכל קריאה, כי הפונקציה נקראת גם
   מראוטים ב-polling תכוף כמו `/api/metrics`).
+  **קובצי JSONL (append, בלי rewrite) — שני כללים, שניהם נלמדו מכיבוי פתאומי:**
+  קוראים **רק** דרך `_read_log_lines` (`errors="replace"` — תו עברי קטוע זרק
+  `UnicodeDecodeError`, שהוא `ValueError` ולא `OSError`, והפיל את airam-web
+  בעלייה), וכותבים דרך `_append_line_on_boundary` (משלים `\n` לשורה קטועה,
+  אחרת הרשומה הבאה מודבקת אליה ואובדת). כל קוד שרץ ב-`__main__` לפני
+  `app.run()` חייב להיות עטוף — היסטוריה היא נוחות, עלייה היא חובה.
 - **threaded=True חובה** ל-Flask (סטרים ארוך-טווח לא חוסם בקשות).
 - **שמע ברקע = MediaSession** (אין API ל"שיחת טלפון" בדפדפן). אל תחפש חלופה.
 - **עברית ב-RTL** ב-UI; CSV עם BOM ל-Excel. `_csv_safe` (`_export_response`)
