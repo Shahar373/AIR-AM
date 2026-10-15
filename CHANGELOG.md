@@ -9,6 +9,14 @@
 
 ## [Unreleased]
 
+### שונה
+- **`docs/intelligence-design.md`: תוצאות שלב 0 (§4.1.1).** הרצה על ה-Pi (31 מטוסים,
+  לילה) אימתה ש-adsb.lol מחזיר `squawk` (94%), `emergency` (90%), `nav_altitude_mcp`
+  (87%) ו-`baro_rate` (84%) — אירועי ADS-B של שלב 1 וקישור קולי דרך squawk/גובה
+  נבחר אפשריים. `nav_heading` (39%) משני; `acas_ra` (0) ירד מהתכנון. `mach`/`roll`
+  (84%/74%) מפריכים את הטענה ב-`field-station-roadmap.md` §5 שנתוני Mode-S EHS לא
+  זמינים ב-API ציבורי. נשאר: הרצה בשעות עומס, כולל `wd`/`ws`/`oat` (רוח בגובה).
+
 ## [2.25.1] - 2026-10-15
 
 ### תוקן
