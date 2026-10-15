@@ -1928,13 +1928,44 @@ def _jsonl_records(lines):
     return out
 
 
+def _read_log_lines(path):
+    """שורות קובץ לוג append-only (JSONL), **סובלני ל-UTF-8 שבור**. זורק OSError
+    בלבד (קובץ חסר/הרשאה) — כמו read_text, כך שהקוראים לא משתנים.
+    ⚠ למה errors="replace" קריטי ולא קוסמטי: הרשומות נכתבות עם
+    ensure_ascii=False ומכילות עברית (קטגוריה, decoded). כיבוי פתאומי באמצע
+    כתיבה יכול לחתוך תו עברי באמצע (2 בייטים ב-UTF-8), ואז read_text קפדני
+    זורק UnicodeDecodeError — שהוא ValueError, לא OSError, ולכן ה-except
+    הקיים לא תפס אותו. ‏_load_*_history נקראות ב-__main__ לפני app.run(), כך
+    שזה מנע מ-airam-web (המתזמר) לעלות בכלל: לולאת קריסה עם Restart=always,
+    והתחנה כולה מתה עד תיקון ידני ב-SSH. הוכח ב-tests/test_corrupt_logs.py.
+    עם replace השארית הופכת לשורה פגומה אחת, ש-_jsonl_records ממילא מדלג עליה."""
+    return path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+
+def _append_line_on_boundary(f, data):
+    """כותב data (bytes שמסתיים ב-\\n) לקובץ שנפתח ב-"a+b", ומוודא שהוא מתחיל
+    בשורה חדשה. ⚠ כיבוי פתאומי משאיר את הקובץ בלי \\n בסוף — שורה קטועה, או
+    זנב של בייטי NUL ש-ext4 משאיר אחרי delayed allocation. append רגיל היה
+    מדביק את הרשומה הבאה לשארית הזאת, והקוראים מדלגים על השורה המשולבת כולה:
+    **הרשומה הראשונה אחרי כל כיבוי פתאומי אבדה**. עם \\n משלים השארית נשארת
+    שורה פגומה בודדת, והרשומה החדשה שלמה. ב-"a+b" הכתיבה תמיד לסוף (O_APPEND),
+    כך שה-seek לקריאת הבייט האחרון לא משנה לאן נכתב."""
+    f.seek(0, os.SEEK_END)
+    if f.tell() > 0:
+        f.seek(-1, os.SEEK_END)
+        if f.read(1) != b"\n":
+            data = b"\n" + data
+    f.write(data)
+
+
 def _append_jsonl_log(path, rec):
     """מוסיף הודעה מנורמלת לקובץ JSONL (append; thread ה-listener הוא הכותב היחיד).
     נכשל בשקט (דיסק מלא וכו') => הפיד החי ממשיך לפעול. משותף ל-ACARS ול-VDL2."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        with path.open("a+b") as f:
+            _append_line_on_boundary(
+                f, (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8"))
     except OSError:
         log.exception("jsonl log append (%s)", path)
 
@@ -1943,7 +1974,7 @@ def _trim_jsonl_log(path, keep):
     """קיצוץ ל-keep שורות (rewrite אטומי). נקרא מדי פעם מ-thread ה-listener
     (הכותב היחיד => אין מרוץ). קוראים (ייצוא) סובלים שורה אחרונה חלקית."""
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = _read_log_lines(path)
     except OSError:
         return
     if len(lines) > keep:
@@ -1988,7 +2019,7 @@ def _load_acars_history():
     רק הודעות מהיום נטענות לזיכרון (ההיסטוריה המלאה נשמרת בדיסק)."""
     global _acars_seq
     try:
-        lines = ACARS_LOG_PATH.read_text(encoding="utf-8").splitlines()
+        lines = _read_log_lines(ACARS_LOG_PATH)
     except OSError:
         return
     recs = _jsonl_records(lines[-ACARS_BUF_MAX:])
@@ -2227,7 +2258,7 @@ def _load_vdl2_history():
     נקרא *לפני* הפעלת thread ה-listener (אין מרוץ)."""
     global _vdl2_seq
     try:
-        lines = VDL2_LOG_PATH.read_text(encoding="utf-8").splitlines()
+        lines = _read_log_lines(VDL2_LOG_PATH)
     except OSError:
         return
     recs = _jsonl_records(lines[-VDL2_BUF_MAX:])
@@ -2421,7 +2452,7 @@ def _load_satcom_history():
     נקרא *לפני* הפעלת thread ה-listener (אין מרוץ)."""
     global _satcom_seq
     try:
-        lines = SATCOM_LOG_PATH.read_text(encoding="utf-8").splitlines()
+        lines = _read_log_lines(SATCOM_LOG_PATH)
     except OSError:
         return
     recs = _jsonl_records(lines[-SATCOM_BUF_MAX:])
@@ -3044,6 +3075,28 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
                 remaining = 0   # עוד רגלים לבדוק באותו סבב — ממשיכים מיד
             continue
         consecutive_skip = 0
+        if not _sdr_present():
+            # ⚠ ניתוק USB באמצע סבב (או אתחול בלי SDR): קודם כל הרגלים נכשלו
+            # בזו אחר זו והסריקה נפלה ל-off לצמיתות (ה-reconcile לא מטפל ב-scan)
+            # — נגיעה בכבל עצרה את התחנה עד התערבות ידנית. ממתינים ל-SDR כמו
+            # לחלון שעות, ו-health מדווח תקלה בינתיים (רגל אמורה לרוץ ואף צרכן
+            # לא פעיל). **לא מנסים להיכנס בזמן ההמתנה:** כל ניסיון חוסם עד ~45ש'
+            # תחת TUNE_LOCK (השער airam-wait-sdrplay), ומעבר-מצב מה-UI היה מקבל
+            # 409 רוב הזמן. עוצרים צרכן שרץ, או יחידה שנשארה בלולאת
+            # Restart=always אחרי כניסה שנכשלה.
+            if (consumer_active or consecutive_fail) and TUNE_LOCK.acquire(timeout=5):
+                try:
+                    log.warning("scan: ה-SDR לא נוכח — עוצר וממתין לו (לא נופל ל-off)")
+                    _enter_standby()
+                finally:
+                    TUNE_LOCK.release()
+                consumer_active = False
+                last_entered = None
+                consecutive_fail = 0
+            with _scan_lock:
+                _scan_status.update(idx=-1, leg=None, next_switch_at=None)
+            remaining = SCAN_WINDOW_RECHECK_SEC
+            continue
         same = (last_entered is not None and last_entered["mode"] == leg["mode"]
                 and last_entered.get("freqs") == leg.get("freqs"))
         if same:
@@ -3066,6 +3119,13 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
         if err:
             log.warning("scan: leg %d (%s) failed: %s", idx % len(plan), leg["mode"], err)
             consecutive_fail += 1
+            if consecutive_fail >= len(plan) and not _sdr_present():
+                # ה-SDR נעלם *תוך כדי* הסבב: זה ניתוק USB, לא כשל של הלוח —
+                # הבדיקה בראש הלולאה תמתין לו (ר' שם). כשל אמיתי (SDR נוכח)
+                # עדיין נופל ל-off למטה.
+                idx += 1
+                remaining = 0
+                continue
             if consecutive_fail >= len(plan):
                 log.warning("scan: כל הרגלים נכשלו בסבב — נופל ל-off")
                 # תחת TUNE_LOCK עד סוף כתיבת ה-state (כולל) — לא רק סביב
@@ -3101,7 +3161,7 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
         idx += 1
 
 
-def _scan_activate(plan):
+def _scan_activate(plan, wait_for_sdr=False):
     """מפעיל סבב סריקה: מוצא את הרגל הראשונה שבחלון השעות שלה כרגע (אם אין
     לאף רגל חלון — זו הרגל הראשונה, כרגיל) ונכנס אליה (הקורא מחזיק את
     TUNE_LOCK — עקבי עם שאר _enter_*). אם אף רגל לא בחלון כרגע — **לא כשל**:
@@ -3124,6 +3184,24 @@ def _scan_activate(plan):
         thread.start()
         return None, None
     err, detail = _scan_enter_leg(plan[active_idx])
+    if err and wait_for_sdr and not _sdr_present():
+        # שחזור באתחול בלי SDR (wait_for_sdr — רק מ-_boot_restore; כניסה ידנית
+        # מה-UI ממשיכה לקבל שגיאה מיידית): במקום ליפול ל-off, מתחילים את ה-thread
+        # כשהוא ממתין — הוא ינסה שוב את אותה רגל אחרי SCAN_WINDOW_RECHECK_SEC,
+        # ו-_scan_loop עצמו ממתין כל עוד ה-SDR חסר. health מדווח תקלה בינתיים
+        # (רגל אמורה לרוץ ואף צרכן לא פעיל). עוצרים קודם את היחידה שנכשלה —
+        # אחרת Restart=always שלה היה ממשיך לנסות במקביל ל-thread.
+        log.warning("scan: SDR לא נוכח — הסבב ימתין לו במקום ליפול ל-off")
+        _enter_standby()
+        stop_evt = threading.Event()
+        thread = threading.Thread(target=_scan_loop,
+                                  args=(stop_evt, plan, active_idx, SCAN_WINDOW_RECHECK_SEC, False),
+                                  daemon=True)
+        with _scan_lock:
+            _scan_status.update(idx=-1, leg=None, next_switch_at=None, plan=plan)
+            _scan_thread, _scan_thread_stop = thread, stop_evt
+        thread.start()
+        return None, None
     if err:
         return err, detail
     stop_evt = threading.Event()
@@ -4760,12 +4838,12 @@ def _rflog_write(obj):
     ⚠ לעולם לא זורק: כשל כתיבה (כרטיס SD מלא, הרשאה) נספר ב-write_errors
     ומוחזר False. בגרסה הראשונה הוא זרק — ובתוך ה-finally של _experiment_run
     זה דילג על סימון הסיום, כך שהניסוי נשאר "רץ" לנצח וסירב להתחיל מחדש."""
-    line = json.dumps(obj, ensure_ascii=False) + "\n"
+    line = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
     with _rflog_lock:
         try:
             RFLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with open(RFLOG_PATH, "a", encoding="utf-8") as f:
-                f.write(line)
+            with open(RFLOG_PATH, "a+b") as f:
+                _append_line_on_boundary(f, line)   # ר' שם: שורה קטועה מכיבוי קודם
                 f.flush()
                 _rflog_fsync(f.fileno())
         except OSError as e:
@@ -5173,7 +5251,7 @@ def _read_rflog_run(run_id):
     """כל שורות הרשם בין exp_start ל-exp_end של ריצה מסוימת (שורה פגומה מדולגת)."""
     rows, inside = [], False
     try:
-        lines = RFLOG_PATH.read_text(encoding="utf-8").splitlines()
+        lines = _read_log_lines(RFLOG_PATH)
     except OSError:
         return rows
     for line in lines:
@@ -5585,7 +5663,7 @@ def _read_jsonl_log(path):
     """כל ההודעות מקובץ JSONL, ממוינות לפי זמן (t עולה). סובל שורות פגומות
     (כתיבה חלקית של ההודעה האחרונה בזמן הקריאה). משותף ל-ACARS ול-VDL2."""
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = _read_log_lines(path)
     except OSError:
         return []
     out = _jsonl_records(lines)
@@ -6279,7 +6357,16 @@ def _boot_restore():
                 if plan is None:
                     err, _detail = "לוח סריקה שמור לא תקין", None
                 else:
-                    err, _detail = _scan_activate(plan)
+                    err, _detail = _scan_activate(plan, wait_for_sdr=True)
+            if err and mode in ("acars", "vdl2") and not _sdr_present():
+                # ⚠ כמו voice למעלה: SDR מנותק באתחול (או USB שמתעורר אחרי
+                # BOOT_SDR_WAIT_SEC) אינו כשל של המצב — הכוונה נשמרת, ו-
+                # _mode_reconcile_loop נכנס מחדש כשה-SDR מופיע (הוא כבר מטפל
+                # ב-acars/vdl2 ומדלג כל עוד _sdr_present()=False). קודם רק voice
+                # קיבל את היחס הזה, ו-ACARS/VDL2 נפלו ל-off — ונשארו שם גם אחרי
+                # שה-SDR חובר, כי ה-reconcile לא נוגע ב-off. health מדווח תקלה.
+                log.warning("boot restore: SDR לא נוכח — %s יעלה כשיחובר", mode)
+                return
             if err:
                 log.warning("boot restore -> %s failed: %s — falling to off", mode, err)
                 _enter_standby()
@@ -6367,11 +6454,17 @@ if __name__ == "__main__":
     REC_DIR.mkdir(parents=True, exist_ok=True)
     _saved_dir().mkdir(parents=True, exist_ok=True)
     threading.Thread(target=_activity_watcher, daemon=True).start()
-    _load_acars_history()                                           # היסטוריית ACARS שורדת restart (לפני ה-listener)
+    # ⚠ טעינת ההיסטוריה עטופה: היא רצה לפני app.run(), וכל חריגה כאן מונעת
+    # מהמתזמר לעלות => לולאת קריסה (Restart=always) והתחנה כולה מתה. זה כבר
+    # קרה פעמיים מקובץ שנפגם בכיבוי פתאומי (שורה שאינה אובייקט, ותו UTF-8 קטוע
+    # — ר' _jsonl_records/_read_log_lines). היסטוריה היא נוחות; עלייה היא חובה.
+    for _load in (_load_acars_history, _load_vdl2_history, _load_satcom_history):
+        try:
+            _load()                                                 # לפני ה-listener => אין מרוץ
+        except Exception:
+            log.exception("%s נכשל — ממשיכים בלי היסטוריה", _load.__name__)
     threading.Thread(target=_acars_listener, daemon=True).start()   # פיד UDP מ-acarsdec (שקט במצב קול)
-    _load_vdl2_history()                                            # היסטוריית VDL2 (לפני ה-listener, אין מרוץ)
     threading.Thread(target=_vdl2_listener, daemon=True).start()    # פיד UDP מ-dumpvdl2 (שקט בשאר המצבים)
-    _load_satcom_history()                                          # היסטוריית SATCOM (לפני ה-listener, אין מרוץ)
     threading.Thread(target=_satcom_listener, daemon=True).start()  # פיד UDP מ-inmarsat-sniffer (שקט בשאר המצבים)
     # תמלול ATC — דמון נפרד (לא חוסם את היומן/retention). עולה **תמיד**, גם
     # כש-transcribe_auto כבוי: תמלול לפי דרישה (📝) ותמלול של הקלטות שמורות

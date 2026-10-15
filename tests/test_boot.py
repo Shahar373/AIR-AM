@@ -144,6 +144,37 @@ def test_boot_restore_sdr_absent_keeps_voice_intent(paths, no_sleep, sysctl_call
     assert app.load_state()["app_mode"] == "voice"
 
 
+@pytest.mark.parametrize("mode,svc_attr,freqs_key,freqs", [
+    ("acars", "ACARS_SERVICE", "acars_freqs", ["131.550"]),
+    ("vdl2", "VDL2_SERVICE", "vdl2_freqs", ["136.975"]),
+])
+def test_boot_restore_sdr_absent_keeps_data_mode_intent_then_recovers(
+        paths, no_sleep, sysctl_calls, monkeypatch, mode, svc_attr, freqs_key, freqs):
+    """⚠ רגרסיה: רק voice שמר על הכוונה כשה-SDR חסר באתחול. ACARS/VDL2 נפלו
+    ל-off — ונשארו שם גם אחרי חיבור ה-SDR, כי _mode_reconcile_once לא נוגע
+    ב-off. עכשיו: הכוונה נשמרת, וה-reconcile מחזיר את המצב כשה-SDR מופיע."""
+    app.save_state({**app.DEFAULT_STATE, "app_mode": mode, freqs_key: freqs})
+    present = {"v": False}
+    monkeypatch.setattr(app, "_sdr_present", lambda: present["v"])
+    # כל עוד ה-SDR חסר — הכניסה נכשלת (השירות לא עולה)
+    monkeypatch.setattr(app, "_is_active",
+                        lambda svc: present["v"] and ("restart", svc) in sysctl_calls[cut:])
+    cut = 0
+    app._boot_restore()
+    st = app.load_state()
+    assert st["app_mode"] == mode                      # לא נפל ל-off
+
+    app._mode_reconcile_once()                         # SDR עדיין חסר => לא נוגעים
+    cut = len(sysctl_calls)
+    app._mode_reconcile_once()
+    assert sysctl_calls[cut:] == []
+
+    present["v"] = True                                # חיברו את ה-SDR
+    app._mode_reconcile_once()
+    assert ("restart", getattr(app, svc_attr)) in sysctl_calls[cut:]
+    assert app.load_state()["app_mode"] == mode
+
+
 def test_boot_restore_defers_to_user_lock(paths, no_sleep, sysctl_calls):
     # המשתמש כבר התחיל מעבר מצב מה-UI (TUNE_LOCK תפוס) => השחזור מוותר בשקט
     app.save_state({**app.DEFAULT_STATE, "app_mode": "acars"})
