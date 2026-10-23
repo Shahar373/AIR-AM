@@ -128,6 +128,8 @@ scripts/
                            # מחדש את sdrplay אם הוא "active" אבל ServiceNotResponding.
   airam-resilience-check   # תמונת מצב לקריאה בלבד לבדיקות עמידות בבית (ר' docs/resilience-test.md).
                            # לא מותקן — מריצים מהעותק: sudo ~/AIR-AM/scripts/airam-resilience-check
+  airam-gps-probe          # שלב 0 של docs/long-term-stats-design.md, קריאה בלבד: מקלט GPS ב-USB (fix, לוויינים,
+                           # SNR, פיזור מיקום/מרחק מנתב"ג, פער שעון) + כמה ימים 5000 הודעות מכסות. לא מותקן.
 
 udev/
   99-airam.rules           # חיבור RSP1B (Vendor 1df7) → restart אוטומטי לשירותי SDR.
@@ -179,6 +181,9 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
                             #   יומן כיסוי, intel.py, קישור קול⇐מטוס דרך אימות (squawk/MCP). טרם מומש.
   resilience-test.md        # נוהל בדיקות עמידות בבית: reboot בכל מצב, ניתוק USB, אתחול בלי SDR,
                             #   ניתוק חשמל. השאלה הפתוחה: מפענח שה-USB שלו נעלם — יוצא או נתקע?
+  long-term-stats-design.md # תכנון סטטיסטיקה לטווח ארוך: קובץ סיכום יומי (מונים + זמן כיסוי — "לא נמדד"≠אפס),
+                            #   מפת טווח קליטה, פעילות לפי שעה + הצעת לוח סריקה, היסטוריית מסלול/GPS, יומן מטוסים,
+                            #   ומקלט GPS ב-USB (VK-162) כמיקום תחנה/חיישן שיבוש מקומי/שעה. טרם מומש.
   session-replay-design.md  # ★ תכנון "שחזור סשן" (מפה+אודיו על ציר זמן). שלבים 0–2 בוצעו
                             #   (buffer מתגלגל + POST /api/sessions) — ר' §11 למימוש שנותר (UI).
 
@@ -231,7 +236,11 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   (מקור-אמת יחיד לשורת ה-squelch). תמיד ערוץ יחיד ממורכז (centerfreq מוסט ב-DC_OFFSET).
 - **restart מאומת + רולבק:** `_restart_and_verify` בודק שה-SDR נוכח ושהשירות עלה;
   `_rollback` מחזיר לקונפיג קודם אם נכשל **ומאומת** (מחזיר bool; כישלון ⇒ `_fail_to_off`).
-  כיוונון אחד בכל רגע (`TUNE_LOCK`).
+  כיוונון אחד בכל רגע (`TUNE_LOCK`). **כל שמירת state אחרי פעולה ארוכה עוברת
+  `_merge_state(changes)`** (טוען טרי + ממזג רק את מפתחות הקורא, תחת `_STATE_LOCK`) —
+  לא `save_state({**st, ...})` מ-snapshot שנלקח לפני restart של 3–45ש': זה דרס בשקט
+  שינוי מקביל (למשל "תמלל הכול" באמצע מעבר). לכן גם `/api/session/ack` ו-`/api/transcribe`
+  לא צריכים `TUNE_LOCK`.
 - **רגיסטרי מצבים (שוויון מצבים):** `MODE_SERVICE` (מצב→שירות), `_live_mode()` (המצב
   שרץ בפועל או None), `_enter_voice` (peer סימטרי של `_enter_acars`/`_enter_vdl2`/
   `_enter_satcom`: עצירת צרכני דאטה + write_config + verify), `_fail_to_off` (כישלון
@@ -266,7 +275,11 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   `api_state`/`api_health` מיוחדים ל-scan: ה"מצב"
   הוא `scan` עצמו (לא הרגל הנוכחית) — הרגל/הספירה-לאחור מגיעות מ-`GET /api/scan`;
   `mode_ok`/`ok` נשארים `True` גם כש"ממתין לחלון" (אף רגל לא אמורה לרוץ כרגע) —
-  לא רק כש-off מכוון.
+  לא רק כש-off מכוון — **בתנאי שה-thread חי** (`_scan_thread_alive`): `_scan_loop`
+  עוטף את `_scan_loop_body` ורושם חריגה במקום למות בשקט, ו-thread מת = תקלה.
+  כניסה ללוח שאף רגל שלו לא בחלון **עוצרת את הצרכן שרץ** (`_enter_standby`) — אחרת
+  SATCOM נשאר דלוק (bias-T) בזמן שה-UI מציג "ממתין". רגל "זהה" לא נכנסת מחדש רק
+  כשהצרכן שלה עדיין `active` (ה-reconcile לא מטפל ב-scan).
 - **ACARS:** `_acars_listener` (thread, מאזין UDP 5556), `_normalize_acars` (הלב —
   ממיר JSON גולמי לכרטיס אחיד: label→קטגוריה+כיוון, חילוץ נ"צ, ARINC-622, actype,
   **מדדי איכות קליטה** — `level`=dBFS מקורי מהמפענח (נשמר כמות שהוא); `snr` מחושב
@@ -527,6 +540,11 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   כל `TRACK_COMPACT_EVERY`=240 appends ≈ שעה) כותב מחדש אטומית עם `fsync` —
   שם כשל-חצי-כתיבה היה מאבד את *כל* הבאפר, לא שורה אחת. `read_track_buffer()`
   (קריאה טרייה מהדיסק, לעולם לא זורק) מזין את `GET /api/replay/buffer` ב-`app.py`.
+  ‏שורה כוללת **רק מטוסים מה-poll האחרון** (`t_mono == last_process_mono`) — מטוס
+  שנשאר ב-`_S["aircraft"]` עוד `AC_KEEP_SEC` (בשביל היתוך ACARS) לא נכנס, אחרת השחזור
+  הציג אותו "קפוא" עד 10 דק'. תשובת-מקור שאינה dict עם רשימת `ac` = שורת `gap`.
+  ה-compaction הראשון קורה ב-append הראשון אחרי עלייה, ו-`read_track_buffer` מתעלם
+  משורות מעבר ל-`TRACK_BUFFER_MIN`.
   ‏`read_track_slice(t_start, t_end)` (שלב 2) מגיש חתך-זמן מדויק (ac+gap כמו
   שהם) ל-`POST /api/sessions` ב-`app.py` — `adsb.py` רק קורא וממיין, gzip/כתיבת
   ‏`meta.json`/העברת קליפים הם אחריות `app.py` (הוא היחיד שמכיר `REC_DIR`/`saved/`).
@@ -754,12 +772,19 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
   תשדורת של 2ש' ל-6ש', בין קליפ לפער-קליטה, ולא ללחוץ עליהם בטלפון. הציר
   מציג **צפיפות** (שניות-אודיו לדלי) ולכן קריא גם ב-7700 תשדורות; פערי-ADS-B
   מסומנים **נקודתית** (§7.2: לא נמדד משך-פער בפועל). לחיצה = קפיצה בזמן.
+- **⚠ `ts` של קליף הוא `mtime` = *סוף* השידור** (§7.4 בתכנון). הנגן מחשב
+  `start = ts − dur` ב-`initReplayPlayer` ומשתמש **רק** בו (רשימה, ציר, מנוע הנגינה);
+  בחפיפה `clipAtReplay` מחזיר את המאוחר. `openReplayPlayer` מנקה את הסשן הקודם
+  (רשימה/🗑/ייצוא) *לפני* הטעינה ומתעלם מתשובה מאוחרת (`replayLoadSeq`) — קודם
+  טעינה שנכשלה השאירה את 🗑 מצביע על הסשן הקודם.
 - **רשימת התשדורות** (`renderReplayTxList`) — **הניווט הראשי**: שעה, תדר, משך
   וסימון-מצב-תמלול, כל שורה יעד-נגיעה של 40px. השורה המתנגנת מסומנת ונגללת
   לתצוגה (`renderReplayNowTx`).
 - **תמלול** (`#replayNowTx`) — הטקסט של התשדורת המתנגנת, מ-`tx` שמגיע חי
   מ-`GET /api/sessions/<id>`. מבחין בין חמשת מצבי ה-`tx.state` כמו יומן
   השידורים (§12: "לא ניסינו" ≠ "ניסינו ונכשלנו"), ו-`dir` לפי `tx.lang`.
+- **⏮/⏭** בסרגל הדביק (`stepReplayClip`) — מעבר בין תשדורות בלי לגלול את הרשימה;
+  ⏮ אחרי 2ש' לתוך תשדורת חוזר לתחילתה (כמו נגני מוזיקה).
 - **נגן**: `<audio>` יחיד משותף לשני מצבי השמעה — **"דלג על שקט"**
   (`#replaySkipSilence`, ברירת מחדל; `onReplayClipEnded` קופץ לקליפ הבא
   כש-`ended` **או** `error` מגיע — קובץ פגום בודד לא תוקע את הנגן) מול
@@ -818,7 +843,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET/DELETE | `/api/sessions/<id>` | GET: `meta.json` + שדה `tx` לכל קליף (**נקרא חי מה-sidecar**, לא מוקפא בשמירה — קליף יכול להתמלל אחריה). DELETE: מחיקת הסשן כולו (בלתי הפיך). דרך `_guard` (DELETE בלבד) |
 | GET | `/api/sessions/<id>/track` | מסלול ה-ADS-B של הסשן, מפוענח מ-`track.jsonl.gz` |
 | GET | `/api/sessions/<id>/clips/<name>` | קליפ אודיו של הסשן — route ייעודי, לא הרחבת `/recordings/<name>` |
-| GET | `/api/sessions/<id>/export.zip` | ייצוא הסשן כולו (מטא-דאטה+מסלול+קליפים), אותו דפוס כמו `starred.zip` |
+| GET | `/api/sessions/<id>/export.zip` | ייצוא הסשן כולו (מטא-דאטה+מסלול+קליפים+`<clip>.txt` לכל קליף מתומלל, נקרא חי מה-sidecar), אותו דפוס כמו `starred.zip` |
 | GET | `/api/sdr` | חיווי SDR: `state` (`missing`/`ours`/`switching`/`checking`/`api_down`/`api_error`/`free`/`busy`/`unavailable`/`unknown`), `usb`/`usb_desc`, `mode`+`service_state` כש-`ours`, `label` כש-`free`, `suspects` (לפי שם תהליך — רמז) כש-`busy`, `checked_age`. "פנוי" = ה-SDRplay API מציע אותו (`SoapySDRUtil --find`), נבדק רק כש-AIR-AM לא מחזיק בו |
 | GET | `/api/power` | מתח/טמפ' ה-Pi (`vcgencmd`), מוגש מ-cache בן ~2 שניות (`_POWER_TTL`) |
 | GET | `/api/metar` | METAR נתב"ג (LLBG) |

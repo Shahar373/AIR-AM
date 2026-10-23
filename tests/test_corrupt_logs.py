@@ -203,8 +203,22 @@ def test_rflog_append_after_power_cut_keeps_next_row(tmp_path, monkeypatch):
 def test_track_append_after_power_cut_keeps_next_row(tmp_path, monkeypatch):
     import adsb
     monkeypatch.setattr(adsb, "TRACK_PATH", tmp_path / "track.jsonl")
+    monkeypatch.setitem(adsb._S, "track_appends", 0)   # בלי compaction (t=1/3 "עתיקים")
     adsb.TRACK_PATH.write_bytes(b'{"t": 1, "ac": []}\n{"t": 2, "a')
     adsb._append_track({"t": 3, "ac": []})
     rows = [json.loads(ln) for ln in adsb.TRACK_PATH.read_text().splitlines()
             if ln.startswith("{") and ln.endswith("}")]
     assert [r["t"] for r in rows] == [1, 3]
+
+
+def test_trim_write_failure_does_not_raise(tmp_path, monkeypatch):
+    """⚠ regression: ‏_trim_*_log נקרא מחוץ ל-try של ה-listener; OSError מ-
+    _atomic_write (דיסק מלא) הרג את thread ה-ACARS/VDL2/SATCOM עד restart."""
+    p = tmp_path / "acars.jsonl"
+    p.write_text("".join(json.dumps({"i": i}) + "\n" for i in range(10)))
+
+    def boom(path, data):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(app, "_atomic_write", boom)
+    app._trim_jsonl_log(p, 5)                      # לא זורק
+    assert len(p.read_text().splitlines()) == 10   # הקובץ לא נפגע

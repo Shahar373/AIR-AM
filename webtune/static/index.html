@@ -193,6 +193,10 @@
     }
     .statusbar::-webkit-scrollbar { display: none; }
     .statusbar > * { flex: none; }
+    /* ברצועה הנגללת (טלפון) מתח/SDR בתקלה היו מחוץ למסך — מקדימים אותם. ‏GPS לא:
+       השיבוש כרוני ליד נתב"ג, והוא היה דוחק את השאר החוצה כל הזמן. */
+    .statusbar > .pwr.warn, .statusbar > .pwr.bad,
+    .statusbar > .pill.err:not(#gpsPill), .statusbar > .pill.warn:not(#gpsPill) { order: -1; }
     .statusbar .sb-label { color: var(--text-faint); letter-spacing: .06em; font-weight: 600; }
     .statusbar .pwr { margin: 0; }
 
@@ -518,6 +522,9 @@
       background: var(--panel); border-top: 1px solid var(--border-strong); box-shadow: var(--sh-card);
       padding: .6rem max(.9rem, env(safe-area-inset-left)) calc(.6rem + env(safe-area-inset-bottom)); }
     body.exp-on { padding-bottom: 8.5rem; }
+    /* הסרגל (z-index 900) כיסה את הטוסטים ואת סרגל הנגן הדביק בתחתית */
+    body.exp-on .toast { bottom: calc(8.5rem + env(safe-area-inset-bottom, 0)); z-index: 950; }
+    body.exp-on .replay-player-bar { bottom: 8.5rem; }
     .exp-bar-main { display: flex; align-items: center; gap: var(--sp-2); max-width: 60rem; margin: 0 auto; }
     .exp-bar-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .1rem; }
     .exp-bar-txt b { font-size: .9rem; }
@@ -631,6 +638,7 @@
       border-radius: var(--r-sm); background: var(--panel-2); border: 1px solid var(--border); }
     .replay-player-controls { display: flex; align-items: center; gap: var(--sp-3); margin-top: .5rem; flex-wrap: wrap; }
     .replay-player-controls .play-main { width: 48px; height: 48px; font-size: 1.15rem; flex: none; }
+    .replay-player-controls .replay-step { width: 44px; height: 44px; padding: 0; flex: none; }
     .replay-time { display: flex; flex-direction: column; line-height: 1.25;
       font-family: var(--font-mono); font-variant-numeric: tabular-nums; direction: ltr; }
     /* שעון-קיר גדול: בתעופה "20:46" הוא המידע, לא "07:30 מתחילת הסשן" */
@@ -642,6 +650,8 @@
       margin: .5rem 0 0; font-size: .88rem; line-height: 1.45; color: var(--text);
       padding: .5rem .65rem; border-radius: var(--r-sm);
       background: rgba(var(--accent-rgb),.08); border: 1px solid rgba(var(--accent-rgb),.22);
+      /* תמלול ארוך/שגיאה ארוכה הגדילו את הסרגל הדביק ל-~200px וכיסו את רשימת התשדורות */
+      max-height: 4.6em; overflow-y: auto;
     }
     .replay-now-tx.muted { color: var(--text-faint); background: var(--wash); border-color: var(--border); }
 
@@ -828,6 +838,8 @@
     .act-row .t { color: var(--dim); font-size: .76rem; min-width: 4.4em; flex: none; }
     .act-row .f { direction: ltr; font-variant-numeric: tabular-nums;
       color: var(--accent); font-size: .85rem; font-weight: 600; flex: none; }
+    .act-row .f.tunable { cursor: pointer; text-decoration: underline dotted;
+      text-underline-offset: 3px; padding: .35rem 0; }
     .act-row .n { color: var(--dim); flex: 1 1 4em; min-width: 3.5em;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .act-row .dur { color: var(--dim); font-size: .74rem; flex: none;
@@ -1564,7 +1576,11 @@
           <canvas id="replayDensity" class="replay-density"
                   title="צפיפות תשדורות לאורך הסשן — לחץ כדי לקפוץ"></canvas>
           <div class="replay-player-controls">
+            <!-- סדר DOM הפוך בכוונה: ב-RTL הראשון מוצג מימין, וכך ⏮ משמאל ו-⏭ מימין —
+                 פקדי מדיה לא משוקפים, וציר-הצפיפות שמעליהם מצויר משמאל לימין. -->
+            <button type="button" class="ghost replay-step" id="replayNextBtn" aria-label="התשדורת הבאה">⏭</button>
             <button type="button" class="play-main" id="replayPlayBtn" aria-label="נגן / השהה">▶</button>
+            <button type="button" class="ghost replay-step" id="replayPrevBtn" aria-label="התשדורת הקודמת">⏮</button>
             <div class="replay-time">
               <b id="replayClockTxt">--:--</b>
               <span id="replayTimeTxt">00:00 / 00:00</span>
@@ -2335,6 +2351,7 @@
                     { mode: "vdl2", dwell_sec: 120 }];   // עורך הלוח במסך הבית (ברירת מחדל)
     const SCAN_MODE_LABEL = { voice: "📻 קול", acars: "📡 ACARS", vdl2: "🛰️ VDL2" };
     let applyModeInFlight = false; // מניעת לחיצות כפולות בזמן מעבר SDR (3-5 שניות)
+    let modeSwitchSeq = 0;      // מוגדל בכל מעבר/כיוונון — poll שיצא לפניו מושלך (ר' pollGlobalState)
     const RATE_HIST_N = 40;       // 40 דגימות × ~3s פולינג = כ-2 דקות אחורה (משותף ל-ACARS/VDL2)
 
     /* ---------- API + PIN אופציונלי ---------- */
@@ -2510,8 +2527,16 @@
       undoBtn.classList.toggle("hidden", !onUndo);   // תזכורת בלי "בטל" (למשל החלפת אנטנה)
       if (onUndo) undoBtn.onclick = () => { $("toast").classList.add("hidden"); clearTimeout(toastTimer); onUndo(); };
       $("toast").classList.remove("hidden");
-      toastTimer = setTimeout(() => $("toast").classList.add("hidden"), 5000);
+      // הסבר ארוך (למשל חיווי ה-SDR, ~200 תווים) לא נקרא ב-5ש' — זמן לפי אורך, עד 15ש'
+      toastTimer = setTimeout(() => $("toast").classList.add("hidden"),
+                              Math.max(5000, Math.min(15000, String(msg).length * 70)));
     }
+    // נגיעה בטוסט סוגרת אותו (חוץ מכפתור "בטל", שיש לו פעולה משלו)
+    $("toast").addEventListener("click", (e) => {
+      if (e.target.closest("#toastUndo")) return;
+      clearTimeout(toastTimer);
+      $("toast").classList.add("hidden");
+    });
 
     function renderPresets(active) {
       const box = $("presets");
@@ -2654,6 +2679,7 @@
       freq = parseFloat(freq);
       if (!(freq >= 0.1 && freq <= 1999.5)) { setStatus("תדר לא תקין", "err"); return; }
       const prevFreq = current;     // לשחזור אם הבקשה נכשלה ברשת (הרדיו לא השתנה)
+      modeSwitchSeq++;
       current = freq;
       updateDisplay(freq);
       showError(null);
@@ -2681,6 +2707,17 @@
           }
           return;
         }
+        // ‏/api/tune מעביר את ה-SDR לקול מכל מצב (כולל standby/סריקה/דאטה) —
+        // מיישרים את הדגלים כמו ענף ה-voice של applyMode. בלעדיו reloadStream
+        // חזר מיד (sdrOff/active), הסטרים לא עלה והבאנר "בכיבוי" נשאר.
+        if (satcom.active) showToast("🔌 החזר את אנטנת ה-airband ל-SDR");
+        sdrOff = false; scanning = false;
+        acars.setActive(false); vdl2.setActive(false); satcom.setActive(false);
+        modeSwitchSeq++;            // poll שיצא בזמן הכיוונון ראה מצב-ביניים — מושלך
+        // התדר מהשרת, לא מהלחיצה: כיוונון שני שקיבל 409 בזמן שהראשון רץ איפס את
+        // התצוגה לתדר הישן, וההצלחה של הראשון לא תיקנה אותה (ה-retune הבא חזר אליו).
+        if (data.freq != null) { current = Number(data.freq); updateDisplay(current); }
+        renderPower(); renderHome();
         // השרת כבר וידא שהשירות נשאר חי => נותר רק לחכות שה-mount יחזור ב-Icecast
         setStatus("מתחבר לסטרים…", "busy");
         connectTimer = setTimeout(() => reloadStream(), 1500);
@@ -3876,7 +3913,11 @@
     // דוח סשן משתנה לאט — פולינג קל, רק במסך הבית (שם הוא מוצג)
     setInterval(() => { if (!document.hidden && appMode === "home") pollSession(); }, 20000);
     $("sessionAckBtn").onclick = async () => {
-      try { await apiSend("POST", "/api/session/ack", {}); } catch (e) { /* ינסה שוב בפעם הבאה */ }
+      // הכרטיס נסגר רק כשהשרת אישר — אחרת הוא "נעלם" וחוזר אחרי 20ש' בלי הסבר
+      try {
+        const d = await (await apiSend("POST", "/api/session/ack", {})).json();
+        if (!d.ok) { showToast(d.error || "הסימון נכשל — נסה שוב"); return; }
+      } catch (e) { showToast("שגיאת רשת — נסה שוב"); return; }
       $("sessionCard").classList.add("hidden");
     };
 
@@ -3933,16 +3974,20 @@
     // נגן משני להקלטות: לא נוגעים בנגן ה-live (שמחזיק חיבור Icecast רגיש-latency)
     const replay = new Audio();
     let replayBtn = null;
+    // לפי *קובץ*, לא לפי כפתור: היומן מצויר מחדש כל 15ש' (וגם אחרי ★/חיפוש), והכפתור
+    // החדש חזר ל-▶ — לחיצה עליו הפעילה מחדש במקום לעצור (renderActivity משחזר ⏸).
+    let replayFile = null;
     function stopReplay() {
       replay.pause();
       if (replayBtn) { replayBtn.textContent = "▶"; replayBtn.classList.remove("playing"); }
       replayBtn = null;
+      replayFile = null;
     }
     replay.addEventListener("ended", stopReplay);
     replay.addEventListener("error", stopReplay);
 
     function playRecording(file, btn) {
-      if (replayBtn === btn) { stopReplay(); return; }   // לחיצה שנייה = עצירה
+      if (replayFile === file) { stopReplay(); return; }   // לחיצה שנייה = עצירה
       stopReplay();
       player.pause();                                    // לא מנגנים live והקלטה יחד
       replay.src = "/recordings/" + encodeURIComponent(file);
@@ -3950,6 +3995,7 @@
       btn.textContent = "⏸";
       btn.classList.add("playing");
       replayBtn = btn;
+      replayFile = file;
     }
 
     function fmtWhen(ts) {
@@ -3999,9 +4045,9 @@
         const d = await res.json();
         if (!d.ok) { showToast(d.error || "הפעולה נכשלה"); return; }
         ev.starred = d.starred;
+        starMetaVersion++;         // ר' הערת starMetaVersion — זו התוצאה הטרייה ביותר
         if (d.starred_count != null) {
           starMeta = { count: d.starred_count, max: d.starred_max };
-          starMetaVersion++;       // ר' הערת starMetaVersion — זו התוצאה הטרייה ביותר
         }
         updateStarFilterButton();
         if (starOnly && !d.starred) actEvents = actEvents.filter((e) => e !== ev);
@@ -4069,6 +4115,7 @@
         d.className = "act-tx";
         if ((ev.tx.lang || "en") === "he") d.dir = "rtl";   // תמלול עברי — RTL
         d.textContent = ev.text;
+        d.appendChild(mkCopyBtn(ev.text));
         return d;
       }
       if (st === "pending") {
@@ -4189,6 +4236,15 @@
         t.title = new Date(ev.ts * 1000).toLocaleString("he-IL");
         const f = document.createElement("span");
         f.className = "f"; f.textContent = ev.freq != null ? ev.freq.toFixed(3) : "—";
+        // נגיעה בתדר => כיוונון אליו (שידור ששמעת ביומן ורוצה להמשיך להאזין לו)
+        if (ev.freq != null && Math.abs(ev.freq - current) >= 5e-4) {
+          f.classList.add("tunable");
+          f.setAttribute("role", "button");
+          f.tabIndex = 0;
+          f.title = "כוונן ל-" + ev.freq.toFixed(3);
+          f.onclick = () => { showToast("מכוונן ל-" + ev.freq.toFixed(3) + " MHz"); tune(ev.freq); };
+          f.onkeydown = (e) => { if (e.key === "Enter") f.onclick(); };
+        }
         const n = document.createElement("span");
         n.className = "n";
         const p = ev.freq != null && presetFor(ev.freq);
@@ -4214,6 +4270,9 @@
         b.setAttribute("aria-label", "נגן הקלטה");
         if (ev.exists && ev.file) b.onclick = () => playRecording(ev.file, b);
         else { b.disabled = true; b.title = "ההקלטה כבר נמחקה"; }
+        if (ev.file && ev.file === replayFile) {
+          b.textContent = "⏸"; b.classList.add("playing"); replayBtn = b;
+        }
         row.appendChild(b);
         item.appendChild(row);
         const tx = txNode(ev);
@@ -4227,16 +4286,26 @@
       actInFlight = true;
       const v = starMetaVersion;    // ר' הערת starMetaVersion: תשובה זו עלולה להגיע
                                      // *אחרי* סימון ★ מוצלח, ואז המספר שבה כבר מיושן
+      const wantStar = starOnly;
+      let stale = false;
       try {
-        const a = await fetchJSON("/api/activity" + (starOnly ? "?starred=1" : ""));
+        const a = await fetchJSON("/api/activity" + (wantStar ? "?starred=1" : ""));
         if (!a.ok) return;
+        // ⚠ הפילטר הוחלף או ★ סומן בזמן שהבקשה הייתה בדרך: התשובה כבר לא נכונה.
+        // קודם היא מילאה את תצוגת ★ ברשימה הלא-מסוננת (ולחיצת הפילטר עצמה דולגה
+        // ע"י ה-in-flight guard), או החזירה ★ שזה עתה סומן ל-☆.
+        if (wantStar !== starOnly || v !== starMetaVersion) { stale = true; return; }
         actEvents = a.events;
-        if (a.starred_count != null && v === starMetaVersion) {
+        if (a.starred_count != null) {
           starMeta = { count: a.starred_count, max: a.starred_max };
         }
         updateStarFilterButton();
       } catch (e) { /* offline - הסטטוס הראשי כבר מציג שגיאת רשת */ }
-      finally { actLoaded = true; actInFlight = false; renderActivity(); }
+      finally {
+        actInFlight = false;
+        if (stale) { pollActivity(); return; }
+        actLoaded = true; renderActivity();
+      }
     }
 
     async function pollTxStatus() {
@@ -4303,8 +4372,12 @@
     // לעולם לא כופה showView — לא חוטפים למשתמש את הטאב שהוא מסתכל עליו.
     async function pollGlobalState() {
       if (document.hidden || applyModeInFlight) return;
+      const seq = modeSwitchSeq;
       try {
         const h = await fetchJSON("/api/health");
+        // תשובה שיצאה *לפני* מעבר מצב הייתה הופכת את הדגלים חזרה למצב הישן עד
+        // ה-poll הבא (10ש') — הבדיקה לפני הבקשה לבדה לא מכסה את זה.
+        if (applyModeInFlight || seq !== modeSwitchSeq) return;
         // הדגלים משקפים את השירות שרץ *בפועל* (לא את הכוונה השמורה) — מצב שקרס
         // לא מוצג כ"מאזין"; h.app_mode (מציאות-או-כוונה) משמש רק להודעת התקלה.
         const s = h.services || {};
@@ -4385,6 +4458,7 @@
     async function applyMode(mode, extra) {
       if (applyModeInFlight) return false;    // מניעת לחיצות כפולות בזמן החלפת SDR
       applyModeInFlight = true;
+      modeSwitchSeq++;
       _setModeButtons(true);                  // נטרל כפתורי SDR בזמן המעבר
       // המצב שעוזבים — נשמר כ-prev_mode מקומי כדי שכפתור ההדלקה יחזיר אותו
       const leaving = sdrOff ? null : scanning ? "scan" : (satcom && satcom.active) ? "satcom"
@@ -4878,7 +4952,23 @@
     }
 
     /* ----- מסך הנגן: טעינה ----- */
+    let replayLoadSeq = 0;
+    // ⚠ מנקה את הסשן הקודם *לפני* הטעינה: קודם, כשטעינת סשן B נכשלה (meta פגום,
+    // timeout על track גדול), רשימת התשדורות של A נשארה על המסך וכפתור 🗑 עדיין
+    // הצביע על A — לחיצה עליו מחקה את הסשן הלא-נכון (אומת בדפדפן).
+    function resetReplayPlayerDom() {
+      $("replayTxList").textContent = "";
+      $("replayTxCount").textContent = "";
+      $("replayNowTx").classList.add("hidden");
+      $("replayDeleteBtn").onclick = null;
+      $("replayExportBtn").removeAttribute("href");
+      const cv = $("replayDensity");
+      if (cv) cv.getContext("2d").clearRect(0, 0, cv.width, cv.height);
+    }
     async function openReplayPlayer(id) {
+      const seq = ++replayLoadSeq;
+      stopReplayPlayback();
+      resetReplayPlayerDom();
       showReplayScreen("player");
       $("replayPlayerTitle").textContent = "טוען…";
       $("replayPlayerMeta").textContent = "";
@@ -4887,16 +4977,24 @@
           fetchJSON("/api/sessions/" + encodeURIComponent(id)),
           fetchJSON("/api/sessions/" + encodeURIComponent(id) + "/track"),
         ]);
+        // תשובה מאוחרת של סשן קודם (או שכבר יצאנו מהנגן) — לא דורסים
+        if (seq !== replayLoadSeq || replayScreen !== "player") return;
         if (!mRes.ok) throw new Error(mRes.error || "טעינת הסשן נכשלה");
         initReplayPlayer(mRes.session, tRes.ok ? (tRes.rows || []) : []);
       } catch (e) {
+        if (seq !== replayLoadSeq) return;
         $("replayPlayerTitle").textContent = "שגיאה";
         $("replayPlayerMeta").textContent = "טעינת הסשן נכשלה: " + e.message;
       }
     }
     function initReplayPlayer(meta, track) {
       stopReplayPlayback();
-      const clips = (meta.clips || []).slice().sort((a, b) => a.ts - b.ts);
+      // ⚠ ts הוא mtime = *סוף* השידור (docs/session-replay-design.md §7.4), לא
+      // ההתחלה. מיקום כל קליף ב-[ts, ts+dur) הזיז אותו קדימה במשכו: בקריאה+
+      // חזרה (מגדל 5ש', טייס מיד אחריו) שני הקליפים חפפו, לחיצה על שורת הטייס
+      // ניגנה את המגדל, ובזמן-אמת חצי מהחזרה נחתך.
+      const clips = (meta.clips || []).map(c => ({ ...c, start: c.ts - (c.dur || 0) }))
+        .sort((a, b) => a.start - b.start);
       const trackRows = track.slice().sort((a, b) => a.t - b.t);
       rp = {
         id: meta.id, meta, clips, trackRows,
@@ -4955,7 +5053,7 @@
         const row = document.createElement("button");
         row.type = "button";
         row.className = "replay-tx-row";
-        row.appendChild(mkSpan("rtx-time", fmtClockHM(c.ts)));
+        row.appendChild(mkSpan("rtx-time", fmtClockHM(c.start)));
         if (c.freq != null) row.appendChild(mkSpan("rtx-freq", c.freq.toFixed(3)));
         row.appendChild(mkSpan("rtx-dur", Math.round(c.dur || 0) + "ש׳"));
         // ⚠ הטקסט המלא מוצג תחת הנגן; כאן רק סימון שקיים/נכשל — "לא ניסינו"
@@ -4965,7 +5063,7 @@
         else if (st === "pending") row.appendChild(mkSpan("rtx-mark", "⏳"));
         else if (st === "empty") row.appendChild(mkSpan("rtx-mark", "🔇"));
         else if (st === "failed") row.appendChild(mkSpan("rtx-mark", "⚠"));
-        row.onclick = () => { seekAndContinue(c.ts); if (!rp.playing) playReplay(); };
+        row.onclick = () => { seekAndContinue(c.start); if (!rp.playing) playReplay(); };
         box.appendChild(row);
         rp.rowEls.push(row);
       });
@@ -4988,7 +5086,7 @@
       const bw = w / buckets;
       const secs = new Array(buckets).fill(0);
       for (const c of rp.clips) {
-        const i = Math.min(buckets - 1, Math.max(0, Math.floor((c.ts - rp.t0) / dur * buckets)));
+        const i = Math.min(buckets - 1, Math.max(0, Math.floor((c.start - rp.t0) / dur * buckets)));
         secs[i] += (c.dur || 1);
       }
       const peak = Math.max(1, ...secs);
@@ -5046,7 +5144,9 @@
             initReplayMap._rt = setTimeout(() => replayMapObj && replayMapObj.invalidateSize(), 120);
           }).observe($("replayMap"));
         }
-        renderReplayMapAt(rp.playT);
+        // ‏rp=null כשיצאו מהנגן לפני ש-leaflet.js סיים להיטען — בלי הבדיקה, החריגה
+        // הסתירה את המפה ("שגיאה בטעינת המפה") עד רענון הדף.
+        if (rp) renderReplayMapAt(rp.playT);
       } catch (e) {
         $("replayMap").classList.add("hidden");
         const n = $("replayMapNote"); n.textContent = "שגיאה בטעינת המפה"; n.classList.remove("hidden");
@@ -5103,7 +5203,7 @@
           rp.markers[reg] = L.circleMarker([lat, lon], {
             radius: rad, weight: 1, color: "#1d4ed8",
             fillColor: "#4da3ff", fillOpacity: op,
-          }).bindTooltip(reg + (alt != null ? " · " + Math.round(alt) + "ft" : ""));
+          }).bindTooltip(mkSpan("", reg + (alt != null ? " · " + Math.round(alt) + "ft" : "")));
           replayMarkersLayer.addLayer(rp.markers[reg]);
         }
       }
@@ -5170,8 +5270,14 @@
       el.dir = "rtl";   // הודעות המצב הן עברית, לא תוכן התשדורת
       el.textContent = tx.state === "pending" ? "⏳ ממתין לתמלול…"
         : tx.state === "empty" ? "🔇 לא זוהה דיבור בתשדורת"
-        : tx.state === "failed" ? "⚠ התמלול נכשל" + (tx.err ? " — " + tx.err : "")
+        : tx.state === "failed" ? "⚠ התמלול נכשל"
         : "אין תמלול לתשדורת הזו";
+      if (tx.state === "failed" && tx.err) {
+        // ‏<bdi> כמו ביומן השידורים: stderr באנגלית בתוך משפט עברי מתהפך בלעדיו
+        const b = document.createElement("bdi");
+        b.textContent = tx.err;
+        el.append(" — ", b);
+      }
     }
     function seekReplay(t) {
       rp.playT = Math.max(rp.t0, Math.min(rp.t1, t));
@@ -5185,12 +5291,15 @@
 
     /* ----- מנוע הנגינה: skip-silence (ברירת מחדל) מול זמן-אמת ----- */
     function clipAtReplay(playT) {
-      for (const c of rp.clips) { if (playT >= c.ts && playT < c.ts + (c.dur || 0)) return c; }
-      return null;
+      // בחפיפה (זנב ה-idle של הקודם, עד 0.5ש') — המאוחר מנצח: לחיצה על שורה
+      // מנגנת את התשדורת שלה, לא את הקודמת.
+      let hit = null;
+      for (const c of rp.clips) { if (playT >= c.start && playT < c.start + (c.dur || 0)) hit = c; }
+      return hit;
     }
     function nextReplayClipAfter(playT) {
       let best = null;
-      for (const c of rp.clips) { if (c.ts > playT && (!best || c.ts < best.ts)) best = c; }
+      for (const c of rp.clips) { if (c.start > playT && (!best || c.start < best.start)) best = c; }
       return best;
     }
     function loadReplayClip(c, offset, play) {
@@ -5204,10 +5313,10 @@
     function playReplayFromCurrent() {
       rp.skip = $("replaySkipSilence").checked;
       const c = clipAtReplay(rp.playT);
-      if (c) loadReplayClip(c, rp.playT - c.ts, true);
+      if (c) loadReplayClip(c, rp.playT - c.start, true);
       else if (rp.skip) {
         const nxt = nextReplayClipAfter(rp.playT);
-        if (nxt) { seekReplay(nxt.ts); loadReplayClip(nxt, 0, true); } else { pauseReplay(); return; }
+        if (nxt) { seekReplay(nxt.start); loadReplayClip(nxt, 0, true); } else { pauseReplay(); return; }
       }
       rp.wallStartMs = Date.now();
       rp.wallStartPlayT = rp.playT;
@@ -5216,8 +5325,8 @@
     function onReplayClipEnded() {
       if (!rp || !rp.playing) return;
       if (rp.skip) {
-        const nxt = nextReplayClipAfter(rp.curClip ? rp.curClip.ts : rp.playT);
-        if (nxt) { seekReplay(nxt.ts); loadReplayClip(nxt, 0, true); rp.wallStartMs = Date.now(); rp.wallStartPlayT = rp.playT; }
+        const nxt = nextReplayClipAfter(rp.curClip ? rp.curClip.start : rp.playT);
+        if (nxt) { seekReplay(nxt.start); loadReplayClip(nxt, 0, true); rp.wallStartMs = Date.now(); rp.wallStartPlayT = rp.playT; }
         else { seekReplay(rp.t1); pauseReplay(); }
       } else {
         rp.curClip = null;   // זמן-אמת: משאירים את ה-tick להמשיך להריץ playT דרך השקט האמיתי
@@ -5226,16 +5335,16 @@
     function replayTick() {
       if (!rp || !rp.playing) return;
       if (rp.skip) {
-        if (rp.curClip && !rp.audio.paused) rp.playT = rp.curClip.ts + rp.audio.currentTime;
+        if (rp.curClip && !rp.audio.paused) rp.playT = rp.curClip.start + rp.audio.currentTime;
         else if (!clipAtReplay(rp.playT)) {
           const nxt = nextReplayClipAfter(rp.playT);
-          if (nxt) { seekReplay(nxt.ts); loadReplayClip(nxt, 0, true); } else { seekReplay(rp.t1); pauseReplay(); return; }
+          if (nxt) { seekReplay(nxt.start); loadReplayClip(nxt, 0, true); } else { seekReplay(rp.t1); pauseReplay(); return; }
         }
       } else {
         rp.playT = rp.wallStartPlayT + (Date.now() - rp.wallStartMs) / 1000;
         if (rp.playT >= rp.t1) { seekReplay(rp.t1); pauseReplay(); return; }
         const c = clipAtReplay(rp.playT);
-        if (c && rp.curClip !== c) loadReplayClip(c, rp.playT - c.ts, true);
+        if (c && rp.curClip !== c) loadReplayClip(c, rp.playT - c.start, true);
         else if (!c && rp.curClip) { rp.audio.pause(); rp.curClip = null; }
       }
       renderReplayMapAt(rp.playT);
@@ -5537,8 +5646,10 @@
         // ⚠ גם ה-tooltip מתעדכן, לא רק המיקום וה-popup: הזהות מתחדדת תוך כדי
         // סשן (הודעה ראשונה עם icao בלבד, אחר-כך מספר טיסה, ובסוף רישום), ובלי
         // העדכון הסמן היה נשאר עם התווית הראשונה והגרועה ביותר עד סוף הסשן.
-        if (mk) { mk.setLatLng([m.lat, m.lon]); mk.setPopupContent(buildPopup(m)); mk.setTooltipContent(label); }
-        else markers[id] = L.marker([m.lat, m.lon], icon ? { icon } : undefined).bindPopup(buildPopup(m)).bindTooltip(label);
+        // ‏tooltip כ-element ולא מחרוזת: Leaflet מכניס מחרוזת כ-HTML, והתווית מגיעה
+        // משידור רדיו (tail/flight) — כמו buildPopup, רק textContent.
+        if (mk) { mk.setLatLng([m.lat, m.lon]); mk.setPopupContent(buildPopup(m)); mk.setTooltipContent(mkSpan("", label)); }
+        else markers[id] = L.marker([m.lat, m.lon], icon ? { icon } : undefined).bindPopup(buildPopup(m)).bindTooltip(mkSpan("", label));
         updateTrack(m);
         if (id === focus) renderMapSelection();
       }
@@ -6284,6 +6395,12 @@
 
     // מתג התצוגות (מרכז/קול/ACARS/VDL2) — רק מחליף תצוגה; ה-SDR לא מוחלף כאן
     segInit("modeSeg", (v) => showView(v));
+    // segInit מתעלם מלחיצה על הכפתור הפעיל — ובתוך שחזור-הסשן 🏠 כבר "on", כך
+    // שהלחיצה עליו לא עשתה כלום. כאן היא סוגרת את השחזור וחוזרת לבית.
+    $("modeSeg").addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (b && b.dataset.v === "home" && replayScreen) showView("home");
+    });
     // אישור מפורש לפני הדלקת bias-T: הכניסה ל-satcom מדליקה ‎+4.7V על מחבר
     // האנטנה מיד (write_satcom_env בברירת מחדל) — דיאלוג חוסם, לא רק הבאנר
     // הקבוע בתצוגה, כדי לוודא שהאזהרה נראתה *לפני* הבקשה ולא רק אחריה. חל על
@@ -6356,7 +6473,12 @@
     $("satcomAgc").onchange = renderSatcomGainUI;
     $("satcomGain").oninput = renderSatcomGainUI;
 
+    // ⚠ בטיחות: עד שה-state נטען, ה-checkbox "הזנת LNA חיצונית" נמצא בברירת
+    // המחדל של ה-HTML (לא מסומן) — כניסה ל-SATCOM הייתה שולחת bias_tee:true
+    // ודורסת satcom_bias_tee:false השמור (אומת: /api/state אחד שנכשל בטעינה).
+    let stateLoaded = false;
     function enterSatcom() {
+      if (!stateLoaded) { showToast("ההגדרות עוד לא נטענו מהשרת — נסה שוב בעוד רגע"); return; }
       if (!confirmSatcomAntenna()) return;
       const extra = { bias_tee: !$("satcomExternalLna").checked,
                       skip_c: $("satcomSkipC").checked,
@@ -6380,6 +6502,24 @@
       else showView("home");
     };
     $("replayPlayBtn").onclick = toggleReplayPlay;
+    // ⏮/⏭ — מעבר בין תשדורות בלי לגלול את הרשימה שמתחת לסרגל הדביק
+    function stepReplayClip(dir) {
+      if (!rp || !rp.clips.length) return;
+      const cur = rp.curClip || clipAtReplay(rp.playT);
+      const ref = cur ? cur.start : rp.playT;
+      let target = null;
+      if (dir > 0) target = nextReplayClipAfter(ref);
+      else {
+        // לחיצה אחרי 2ש' לתוך תשדורת => לתחילתה; אחרת — לקודמת
+        if (cur && rp.playT - cur.start > 2) target = cur;
+        else for (const c of rp.clips) { if (c.start < ref - 1e-3) target = c; }
+      }
+      if (!target) return;
+      seekAndContinue(target.start);
+      if (!rp.playing) playReplay();
+    }
+    $("replayPrevBtn").onclick = () => stepReplayClip(-1);
+    $("replayNextBtn").onclick = () => stepReplayClip(1);
     $("replaySkipSilence").addEventListener("change", () => {
       if (!rp) return;
       rp.skip = $("replaySkipSilence").checked;
@@ -6529,6 +6669,7 @@
     });
 
     /* ---------- אתחול ---------- */
+    function loadInitialState(attempt) {
     fetchJSON("/api/state").then((st) => {
       document.body.classList.remove("loading");   // הצלחה => מבטלים את שלד הטעינה
       cfg = st;
@@ -6568,6 +6709,7 @@
       $("satcomAgc").checked = !(typeof sg === "number");
       if (typeof sg === "number") $("satcomGain").value = 59 - sg;
       renderSatcomGainUI();
+      stateLoaded = true;
       // app_mode מגיע מהמציאות (השירות הפעיל), ובאין צרכן — מהכוונה השמורה
       // (mode_ok=false אומר שהמצב השמור אמור לרוץ אבל לא רץ). נוחתים בתצוגת
       // המצב הפעיל; off/תקלה נוחתים במסך הבית (התצוגה הניטרלית).
@@ -6616,8 +6758,11 @@
     }, () => {
       // ⚠ מסלול הדחייה של ה-fetch עצמו (ארגומנט שני ל-then), *לא* .catch:
       // שגיאה שנזרקת בגוף האתחול למעלה לא מגיעה לכאן אלא ל-catch שמתחת.
+      // ‏/api/state אחד שנכשל (Wi-Fi בקצה, Pi באמצע עלייה) השאיר את הדף בלי
+      // הגדרות עד רענון ידני. מנסים שוב עם backoff (2ש' → 30ש').
       document.body.classList.remove("loading");
-      setStatus("אין חיבור לשרת", "err");
+      setStatus("אין חיבור לשרת — מנסה שוב…", "err");
+      setTimeout(() => loadInitialState(attempt + 1), Math.min(30000, 2000 * 2 ** attempt));
     }).catch((e) => {
       // ⚠ השרת ענה — האתחול עצמו נכשל (שדה חסר בתשובה, אי-התאמת גרסה אחרי
       // שדרוג, באג בדף). קודם כל השגיאות האלה הוצגו כ"אין חיבור לשרת", מה
@@ -6628,6 +6773,8 @@
       setStatus("שגיאה באתחול הדף (השרת ענה) — נסה לרענן", "err");
       showError(e && e.message ? String(e.message) : null);
     });
+    }
+    loadInitialState(0);
 
     // רישום ה-service worker => מאפשר "הוסף למסך הבית" כאפליקציה. לא מטמיין כלום.
     if ("serviceWorker" in navigator) {

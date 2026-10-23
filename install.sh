@@ -42,7 +42,10 @@ apt-get install -y \
 # בדיקה תלוית-גרסה *מלאה* (marker, לא שם קובץ ה-so שמכיל רק major.minor):
 # עדכון SDRPLAY_VER - גם patch level כמו 3.15.3 - יתקין מחדש בהרצה הבאה.
 SDRPLAY_MARK="/usr/local/share/airam/sdrplay-api.version"
-if ldconfig -p | grep -q libsdrplay_api && [[ "$(cat "$SDRPLAY_MARK" 2>/dev/null)" == "$SDRPLAY_VER" ]]; then
+# ⚠ "grep -q X < <(cmd)" ולא "cmd | grep -q X": תחת pipefail, grep -q יוצא בהתאמה
+# הראשונה, הכותב מקבל SIGPIPE (141) והצינור כולו "נכשל" — בדיקת "כבר מותקן"
+# החזירה "לא" באקראי (אומת: עד ~50% מההרצות), והתקנה חוזרת הורידה מחדש את ה-API.
+if grep -q libsdrplay_api < <(ldconfig -p) && [[ "$(cat "$SDRPLAY_MARK" 2>/dev/null)" == "$SDRPLAY_VER" ]]; then
   log "SDRplay API v${SDRPLAY_VER} כבר מותקן - מדלג."
 else
   log "מתקין SDRplay API v${SDRPLAY_VER}..."
@@ -104,7 +107,7 @@ fi
 # ----------------------------------------------------------------------------
 # 3. SoapySDRPlay3
 # ----------------------------------------------------------------------------
-if SoapySDRUtil --info 2>/dev/null | grep -qi sdrplay; then
+if grep -qi sdrplay < <(SoapySDRUtil --info 2>/dev/null); then
   log "SoapySDRPlay3 כבר מותקן - מדלג."
 else
   log "בונה SoapySDRPlay3..."
@@ -125,7 +128,7 @@ else
     || die "בניית SoapySDRPlay3 נכשלה."
   # אימות אחרי בנייה (כמו command -v לבינארים) — לא מספיק ש-make הצליח, צריך
   # ש-SoapySDR באמת מזהה את המודול (אחרת מצב תמידית "לא נמצא SDR" בממשק).
-  SoapySDRUtil --info 2>/dev/null | grep -qi sdrplay \
+  grep -qi sdrplay < <(SoapySDRUtil --info 2>/dev/null) \
     || die "SoapySDRPlay3 נבנה אך לא זוהה ע\"י SoapySDR - בדוק את פלט הבנייה למעלה."
 fi
 
@@ -301,7 +304,7 @@ else
     || die "בניית dumpvdl2 נכשלה."
   command -v dumpvdl2 >/dev/null 2>&1 || die "בניית dumpvdl2 נכשלה (בדוק SoapySDR/libacars/glib2)."
   # אזהרה מוקדמת (לא כישלון): הבינארי חייב לכלול את קלט ה-SoapySDR שה-unit משתמש בו
-  dumpvdl2 --version 2>&1 | grep -qi soapysdr \
+  grep -qi soapysdr < <(dumpvdl2 --version 2>&1) \
     || warn "dumpvdl2 נבנה בלי SoapySDR - מצב VDL2 לא יעבוד. ודא libsoapysdr-dev והרץ שוב."
   mkdir -p "$(dirname "$AIRAM_VDL2_MARK")"
   printf '%s' "$DUMPVDL2_BUILD_SIG" > "$AIRAM_VDL2_MARK"
@@ -340,8 +343,10 @@ else
   # האמת היחיד לתמיכת SDRplay בפועל (בניגוד ל---help, שמפרט sdrplay[-SERIAL]
   # תמיד בסטטי גם בבנייה בלי הדרייבר — אומת ישירות, לא הנחה).
   CMAKE_LOG="$(mktemp)"
+  # ⚠ "|| die": תחת set -e+pipefail כשל cmake יצא בשקט (בלי הודעה) והשאיר את הלוג.
   PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
-    cmake .. 2>&1 | tee "$CMAKE_LOG"
+    cmake .. 2>&1 | tee "$CMAKE_LOG" \
+    || { rm -f "$CMAKE_LOG"; die "cmake של inmarsat-sniffer נכשל."; }
   # ⚠ "|| die" על שרשרת הבנייה עצמה — כמו acarsdec/dumpvdl2, command -v לבד
   # למטה לא מבחין בין "נבנה עכשיו בהצלחה" ל"בינארי ישן עדיין שם".
   make -j"$(nproc)" && make install && ldconfig || die "בניית inmarsat-sniffer נכשלה."

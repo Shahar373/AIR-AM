@@ -1447,3 +1447,21 @@ def test_normalize_satcom_20260814_capture_uplink_vectors(monkeypatch, label, te
     # ⚠ invariant קריטי: כל שבעת הווקטורים uplink — אף אחד לא מייצר מיקום,
     # גם לא ה-ADS-C, גם לא כשה-re-decode "מצליח" בלי err.
     assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
+
+
+def test_normalize_satcom_nul_in_text_does_not_drop_message(monkeypatch):
+    """⚠ regression: NUL בטקסט מהרשת => subprocess זורק ValueError ("embedded
+    null byte"), שלא נתפס — וכל ההודעה נזרקה ב-listener. עכשיו ה-re-decode
+    מדולג והכרטיס נבנה כרגיל (§9: כשל לא מאבד הודעה)."""
+    text = "/PIKCPYA.AT1.C-GEGP2135\x009DE2407AA1"
+
+    def real_like_run(cmd, **kw):
+        if any("\x00" in str(a) for a in cmd):
+            raise ValueError("embedded null byte")
+        raise AssertionError("לא צפוי")
+    monkeypatch.setattr(app.subprocess, "run", real_like_run)
+    app._libacars_cache.clear()
+    m = _satcom({"mode": "2", "label": "AA", "reg": "C-GEGP", "msg_text": text},
+                src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
+    n = app._normalize_satcom(m)
+    assert n["dir"] == "uplink" and n["tail"]

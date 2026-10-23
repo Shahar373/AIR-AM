@@ -221,3 +221,23 @@ def test_write_failure_is_counted_not_raised(client, paths, monkeypatch):
     r = client.post("/api/rflog", json={"active": True})
     assert r.status_code == 200 and r.get_json()["write_errors"] >= 1
 
+
+
+def test_no_timeout_while_experiment_running(client, paths, monkeypatch):
+    """⚠ regression: רשם שהופעל ידנית לפני ~שעתיים נכבה באמצע ניסוי הכיול
+    (_rflog_start החזיר False ולא האריך את until), והניסוי הסתיים בלי נתונים
+    אחרי שהמשתמש כבר ניתק וחיבר את האנטנה. כל עוד הניסוי רץ — לא נכבים."""
+    monkeypatch.setattr(app, "RFLOG_MAX_SEC", 0)
+    monkeypatch.setattr(app, "RFLOG_POLL_SEC", 0.02)
+    with app._exp_lock:
+        app._exp["running"] = True
+    try:
+        client.post("/api/rflog", json={"active": True})
+        app._rflog["stop"].wait(0.2)          # כמה סבבי worker אחרי שה-until עבר
+        assert app._rflog["active"] is True
+    finally:
+        with app._exp_lock:
+            app._exp["running"] = False
+    app._rflog["thread"].join(timeout=3)      # הניסוי הסתיים => ה-timeout חל
+    assert app._rflog["active"] is False
+    assert _rows(paths)[-1]["reason"] == "timeout"

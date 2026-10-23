@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  AIR-AM  -  בדיקת מקלט GPS ב-USB (VK-162 וכו') + מדידת חלון ההיסטוריה
+# ----------------------------------------------------------------------------
+#  שלב 0 ב-docs/long-term-stats-design.md: לפני שכותבים קוד, לראות מה המקלט
+#  באמת נותן בבית — האם יש fix, כמה לוויינים, עוצמת אות, האם המיקום "קופץ"
+#  (spoofing ליד נתב"ג), ופער השעה מול השעון של ה-Pi.
+#
+#    sudo ~/AIR-AM/scripts/airam-gps-probe            # 120 שניות האזנה
+#    sudo ~/AIR-AM/scripts/airam-gps-probe 300        # 5 דקות (fix ראשון בבית יכול לקחת זמן)
+#
+#  קריאה בלבד: לא מתקין, לא שולח פקודות למקלט, לא נוגע בשירותי AIR-AM. היחיד
+#  שמשתנה הוא מצב ה-tty (raw, 9600) לזמן הקריאה. ההקלטה הגולמית נשמרת ל-
+#  /tmp/airam-gps-capture.nmea — אם משהו מוזר, שלח גם אותה.
+#  sudo נדרש כי /dev/ttyACM* שייך לקבוצת dialout.
+# ============================================================================
+set -u
+
+SECS="${1:-120}"
+DATA="${AIRAM_DATA:-/var/lib/airam}"
+
+echo "=== AIR-AM GPS probe  $(date '+%F %T %Z')"
+
+echo "--- USB"
+if command -v lsusb >/dev/null 2>&1; then
+  # 1546 = u-blox. מדפיסים גם את כל ההתקנים — אם ה-VK-162 מזדהה אחרת, נראה אותו.
+  lsusb | sed 's/^/  /'
+else
+  echo "  lsusb לא מותקן (sudo apt install usbutils)"
+fi
+
+echo "--- serial devices"
+DEV=""
+for d in /dev/serial/by-id/* /dev/ttyACM* /dev/ttyUSB*; do
+  [ -e "$d" ] || continue
+  echo "  $d -> $(readlink -f "$d")"
+  [ -z "$DEV" ] && DEV="$(readlink -f "$d")"
+done
+[ -z "$DEV" ] && echo "  אין התקן טורי — המקלט לא מחובר/לא זוהה (בדוק dmesg | tail)"
+
+echo "--- מי עלול לתפוס את הפורט"
+for s in ModemManager gpsd gpsd.socket; do
+  printf '  %-14s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null || echo '-')"
+done
+echo "  (ModemManager פעיל עלול 'לבדוק' את ttyACM ולשבש את ה-NMEA בדקות הראשונות)"
+
+if [ -n "$DEV" ]; then
+  if systemctl is-active --quiet gpsd 2>/dev/null; then
+    echo "  ⚠ gpsd פעיל ומחזיק את המקלט — עצור זמנית: sudo systemctl stop gpsd gpsd.socket"
+  else
+    echo "--- האזנה ל-$DEV למשך ${SECS}s (כדאי ליד חלון)…"
+    python3 - "$DEV" "$SECS" <<'PY'
+import math, os, select, statistics, sys, termios, time
+from datetime import datetime, timezone
+
+dev, secs = sys.argv[1], float(sys.argv[2])
+ARP = (32.0114, 34.8867)          # נתב"ג — אותו ARP כמו adsb.py
+CAPTURE = "/tmp/airam-gps-capture.nmea"
+
+def km(a, b):
+    la1, lo1, la2, lo2 = map(math.radians, (*a, *b))
+    h = (math.sin((la2 - la1) / 2) ** 2
+         + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2)
+    return 6371.0 * 2 * math.asin(math.sqrt(h))
+
+def coord(v, hemi):
+    if not v:
+        return None
+    d = int(float(v) / 100)
+    x = d + (float(v) - d * 100) / 60
+    return -x if hemi in ("S", "W") else x
+
+def valid(line):
+    if not line.startswith("$") or "*" not in line:
+        return False
+    body, _, cs = line[1:].partition("*")
+    c = 0
+    for ch in body:
+        c ^= ord(ch)
+    try:
+        return c == int(cs[:2], 16)
+    except ValueError:
+        return False
+
+try:
+    fd = os.open(dev, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+except OSError as e:
+    print(f"  לא ניתן לפתוח את {dev}: {e} (sudo?)")
+    sys.exit(0)
+try:
+    attrs = termios.tcgetattr(fd)
+    attrs[0] = 0; attrs[1] = 0; attrs[3] = 0          # raw: בלי עיבוד שורות/הד
+    attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+    attrs[4] = attrs[5] = termios.B9600               # ברירת המחדל של u-blox 7 (ב-ACM לא משנה)
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)
+except termios.error:
+    pass
+
+t0 = time.time()
+buf = b""
+lines = bad = 0
+first_fix = None
+talkers, txt, sample = {}, [], []
+gga_fix = gga_all = 0
+sats_used, hdops, positions, offsets = [], [], [], []
+snr_by_sys = {}
+cap = open(CAPTURE, "w", encoding="ascii", errors="replace")
+while time.time() - t0 < secs:
+    r, _, _ = select.select([fd], [], [], 1.0)
+    if not r:
+        continue
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    now = time.time()
+    buf += chunk
+    while b"\n" in buf:
+        raw, buf = buf.split(b"\n", 1)
+        line = raw.decode("ascii", "replace").strip()
+        if not line:
+            continue
+        cap.write(line + "\n")
+        lines += 1
+        if len(sample) < 12:
+            sample.append(line)
+        if not valid(line):
+            bad += 1
+            continue
+        f = line[1:].split("*")[0].split(",")
+        tag, talker, kind = f[0], f[0][:2], f[0][2:]
+        talkers[talker] = talkers.get(talker, 0) + 1
+        try:
+            if kind == "TXT" and len(f) > 4:
+                txt.append(f[4])
+            elif kind == "GGA" and len(f) > 9:
+                gga_all += 1
+                q = int(f[6] or 0)
+                if q > 0:
+                    gga_fix += 1
+                    if first_fix is None:
+                        first_fix = now - t0
+                    sats_used.append(int(f[7] or 0))
+                    if f[8]:
+                        hdops.append(float(f[8]))
+                    la, lo = coord(f[2], f[3]), coord(f[4], f[5])
+                    if la is not None and lo is not None:
+                        positions.append((la, lo))
+            elif kind == "RMC" and len(f) > 9 and f[2] == "A" and f[1] and f[9]:
+                hh, mm, ss = int(f[1][0:2]), int(f[1][2:4]), float(f[1][4:])
+                dd, mo, yy = int(f[9][0:2]), int(f[9][2:4]), 2000 + int(f[9][4:6])
+                g = datetime(yy, mo, dd, hh, mm, int(ss), tzinfo=timezone.utc).timestamp()
+                offsets.append(now - g)
+            elif kind == "GSV" and len(f) > 4:
+                for i in range(4, len(f) - 3, 4):
+                    snr = f[i + 3]
+                    if snr:
+                        snr_by_sys.setdefault(talker, []).append(int(snr))
+        except (ValueError, IndexError):
+            bad += 1
+cap.close()
+os.close(fd)
+
+def med(v):
+    return statistics.median(v) if v else None
+
+print(f"  שורות NMEA: {lines}  (checksum/פענוח שגוי: {bad})  talkers: {talkers}")
+for t in txt[:6]:
+    print(f"  TXT: {t}")                       # u-blox מכריז כאן על גרסת חומרה/קושחה
+print("  דוגמה גולמית:")
+for s in sample:
+    print(f"    {s}")
+if not lines:
+    print("  ⚠ לא התקבל כלום — פורט שגוי, או שמשהו אחר מחזיק אותו")
+    sys.exit(0)
+print(f"  fix: {gga_fix}/{gga_all} דגימות GGA"
+      + (f", fix ראשון אחרי {first_fix:.0f}s" if first_fix is not None else " — אין fix בכלל"))
+if sats_used:
+    print(f"  לוויינים בשימוש: min {min(sats_used)} · חציון {med(sats_used)} · max {max(sats_used)}"
+          + (f"   HDOP חציון {med(hdops):.1f}" if hdops else ""))
+for sysname, v in sorted(snr_by_sys.items()):
+    print(f"  SNR ({sysname}, dB-Hz): חציון {med(v)} · max {max(v)} · {len(v)} דיווחים")
+if positions:
+    c = (med([p[0] for p in positions]), med([p[1] for p in positions]))
+    spread = max(km(c, p) for p in positions) * 1000
+    far = max(km(ARP, p) for p in positions)
+    sp = f"{spread:.0f} m" if spread < 1000 else f"{spread / 1000:.1f} km"
+    print(f"  מיקום חציוני: {c[0]:.5f}, {c[1]:.5f}   פיזור מרבי מהחציון: {sp}")
+    print(f"  מרחק מנתב\"ג: חציון {km(ARP, c):.1f} km · מרבי {far:.1f} km"
+          "   (מאות ק\"מ = כנראה spoofing)")
+if offsets:
+    print(f"  שעון ה-Pi מול GPS (RMC): חציון {med(offsets):+.2f}s"
+          "   (~+0.5–1s זה זמן ההגעה של ה-NMEA; עשרות שניות ומעלה = שעון לא מסונכרן או זמן מזויף)")
+print(f"  הקלטה גולמית מלאה: {CAPTURE}")
+PY
+  fi
+fi
+
+echo "--- חלון ההיסטוריה (כמה ימים 5000 הודעות מכסות)"
+for f in acars vdl2 satcom; do
+  p="$DATA/$f.jsonl"
+  [ -r "$p" ] || { echo "  $f: אין קובץ"; continue; }
+  python3 - "$p" "$f" <<'PY'
+import json, sys
+ts = []
+for ln in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    try:
+        ts.append(float(json.loads(ln)["t"]))
+    except Exception:
+        pass
+if ts:
+    days = (max(ts) - min(ts)) / 86400
+    print(f"  {sys.argv[2]}: {len(ts)} הודעות על פני {days:.1f} ימים")
+else:
+    print(f"  {sys.argv[2]}: ריק")
+PY
+done
+echo "=== סוף"

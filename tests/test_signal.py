@@ -386,3 +386,16 @@ def test_antenna_check_skips_reentry_when_live_params_match_probe(client, paths,
     assert r.status_code == 200
     assert entered == []                    # אין restart — התנאים כבר נכונים
     assert r.get_json()["noise"] == -72.0
+
+
+def test_antenna_check_refused_while_satcom_live(client, paths, monkeypatch):
+    """בדיקת אנטנה היא ל-VHF: עם SATCOM חי (אנטנת L-band) המדידה חסרת משמעות,
+    ‏calibrate היה שומר אותה כבסיס, והמעבר היה מכבה ומדליק bias-T. כמו הניסוי."""
+    monkeypatch.setattr(app, "_live_mode", lambda: "satcom")
+    entered = []
+    monkeypatch.setattr(app, "_enter_voice", lambda params: entered.append(1) or (None, None, False))
+    r = client.post("/api/antenna/check", json={"freq": 121.5, "calibrate": True})
+    assert r.status_code == 409
+    assert not entered and not app.load_state().get("signal_baseline")
+    assert app.TUNE_LOCK.acquire(blocking=False)   # הנעילה שוחררה
+    app.TUNE_LOCK.release()

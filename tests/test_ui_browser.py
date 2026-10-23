@@ -32,6 +32,7 @@ BASE = "http://airam.test/"
 # נתיבי דפדפן אפשריים בסביבות שונות; None => ברירת המחדל של playwright.
 _CHROME_CANDIDATES = [
     "/opt/pw-browsers/chromium-1194/chrome-linux/chrome",
+    "/opt/pw-browsers/chromium",        # סביבת ענן: קישור יציב, בלי תלות בגרסת playwright
 ]
 
 
@@ -727,3 +728,181 @@ def test_successful_data_mode_entry_does_not_leave_status_stuck(page, mode, card
     page.locator(card).click()
     expect(page.locator("#status")).to_contain_text(f"מצב {label} פעיל", timeout=5000)
     assert [p["mode"] for p in posts] == [mode]
+
+
+# --- סבב תיקונים: באגים שאומתו בדפדפן -----------------------------------------
+
+def test_state_load_retries_and_satcom_waits_for_it(page):
+    """⚠ בטיחות: /api/state אחד שנכשל בטעינה השאיר את "הזנת LNA חיצונית" לא
+    מסומן לצמיתות, וכניסה ל-SATCOM שלחה bias_tee:true ודרסה את הבחירה השמורה.
+    עכשיו: הכניסה חסומה עד שה-state נטען, והטעינה מנסה שוב לבד."""
+    posts, dialogs = [], []
+    page.on("dialog", lambda d: (dialogs.append(d.message), d.accept()))
+    calls = {"n": 0}
+    st = _standby_api(satcom_bias_tee=False)["/api/state"]
+
+    def state(route, url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            route.abort()
+            return
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(st))
+    _mount(page, overrides={**_standby_api(), "/api/state": state,
+                            "/api/mode": _record_mode_posts(posts)})
+    expect(page.locator("#status")).to_contain_text("מנסה שוב", timeout=5000)
+    page.evaluate("enterSatcom()")             # לפני שה-state נטען
+    assert posts == [] and dialogs == []
+    expect(page.locator("#satcomExternalLna")).to_be_checked(timeout=8000)
+    page.evaluate("enterSatcom()")
+    expect(page.locator("#status")).to_contain_text("מצב SATCOM פעיל", timeout=5000)
+    assert len(posts) == 1 and posts[0]["bias_tee"] is False
+
+
+def test_tune_from_standby_syncs_flags_and_starts_stream(page):
+    """⚠ /api/tune מעביר את ה-SDR לקול גם מ-standby, אבל tune() לא ניקה את
+    sdrOff — reloadStream חזר מיד, הסטטוס נתקע על "מתחבר לסטרים…" ו-⏻ נשאר
+    "הפעלה" בזמן שהמקלט כבר שידר."""
+    tunes = []
+
+    def tune(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        tunes.append(body)
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, **_default_api()["/api/state"],
+                                       "freq": body["freq"], "app_mode": "voice"}))
+    _mount(page, overrides={**_standby_api(), "/api/tune": tune})
+    expect(page.locator("#powerBtnLbl")).to_contain_text("הפעלה")
+    page.click("#modeSeg button[data-v=voice]")
+    page.locator("#presets button").first.click()
+    expect(page.locator("#powerBtnLbl")).not_to_contain_text("הפעלה", timeout=5000)
+    page.wait_for_function("document.getElementById('player').src.length > 0", timeout=5000)
+    assert len(tunes) == 1
+
+
+def _replay_api(fail_id):
+    now = 1_760_000_000
+
+    def meta(sid):
+        return {"ok": True, "session": {
+            "id": sid, "t_start": now, "t_end": now + 600, "note": sid,
+            "aircraft": [], "gaps": [], "counts": {"clips": 1},
+            "clips": [{"file": "airam_20251009_101000_132500000.mp3",
+                       "ts": now + 60, "dur": 5.0, "freq": 132.5,
+                       "tx": {"state": "none"}}]}}
+    api = {"/api/sessions": {"ok": True, "sessions": [meta("S-A")["session"],
+                                                       meta("S-B")["session"]]},
+           "/api/sessions/S-A": meta("S-A"),
+           "/api/sessions/S-A/track": {"ok": True, "rows": []},
+           "/api/sessions/S-B/track": {"ok": True, "rows": []}}
+
+    def broken(route, url):
+        route.fulfill(status=500, content_type="application/json",
+                      body=json.dumps({"ok": False, "error": "metadata פגום"}))
+    api["/api/sessions/" + fail_id] = broken
+    return api
+
+
+def test_replay_failed_open_does_not_keep_previous_session(page):
+    """⚠ אובדן נתונים: פתיחת סשן B שנכשלה השאירה את רשימת התשדורות של A על
+    המסך, וכפתור 🗑 עדיין הצביע על A — לחיצה עליו מחקה את הסשן הלא-נכון."""
+    deletes = []
+    page.on("dialog", lambda d: d.accept())
+    _mount(page, overrides={**_standby_api(), **_replay_api("S-B")},
+           on_request=lambda r: deletes.append(r.url) if r.method == "DELETE" else None)
+    page.locator("#replayOpenListBtn").click()
+    page.locator(".replay-session-card button.primary").nth(0).click()   # S-A
+    expect(page.locator("#replayTxList .replay-tx-row")).to_have_count(1)
+    page.locator("#replayBackBtn").click()
+    page.locator(".replay-session-card button.primary").nth(1).click()   # S-B (נכשל)
+    expect(page.locator("#replayPlayerTitle")).to_have_text("שגיאה")
+    expect(page.locator("#replayTxList .replay-tx-row")).to_have_count(0)
+    page.locator("#replayDeleteBtn").click()
+    page.evaluate("1")
+    assert deletes == []
+
+
+def test_replay_clip_row_shows_start_time_not_end(page):
+    """‏ts של קליף הוא mtime = *סוף* השידור (docs/session-replay-design.md §7.4).
+    השורה מציגה את שעת ההתחלה (ts − dur), כמו שהנגן ממקם אותו."""
+    _mount(page, overrides={**_standby_api(), **_replay_api("S-B")})
+    page.locator("#replayOpenListBtn").click()
+    page.locator(".replay-session-card button.primary").nth(0).click()
+    expect(page.locator("#replayTxList .replay-tx-row")).to_have_count(1)
+    starts = page.evaluate("rp.clips.map(c => c.start)")
+    assert starts == [1_760_000_000 + 60 - 5.0]
+
+
+def test_home_tab_closes_replay_view(page):
+    """בתוך שחזור-הסשן 🏠 כבר מסומן כפעיל, ו-segInit התעלם מהלחיצה."""
+    _mount(page, overrides={**_standby_api(), **_replay_api("S-B")})
+    page.locator("#replayOpenListBtn").click()
+    expect(page.locator("#replayView")).to_be_visible()
+    page.click("#modeSeg button[data-v=home]")
+    expect(page.locator("#replayView")).to_be_hidden()
+    expect(page.locator("#homeView")).to_be_visible()
+
+
+# --- פיצ'רים קטנים -----------------------------------------------------------
+
+def test_replay_next_prev_buttons_step_between_clips(page):
+    """⏮/⏭ בסרגל הדביק עוברים בין תשדורות בלי לגלול את הרשימה שמתחת."""
+    api = {**_standby_api(), **_replay_api("S-B")}
+    meta = api["/api/sessions/S-A"]
+    base = meta["session"]["t_start"]
+    meta["session"]["clips"] = [
+        {"file": f"airam_20251009_1010{i}0_132500000.mp3", "ts": base + 60 * (i + 1),
+         "dur": 4.0, "freq": 132.5, "tx": {"state": "none"}} for i in range(3)]
+    # קובץ שמע תקין (WAV שקט) — 404 היה מפעיל error => דילוג אוטומטי לקליף הבא
+    import io
+    import wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+        w.writeframes(b"\0\0" * 8000 * 4)
+    wav = buf.getvalue()
+
+    def clip(route, url):
+        route.fulfill(status=200, content_type="audio/wav", body=wav)
+    for c in meta["session"]["clips"]:
+        api["/api/sessions/S-A/clips/" + c["file"]] = clip
+    _mount(page, overrides=api)
+    page.evaluate("HTMLMediaElement.prototype.play = function () { return Promise.resolve(); }")
+    page.locator("#replayOpenListBtn").click()
+    page.locator(".replay-session-card button.primary").nth(0).click()
+    expect(page.locator("#replayTxList .replay-tx-row")).to_have_count(3)
+    page.locator("#replayNextBtn").click()
+    expect(page.locator("#replayTxList .replay-tx-row").nth(0)).to_have_class(re.compile(r"\bon\b"))
+    page.locator("#replayNextBtn").click()
+    expect(page.locator("#replayTxList .replay-tx-row").nth(1)).to_have_class(re.compile(r"\bon\b"))
+    page.locator("#replayPrevBtn").click()
+    expect(page.locator("#replayTxList .replay-tx-row").nth(0)).to_have_class(re.compile(r"\bon\b"))
+
+
+def test_activity_frequency_tap_tunes(page):
+    """נגיעה בתדר בשורת היומן מכווננת אליו; התדר הנוכחי לא לחיץ (אין מה לכוונן)."""
+    tunes = []
+
+    def tune(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        tunes.append(body["freq"])
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, **_default_api()["/api/state"],
+                                       "freq": body["freq"], "app_mode": "voice"}))
+    events = [{"ts": 1_760_000_000, "freq": 118.3, "file": None, "dur": 3.0},
+              {"ts": 1_760_000_100, "freq": 132.5, "file": None, "dur": 3.0}]
+    _mount(page, overrides={"/api/activity": {"ok": True, "events": events},
+                            "/api/tune": tune})
+    expect(page.locator("#activity .act-row .f.tunable")).to_have_count(1)
+    page.locator("#activity .act-row .f.tunable").click()
+    expect(page.locator("#status")).to_contain_text("מתחבר לסטרים", timeout=5000)
+    assert tunes == [118.3]
+
+
+def test_long_toast_stays_longer_and_tap_dismisses(page):
+    _mount(page)
+    page.evaluate("showToast('" + "א" * 180 + "')")
+    expect(page.locator("#toast")).to_be_visible()
+    page.wait_for_timeout(6000)                  # מעבר ל-5ש' הישנים — עדיין גלוי
+    expect(page.locator("#toast")).to_be_visible()
+    page.locator("#toastMsg").click()
+    expect(page.locator("#toast")).to_be_hidden()

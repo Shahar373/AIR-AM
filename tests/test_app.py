@@ -662,3 +662,36 @@ def test_pwa_assets_served_from_root(client):
     assert sw.status_code == 200 and sw.headers.get("Service-Worker-Allowed") == "/"
     assert client.get("/icon-192.png").status_code == 200
     assert client.get("/nope-asset.foo").status_code == 404   # catch-all לא מגיש זבל
+
+
+# --- lost update ב-state.json: שמירה אחרי פעולה ארוכה ממזגת על state טרי -------
+
+def test_tune_does_not_revert_concurrent_transcribe_toggle(client, paths, monkeypatch):
+    """⚠ regression: _voice_tune שמר {**prev, ...} מ-snapshot שנלקח *לפני*
+    restart של 3–45ש'. מתג "תמלל הכול" שהופעל באמצע (POST /api/transcribe, בלי
+    TUNE_LOCK) קיבל ok ואז נדרס בשקט כשהכיוונון הסתיים."""
+    app.save_state({**app.DEFAULT_STATE, "transcribe_auto": False})
+
+    def slow_restart():
+        # "באמצע ה-restart" המשתמש מדליק תמלול אוטומטי
+        assert client.post("/api/transcribe", json={"auto": True}).get_json()["ok"]
+        return None, None, False
+    monkeypatch.setattr(app, "_restart_and_verify", slow_restart)
+    r = client.post("/api/tune", json={"freq": 134.6})
+    assert r.status_code == 200
+    st = app.load_state()
+    assert st["freq"] == 134.6 and st["transcribe_auto"] is True
+
+
+def test_mode_switch_does_not_revert_concurrent_transcribe_lang(client, paths, monkeypatch):
+    """אותו lost update במסלול /api/mode (ACARS/VDL2/SATCOM)."""
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "off", "transcribe_lang": "en"})
+
+    def slow_enter(freqs):
+        assert client.post("/api/transcribe", json={"lang": "he"}).get_json()["ok"]
+        return None, None
+    monkeypatch.setattr(app, "_enter_acars", slow_enter)
+    r = client.post("/api/mode", json={"mode": "acars"})
+    assert r.status_code == 200
+    st = app.load_state()
+    assert st["app_mode"] == "acars" and st["transcribe_lang"] == "he"
