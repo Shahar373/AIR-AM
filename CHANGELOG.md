@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [2.28.1] - 2026-10-23
+
 ### תוקן
 - **בדיקה רועדת ב-CI:** `test_full_run_two_prompts_summary_and_restore` נכשלה לסירוגין
   (`atis.gone` = `None`): הבדיקה דוחסת זמן פי ~100, וחלון ה-ATIS היה ~0.2ש' בלבד — עצירת
