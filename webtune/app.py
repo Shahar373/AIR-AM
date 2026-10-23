@@ -195,7 +195,13 @@ _ACARS_DIR_BY_LABEL = {
     "WX": "downlink",   # בקשת METAR לשדות גיבוי מהמטוס
     "SA": "downlink",   # media advisory — המטוס מדווח על מצב הקישורים שלו
     "15": "downlink",   # דיווח מיקום מהמטוס
-    "BA": "uplink",     # מתן אישור מהקרקע אל המטוס
+    # ARINC 620/libacars: ‏A6/AA = ADS-C/CPDLC uplink, ‏B6/BA = ADS-C/CPDLC downlink.
+    # ⚠ גם ה-downlink מתחיל בכתובת תחנת קרקע (‎/QUKAXBA.ADS.G-ZBKM…, קליטת VHF
+    # 23.10.2026), ולכן _UPLINK_HEADER_RE סיווג אותו בטעות כ-uplink. ‏BA תוקן
+    # (בעבר "uplink", אישור מהקרקע). אומת ב-decode_acars_apps: ‏d B6 ⇒ Basic report
+    # תקין, ‏u B6 ⇒ "Malformed ADS-C message".
+    "A6": "uplink", "AA": "uplink",
+    "B6": "downlink", "BA": "downlink",
     "A9": "uplink",     # ATIS משודר מהקרקע
     "A4": "uplink",     # FSM / הודעת לוח-זמנים מהקרקע
     "SQ": "uplink",     # squitter של תחנת הקרקע (תוקן: בעבר downlink בטעות)

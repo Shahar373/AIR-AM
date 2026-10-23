@@ -393,10 +393,11 @@ def test_normalize_position_from_text():
 
 
 def test_acars_direction_heuristic():
-    # label מוכר: OOOI/position/login => downlink; BA (אישור מהקרקע) => uplink
+    # label מוכר: OOOI/position/login => downlink; ‏A6/AA (ADS-C/CPDLC מהקרקע) => uplink
     assert app._acars_direction("QA", None) == "downlink"
     assert app._acars_direction("H1", "HELLO") == "downlink"
-    assert app._acars_direction("BA", None) == "uplink"
+    assert app._acars_direction("A6", None) == "uplink"
+    assert app._acars_direction("AA", None) == "uplink"
     assert app._acars_direction("A9", None) == "uplink"   # ATIS מהקרקע
     assert app._acars_direction("Q0", "PING") == "downlink"  # link test ממטוס
     assert app._acars_direction("80", None) == "downlink"    # OOOI report ממטוס
@@ -410,9 +411,40 @@ def test_acars_direction_heuristic():
 def test_normalize_includes_direction():
     n = app._normalize_acars({"timestamp": 1.0, "label": "QA", "tail": "4X-A"})
     assert n["dir"] == "downlink"
-    n2 = app._normalize_acars({"timestamp": 1.0, "label": "BA", "tail": "4X-A"})
+    n2 = app._normalize_acars({"timestamp": 1.0, "label": "AA", "tail": "4X-A"})
     assert n2["dir"] == "uplink"
     assert app._normalize_acars({"timestamp": 1.0, "label": "Q0"})["dir"] == "downlink"
+
+
+# ⚠ קליטת VHF אמיתית (23.10.2026): ADS-C downlink מתחיל בכתובת תחנת קרקע, כמו
+# uplink. בלי מיפוי label, _UPLINK_HEADER_RE סיווג אותו כ-uplink.
+_B6_TEXT = "/QUKAXBA.ADS.G-ZBKM071798089D4D8946EACD9F84D7"
+
+
+def test_acars_direction_b6_ba_downlink_despite_ground_header():
+    """ARINC 620/libacars: ‏B6/BA = ADS-C/CPDLC downlink. הטקסט מתחיל ב-header
+    שתואם _UPLINK_HEADER_RE, אבל ה-label מכריע (אומת ב-decode_acars_apps:
+    ‏d B6 ⇒ Basic report תקין, ‏u B6 ⇒ Malformed ADS-C message)."""
+    assert app._UPLINK_HEADER_RE.match(_B6_TEXT)          # בלי ה-label — היה uplink
+    assert app._acars_direction("B6", _B6_TEXT) == "downlink"
+    assert app._acars_direction("BA", "/QUKAXBA.AT1.G-ZBKM2A48E3C9") == "downlink"
+
+
+def test_normalize_acars_b6_downlink_keeps_adsc_position():
+    """ה-B6 מהקליטה מנורמל ל-dir=downlink ושומר את מיקום ה-ADS-C (Basic report
+    כפי ש-decode_acars_apps פענח אותו: 33.1789N 27.6509E, ‏37996ft)."""
+    n = app._normalize_acars({
+        "timestamp": 1.0, "label": "B6", "tail": ".G-ZBKM", "error": 0,
+        "text": _B6_TEXT,
+        "libacars": {"arinc622": {"msg_type": "adsc_msg", "crc_ok": True,
+                                  "gs_addr": "QUKAXBA", "air_addr": ".G-ZBKM",
+                                  "adsc": {"err": False, "basic_report": {
+                                      "lat": 33.1789, "lon": 27.6509, "alt": 37996}}}},
+    })
+    assert n["dir"] == "downlink"
+    assert n["category"] == "ADS-C" and n["group"] == "position"
+    assert n["pos_src"] == "adsc"
+    assert abs(n["lat"] - 33.1789) < 0.001 and abs(n["lon"] - 27.6509) < 0.001
 
 
 def test_text_latlon_rejects_noise_and_parses_arinc():

@@ -9,6 +9,16 @@
 
 ## [Unreleased]
 
+### תוקן
+- **ADS-C/CPDLC downlink (labels ‏B6/BA) סווגו כ-`dir="uplink"` (v2.25.2).** גם הודעות
+  downlink מתחילות בכתובת תחנת קרקע (למשל ‎`B6 /QUKAXBA.ADS.G-ZBKM…` מקליטת VHF ב-23.10.2026),
+  ו-`_acars_direction` נפל ל-`_UPLINK_HEADER_RE` כשה-label לא היה ב-`_ACARS_DIR_BY_LABEL`.
+  נוספו ‏`B6`/`BA` ⇒ downlink ו-`A6`/`AA` ⇒ uplink (ARINC 620/libacars). ‏`BA` היה ממופה
+  בטעות ל-uplink ("אישור מהקרקע"), וזה תוקן. אומת ב-`decode_acars_apps`: ‏`d B6` מחזיר
+  Basic report תקין (33.1789N 27.6509E, ‏37996ft), ו-`u B6` מחזיר "Malformed ADS-C message".
+  המיקום הוצג גם קודם, כי ב-VHF ‏`adsc_dir_ok` מתיר כשאין כיוון מבני. אבל ה-`dir` שנשמר
+  היה שגוי, ו-re-decode עתידי ב-VHF דרך `_decode_libacars_app` היה רץ בכיוון ASN.1 ההפוך.
+
 ### שונה
 - **`docs/intelligence-design.md`: תוצאות שלב 0 (§4.1.1).** הרצה על ה-Pi (31 מטוסים,
   לילה) אימתה ש-adsb.lol מחזיר `squawk` (94%), `emergency` (90%), `nav_altitude_mcp`
