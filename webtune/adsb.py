@@ -246,7 +246,9 @@ _S = {
     "spoofed_now": 0,         # מטוסים מזויפים (nic<SPOOF_NIC) בדגימה האחרונה
     "aircraft": {},           # norm_reg(r) -> רשומת מטוס אחרונה (היתוך ACARS↔ADS-B)
     "session_series": deque(maxlen=SESSION_SERIES_MAX),   # (t_wall, gps_ratio|None, runway|None) לדוח הסשן
-    "track_appends": 0,       # מונה מ-compaction אחרון (ר' _append_track/_compact_track)
+    # None = עוד לא נדחס מאז העלייה => compaction כבר ב-append הראשון. בלי זה,
+    # airam-web שמופעל מחדש כל פחות משעה לא דחס לעולם, והקובץ גדל בלי גבול.
+    "track_appends": None,    # מונה מ-compaction אחרון (ר' _append_track/_compact_track)
 }
 
 
@@ -327,6 +329,7 @@ def process(ac_list, now=None):
 
     _S["gps_hist"].append((now, bad, total))
     _S["spoofed_now"] = spoofed
+    _S["last_process_mono"] = now      # ר' _build_track_row: רק מטוסים מה-poll הזה
 
     # גיזום חלונות + מפתחות dedup ישנים
     while events and now - events[0][0] > WINDOW_MIN * 60:
@@ -478,7 +481,13 @@ def _build_track_row():
     מול process() שרץ באותו thread ממש לפני כן) — הכתיבה לדיסק עצמה קורית
     מחוץ לנעילה (_append_track), כדי לא לחסום קוראים אחרים על I/O."""
     ac_rows = []
+    seen_now = _S.get("last_process_mono")
     for reg, rec in _S["aircraft"].items():
+        # ⚠ _S["aircraft"] שומר מטוס עוד AC_KEEP_SEC (10 דק') אחרי שיצא מהפיד —
+        # בשביל היתוך ACARS, לא בשביל המסלול. בלי הסינון, השחזור הציג מטוס
+        # "קפוא" במיקומו האחרון עד 10 דק', בניגוד ל"לא בשורה = לא נראה" (§4.1).
+        if rec["t_mono"] != seen_now:
+            continue
         lat = round(rec["lat"], 5) if rec["lat"] is not None else None
         lon = round(rec["lon"], 5) if rec["lon"] is not None else None
         alt = round(rec["alt"]) if rec["alt"] is not None else None
@@ -509,10 +518,13 @@ def _append_track(row):
             f.write(data)
     except OSError:
         return
-    _S["track_appends"] += 1
+    n = _S["track_appends"]
+    _S["track_appends"] = TRACK_COMPACT_EVERY if n is None else n + 1
     if _S["track_appends"] >= TRACK_COMPACT_EVERY:
-        _compact_track()
-        _S["track_appends"] = 0
+        try:
+            _compact_track()
+        finally:
+            _S["track_appends"] = 0     # חריגה לא תגרום ל-compaction בכל poll
 
 
 def _compact_track():
@@ -527,9 +539,12 @@ def _compact_track():
     kept = []
     for ln in lines:
         try:
-            t = json.loads(ln).get("t")
+            row = json.loads(ln)
         except ValueError:
             continue                      # שורה פגומה (כתיבה שנקטעה) — מדלגים, לא כושלים
+        if not isinstance(row, dict):     # JSON תקין שאינו אובייקט (שריד-כתיבה) — כמו בקוראים
+            continue
+        t = row.get("t")
         if isinstance(t, (int, float)) and t >= cutoff:
             kept.append(ln)
     text = "\n".join(kept) + ("\n" if kept else "")
@@ -558,6 +573,9 @@ def read_track_buffer():
     t_oldest = None
     samples = 0
     gaps = []
+    # שורות מעבר לחלון (לפני compaction, למשל אחרי השבתה) לא נספרות: אחרת ה-UI
+    # הציג "ניתן לשמור 1200 דק' אחורה" כשבפועל POST /api/sessions חותך ל-90.
+    cutoff = time.time() - TRACK_BUFFER_MIN * 60.0
     for ln in lines:
         try:
             row = json.loads(ln)
@@ -566,7 +584,7 @@ def read_track_buffer():
         if not isinstance(row, dict):
             continue
         t = row.get("t")
-        if not isinstance(t, (int, float)):
+        if not isinstance(t, (int, float)) or t < cutoff:
             continue
         if t_oldest is None or t < t_oldest:
             t_oldest = t
@@ -602,6 +620,10 @@ def read_track_slice(t_start, t_end):
 def _poll_once():
     try:
         name, data = _fetch(_S["src_idx"])
+        # גוף-שגיאה ב-HTTP 200 (למשל {"msg": ...}) נרשם בעבר כ-poll תקין עם 0
+        # מטוסים — השחזור הציג שמיים ריקים במקום פער-קליטה (§4.2).
+        if not isinstance(data, dict) or not isinstance(data.get("ac"), list):
+            raise ValueError("תשובה לא צפויה (אין רשימת ac)")
     except Exception as e:
         with _LOCK:
             _S["fails"] += 1

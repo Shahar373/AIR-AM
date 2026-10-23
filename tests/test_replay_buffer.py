@@ -46,7 +46,9 @@ def _clean_adsb_state():
 def _feed_aircraft(regs_and_pos):
     """ממלא _S['aircraft'] ישירות (בלי HTTP) — (reg, lat, lon, nic) לכל מטוס.
     nic=None משאיר גם lat/lon=None (משבש), כמו process() האמיתי."""
+    now = time.monotonic()
     with adsb._LOCK:
+        adsb._S["last_process_mono"] = now      # כמו process(): כולם מה-poll הנוכחי
         for reg, lat, lon, nic in regs_and_pos:
             adsb._S["aircraft"][reg] = {
                 "reg": reg, "hex": "abc123", "flight": None, "type": None,
@@ -54,6 +56,7 @@ def _feed_aircraft(regs_and_pos):
                 "gs": 180.0, "track": 90.0, "nic": nic,
                 "spoofed": nic is not None and nic < adsb.SPOOF_NIC,
                 "pos_ok": lat is not None,
+                "t_mono": now,
             }
 
 
@@ -169,7 +172,65 @@ def test_append_track_triggers_compaction_after_threshold(paths, monkeypatch):
     assert adsb._S["track_appends"] == 0
 
 
+def test_track_row_skips_aircraft_not_in_current_poll():
+    """⚠ regression: _S["aircraft"] שומר מטוס עוד AC_KEEP_SEC (10 דק') אחרי שיצא
+    מהפיד (לטובת היתוך ACARS). שורת המסלול כללה אותו, והשחזור הציג אותו "קפוא"
+    במיקומו האחרון עד 10 דק'. רק מטוסים מה-poll האחרון נכנסים לשורה."""
+    ac = {"r": "4X-EHD", "hex": "738065", "lat": 32.2, "lon": 34.7, "alt_baro": 3200,
+          "gs": 180, "track": 90, "nic": 8, "seen_pos": 1}
+    with adsb._LOCK:
+        adsb.process([ac], now=1000.0)
+        assert [r[0] for r in adsb._build_track_row()["ac"]] == ["4XEHD"]
+        adsb.process([], now=1015.0)                      # המטוס נעלם מהפיד
+        assert "4XEHD" in adsb._S["aircraft"]             # עדיין בזיכרון להיתוך ACARS
+        assert adsb._build_track_row()["ac"] == []        # אבל לא בשורת המסלול
+
+
+def test_first_append_after_start_compacts(paths):
+    """⚠ regression: המונה התחיל מ-0 בכל עלייה => airam-web שמופעל מחדש כל פחות
+    משעה לא דחס לעולם, והקובץ גדל בלי גבול."""
+    old = time.time() - (adsb.TRACK_BUFFER_MIN + 5) * 60
+    adsb.TRACK_PATH.write_text(json.dumps({"t": old, "ac": []}) + "\n")
+    with adsb._LOCK:
+        adsb._S["track_appends"] = None                  # כמו אחרי עלייה
+    adsb._append_track({"t": time.time(), "ac": []})
+    assert all(r["t"] != old for r in _lines(adsb.TRACK_PATH))
+
+
+def test_compaction_survives_non_object_line(paths, monkeypatch):
+    """שורת JSON תקינה שאינה אובייקט (שריד כתיבה) הפילה את _compact_track ב-
+    AttributeError, והמונה לא התאפס => ניסיון כושל בכל poll."""
+    monkeypatch.setattr(adsb, "TRACK_COMPACT_EVERY", 1)
+    adsb.TRACK_PATH.write_text("32.1\n" + json.dumps({"t": time.time(), "ac": []}) + "\n")
+    adsb._append_track({"t": time.time(), "ac": []})
+    assert adsb._S["track_appends"] == 0
+    assert all(isinstance(r, dict) for r in _lines(adsb.TRACK_PATH))
+
+
+def test_poll_non_dict_response_is_gap(paths, monkeypatch):
+    """גוף-שגיאה ב-HTTP 200 (למשל {"msg": ...}) נרשם בעבר כ-poll תקין עם 0
+    מטוסים — השחזור הציג שמיים ריקים במקום פער-קליטה."""
+    monkeypatch.setattr(adsb, "_fetch", lambda idx: ("adsb.lol", {"msg": "rate limited"}))
+    monkeypatch.setitem(adsb._S, "fails", 0)
+    monkeypatch.setitem(adsb._S, "src_idx", 0)
+    monkeypatch.setitem(adsb._S, "error", None)
+    adsb._poll_once()
+    rows = _lines(adsb.TRACK_PATH)
+    assert rows and rows[-1].get("gap") == "no_adsb"
+    assert adsb._S["fails"] == 1
+
+
 # --- read_track_buffer ---------------------------------------------------------
+
+def test_read_track_buffer_ignores_rows_beyond_window(paths):
+    """שורות מעבר לחלון (לפני compaction, למשל אחרי השבתה) לא נספרות — אחרת
+    ה-UI הציג "ניתן לשמור 1200 דק' אחורה" כשהשמירה בפועל חותכת ל-90."""
+    now = time.time()
+    old = now - 20 * 3600
+    adsb.TRACK_PATH.write_text(json.dumps({"t": old, "ac": []}) + "\n"
+                               + json.dumps({"t": now - 60, "ac": []}) + "\n")
+    buf = adsb.read_track_buffer()
+    assert buf["samples"] == 1 and buf["t_oldest"] == pytest.approx(now - 60, abs=1)
 
 def test_read_track_buffer_missing_file(paths):
     buf = adsb.read_track_buffer()

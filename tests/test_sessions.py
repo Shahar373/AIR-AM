@@ -340,3 +340,38 @@ def test_saving_new_session_does_not_steal_clips_from_existing_sessions(client, 
     r2 = client.post("/api/sessions", json={"minutes": 5}).get_json()
     assert clip1.is_file(), "הקליפ של הסשן הראשון נגנב ע\"י שמירת סשן חדש"
     assert [c["file"] for c in r2["session"]["clips"]] == [NAME2]
+
+
+# --- כשל בשמירה לא מוחק הקלטות ---------------------------------------------
+
+def test_track_write_failure_leaves_recordings_untouched(client, paths, monkeypatch):
+    """⚠ regression: הקליפים הלא-שמורים *הועברו* לפני כתיבת המסלול, וכשל
+    בכתיבה (דיסק מלא) הריץ rmtree — ומחק אותם לצמיתות. עכשיו המסלול נכתב
+    קודם, וכשל בו לא נוגע באף הקלטה."""
+    now = time.time()
+    _write_track([_ac_row(now - 60, [("4X-EHD", 32.2, 34.7, 3200, 90.0, 180.0, 8)])])
+    rec = _mk_rec(NAME1, age=30)
+
+    def boom(*a, **kw):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(app.gzip, "open", boom)
+    r = client.post("/api/sessions", json={"minutes": 5})
+    assert r.status_code == 500
+    assert rec.is_file()                                  # ההקלטה במקומה
+
+
+def test_meta_write_failure_moves_recordings_back(client, paths, monkeypatch):
+    now = time.time()
+    _write_track([_ac_row(now - 60, [("4X-EHD", 32.2, 34.7, 3200, 90.0, 180.0, 8)])])
+    rec = _mk_rec(NAME1, age=30)
+    real = app._atomic_write
+
+    def fail_meta(path, data):
+        if path.name == "meta.json":
+            raise OSError(28, "No space left on device")
+        return real(path, data)
+    monkeypatch.setattr(app, "_atomic_write", fail_meta)
+    r = client.post("/api/sessions", json={"minutes": 5})
+    assert r.status_code == 500
+    assert rec.is_file()                                  # הוחזרה לתיקייה החיה
+    assert not any(app.SESSIONS_DIR.iterdir())            # אין תיקיית סשן יתומה

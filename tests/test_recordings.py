@@ -635,3 +635,14 @@ def test_recordings_route_serves_from_saved_dir(client, paths):
     """‏/recordings/<name> חייב למצוא הקלטה גם אחרי שהיא זזה ל-saved/."""
     _mk_rec(paths, NAME, saved=True)
     assert client.get(f"/recordings/{NAME}").status_code == 200
+
+
+def test_write_tx_does_not_resurrect_deleted_session_dir(paths):
+    """⚠ regression: ה-worker סיים לתמלל קליפ של סשן שנמחק בינתיים, ו-
+    _atomic_write יצר מחדש את sessions/<id>/clips/ עם sidecar בודד — תיקייה בלי
+    meta.json שה-GET שלה החזיר 500 והסשן הבא קיבל סיומת "-2"."""
+    gone = paths / "sessions" / "20260817-120000" / "clips"
+    mp3 = gone / "airam_20260817_120000_134600000.mp3"
+    rec = app._write_tx(mp3, "ok", text="CLEARED TO LAND")
+    assert rec["state"] == "ok"
+    assert not (paths / "sessions").exists()

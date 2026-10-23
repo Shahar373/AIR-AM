@@ -816,6 +816,21 @@ def save_state(st):
     _atomic_write(STATE_PATH, json.dumps(st))
 
 
+_STATE_LOCK = threading.Lock()
+
+
+def _merge_state(changes):
+    """read-modify-write של state.json: טוען טרי, ממזג רק את המפתחות של הקורא
+    ושומר. מחזיר את ה-state החדש.
+    ⚠ מעבר מצב/כיוונון מחזיק snapshot לאורך restart של 3–45ש'; שמירת
+    {**st, ...} מאותו snapshot דרסה שינוי מקביל (למשל "תמלל הכול" או בחירת
+    שפה באמצע מעבר) — lost update שקט. כל שמירה אחרי פעולה ארוכה עוברת כאן."""
+    with _STATE_LOCK:
+        st = {**load_state(), **changes}
+        save_state(st)
+        return st
+
+
 # --- הפעלה מחדש מאומתת + רולבק --------------------------------------------
 def _sdr_present():
     """בדיקת USB מהירה (vendor 1df7 = SDRplay) בלי לפתוח את המכשיר."""
@@ -1184,6 +1199,10 @@ def _run_libacars(dir_arg, label, text, as_json):
         return None
     except subprocess.TimeoutExpired:
         log.warning("libacars: timeout בפענוח %s %s", dir_arg, label)
+        return None
+    except ValueError:
+        # ‏NUL בטקסט מהרשת => "embedded null byte" מ-subprocess. בלי זה כל ההודעה
+        # נזרקה ב-listener, בניגוד ל"כשל לא מאבד הודעה" (§9).
         return None
     except OSError:
         log.exception("libacars: לא ניתן להריץ decoder")
@@ -1984,7 +2003,12 @@ def _trim_jsonl_log(path, keep):
     except OSError:
         return
     if len(lines) > keep:
-        _atomic_write(path, "\n".join(lines[-keep:]) + "\n")
+        # ⚠ נקרא מחוץ ל-try של ה-listener: OSError (דיסק מלא) היה הורג את thread
+        # ה-ACARS/VDL2/SATCOM, והפיד מת עד restart של airam-web.
+        try:
+            _atomic_write(path, "\n".join(lines[-keep:]) + "\n")
+        except OSError:
+            log.warning("קיצוץ %s נכשל", path, exc_info=True)
 
 
 def _append_acars_log(rec):
@@ -2904,8 +2928,7 @@ def _fail_to_off(st, err, detail, log_prefix):
         _enter_standby()   # שגיאה משנית לא מעניינת — ממילא מדווחים על המקורית
     except Exception:
         pass
-    new_state = {**st, "app_mode": "off", "prev_mode": st.get("app_mode", "off")}
-    save_state(new_state)
+    new_state = _merge_state({"app_mode": "off", "prev_mode": st.get("app_mode", "off")})
     return {"ok": False, "error": err, "detail": detail,
             "app_mode": "off", "state": new_state}, 500
 
@@ -3023,6 +3046,24 @@ def _scan_stop_thread():
 
 
 def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
+    """עטיפה ל-_scan_loop_body: חריגה לא-צפויה (למשל OSError מ-write_config/
+    save_state כשהדיסק מלא) הייתה הורגת את ה-thread בשקט, והרגל האחרונה הייתה
+    ממשיכה לרוץ לנצח. כאן היא נרשמת, ו-api_state/api_health מדווחים תקלה כי
+    ה-thread כבר לא חי (_scan_thread_alive)."""
+    try:
+        _scan_loop_body(stop_evt, plan, start_idx, first_dwell, consumer_active)
+    except Exception:
+        log.exception("scan: ה-thread נפל — הסבב נעצר")
+        with _scan_lock:
+            _scan_status.update(wait=None, idx=-1, leg=None, next_switch_at=None)
+
+
+def _scan_thread_alive():
+    with _scan_lock:
+        return _scan_thread is not None and _scan_thread.is_alive()
+
+
+def _scan_loop_body(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
     """thread: ממתין first_dwell על הרגל שכבר הוכנסה (start_idx-1), ואז מסתובב
     בין שאר רגלי הלוח עד עצירה. stop_evt ייחודי-לקריאה-הזו (לא גלובלי) => סבב
     חדש שמתחיל אחר-כך לא "מבטל בטעות" thread ישן שעדיין מסיים את היציאה.
@@ -3104,8 +3145,12 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
                 _scan_status.update(wait="sdr", idx=-1, leg=None, next_switch_at=None)
             remaining = SCAN_WINDOW_RECHECK_SEC
             continue
+        # ‏same דורש גם שהצרכן עדיין חי: _mode_reconcile_loop מדלג על scan, כך
+        # שבלוח עם רגל יחידה צרכן שקרס (למשל קריסת sdrplay שלא הופצה) היה נשאר
+        # מת עד סוף החלון בלי שום ניסיון כניסה מחדש.
         same = (last_entered is not None and last_entered["mode"] == leg["mode"]
-                and last_entered.get("freqs") == leg.get("freqs"))
+                and last_entered.get("freqs") == leg.get("freqs")
+                and _is_active(MODE_SERVICE[leg["mode"]]))
         if same:
             # אותה רגל בדיוק כבר רצה (מצב+תדרים) — אין טעם ב-restart של השירות,
             # רק מרעננים את הטיימר. חוסך נתק שמע/הקלטות כל dwell בלוח עם רגל
@@ -3136,9 +3181,8 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
             if consecutive_fail >= len(plan):
                 log.warning("scan: כל הרגלים נכשלו בסבב — נופל ל-off")
                 # תחת TUNE_LOCK עד סוף כתיבת ה-state (כולל) — לא רק סביב
-                # _enter_standby: בלעדיו קריאה/כתיבה מקבילה ל-state.json (כמו
-                # /api/session/ack, שגם הוא עכשיו תחת TUNE_LOCK) הייתה עלולה
-                # לקרוא לפני השינוי הזה ולדרוס אותו אחרי — lost update.
+                # _enter_standby: מעבר מצב מה-UI שנכנס בין הכיבוי לשמירה היה
+                # נדרס ב-"off". השמירה עצמה דרך _merge_state (מפתחות בודדים).
                 if not TUNE_LOCK.acquire(timeout=5):
                     log.warning("scan: לא ניתן היה לתפוס TUNE_LOCK לכיבוי — פעולה אחרת כנראה כבר משתלטת")
                     return
@@ -3146,8 +3190,7 @@ def _scan_loop(stop_evt, plan, start_idx, first_dwell, consumer_active=False):
                     _enter_standby()
                     if stop_evt.is_set():
                         return   # מעבר מצב אחר כבר תפס פיקוד בינתיים — לא דורסים את ה-state שלו
-                    cur = load_state()
-                    save_state({**cur, "app_mode": "off", "prev_mode": "scan"})
+                    _merge_state({"app_mode": "off", "prev_mode": "scan"})
                 finally:
                     TUNE_LOCK.release()
                 with _scan_lock:
@@ -3183,6 +3226,13 @@ def _scan_activate(plan, wait_for_sdr=False):
     _scan_stop_thread()
     active_idx = next((i for i, leg in enumerate(plan) if _leg_active_now(leg)), None)
     if active_idx is None:
+        # ⚠ עוצרים את הצרכן שכבר רץ (SATCOM/קול/...): ה-thread מתחיל עם
+        # consumer_active=False ולכן לעולם לא היה עוצר אותו בעצמו. בלי זה,
+        # לוח שכל רגליו מחוץ לחלון השאיר את SATCOM רץ עם bias-T דלוק עד
+        # שנפתח חלון — בזמן שה-UI מציג "ממתין" ו-health מדווח תקין.
+        err, detail = _enter_standby()
+        if err:
+            return err, detail
         stop_evt = threading.Event()
         thread = threading.Thread(target=_scan_loop, args=(stop_evt, plan, 0, 0, False), daemon=True)
         with _scan_lock:
@@ -3305,7 +3355,8 @@ def api_state():
         plan = st.get("scan_plan") or []
         any_due = any(_leg_active_now(leg) for leg in plan) if plan else True
         st["app_mode"] = "scan"
-        st["mode_ok"] = (live is not None) or not any_due
+        # thread שמת (חריגה) = אף אחד לא מסובב את הרגלים — תקלה, גם אם צרכן עוד רץ
+        st["mode_ok"] = _scan_thread_alive() and ((live is not None) or not any_due)
     else:
         st["app_mode"] = live or saved
         # mode_ok=False: המצב השמור אמור להריץ צרכן ואף אחד לא רץ (קריסה / עליית
@@ -3539,7 +3590,7 @@ def api_health():
         # אמורה לרוץ כרגע (חלון שעות) — "ממתין" אינו תקלה.
         plan = saved_state.get("scan_plan") or []
         any_due = any(_leg_active_now(leg) for leg in plan) if plan else True
-        mode, ok = "scan", (active is not None) or not any_due
+        mode, ok = "scan", _scan_thread_alive() and ((active is not None) or not any_due)
     else:
         mode = active or saved
         ok = (voice_ok if mode == "voice" else acars_ok if mode == "acars"
@@ -3704,6 +3755,10 @@ def _read_tx(mp3):
 
 def _write_tx(mp3, state, text=None, err=None, lang=None):
     rec = {"state": state, "text": text}
+    if not mp3.parent.is_dir():
+        # ‏_atomic_write יוצר תיקיות-אב: סשן שנמחק בזמן שה-worker מתמלל קליפ
+        # שלו היה "קם לתחייה" כתיקייה עם sidecar בודד ובלי meta.json.
+        return rec
     if err:
         rec["err"] = err
     if lang:
@@ -4233,14 +4288,14 @@ def api_transcribe():
         data = request.get_json(silent=True) or {}
         if "auto" not in data and "lang" not in data:
             return jsonify(ok=False, error="חסר שדה auto או lang"), 400
-        st = load_state()
+        changes = {}
         if "auto" in data:
-            st["transcribe_auto"] = bool(data.get("auto"))
+            changes["transcribe_auto"] = bool(data.get("auto"))
         if "lang" in data:
             if data.get("lang") not in TX_LANGS:
                 return jsonify(ok=False, error="שפה לא נתמכת"), 400
-            st["transcribe_lang"] = data["lang"]
-        save_state(st)
+            changes["transcribe_lang"] = data["lang"]
+        _merge_state(changes)
     return jsonify(ok=True, tx=_tx_status())
 
 
@@ -4343,37 +4398,9 @@ def api_sessions():
     clips_dir = sdir / SESSION_CLIPS_DIRNAME
     clips_dir.mkdir(parents=True, exist_ok=True)
 
-    # קליפים בחלון הזמן: שמורה (★) מ*עתיקים* (שומרת על ההגנה ב-saved/ גם),
-    # לא-שמורה *מועברת* (משתמשת ב-_move_recording הקיים — משחררת מ-retention
-    # החי, בדיוק כמו §12: "מיקום הקובץ הוא המצב", אפס לוגיקת-פטור חדשה).
-    clips = []
-    for p in _iter_recordings():
-        try:
-            mtime = p.stat().st_mtime
-        except OSError:
-            continue
-        if not (t_start <= mtime <= t_end):
-            continue
-        ev = _rec_event(p)
-        if _is_saved(p.name):
-            try:
-                shutil.copy2(p, clips_dir / p.name)
-                for s in _tx_sidecars(p):
-                    if s.exists():
-                        shutil.copy2(s, clips_dir / s.name)
-            except OSError:
-                continue
-        else:
-            try:
-                _move_recording(p, clips_dir)
-            except OSError:
-                continue
-        clips.append(ev)
-
-    aircraft = sorted({ac[0] for row in rows for ac in row.get("ac", [])})
-    gaps = [{"t": row["t"], "reason": row.get("gap"), "detail": row.get("detail")}
-            for row in rows if "gap" in row]
-
+    # ⚠ המסלול נכתב *לפני* העברת הקליפים: קודם הקליפים הלא-שמורים הועברו
+    # ראשונים, וכשל בכתיבת המסלול (דיסק מלא) הריץ rmtree על התיקייה — ומחק
+    # לצמיתות הקלטות שכבר יצאו מהתיקייה החיה. כשל כאן עוד לא נגע באף הקלטה.
     track_path = sdir / "track.jsonl.gz"
     tmp = track_path.with_name(track_path.name + f".tmp{os.getpid()}")
     try:
@@ -4384,6 +4411,42 @@ def api_sessions():
     except OSError as e:
         shutil.rmtree(sdir, ignore_errors=True)
         return jsonify(ok=False, error=f"שמירת מסלול נכשלה: {e}"), 500
+
+    # קליפים בחלון הזמן: שמורה (★) מ*עתיקים* (שומרת על ההגנה ב-saved/ גם),
+    # לא-שמורה *מועברת* (משתמשת ב-_move_recording הקיים — משחררת מ-retention
+    # החי, בדיוק כמו §12: "מיקום הקובץ הוא המצב", אפס לוגיקת-פטור חדשה).
+    clips = []
+    moved = []          # לא-שמורות שהועברו — מוחזרות לתיקייה החיה אם השמירה נכשלת
+    skipped = 0
+    for p in _iter_recordings():
+        try:
+            mtime = p.stat().st_mtime
+            if not (t_start <= mtime <= t_end):
+                continue
+            ev = _rec_event(p)
+        except OSError:
+            continue
+        if _is_saved(p.name):
+            try:
+                shutil.copy2(p, clips_dir / p.name)
+                for sc in _tx_sidecars(p):
+                    if sc.exists():
+                        shutil.copy2(sc, clips_dir / sc.name)
+            except OSError:
+                skipped += 1
+                continue
+        else:
+            try:
+                _move_recording(p, clips_dir)
+            except OSError:
+                skipped += 1
+                continue
+            moved.append(p.name)
+        clips.append(ev)
+
+    aircraft = sorted({ac[0] for row in rows for ac in row.get("ac", [])})
+    gaps = [{"t": row["t"], "reason": row.get("gap"), "detail": row.get("detail")}
+            for row in rows if "gap" in row]
 
     # ⚠ app_mode/freq הם תמונת-מצב *נוכחית* בזמן השמירה, לא היסטוריה מלאה:
     # אין ב-AIR-AM יומן מעברי-מצב (ר' docs/session-replay-design.md §4.3 —
@@ -4406,8 +4469,18 @@ def api_sessions():
     try:
         _atomic_write(sdir / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
     except OSError as e:
+        for name in moved:
+            try:
+                _move_recording(clips_dir / name, REC_DIR)
+            except OSError:
+                log.warning("שמירת סשן: החזרת %s לתיקייה החיה נכשלה", name)
+                return jsonify(ok=False, error=f"שמירת מטא-דאטה נכשלה: {e}; "
+                               f"ההקלטות נשארו ב-{sdir}"), 500
         shutil.rmtree(sdir, ignore_errors=True)
         return jsonify(ok=False, error=f"שמירת מטא-דאטה נכשלה: {e}"), 500
+    if skipped:
+        # לא שקט: סשן שחסרים בו קליפים לא נראה "מלא" כשהוא לא
+        return jsonify(ok=True, id=session_id, session=meta, skipped_clips=skipped)
     return jsonify(ok=True, id=session_id, session=meta)
 
 
@@ -4731,6 +4804,10 @@ def api_antenna_check():
         return jsonify(ok=False, error="פעולה אחרת מתבצעת כרגע — המתן שנייה ונסה שוב"), 409
     try:
         prev_live = _live_mode()
+        if prev_live == "satcom":
+            # כמו _experiment_start: עם אנטנת L-band מחוברת המדידה ב-VHF חסרת
+            # משמעות (ו-calibrate היה שומר אותה כבסיס), והמעבר מכבה ומדליק bias-T.
+            return jsonify(ok=False, error="SATCOM פעיל — בדיקת אנטנה היא ל-VHF בלבד"), 409
         # ⚠ "כבר בקול" לא מספיק כדי לדלג על ההכנה: הדגימה חייבת להיעשות *באותם
         # תנאים* שבהם נמדד הבסיס, אחרת ההשוואה של _signal_verdict חסרת משמעות.
         # רצפת הרעש ב-dBFS נמדדת אחרי שרשרת הרווח => משתמש שיושב בקול עם רווח
@@ -4765,7 +4842,7 @@ def api_antenna_check():
 
         if calibrate:
             baseline = {"noise": result["noise"], "freq": freq, "ts": time.time()}
-            save_state({**load_state(), "signal_baseline": baseline})
+            _merge_state({"signal_baseline": baseline})
         else:
             baseline = prev.get("signal_baseline")
         verdict = _signal_verdict(result["noise"], baseline)
@@ -4882,7 +4959,11 @@ def _rflog_worker(stop_evt):
     while not stop_evt.is_set():
         with _rflog_lock:
             until = _rflog["until"]
-        if until is not None and time.time() >= until:
+        with _exp_lock:
+            exp_running = _exp["running"]
+        # לא נכבים באמצע ניסוי כיול: רשם שהופעל ידנית לפני ~שעתיים היה נעצר
+        # באמצע, והניסוי (על שתי הפעולות הפיזיות שלו) היה מסתיים בלי נתונים.
+        if until is not None and time.time() >= until and not exp_running:
             _rflog_stop("timeout")
             return
         try:
@@ -5569,12 +5650,11 @@ def _voice_tune(params):
         # סבב תקין "בחינם" ומשאיר "scan זומבי" — צרכן רץ בלי thread שממשיך אותו.
         _scan_stop_thread()
         prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
-        # ⚠ מיזוג על גבי prev, לא דריסה: params מכיל רק שדות קול (freq/mod/
-        # gain/squelch). דריסה מלאה הייתה מוחקת satcom_bias_tee/satcom_gain/
-        # signal_baseline/scan_plan/last_session_view_at וכו' — עם satcom_bias_tee
-        # במיוחד, load_state הבא היה ממזג מ-DEFAULT_STATE=True ומדליק bias-T
-        # מחדש בכניסה הבאה ל-SATCOM גם כשהמשתמש כבר מזין LNA חיצוני (§12).
-        new_state = {**prev, **params, "app_mode": "voice"}
+        # ⚠ השמירה ממזגת (_merge_state), לא דורסת: params מכיל רק שדות קול
+        # (freq/mod/gain/squelch). דריסה מלאה הייתה מוחקת satcom_bias_tee/
+        # satcom_gain/signal_baseline/scan_plan וכו' — עם satcom_bias_tee במיוחד,
+        # load_state הבא היה ממזג מ-DEFAULT_STATE=True ומדליק bias-T מחדש בכניסה
+        # הבאה ל-SATCOM גם כשהמשתמש כבר מזין LNA חיצוני (§12).
         log.info("tune %.3f MHz mod=%s agc=%s if_gain=%d rf_gain=%d squelch=%s snr=%.1f (from %s)",
                  params["freq"], params["mod"], params["agc"], params["if_gain"],
                  params["rf_gain"], params["squelch_mode"], params["squelch_snr"], request.remote_addr)
@@ -5586,7 +5666,7 @@ def _voice_tune(params):
                 # ה-SDR מנותק: רולבק ייתקע באותה המתנה בדיוק, אז מדלגים עליו.
                 # הקונפיג החדש נשאר על הדיסק וייקלט כשהמכשיר יחובר (udev מרים
                 # את השירותים) => שומרים state תואם לדיסק, לא את הקודם.
-                save_state(new_state)
+                new_state = _merge_state({**params, "app_mode": "voice"})
                 return {"ok": False, "detail": detail, "state": new_state,
                         "error": err + " — התדר יוחל אוטומטית כשה-SDR יחובר"}, 500
             # config רע => מנסים את קונפיג הקול האחרון שעבד (retry בתוך קול, לא
@@ -5598,7 +5678,7 @@ def _voice_tune(params):
                                 detail, "voice tune")
 
         # נשמר רק אחרי שאומת שהשירות חי => state תמיד משקף הגדרות שעובדות
-        save_state(new_state)
+        new_state = _merge_state({**params, "app_mode": "voice"})
         return {"ok": True, **new_state}, 200
     finally:
         TUNE_LOCK.release()
@@ -6127,16 +6207,10 @@ def api_session_ack():
     """מסמן שהמשתמש ראה את דוח הסשן — מקדם את הסמן ל'עכשיו', כך שהדוח הבא
     יתחיל מכאן. פעולה מפורשת (לא חלק מ-GET) כדי ש-/api/session יישאר
     idempotent — פתיחה/רענון חוזרים של הכרטיס לא 'צורכים' אותו בטעות.
-    תחת TUNE_LOCK כמו כל read-modify-write אחר של state.json — בלעדיו בקשה
-    שמגיעה בדיוק תוך כדי מעבר מצב יכולה לקרוא state ישן ולדרוס את app_mode
-    החדש בחזרה לישן (lost update); זו לא פעולת חומרה, אז timeout קצר מספיק
-    ו-409 (לא 500) כשעסוקה — המשתמש פשוט מנסה שוב."""
-    if not TUNE_LOCK.acquire(timeout=2):
-        return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב"), 409
-    try:
-        save_state({**load_state(), "last_session_view_at": time.time()})
-    finally:
-        TUNE_LOCK.release()
+    ‏_merge_state (מפתח יחיד, תחת _STATE_LOCK) מספיק נגד lost update: גם מעברי
+    המצב שומרים עכשיו דרכו. קודם זה היה תחת TUNE_LOCK, ולכן "✓ הבנתי" קיבל 409
+    לאורך כל ניסוי כיול (~20 דק') וכל מעבר רגל בסריקה."""
+    _merge_state({"last_session_view_at": time.time()})
     return jsonify(ok=True)
 
 
@@ -6235,10 +6309,9 @@ def api_mode():
             # דורסים prev_mode ב-"off" עצמו; שומרים את prev_mode הקודם כדי
             # שכפתור ההדלקה עדיין יזכור את המצב האמיתי האחרון שהיה פעיל.
             cur_mode = st.get("app_mode", "off")
-            new_state = {**st, "app_mode": "off",
-                         "prev_mode": (cur_mode if cur_mode != "off"
-                                      else st.get("prev_mode", "off"))}
-            save_state(new_state)
+            _merge_state({"app_mode": "off",
+                          "prev_mode": (cur_mode if cur_mode != "off"
+                                        else st.get("prev_mode", "off"))})
             return jsonify(ok=True, app_mode="off")
 
         if mode == "scan":
@@ -6247,8 +6320,7 @@ def api_mode():
             if err:
                 payload, status = _fail_to_off(st, err, detail, "enter scan (leg 0)")
                 return jsonify(payload), status
-            new_state = {**st, "app_mode": "scan", "scan_plan": plan}
-            save_state(new_state)
+            _merge_state({"app_mode": "scan", "scan_plan": plan})
             return jsonify(ok=True, app_mode="scan", scan_plan=plan)
 
         # acars / vdl2 / satcom — מסלול דאטה סימטרי (satcom מקבל גם bias_tee/skip_c/spectrum)
@@ -6261,8 +6333,7 @@ def api_mode():
         extra = ({"satcom_bias_tee": bias_tee, "satcom_skip_c": skip_c,
                   "satcom_spectrum": spectrum, "satcom_gain": gain}
                  if mode == "satcom" else {})
-        new_state = {**st, "app_mode": mode, key: freqs, **extra}
-        save_state(new_state)
+        _merge_state({"app_mode": mode, key: freqs, **extra})
         return jsonify(ok=True, app_mode=mode, **{key: freqs}, **extra)
     finally:
         TUNE_LOCK.release()
@@ -6377,7 +6448,7 @@ def _boot_restore():
             if err:
                 log.warning("boot restore -> %s failed: %s — falling to off", mode, err)
                 _enter_standby()
-                save_state({**st, "app_mode": "off", "prev_mode": mode})
+                _merge_state({"app_mode": "off", "prev_mode": mode})
             else:
                 log.info("boot restore -> %s", mode)
         finally:

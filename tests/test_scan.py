@@ -409,10 +409,39 @@ def test_scan_activate_waits_when_no_leg_active(paths, no_sleep, monkeypatch):
     monkeypatch.setattr(app, "_leg_active_now", lambda leg: False)
     err, detail = app._scan_activate([ACARS_LEG, VDL2_LEG])
     assert err is None
-    assert calls == []                     # לא ניסינו להיכנס לשום רגל
+    # לא ניסינו להיכנס לשום רגל — רק עצרנו צרכן שאולי רץ (ר' הבדיקה הבאה)
+    assert calls and all(action == "stop" for action, _svc in calls)
     assert app._scan_status["idx"] == -1 and app._scan_status["leg"] is None
     assert app._scan_status["wait"] == "window"   # ה-UI: "ממתין לחלון" — לא תקלה
     assert app._scan_thread is not None and app._scan_thread.is_alive()
+
+
+def test_scan_activate_no_window_stops_running_consumer(paths, no_sleep, monkeypatch):
+    """⚠ regression: לוח שכל רגליו מחוץ לחלון התחיל thread עם consumer_active=False
+    ולא עצר את מה שכבר רץ. מ-SATCOM זה השאיר את inmarsat-sniffer (ו-bias-T) דלוק
+    עד שנפתח חלון, בזמן שה-UI הציג "ממתין"."""
+    stopped = []
+    def fake_sysctl(action, svc, timeout=45):
+        if action == "stop":
+            stopped.append(svc)
+        return _ok()
+    monkeypatch.setattr(app, "_sysctl", fake_sysctl)
+    monkeypatch.setattr(app, "_is_active", lambda svc: svc not in stopped)
+    monkeypatch.setattr(app, "_leg_active_now", lambda leg: False)
+    err, _detail = app._scan_activate([ACARS_LEG, VDL2_LEG])
+    assert err is None
+    assert app.SATCOM_SERVICE in stopped and "rtl_airband" in stopped
+
+
+def test_scan_activate_no_window_reports_stuck_consumer(paths, no_sleep, monkeypatch):
+    """צרכן שלא נעצר => שגיאה (נופלים ל-off דרך הקורא), לא "ממתין" שקרי."""
+    monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
+    monkeypatch.setattr(app, "_is_active", lambda svc: svc == app.SATCOM_SERVICE)
+    monkeypatch.setattr(app, "_journal_tail", lambda svc: "")
+    monkeypatch.setattr(app, "_leg_active_now", lambda leg: False)
+    err, _detail = app._scan_activate([ACARS_LEG, VDL2_LEG])
+    assert err
+    assert not (app._scan_thread is not None and app._scan_thread.is_alive())
 
 
 def test_scan_loop_skips_leg_outside_window(paths, no_sleep):
@@ -440,6 +469,7 @@ def test_api_state_scan_waiting_for_window_not_fault(client, paths, no_sleep, mo
     leg = {"mode": "acars", "dwell_sec": 60, "active_from": "02:00", "active_to": "03:00"}
     app.save_state({**app.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [leg]})
     monkeypatch.setattr(app, "_is_active", lambda svc: False)   # אין צרכן חי
+    monkeypatch.setattr(app, "_scan_thread_alive", lambda: True)  # ה-thread ממתין לחלון
     _at(monkeypatch, 12, 0)                                    # מחוץ לחלון
     st = client.get("/api/state").get_json()
     assert st["app_mode"] == "scan" and st["mode_ok"] is True   # "ממתין", לא תקלה
@@ -453,8 +483,51 @@ def test_api_health_scan_waiting_for_window_not_fault(client, paths, no_sleep, m
     def fake_run(cmd, **kw):
         return types.SimpleNamespace(stdout="inactive", stderr="")
     monkeypatch.setattr(app.subprocess, "run", fake_run)
+    monkeypatch.setattr(app, "_scan_thread_alive", lambda: True)
     h = client.get("/api/health").get_json()
     assert h["app_mode"] == "scan" and h["ok"] is True
+
+
+def test_scan_dead_thread_is_fault(client, paths, no_sleep, monkeypatch):
+    """thread סריקה שמת (חריגה) לא מסובב יותר את הרגלים — גם אם הצרכן של הרגל
+    האחרונה עדיין רץ, זו תקלה ולא "סורק תקין"."""
+    leg = {"mode": "acars", "dwell_sec": 60}
+    app.save_state({**app.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [leg, leg]})
+    monkeypatch.setattr(app, "_is_active", lambda svc: svc == app.ACARS_SERVICE)
+    monkeypatch.setattr(app, "_scan_thread_alive", lambda: False)
+    assert client.get("/api/state").get_json()["mode_ok"] is False
+
+
+def test_scan_loop_exception_is_logged_not_silent(paths, no_sleep, monkeypatch):
+    """חריגה לא-צפויה בגוף הלולאה (למשל OSError מ-save_state) לא מפילה את התהליך
+    ומאפסת את סטטוס הרגל — api_state/api_health מדווחים תקלה דרך _scan_thread_alive."""
+    def boom(*a, **kw):
+        raise OSError("disk full")
+    monkeypatch.setattr(app, "_scan_loop_body", boom)
+    app._scan_status.update(idx=1, leg={"mode": "acars"})
+    app._scan_loop(threading.Event(), [], 0, 0)
+    assert app._scan_status["leg"] is None and app._scan_status["idx"] == -1
+
+
+def test_scan_same_leg_reenters_when_consumer_died(paths, no_sleep, monkeypatch):
+    """⚠ regression: רגל יחידה רק רעננה טיימר ("same") גם כשהצרכן שלה מת, ו-
+    _mode_reconcile_loop מדלג על scan — כלומר אף אחד לא החזיר אותו."""
+    entered = []
+    stop = threading.Event()
+
+    def fake_enter(leg):
+        entered.append(leg["mode"])
+        if len(entered) >= 2:
+            stop.set()
+        return None, None
+    monkeypatch.setattr(app, "_scan_enter_leg", fake_enter)
+    monkeypatch.setattr(app, "_sdr_present", lambda: True)
+    monkeypatch.setattr(app, "_is_active", lambda svc: False)   # הצרכן מת אחרי הכניסה
+    leg = {"mode": "acars", "dwell_sec": 1}
+    t = threading.Thread(target=app._scan_loop, args=(stop, [leg], 0, 0), daemon=True)
+    t.start()
+    t.join(timeout=5)
+    assert len(entered) >= 2
 
 
 # --- באג: חלון שנסגר באמצע סבב חייב לכבות את הצרכן הרץ בפועל, לא רק את החיווי ----

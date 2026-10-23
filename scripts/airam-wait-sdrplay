@@ -40,8 +40,14 @@ for attempt in $(seq 1 30); do
   # API בריא. כתיבה בריאה (device_ready בניסיון 1) לא מגיעה לכאן כלל.
   # מדלגים על הבעיטה כש-airam-satcom הוא הקורא — ר' ההערה למעלה; שלושת
   # הצרכנים האחרים מתאוששים לנצח (StartLimitIntervalSec=0) ולא נפגעים מזה.
+  # גם לא כשה-SDR בכלל לא ב-USB: ה-daemon לא "תקוע", אין מכשיר. בעיטה אז
+  # מפעילה מחדש (Requires/PartOf) גם את הצרכן שממתין כאן, השער מתחיל מחדש,
+  # וחוזר חלילה — restart ל-sdrplay כל ~15ש' לנצח (רעש ביומן וכתיבות ל-SD).
+  # בלי lsusb => מתנהגים כמו קודם (בועטים).
   if [ "$attempt" -eq 8 ] && [ "$CALLER" != "airam-satcom.service" ]; then
-    systemctl restart --no-block sdrplay.service 2>/dev/null || true
+    if ! command -v lsusb >/dev/null 2>&1 || lsusb -d 1df7: >/dev/null 2>&1; then
+      systemctl restart --no-block sdrplay.service 2>/dev/null || true
+    fi
   fi
   sleep 1
 done
