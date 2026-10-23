@@ -128,6 +128,8 @@ scripts/
                            # מחדש את sdrplay אם הוא "active" אבל ServiceNotResponding.
   airam-resilience-check   # תמונת מצב לקריאה בלבד לבדיקות עמידות בבית (ר' docs/resilience-test.md).
                            # לא מותקן — מריצים מהעותק: sudo ~/AIR-AM/scripts/airam-resilience-check
+  airam-gps-probe          # שלב 0 של docs/long-term-stats-design.md, קריאה בלבד: מקלט GPS ב-USB (fix, לוויינים,
+                           # SNR, פיזור מיקום/מרחק מנתב"ג, פער שעון) + כמה ימים 5000 הודעות מכסות. לא מותקן.
 
 udev/
   99-airam.rules           # חיבור RSP1B (Vendor 1df7) → restart אוטומטי לשירותי SDR.
