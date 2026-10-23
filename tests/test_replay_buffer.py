@@ -73,7 +73,27 @@ def test_append_track_writes_ac_row(paths):
     adsb._append_track(row)
     rows = _lines(adsb.TRACK_PATH)
     assert len(rows) == 1 and "ac" in rows[0]
-    assert rows[0]["ac"] == [["4X-EHD", 32.2, 34.7, 3200, 90.0, 180.0, 8]]
+    # [0..6] — הפורמט המקורי, ללא שינוי (נגן השחזור קורא לפי אינדקס). [7]=hex,
+    # [8]=גיל המיקום — הרחבת ההצלבה (docs/adsb-crosscheck-design.md); רשומה בלי
+    # t_pos (כמו כאן) => None, לא ערך מומצא.
+    assert rows[0]["ac"] == [["4X-EHD", 32.2, 34.7, 3200, 90.0, 180.0, 8, "abc123", None]]
+
+
+def test_track_row_position_age_from_measurement_time(paths):
+    """[8] = t של השורה − זמן המדידה (now − seen_pos של המקור) — מאפשר לשחזר את
+    זמן המדידה האמיתי (local_track_points) במקום זמן ה-poll."""
+    _feed_aircraft([("4X-EHD", 32.2, 34.7, 8)])
+    with adsb._LOCK:
+        adsb._S["aircraft"]["4X-EHD"]["t_pos"] = round(time.time() - 12.0, 1)
+        row = adsb._build_track_row()
+    age = row["ac"][0][8]
+    assert 11.5 <= age <= 13.0
+    pts, gaps = adsb.local_track_points(0, 2e10, reg="4X-EHD")
+    adsb._append_track(row)
+    pts, gaps = adsb.local_track_points(0, 2e10, reg="4X-EHD")
+    assert len(pts) == 1 and pts[0]["t_uncert"] == 0.0
+    assert abs(pts[0]["t"] - (row["t"] - age)) < 1e-6
+    assert pts[0]["origin"] == "buffer" and pts[0]["lat"] == 32.2
 
 
 def test_track_row_keeps_spoofed_aircraft_with_null_position(paths):

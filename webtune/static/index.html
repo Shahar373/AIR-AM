@@ -1289,6 +1289,89 @@
       .skel-bar, body.loading .pill .dot { animation: none; }
     }
 
+    /* ---------- הצלבת ADS-B + אופק רדיו (docs/adsb-crosscheck-design.md) ----------
+       שתי שאלות נפרדות, שני צבעים נפרדים: גאומטריה (התג) ורמת ראיות (השבב). */
+    .xc-badge { font-size: .66rem; font-weight: 700; border-radius: 999px; padding: .08rem .5rem;
+      white-space: nowrap; border: 1px solid var(--border); cursor: pointer; }
+    .xc-strong { color: var(--accent-2); background: rgba(var(--accent-rgb),.14); border-color: rgba(var(--accent-rgb),.45); }
+    .xc-warm { color: var(--amber-fg); background: rgba(var(--amber-rgb),.14); border-color: rgba(var(--amber-rgb),.45); }
+    .xc-ok { color: var(--green-fg); background: rgba(var(--green-rgb),.12); border-color: rgba(var(--green-rgb),.4); }
+    .xc-bad { color: var(--red-fg); background: rgba(var(--red-rgb),.12); border-color: rgba(var(--red-rgb),.45); }
+    .xc-dim { color: var(--dim); background: var(--wash); }
+    button.xc-verify-btn { min-height: 32px; min-width: 36px; padding: 0 .45rem; font-size: .8rem;
+      background: var(--panel); }
+    /* ⚠ מעל סרגל האפליקציה (1100) ומעל פקדי Leaflet של המפות שמתחת (עד 1000) */
+    .xc-sheet { position: fixed; inset: 0; z-index: 1200; background: var(--bg); overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 0 var(--sp-4) calc(var(--sp-5) + env(safe-area-inset-bottom)); }
+    .xc-sheet-in { max-width: 60rem; margin: 0 auto; display: flex; flex-direction: column; gap: var(--sp-3); }
+    .xc-head { display: flex; align-items: center; gap: var(--sp-2); position: sticky; top: 0; z-index: 2;
+      background: var(--bg); padding: var(--sp-3) 0 var(--sp-2); border-bottom: 1px solid var(--border); }
+    .xc-head .ttl { flex: 1; min-width: 0; font-weight: 700; font-size: 1rem; margin: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .xc-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-card);
+      padding: var(--sp-3) var(--sp-4); box-shadow: var(--sh-card); }
+    .xc-card h3 { font-size: .78rem; font-weight: 700; color: var(--dim); margin: 0 0 var(--sp-2); }
+    .xc-verdict b { display: block; font-size: 1rem; line-height: 1.35; }
+    .xc-verdict .xc-sub { font-size: .8rem; color: var(--dim); margin-top: .3rem; }
+    .xc-verdict.v-blos_supported { border-color: rgba(var(--accent-rgb),.55); }
+    .xc-verdict.v-blos_possible, .xc-verdict.v-exceeds_unverified { border-color: rgba(var(--amber-rgb),.55); }
+    .xc-verdict.v-exceeds_conflict { border-color: rgba(var(--red-rgb),.55); }
+    .xc-lvl { display: inline-block; margin-top: .45rem; }
+    .xc-grid { display: grid; grid-template-columns: minmax(7.5rem, max-content) 1fr; gap: .32rem .8rem;
+      margin: 0; font-size: .84rem; }
+    .xc-grid dt { color: var(--dim); }
+    .xc-grid dd { margin: 0; font-variant-numeric: tabular-nums; min-width: 0; overflow-wrap: anywhere; }
+    .xc-ltr { direction: ltr; unicode-bidi: isolate; }
+    .xc-crit { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .35rem;
+      font-size: .82rem; }
+    .xc-crit li { display: flex; gap: .5rem; align-items: flex-start; }
+    .xc-crit .mark { flex: none; width: 1.2rem; text-align: center; font-weight: 700; }
+    .xc-crit .ok .mark { color: var(--green); }
+    .xc-crit .no .mark { color: var(--red); }
+    .xc-crit .na .mark { color: var(--text-faint); }
+    .xc-caveats { margin: 0; padding-inline-start: 1.1rem; font-size: .78rem; color: var(--dim);
+      display: flex; flex-direction: column; gap: .25rem; }
+    /* isolation: פקדי Leaflet (z עד 1000) נשארים בתוך המפה ולא עולים מעל הכותרת הדביקה */
+    .xc-map { height: 340px; border-radius: var(--r-ctrl); border: 1px solid var(--border); isolation: isolate; }
+    .xc-legend { display: flex; flex-wrap: wrap; gap: .3rem .9rem; font-size: .72rem; color: var(--dim);
+      margin-top: var(--sp-2); }
+    .xc-legend i { display: inline-block; width: .7rem; height: .7rem; border-radius: 50%;
+      margin-inline-end: .3rem; vertical-align: -1px; }
+    .xc-sources { list-style: none; margin: 0; padding: 0; font-size: .76rem; color: var(--dim);
+      display: flex; flex-direction: column; gap: .2rem; }
+    .xc-ctrl { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+    .xc-field { display: flex; flex-direction: column; gap: .2rem; font-size: .74rem; color: var(--dim); min-width: 0; }
+    .xc-field input, .xc-field select, .xc-ctrl input {
+      font: inherit; font-size: .9rem; color: var(--text); background: var(--panel-2);
+      border: 1px solid var(--border); border-radius: var(--r-sm); padding: .45rem .55rem;
+      min-height: 38px; min-width: 0; width: 100%; }
+    .xc-field input[type=number], .xc-ctrl input { direction: ltr; text-align: center; }
+    .xc-ctrl input { width: 9rem; }
+    .xc-field input:focus, .xc-field select:focus, .xc-ctrl input:focus { outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(var(--accent-rgb),.16); }
+    .xc-station { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; font-size: .85rem; }
+    .xc-station #xcStationTxt { flex: 1; min-width: 12rem; }
+    .xc-station-form, .xc-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+      gap: var(--sp-2); margin: var(--sp-2) 0; }
+    .xc-station-form .fm-btns, .xc-station-form .hint { grid-column: 1 / -1; margin: 0; flex-wrap: wrap; }
+    .xc-events { display: flex; flex-direction: column; gap: .4rem; max-height: 50vh; overflow: auto; margin-top: var(--sp-2); }
+    button.xc-ev { text-align: start; display: flex; flex-direction: column; align-items: stretch; gap: .2rem;
+      background: var(--panel-2); font-weight: 500; min-height: 48px; padding: .5rem .7rem; }
+    .xc-ev-top { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; font-size: .85rem; }
+    .xc-ev-top .t { margin-inline-start: auto; color: var(--dim); font-size: .72rem; }
+    .xc-ev-sub { font-size: .74rem; color: var(--dim); }
+    .xc-raw { direction: ltr; text-align: left; white-space: pre-wrap; word-break: break-word;
+      font-family: var(--font-mono); font-size: .76rem; color: var(--dim); margin: .3rem 0 0; }
+    .xc-loading { color: var(--dim); font-size: .9rem; text-align: center; padding: var(--sp-5) 0; }
+    #xcBody { display: flex; flex-direction: column; gap: var(--sp-3); }
+    @media (min-width: 1024px) {
+      #xcBody { display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
+      #xcBody > .xc-verdict, #xcBody > .xc-loading { grid-column: 1 / -1; }
+    }
+    body.xc-open { overflow: hidden; }
+    body.xc-open .toast { z-index: 1300; }
+
     .hidden { display: none !important; }
     .flex-col { display: flex; flex-direction: column; gap: .5rem; align-items: flex-start; }
   </style>
@@ -1481,6 +1564,48 @@
           📼 הסשנים השמורים (<span id="replaySessionsCount">0</span>)</button>
       </div>
     </div><!-- /panel-bd -->
+  </section>
+
+  <!-- הצלבת ADS-B + אופק רדיו (docs/adsb-crosscheck-design.md): תחנת הקליטה,
+       אירועים חריגים שנשמרו כראיה (סינון + ייצוא). מערכתי — לא תלוי-מצב. -->
+  <section class="panel p-xc" id="xcPanel">
+    <div class="panel-hd"><p class="ttl">📡 הצלבת ADS-B · קליטות מעבר לאופק</p>
+      <span class="hint" id="xcCount">0</span></div>
+    <div class="panel-bd">
+      <div class="xc-station">
+        <span id="xcStationTxt">טוען…</span>
+        <button type="button" class="ghost" id="xcStationEdit">✎ תחנה</button>
+      </div>
+      <form id="xcStationForm" class="xc-station-form hidden" novalidate>
+        <label class="xc-field">קו רוחב (°)<input type="number" id="xcStLat" step="any" inputmode="decimal" /></label>
+        <label class="xc-field">קו אורך (°)<input type="number" id="xcStLon" step="any" inputmode="decimal" /></label>
+        <label class="xc-field">גובה אנטנה מעל פני הים (מ׳)<input type="number" id="xcStAlt" step="any" inputmode="decimal" /></label>
+        <label class="xc-field">שם (אופציונלי)<input type="text" id="xcStName" maxlength="40" /></label>
+        <div class="fm-btns">
+          <button type="button" class="ghost" id="xcStGeo">📍 מיקום המכשיר</button>
+          <button type="submit" class="primary" id="xcStSave">שמור תחנה</button>
+          <button type="button" class="ghost" id="xcStClear">נקה</button>
+        </div>
+        <p class="hint" id="xcStHint">התחנה ניידת — עדכן כשמזיזים אותה. הגובה הוא של האנטנה (גובה הקרקע + התורן); האופק רגיש אליו.</p>
+      </form>
+      <p class="hint" style="margin:.4rem 0">כל הודעה עם מזהה מטוס מוצלבת אוטומטית מול ADS-B. אירוע נשמר כאן כשמיקום
+        המטוס חורג מאופק הרדיו של התחנה. להודעה ישנה — 🔎 בכרטיס ההודעה (גם בארכיון).</p>
+      <div class="xc-filters">
+        <label class="xc-field">מרחק מינ׳ (ק״מ)<input type="number" id="xcFMinKm" min="0" step="10" inputmode="numeric" /></label>
+        <label class="xc-field">dBFS מינ׳<input type="number" id="xcFMinDb" step="1" /></label>
+        <label class="xc-field">dBFS מקס׳<input type="number" id="xcFMaxDb" step="1" /></label>
+        <label class="xc-field">תאריך<input type="date" id="xcFDay" /></label>
+        <label class="xc-field">רמת ראיות<select id="xcFLevel">
+          <option value="">הכול</option><option value="strong">חזקה</option><option value="partial">חלקית</option>
+          <option value="weak">חלשה</option><option value="conflict">סתירה</option></select></label>
+      </div>
+      <div id="xcEvents" class="xc-events"><p class="nodata">טוען…</p></div>
+      <div class="fm-btns">
+        <a class="ghost" id="xcExportJson" href="/api/xcheck/events/export?format=json" download>⬇ ראיות JSON</a>
+        <a class="ghost" id="xcExportCsv" href="/api/xcheck/events/export?format=csv" download>⬇ סיכום CSV</a>
+      </div>
+      <p class="hint" id="xcStatusTxt" style="margin:.5rem 0 0"></p>
+    </div>
   </section>
 
   <!-- ═══ ניסוי כיול אנטנה אוטומטי (docs/antenna-calibration-experiment.md) ═══
@@ -2318,6 +2443,40 @@
     </div>
   </div>
 
+  <!-- "אמת מול ADS-B": גיליון גלובלי (נפתח מכל תצוגת דאטה ומרשימת האירועים).
+       כל תוכן דינמי נבנה ב-textContent — טקסט ההודעה מגיע משידור רדיו. -->
+  <div id="xcSheet" class="xc-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="xcTitle">
+    <div class="xc-sheet-in">
+      <div class="xc-head">
+        <button type="button" class="ghost" id="xcClose" aria-label="סגור">✕</button>
+        <p class="ttl" id="xcTitle">אמת מול ADS-B</p>
+      </div>
+      <div id="xcBody"></div>
+      <div class="xc-card" id="xcMapCard">
+        <h3>מפה</h3>
+        <div id="xcMap" class="xc-map"></div>
+        <p class="hint hidden" id="xcMapNote"></p>
+        <div class="xc-legend">
+          <span><i style="background:var(--accent)"></i>תחנה + אופק רדיו (מקווקו)</span>
+          <span><i style="background:var(--amber)"></i>מיקום בהודעה</span>
+          <span><i style="background:var(--green)"></i>מיקום ADS-B בזמן הקליטה</span>
+          <span><i style="background:var(--dim)"></i>מסלול ADS-B ±15 דק'</span>
+        </div>
+      </div>
+      <div class="xc-card">
+        <h3>אימות חוזר</h3>
+        <div class="xc-ctrl">
+          <input type="text" id="xcHexIn" maxlength="6" placeholder="ICAO24 (hex)" aria-label="כתובת ICAO ידנית" autocomplete="off" />
+          <button type="button" class="primary" id="xcRerun">🔎 אמת שוב</button>
+          <button type="button" class="ghost" id="xcSave">💾 שמור כראיה</button>
+          <a class="ghost hidden" id="xcExpJson" download>⬇ JSON</a>
+          <a class="ghost hidden" id="xcExpCsv" download>⬇ CSV</a>
+        </div>
+        <p class="hint" id="xcCtrlHint" style="margin:.5rem 0 0">כתובת ICAO ידנית — כשההודעה נושאת רק רישום והמערכת לא מצאה את ה-hex.</p>
+      </div>
+    </div>
+  </div>
+
   <!-- טוסט כללי (כרגע: ביטול-מחיקה לפריסט) — מוסתר כברירת מחדל -->
   <div id="toast" class="toast hidden">
     <span id="toastMsg"></span>
@@ -2406,8 +2565,9 @@
     // עוזר קצר לבקשות GET שמפענחות JSON ישירות — התבנית החוזרת ביותר בקובץ.
     async function fetchJSON(url, opts) { return (await fetchTimeout(url, opts)).json(); }
 
-    async function apiSend(method, url, body) {
-      const opts = { method, headers: apiHeaders(), body: JSON.stringify(body) };
+    async function apiSend(method, url, body, timeoutMs) {
+      // timeoutMs — רק לבקשות ארוכות במכוון ("אמת מול ADS-B": רשת, עד ~30ש' בשרת)
+      const opts = { method, headers: apiHeaders(), body: JSON.stringify(body), timeoutMs };
       let res = await fetchTimeout(url, opts);
       if (res.status === 401) {                 // השרת דורש PIN => בקש פעם אחת ונסה שוב
         const entered = prompt("נדרש PIN לשינוי הגדרות:");
@@ -4442,7 +4602,7 @@
       replayScreen = null;
       segSet("modeSeg", mode);
       renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acars/vdl2/satcom.active — עדכן בכל מעבר
-      if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); pollExperiment(); }
+      if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); pollExperiment(); pollXc(); }
       if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); pollRflog(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
       if (mode === "acars") acarsFm.poll();
       if (mode === "vdl2") vdl2Fm.poll();
@@ -5472,7 +5632,7 @@
     function msgSig(m, count, hasRetx) {
       return JSON.stringify([m.id, m.tail, m.flight, m.icao, m.dir, m.category, m.group,
         m.lat, m.lon, m.error, m.freq, m.level, m.snr, m.label, m.mode, m.msgno, m.decoded,
-        m.text, count, hasRetx]);
+        m.text, count, hasRetx, m.xc || null]);
     }
     function patchMsgTime(el, m) {
       const t = el.querySelector(".amsg-time");
@@ -5522,6 +5682,10 @@
       const feedCache = new Map();                    // key => { sig, el } — reconcileFeed (רינדור אינקרמנטלי, כמו ACARS)
       let timer = null, staleTimer = null, inFlight = false, resizeT = null;
       const icaoToId = {};                            // icao -> מזהה-מטוס ראשי (tail/flight)
+      // תקצירי הצלבת ADS-B (xcheck) מה-poll הקיים: ‏?xseq= הוא cursor נפרד מ-since —
+      // התקציר מגיע *אחרי* ההודעה (worker ברקע, ושלב 2 אחרי ~40ש').
+      let xseq = 0;
+      const xcById = {};
       let archiveDay = null;      // תאריך ארכיון פעיל (YYYY-MM-DD) או null (שידור חי)
       let liveSnapshot = null;    // מצב חי שמור בזמן ביקור בארכיון — לשחזור ב-exitArchive
 
@@ -5883,6 +6047,20 @@
           top.appendChild(mk("amsg-err", errLabels[m.error] || ("err " + m.error + " ⚠")));
         }
         if (m.freq != null) top.appendChild(mk("amsg-freq", Number(m.freq).toFixed(3)));
+        const xb = xcBadge(m.xc);
+        if (xb) {
+          xb.tabIndex = 0; xb.setAttribute("role", "button");
+          xb.onclick = () => xcOpen(opts.prefix, m);
+          xb.onkeydown = (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); xcOpen(opts.prefix, m); } };
+          top.appendChild(xb);
+        }
+        if (xcHasIdentity(m) && typeof m.t === "number") {
+          const vb = document.createElement("button");
+          vb.type = "button"; vb.className = "ghost xc-verify-btn"; vb.textContent = "🔎";
+          vb.title = "אמת מול ADS-B"; vb.setAttribute("aria-label", "אמת מול ADS-B");
+          vb.onclick = (ev) => { ev.stopPropagation(); xcOpen(opts.prefix, m); };
+          top.appendChild(vb);
+        }
         const tm = mk("amsg-time", fmtRel(m.t));
         if (m.t) tm.title = new Date(m.t * 1000).toLocaleString("he-IL");
         top.appendChild(tm);
@@ -6179,7 +6357,7 @@
         if (inFlight) return;
         inFlight = true;
         try {
-          const data = await fetchJSON("/api/" + opts.prefix + "?since=" + lastId);
+          const data = await fetchJSON("/api/" + opts.prefix + "?since=" + lastId + "&xseq=" + xseq);
           // בדיקה שנייה אחרי ה-await: בקשה שכבר הייתה "בטיסה" כש-enterArchiveDay
           // הוחלף אליו (הבדיקה בראש הפונקציה לא תפסה את זו) לא אמורה לעבד את
           // התוצאה על msgs/lastId שכבר הוחלפו לתוכן הארכיון.
@@ -6193,6 +6371,8 @@
             for (const id in tracks) { if (map && tracks[id].line) map.removeLayer(tracks[id].line); delete tracks[id]; }
             for (const id in craft) delete craft[id];
             for (const k in icaoToId) delete icaoToId[k];
+            for (const k in xcById) delete xcById[k];
+            xseq = 0;
             for (const reg in adsbTrk) {
               if (map) { if (adsbTrk[reg].line) map.removeLayer(adsbTrk[reg].line); if (adsbTrk[reg].head) map.removeLayer(adsbTrk[reg].head); }
               delete adsbTrk[reg];
@@ -6203,6 +6383,7 @@
           if (data.messages && data.messages.length) {
             totalMsgs += data.messages.length;   // מונה-אמת, לא מוגבל לחלון msgs (ר' ההערה למעלה)
             for (const m of data.messages) {
+              if (xcById[m.id]) m.xc = xcById[m.id];
               msgs.push(m);
               if (m.id > lastId) lastId = m.id;
               updateCraft(m); upsertMarker(m);
@@ -6210,6 +6391,17 @@
             }
             while (msgs.length > MAX) msgs.shift();
             renderStats(); renderFilters(); renderRoster(); renderDetail(); renderFeed();
+          }
+          if (typeof data.xcheck_cursor === "number") {
+            if (data.xcheck_cursor < xseq) { xseq = 0; for (const k in xcById) delete xcById[k]; }  // השרת אותחל
+            let changed = false;
+            for (const [id, summ] of Object.entries(data.xcheck || {})) {
+              xcById[id] = summ;
+              const m = msgs.find((x) => String(x.id) === id);
+              if (m) { m.xc = summ; changed = true; }
+            }
+            xseq = Math.max(xseq, data.xcheck_cursor);
+            if (changed) renderFeed();
           }
           if (data.adsb) {
             const key = Object.keys(data.adsb).sort().map((k) => {
@@ -6306,6 +6498,476 @@
     var satcom = createDataView({ prefix: "satcom", mode: "satcom", label: "SATCOM",
       onMessage: (m) => notifyMessage("satcom", m),
       emptyHint: "ממתין להודעות… ‏SATCOM דורש אנטנת L-band מכוונת ל-Alphasat (25°E)." });
+
+    /* ---------- הצלבת ADS-B + אופק רדיו (docs/adsb-crosscheck-design.md) ----------
+       השרת מחשב הכול (xcheck.py) ושומר את הראיות; כאן רק תצוגה. שתי שאלות נפרדות
+       מוצגות בנפרד: גאומטריה (האם המטוס מעבר לאופק הרדיו) ורמת ראיות (האם האות
+       אכן שודר מהמטוס שם). מנגנון ההתפשטות לעולם לא נטען — השרת מצרף הסתייגות.
+       ⚠ כל טקסט דינמי ב-textContent בלבד: תוכן ההודעה מגיע משידור רדיו. */
+    const XC_VERDICT_BADGE = {
+      blos_supported: ["xc-strong", "מעבר לאופק · ראיות חזקות"],
+      blos_possible: ["xc-warm", "מעבר לאופק · ראיות חלקיות"],
+      exceeds_unverified: ["xc-warm", "מעבר לאופק? · לא מאומת"],
+      exceeds_conflict: ["xc-bad", "חריגה לכאורה · סתירה"],
+      marginal: ["xc-dim", "גבולי מול האופק"],
+    };
+    const XC_LEVEL = { strong: ["xc-strong", "חזקה"], partial: ["xc-warm", "חלקית"], weak: ["xc-warm", "חלשה"],
+                       conflict: ["xc-bad", "סתירה"], none: ["xc-dim", "אין"], "n/a": ["xc-dim", "לא רלוונטי"] };
+    const XC_STATUS = { measured: "נמדד", interpolated: "אינטרפולציה בין שתי נקודות",
+                        unverified: "לא מאומת — הנקודה הקרובה רחוקה בזמן", none: "אין נתונים" };
+    const XC_SRC_NAME = { snapshot: "ADS-B חי (poll)", buffer: "buffer מקומי (90 דק׳)", lookup: "חיפוש ממוקד",
+                          trace: "trace היסטורי", opensky: "OpenSky" };
+    const XC_SRC_STATUS = { ok: "נמצא", miss: "לא נמצא", error: "שגיאה", rate_limited: "הגבלת קצב",
+                            skipped: "דולג", no_hex: "אין כתובת ICAO", conflict: "סתירה — לא בשימוש",
+                            auth_required: "נדרשים פרטי גישה", out_of_range: "מחוץ לטווח", invalid: "קלט לא תקין" };
+    const XC_MATCH = { hex: "כתובת ICAO", reg: "רישום", flight: "מספר טיסה (עזר בלבד)" };
+    const XC_HEX_SRC = { message: "מההודעה (מבני)", user: "הוזן ידנית", adsb_db: "ממאגר ADS-B לפי הרישום",
+                         flight_lookup: "מחיפוש לפי טיסה" };
+
+    function xcHasIdentity(m) { return !!((m.tail && !m.tail_is_station) || m.flight || m.icao || m.aes); }
+    function xcBadge(s) {   // תג בכרטיס ההודעה — רק כשיש מה לומר (חריגה/סתירה/התאמת מיקום)
+      if (!s) return null;
+      const v = XC_VERDICT_BADGE[s.v];
+      if (v) {
+        const b = mkSpan("xc-badge " + v[0], "📡 " + (s.km != null ? Math.round(s.km) + " ק״מ · " : "") + v[1]);
+        b.title = "מרחק מהתחנה " + (s.km != null ? Math.round(s.km) : "?") + " ק״מ · אופק רדיו "
+          + (s.hz != null ? Math.round(s.hz) : "?") + " ק״מ — נגיעה לפרטים";
+        return b;
+      }
+      if (s.agree === true) { const b = mkSpan("xc-badge xc-ok", "📍✓ ADS-B"); b.title = "מיקום ההודעה תואם ל-ADS-B"; return b; }
+      if (s.agree === false) { const b = mkSpan("xc-badge xc-bad", "📍✗ ADS-B"); b.title = "מיקום ההודעה סותר את ADS-B"; return b; }
+      return null;
+    }
+    const xcUTC = (t, dec) => t == null ? "—" : new Date(t * 1000).toISOString().slice(11, dec ? 21 : 19) + "Z";
+    const xcKm = (v) => v == null ? "—" : (v < 0.1 ? "<0.1" : v < 10 ? Number(v).toFixed(1)
+      : Math.round(v).toLocaleString("he-IL")) + " ק״מ";
+    const xcLL = (la, lo) => la == null || lo == null ? "—" : Number(la).toFixed(4) + ", " + Number(lo).toFixed(4);
+    function xcEl(tag, cls, text) {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text != null) e.textContent = text;
+      return e;
+    }
+    function xcLtr(text) { return xcEl("span", "xc-ltr", text); }
+    // ערך מעורב: חלק מספרי/לטיני מבודד LTR + המשך בעברית — בלי שהסדר יתהפך
+    function xcMix(ltr, rtl) {
+      const s = xcEl("span"); s.appendChild(xcLtr(ltr));
+      if (rtl) s.appendChild(document.createTextNode(" · " + rtl));
+      return s;
+    }
+    const xcSec = (v) => (Math.abs(v) < 10 ? Math.abs(v).toFixed(1) : Math.round(Math.abs(v))) + "ש׳";
+    function xcCard(title) {
+      const c = xcEl("div", "xc-card");
+      if (title) c.appendChild(xcEl("h3", null, title));
+      return c;
+    }
+    function xcGrid(rows) {   // rows: [label, value(string|Node)] — שורה עם value null מושמטת
+      const g = xcEl("dl", "xc-grid");
+      for (const [k, v] of rows) {
+        if (v == null || v === "") continue;
+        g.appendChild(xcEl("dt", null, k));
+        const dd = xcEl("dd");
+        if (v instanceof Node) dd.appendChild(v); else dd.textContent = String(v);
+        g.appendChild(dd);
+      }
+      return g;
+    }
+
+    let xcCtx = null;            // {src, msg} של הגיליון הפתוח — לאימות חוזר
+    let xcReq = 0;               // מזהה בקשה: תשובה מאוחרת לגיליון שנסגר/הוחלף לא מרונדרת
+    let xcMap = null, xcLayer = null, xcLeafLoading = false, xcPending = null;
+
+    function xcShow() { $("xcSheet").classList.remove("hidden"); document.body.classList.add("xc-open"); }
+    function xcHide() {
+      $("xcSheet").classList.add("hidden"); document.body.classList.remove("xc-open");
+      xcCtx = null; xcReq++;
+    }
+    $("xcClose").onclick = xcHide;
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !$("xcSheet").classList.contains("hidden")) xcHide();
+    });
+    function xcLoading(text) {
+      const body = $("xcBody"); body.textContent = "";
+      body.appendChild(xcEl("p", "xc-loading", text));
+      $("xcMapCard").classList.add("hidden");
+      $("xcExpJson").classList.add("hidden"); $("xcExpCsv").classList.add("hidden");
+    }
+
+    async function xcOpen(src, m, opts = {}) {
+      xcCtx = { src, msg: m };
+      xcShow();
+      $("xcTitle").textContent = "אמת מול ADS-B · " + (m.tail || m.flight || m.icao || m.aes || "");
+      if (!opts.keepHex) $("xcHexIn").value = "";
+      xcLoading("מצליב מול ADS-B — snapshot, buffer מקומי, חיפוש ממוקד ו-trace היסטורי (עד ~30ש׳)…");
+      const seq = ++xcReq;
+      const payload = { src, t: m.t, tail: m.tail ?? null, label: m.label ?? null };
+      if (opts.hex) payload.hex = opts.hex;
+      if (opts.save) payload.save = true;
+      try {
+        const res = await apiSend("POST", "/api/xcheck/verify", payload, 60000);
+        const data = await res.json();
+        if (seq !== xcReq) return;
+        if (!data.ok) { xcLoading("⚠ " + (data.error || ("שגיאה " + res.status))); return; }
+        xcRender(data.result, data.saved);
+        if (data.saved) pollXcEvents();
+      } catch (e) {
+        if (seq === xcReq) xcLoading("⚠ אין תשובה מהשרת (רשת?) — נסה שוב");
+      }
+    }
+    async function xcOpenEvent(id) {
+      xcCtx = null;
+      xcShow();
+      $("xcTitle").textContent = "ראיה שמורה";
+      $("xcHexIn").value = "";
+      xcLoading("טוען את הראיה השמורה…");
+      const seq = ++xcReq;
+      try {
+        const data = await fetchJSON("/api/xcheck/events/" + encodeURIComponent(id));
+        if (seq !== xcReq) return;
+        if (!data.ok) { xcLoading("⚠ " + (data.error || "האירוע לא נמצא")); return; }
+        xcCtx = { src: data.event.src, msg: data.event.msg || {} };
+        xcRender(data.event, data.event.id);
+      } catch (e) {
+        if (seq === xcReq) xcLoading("⚠ אין תשובה מהשרת (רשת?)");
+      }
+    }
+    $("xcRerun").onclick = () => {
+      if (!xcCtx) return;
+      const hx = $("xcHexIn").value.trim();
+      if (hx && !/^[0-9a-fA-F]{6}$/.test(hx)) { showToast("כתובת ICAO היא 6 ספרות hex (למשל 406F79)"); return; }
+      xcOpen(xcCtx.src, xcCtx.msg, { hex: hx || null, keepHex: true });
+    };
+    $("xcSave").onclick = () => {
+      if (!xcCtx) return;
+      const hx = $("xcHexIn").value.trim();
+      xcOpen(xcCtx.src, xcCtx.msg, { hex: /^[0-9a-fA-F]{6}$/.test(hx) ? hx : null, save: true, keepHex: true });
+    };
+
+    function xcRender(r, savedId) {
+      const body = $("xcBody"); body.textContent = "";
+      const m = r.msg || {}, hz = r.horizon, rx = r.rx_at || {}, pc = r.position_check;
+      const ac = r.aircraft_at_rx, mt = r.match || {}, ad = r.adsc;
+      $("xcTitle").textContent = "אמת מול ADS-B · " + (m.tail || m.flight || m.icao || m.aes || "");
+
+      // 1. פסק הדין: גאומטריה + רמת ראיות — בנפרד
+      const vc = xcCard(null); vc.classList.add("xc-verdict", "v-" + r.verdict);
+      vc.appendChild(xcEl("b", null, r.verdict_text));
+      if (hz) {
+        vc.appendChild(xcEl("div", "xc-sub",
+          "מרחק מהתחנה " + xcKm(hz.distance_km) + (hz.distance_uncert_km >= 0.1 ? " (±" + xcKm(hz.distance_uncert_km) + ")" : "")
+          + " · אופק רדיו (k=4/3) " + xcKm(hz.radio_km) + " · אופק גאומטרי " + xcKm(hz.geometric_km)
+          + (hz.excess_km > 0 ? " · חריגה +" + xcKm(hz.excess_km) : "")));
+      }
+      const lv = XC_LEVEL[r.level] || XC_LEVEL.none;
+      const lvRow = xcEl("div", "xc-lvl");
+      lvRow.appendChild(document.createTextNode("רמת הראיות שהאות שודר מהמטוס במיקום הזה: "));
+      lvRow.appendChild(mkSpan("xc-badge " + lv[0], lv[1]));
+      vc.appendChild(lvRow);
+      body.appendChild(vc);
+
+      // 2. ההודעה
+      const SRC = { acars: "ACARS", vdl2: "VDL2", satcom: "SATCOM" };
+      const mc = xcCard("ההודעה (" + (SRC[r.src] || r.src) + ")");
+      mc.appendChild(xcGrid([
+        ["זמן קליטה", xcLtr(xcUTC(r.t_rx) + " · " + fmtTime(r.t_rx))],
+        ["מטוס", xcLtr([m.tail, m.flight, m.icao || m.aes].filter(Boolean).join(" · ") || "—")],
+        ["תדר", m.freq != null ? xcLtr(Number(m.freq).toFixed(3) + " MHz") : null],
+        ["עוצמת אות", m.level != null ? xcLtr(Number(m.level).toFixed(1) + " dBFS") : "לא נמדד (המפענח לא מדווח)"],
+        ["שגיאות פענוח", m.error != null ? String(m.error) : null],
+        ["label", m.label ? xcLtr(m.label + (m.category ? " · " + m.category : "")) : null],
+        ["כיוון", (r.direction || "לא ידוע") + (r.direction_basis ? " — " + r.direction_basis : "")],
+        ["מיקום בהודעה", m.lat != null ? xcMix(xcLL(m.lat, m.lon), m.pos_src ? "מקור: " + m.pos_src : null) : "אין"],
+        ["זמן דוח ADS-C", ad && ad.report_t != null ? xcMix(xcUTC(ad.report_t, true),
+          ad.report_age_s >= 0 ? xcSec(ad.report_age_s) + " לפני הקליטה" : xcSec(-ad.report_age_s) + " אחרי הקליטה") : null],
+        ["גובה ADS-C", ad && ad.alt_ft != null ? xcLtr(Math.round(ad.alt_ft).toLocaleString() + " ft") : null],
+        ["דיוק ניווט מדווח", ad && ad.accuracy_nm != null
+          ? (ad.accuracy_nm < 0 ? "אובדן יכולת ניווט" : xcLtr("<" + ad.accuracy_nm + " nm")) : null],
+      ]));
+      if (m.decoded) mc.appendChild(xcEl("p", "xc-raw", m.decoded));
+      if (m.text) {
+        const det = document.createElement("details");
+        det.appendChild(xcEl("summary", null, "טקסט גולמי"));
+        det.append(xcEl("p", "xc-raw", m.text), mkCopyBtn(m.text));
+        mc.appendChild(det);
+      }
+      body.appendChild(mc);
+
+      // 3. ADS-B בזמן הקליטה
+      const bc = xcCard("ADS-B בזמן הקליטה");
+      const adsbMeta = mt.adsb || {};
+      bc.appendChild(xcGrid([
+        ["מצב", XC_STATUS[rx.status] || rx.status || "—"],
+        ["התאמת זהות", mt.by ? XC_MATCH[mt.by] + (mt.conflict ? " · ⚠ סתירה (" + mt.conflict + ")" : "")
+          : (mt.conflict ? "⚠ סתירת זהות (" + mt.conflict + ")" : "לא נמצא מטוס תואם")],
+        ["כתובת ICAO", mt.hex ? xcLtr(mt.hex + (mt.hex_src ? "" : "")) : null],
+        ["מקור ה-hex", mt.hex_src ? XC_HEX_SRC[mt.hex_src] || mt.hex_src : null],
+        ["ב-ADS-B", (adsbMeta.reg || adsbMeta.flight || adsbMeta.type)
+          ? xcLtr([adsbMeta.reg, adsbMeta.flight, adsbMeta.type].filter(Boolean).join(" · ")) : null],
+        ["מיקום", rx.lat != null ? xcLtr(xcLL(rx.lat, rx.lon)) : null],
+        ["הפרש זמן מהקליטה", rx.dt_s == null ? null : Array.isArray(rx.dt_s)
+          ? xcSec(rx.dt_s[0]) + " לפני · " + xcSec(rx.dt_s[1]) + " אחרי"
+          : xcSec(rx.dt_s) + (rx.dt_s >= 0 ? " אחרי הקליטה" : " לפני הקליטה")],
+        ["אי-ודאות מיקום", rx.uncert_km != null ? "± " + xcKm(rx.uncert_km) : null],
+        ["גובה", rx.alt_ft != null ? xcMix(Math.round(rx.alt_ft).toLocaleString() + " ft",
+          rx.alt_kind === "geom" ? "גאומטרי" : rx.alt_kind === "baro" ? "גובה לחץ" : null) : null],
+        ["מהירות / כיוון", rx.gs != null || rx.track != null
+          ? xcLtr((rx.gs != null ? Math.round(rx.gs) + " kt" : "—") + " / " + (rx.track != null ? Math.round(rx.track) + "°" : "—")) : null],
+        ["מקור / סוג", rx.provider || rx.src_type ? xcLtr([rx.provider, rx.src_type].filter(Boolean).join(" · ")) : null],
+        ["NIC / NACp", rx.nic != null || rx.nac_p != null
+          ? xcLtr((rx.nic != null ? rx.nic : "—") + " / " + (rx.nac_p != null ? rx.nac_p : "—")) : null],
+      ]));
+      body.appendChild(bc);
+
+      // 4. השוואה + אופק
+      const cc = xcCard("השוואה ואופק");
+      const st = r.station;
+      cc.appendChild(xcGrid([
+        ["מרחק בין המיקומים", pc ? xcKm(pc.distance_km) + " (גבול שגיאה " + xcKm(pc.tolerance_km) + ")"
+          + (pc.agree === true ? " ✓" : pc.agree === false ? " ✗" : "") : (m.lat != null ? "אין ADS-B להשוואה" : "אין מיקום בהודעה")],
+        ["זמן המיקום שבהודעה", pc && pc.msg_pos_t != null
+          ? xcMix(xcUTC(pc.msg_pos_t, true), pc.msg_pos_t_known ? "מחותמת הזמן שבדוח" : "זמן הקליטה — אין חותמת בהודעה") : null],
+        ["מיקום המטוס בקליטה", ac ? xcLtr(xcLL(ac.lat, ac.lon)) : "לא ידוע"],
+        ["מקור המיקום", ac ? ({ adsb_measured: "ADS-B נמדד", adsb_interpolated: "ADS-B אינטרפולציה",
+          message_timed: "ההודעה (דוח בזמן אמת)", message_untimed: "ההודעה (זמן לא ידוע)",
+          adsb_unverified: "ADS-B לא מאומת" }[ac.source] || ac.source) : null],
+        ["מרחק מהתחנה", hz ? xcKm(hz.distance_km) : null],
+        ["גובה לחישוב", hz ? xcLtr(Math.round(hz.aircraft_alt_ft).toLocaleString() + " ft")
+          : null],
+        ["אופק רדיו (k=4/3)", hz ? xcKm(hz.radio_km) + " (עד " + xcKm(hz.radio_km_upper) + " בגובה העליון)" : null],
+        ["אופק גאומטרי", hz ? xcKm(hz.geometric_km) : null],
+        ["יחס מרחק/אופק", hz && hz.ratio != null ? xcLtr("×" + hz.ratio) : null],
+        ["תחנת קליטה", st ? xcMix(xcLL(st.lat, st.lon) + " · " + st.alt_m + " m", st.name || null) : "לא הוגדרה"],
+      ]));
+      body.appendChild(cc);
+
+      // 5. קריטריונים
+      const ec = xcCard("קריטריוני ראיות");
+      const ul = xcEl("ul", "xc-crit");
+      for (const c of r.evidence || []) {
+        const li = xcEl("li", c.ok === true ? "ok" : c.ok === false ? "no" : "na");
+        li.append(xcEl("span", "mark", c.ok === true ? "✓" : c.ok === false ? "✗" : "–"), xcEl("span", null, c.text));
+        ul.appendChild(li);
+      }
+      ec.appendChild(ul);
+      body.appendChild(ec);
+
+      // 6. הסתייגויות — מה *לא* נקבע
+      if ((r.caveats || []).length) {
+        const kc = xcCard("מה לא נקבע");
+        const ol = xcEl("ul", "xc-caveats");
+        for (const c of r.caveats) ol.appendChild(xcEl("li", null, c));
+        kc.appendChild(ol);
+        body.appendChild(kc);
+      }
+
+      // 7. מקורות שנוסו ("לא ניסינו" ≠ "ניסינו ולא נמצא")
+      const sc = xcCard("מקורות ADS-B שנבדקו");
+      const sl = xcEl("ul", "xc-sources");
+      for (const s of r.sources || []) {
+        const parts = [XC_SRC_NAME[s.name] || s.name, XC_SRC_STATUS[s.status] || s.status];
+        if (s.provider) parts.push(s.provider);
+        if (s.points) parts.push(s.points + " נקודות");
+        const li = xcEl("li", null, parts.join(" · "));
+        if (s.detail) li.appendChild(xcEl("span", "xc-ltr", " — " + s.detail));
+        sl.appendChild(li);
+      }
+      sc.appendChild(sl);
+      sc.appendChild(xcEl("p", "hint", "חושב " + fmtTime(r.computed_at) + " · מצב " + (r.mode === "full" ? "אימות מלא" : "בזמן אמת")
+        + (savedId ? " · נשמר כראיה" : "")));
+      body.appendChild(sc);
+
+      for (const [id, fmt] of [["xcExpJson", "json"], ["xcExpCsv", "csv"]]) {
+        const a = $(id);
+        a.classList.toggle("hidden", !savedId);
+        if (savedId) a.href = "/api/xcheck/events/" + encodeURIComponent(savedId) + "/export?format=" + fmt;
+      }
+      xcEnsureMap(r);
+    }
+
+    /* ----- מפה: תחנה + עיגולי אופק, מיקום ההודעה, מיקום ADS-B, מסלול ±15 דק' ----- */
+    function xcMapNote(msg) { const n = $("xcMapNote"); n.textContent = msg; n.classList.remove("hidden"); }
+    function xcEnsureMap(r) {
+      $("xcMapCard").classList.remove("hidden");
+      xcPending = r;
+      if (xcMap) { setTimeout(() => { xcMap.invalidateSize(); xcDraw(xcPending); }, 60); return; }
+      if (window.L) { xcInitMap(); return; }
+      if (xcLeafLoading) return;
+      xcLeafLoading = true;
+      const s = document.createElement("script");
+      s.src = "/static/vendor/leaflet/leaflet.js";
+      s.onload = () => { xcLeafLoading = false; xcInitMap(); };
+      s.onerror = () => { xcLeafLoading = false; xcMapNote("המפה לא נטענה (אין חיבור?) — הנתונים מוצגים למעלה."); };
+      document.head.appendChild(s);
+    }
+    function xcInitMap() {
+      try {
+        xcMap = L.map("xcMap", { zoomControl: true }).setView([32.0, 34.9], 6);
+        const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+          { maxZoom: 12, attribution: "© OpenStreetMap" });
+        let tileErr = 0;
+        tiles.on("tileerror", () => { if (++tileErr === 6) xcMapNote("רקע המפה לא נטען (אין אינטרנט?) — הסמנים עדיין מוצגים."); });
+        tiles.addTo(xcMap);
+        xcLayer = L.layerGroup().addTo(xcMap);
+        setTimeout(() => { xcMap.invalidateSize(); if (xcPending) xcDraw(xcPending); }, 60);
+      } catch (e) { xcMapNote("שגיאה בטעינת המפה"); }
+    }
+    function xcDraw(r) {
+      if (!xcMap || !xcLayer || !r) return;
+      xcLayer.clearLayers();
+      const css = getComputedStyle(document.documentElement);
+      const col = (v, fb) => css.getPropertyValue(v).trim() || fb;
+      const accent = col("--accent", "#6ea8fe"), amber = col("--amber", "#dcae4d"),
+            green = col("--green", "#5fce85"), dim = col("--dim", "#9a9da3");
+      const bounds = [];
+      const st = r.station, m = r.msg || {}, rx = r.rx_at || {}, ac = r.aircraft_at_rx, hz = r.horizon;
+      if (r.track && r.track.length > 1) {
+        const line = r.track.map((p) => [p.lat, p.lon]);
+        L.polyline(line, { color: dim, weight: 2, opacity: .75 }).bindTooltip("מסלול ADS-B ±15 דק׳").addTo(xcLayer);
+        bounds.push(...line);
+      }
+      if (st) {
+        L.circleMarker([st.lat, st.lon], { radius: 7, color: accent, fillColor: accent, fillOpacity: .9, weight: 2 })
+          .bindTooltip("תחנה" + (st.name ? " · " + st.name : "") + " · " + st.alt_m + " m").addTo(xcLayer);
+        bounds.push([st.lat, st.lon]);
+        if (hz) {
+          L.circle([st.lat, st.lon], { radius: hz.radio_km * 1000, color: accent, weight: 1.5, dashArray: "6 6", fill: false })
+            .bindTooltip("אופק רדיו (k=4/3) · " + Math.round(hz.radio_km) + " ק״מ").addTo(xcLayer);
+          L.circle([st.lat, st.lon], { radius: hz.geometric_km * 1000, color: dim, weight: 1, dashArray: "2 6", fill: false })
+            .bindTooltip("אופק גאומטרי · " + Math.round(hz.geometric_km) + " ק״מ").addTo(xcLayer);
+        }
+        if (ac) L.polyline([[st.lat, st.lon], [ac.lat, ac.lon]], { color: accent, weight: 1, opacity: .6, dashArray: "3 5" }).addTo(xcLayer);
+      }
+      if (m.lat != null && m.lon != null) {
+        L.circleMarker([m.lat, m.lon], { radius: 7, color: amber, fillColor: amber, fillOpacity: .85, weight: 2 })
+          .bindTooltip("מיקום בהודעה" + (m.pos_src ? " (" + m.pos_src + ")" : "")).addTo(xcLayer);
+        bounds.push([m.lat, m.lon]);
+      }
+      if (rx.lat != null && rx.lon != null) {
+        L.circleMarker([rx.lat, rx.lon], { radius: 6, color: green, fillColor: green, fillOpacity: .85, weight: 2 })
+          .bindTooltip("ADS-B · " + (XC_STATUS[rx.status] || rx.status)).addTo(xcLayer);
+        if (rx.uncert_km >= 0.5) L.circle([rx.lat, rx.lon], { radius: rx.uncert_km * 1000, color: green, weight: 1, fillOpacity: .08 }).addTo(xcLayer);
+        bounds.push([rx.lat, rx.lon]);
+      }
+      if (bounds.length) xcMap.fitBounds(bounds, { padding: [28, 28], maxZoom: 9 });
+    }
+
+    /* ----- מסך הבית: תחנת הקליטה + רשימת האירועים החריגים (סינון + ייצוא) ----- */
+    let xcStation = null, xcStSource = "manual";
+    function renderXcStation() {
+      const t = $("xcStationTxt");
+      if (!xcStation) { t.textContent = "⚠ תחנת הקליטה לא הוגדרה — בלי מיקום וגובה אנטנה אין חישוב אופק."; return; }
+      t.textContent = "תחנה: " + (xcStation.name ? bidi(xcStation.name) + " · " : "")
+        + bidi(xcLL(xcStation.lat, xcStation.lon)) + " · " + bidi(xcStation.alt_m + " m") + " מעל פני הים";
+    }
+    $("xcStationEdit").onclick = () => {
+      const f = $("xcStationForm");
+      const open = f.classList.toggle("hidden") === false;
+      if (open && xcStation) {
+        $("xcStLat").value = xcStation.lat; $("xcStLon").value = xcStation.lon;
+        $("xcStAlt").value = xcStation.alt_m; $("xcStName").value = xcStation.name || "";
+      }
+      xcStSource = (xcStation && xcStation.source) || "manual";
+    };
+    ["xcStLat", "xcStLon", "xcStAlt"].forEach((id) => $(id).addEventListener("input", () => { xcStSource = "manual"; }));
+    $("xcStationForm").onsubmit = async (e) => {
+      e.preventDefault();
+      const body = { lat: parseFloat($("xcStLat").value), lon: parseFloat($("xcStLon").value),
+                     alt_m: parseFloat($("xcStAlt").value), name: $("xcStName").value.trim(), source: xcStSource };
+      if (![body.lat, body.lon, body.alt_m].every(Number.isFinite)) { $("xcStHint").textContent = "⚠ נדרשים קו רוחב, קו אורך וגובה אנטנה."; return; }
+      try {
+        const res = await apiSend("POST", "/api/station", body);
+        const data = await res.json();
+        if (!data.ok) { $("xcStHint").textContent = "⚠ " + (data.error || "שמירה נכשלה"); return; }
+        xcStation = data.station; renderXcStation();
+        $("xcStationForm").classList.add("hidden");
+        showToast("תחנת הקליטה נשמרה");
+      } catch (err) { $("xcStHint").textContent = "⚠ אין תשובה מהשרת"; }
+    };
+    $("xcStClear").onclick = async () => {
+      if (!confirm("לנקות את מיקום התחנה? בלעדיו לא יחושב אופק רדיו.")) return;
+      try {
+        const data = await (await apiSend("POST", "/api/station", { clear: true })).json();
+        if (data.ok) { xcStation = null; renderXcStation(); $("xcStationForm").classList.add("hidden"); }
+      } catch (err) { $("xcStHint").textContent = "⚠ אין תשובה מהשרת"; }
+    };
+    $("xcStGeo").onclick = () => {
+      // ⚠ geolocation זמין רק ב-secure context (HTTPS) — כמו wakeLock (§7 ב-CLAUDE.md)
+      if (!window.isSecureContext || !navigator.geolocation) {
+        $("xcStHint").textContent = "מיקום המכשיר זמין רק ב-HTTPS — הזן ידנית (מהמפה/GPS).";
+        return;
+      }
+      $("xcStHint").textContent = "מאתר…";
+      navigator.geolocation.getCurrentPosition((pos) => {
+        const c = pos.coords;
+        $("xcStLat").value = c.latitude.toFixed(6); $("xcStLon").value = c.longitude.toFixed(6);
+        xcStSource = "device";
+        if (c.altitude != null) $("xcStAlt").value = Math.round(c.altitude);
+        $("xcStHint").textContent = "מיקום ±" + Math.round(c.accuracy) + " מ׳. "
+          + (c.altitude != null ? "גובה ה-GPS של הטלפון לא מדויק — עדיף גובה קרקע מהמפה + גובה התורן."
+                                : "המכשיר לא מסר גובה — הזן גובה אנטנה ידנית.")
+          + " ⚠ ליד נתב״ג ה-GPS עצמו עלול להיות משובש — ודא שהמיקום נכון לפני שמירה.";
+      }, (err) => { $("xcStHint").textContent = "⚠ איתור נכשל: " + err.message; },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+    };
+    function xcFilterQuery() {
+      const q = new URLSearchParams();
+      const add = (k, id) => { const v = $(id).value.trim(); if (v !== "") q.set(k, v); };
+      add("min_km", "xcFMinKm"); add("min_dbfs", "xcFMinDb"); add("max_dbfs", "xcFMaxDb");
+      add("day", "xcFDay"); add("evidence", "xcFLevel");
+      return q.toString();
+    }
+    let xcEvTimer = null;
+    ["xcFMinKm", "xcFMinDb", "xcFMaxDb", "xcFDay", "xcFLevel"].forEach((id) =>
+      $(id).addEventListener("input", () => { clearTimeout(xcEvTimer); xcEvTimer = setTimeout(pollXcEvents, 350); }));
+    async function pollXcEvents() {
+      const q = xcFilterQuery();
+      $("xcExportJson").href = "/api/xcheck/events/export?format=json" + (q ? "&" + q : "");
+      $("xcExportCsv").href = "/api/xcheck/events/export?format=csv" + (q ? "&" + q : "");
+      let data;
+      try { data = await fetchJSON("/api/xcheck/events" + (q ? "?" + q : "")); } catch (e) { return; }
+      if (!data || !data.ok) return;
+      $("xcCount").textContent = data.total;
+      const box = $("xcEvents"); box.textContent = "";
+      if (!data.events.length) {
+        box.appendChild(xcEl("p", "nodata", q ? "אין אירועים שתואמים לסינון." : "אין עדיין קליטות מעבר לאופק."));
+        return;
+      }
+      for (const e of data.events.slice(0, 100)) {
+        const b = xcEl("button", "xc-ev"); b.type = "button";
+        const top = xcEl("div", "xc-ev-top");
+        top.appendChild(mkSpan("amsg-tail", e.tail || e.flight || e.hex || "?"));
+        if (e.flight && e.tail) top.appendChild(mkSpan("amsg-flight", e.flight));
+        const v = XC_VERDICT_BADGE[e.verdict];
+        if (v) top.appendChild(mkSpan("xc-badge " + v[0], v[1]));
+        top.appendChild(mkSpan("t", new Date(e.t * 1000).toLocaleString("he-IL", { hour12: false })));
+        b.appendChild(top);
+        const sub = [xcKm(e.distance_km) + " / אופק " + xcKm(e.radio_horizon_km)];
+        if (e.signal_dbfs != null) sub.push(Number(e.signal_dbfs).toFixed(1) + " dBFS");
+        if (e.freq != null) sub.push(Number(e.freq).toFixed(3) + " MHz");
+        sub.push("ADS-B: " + ({ measured: "נמדד", interpolated: "אינטרפולציה", unverified: "לא מאומת" }[e.adsb_status] || "אין"));
+        b.appendChild(xcEl("div", "xc-ev-sub", sub.map(bidi).join(" · ")));
+        b.onclick = () => xcOpenEvent(e.id);
+        box.appendChild(b);
+      }
+    }
+    async function pollXc() {
+      try {
+        const st = await fetchJSON("/api/xcheck/status");
+        if (st && st.ok) {
+          xcStation = st.station; renderXcStation();
+          const s = st.stats || {}, parts = [];
+          parts.push("נבדקו בזמן אמת: " + (s.done || 0));
+          if (st.queue) parts.push("בתור: " + st.queue);
+          if (s.dropped) parts.push("⚠ לא נבדקו (עומס): " + s.dropped);
+          for (const [name, p] of Object.entries((st.net && st.net.providers) || {})) {
+            if (p.last_error && (!p.last_ok || p.last_error.t > p.last_ok)) parts.push(bidi(name) + ": תקלה אחרונה");
+          }
+          $("xcStatusTxt").textContent = parts.join(" · ");
+        }
+      } catch (e) { /* רשת זמנית — המחזור הבא */ }
+      pollXcEvents();
+    }
+    setInterval(() => { if (!document.hidden && appMode === "home") pollXc(); }, 30000);
 
     /* ---------- רוסטר מטוסים מאוחד (ACARS+VDL2+ADS-B), מסך הבית ---------- */
     // חי בכל מצב (לא רק כשצופים ב-ACARS/VDL2) — /api/aircraft מהתך את שתי

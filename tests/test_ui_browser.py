@@ -103,6 +103,9 @@ def _default_api():
                       "messages": [], "adsb": {}},
         "/api/satcom": {"ok": True, "active": False, "freqs": [], "cursor": 0,
                         "messages": []},
+        "/api/xcheck/status": {"ok": True, "station": None, "auto_lookup": True, "queue": 0,
+                               "stats": {"done": 0, "dropped": 0}, "net": {"providers": {}}},
+        "/api/xcheck/events": {"ok": True, "events": [], "total": 0},
     }
 
 
@@ -906,3 +909,167 @@ def test_long_toast_stays_longer_and_tap_dismisses(page):
     expect(page.locator("#toast")).to_be_visible()
     page.locator("#toastMsg").click()
     expect(page.locator("#toast")).to_be_hidden()
+
+
+# --- הצלבת ADS-B + אופק רדיו (docs/adsb-crosscheck-design.md) ------------------
+
+def _zbkm_verify_result(text="/QUKAXBA.ADS.G-ZBKM071798089D4D8946EACD9F84D7"):
+    """תוצאת /api/xcheck/verify כפי שהשרת בונה אותה — מחושבת כאן ב-xcheck האמיתי
+    (לא JSON שנכתב ביד), על מסלול ADS-B *סינתטי* שעובר במיקום ה-ADS-C."""
+    import calendar
+    import xcheck
+    t_rx = calendar.timegm((2026, 10, 23, 13, 45, 40)) + 0.0
+    lat0, lon0 = 33.17888, 27.65087
+    pts = []
+    for dt, dlat, dlon in ((-40, 0.0365, -0.0723), (45, -0.0411, 0.0814)):
+        pts.append(xcheck.make_point(t_rx - 0.625 + dt, lat0 + dlat, lon0 + dlon, alt_baro=38000,
+                                     alt_geom=38600, gs=480.0, track=120.0, src_type="adsb_icao",
+                                     nic=8, nac_p=9, provider="adsb.lol", origin="trace"))
+    msg = {"t": t_rx, "freq": 131.825, "level": -46.9, "label": "B6", "tail": ".G-ZBKM",
+           "flight": "BA0060", "lat": lat0, "lon": lon0, "pos_src": "adsc", "error": 0,
+           "category": "ADS-C", "text": text}
+    station = {"lat": 31.968, "lon": 34.935, "alt_m": 150.0, "name": "תל חדיד"}
+    rx_at = xcheck.position_at(pts, t_rx)
+    pos_at = xcheck.position_at(pts, t_rx - 0.625)
+    match = {"by": "reg", "conflict": None, "hex": "406F79", "hex_src": "adsb_db",
+             "adsb": {"hex": "406F79", "reg": "G-ZBKM", "type": "B789"}}
+    res = xcheck.assess("acars", msg, "downlink", station, match, rx_at, pos_at,
+                        {"t": t_rx - 0.625, "alt_ft": 37996, "accuracy_nm": 0.05},
+                        direction_basis="לפי label B6")
+    res.update({"event_id": "0123456789abcdef", "src": "acars", "t_rx": t_rx, "msg": msg,
+                "identity": {}, "match": match, "rx_at": rx_at, "pos_at": pos_at,
+                "sources": [{"name": "lookup", "status": "ok", "provider": "adsb.lol"},
+                            {"name": "trace", "status": "ok", "provider": "adsb.lol", "points": 2}],
+                "track": [{"t": p["t"], "lat": p["lat"], "lon": p["lon"]} for p in pts],
+                "mode": "full", "computed_at": t_rx + 3600, "version": "test"})
+    return res, msg
+
+
+def _zbkm_acars_overrides(result, msg, posts):
+    feed = {**msg, "id": 1}
+
+    def acars(route, url):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "active": True, "freqs": ["131.825"],
+                                       "cursor": 1, "messages": [feed] if "since=0" in url else [],
+                                       "adsb": {},
+                                       "xcheck": {"1": {"v": result["verdict"], "lvl": result["level"],
+                                                        "km": result["horizon"]["distance_km"],
+                                                        "hz": result["horizon"]["radio_km"],
+                                                        "adsb": "interpolated", "agree": True, "by": "reg"}},
+                                       "xcheck_cursor": 1}))
+
+    def verify(route, url):
+        posts.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "result": result, "saved": result["event_id"]}))
+
+    ov = _acars_mode_overrides(acars)
+    ov["/api/xcheck/verify"] = verify
+    return ov
+
+
+def test_xcheck_badge_and_verify_sheet_for_zbkm(page):
+    """הודעת ה-ADS-C של G-ZBKM: תג "מעבר לאופק" בכרטיס, ו-🔎 פותח גיליון עם שתי
+    התשובות *בנפרד* (גאומטריה + רמת ראיות), קריטריונים, הסתייגות על מנגנון
+    ההתפשטות, וייצוא הראיה. ⚠ טקסט ההודעה (משידור רדיו) מוצג כטקסט, לא HTML."""
+    result, msg = _zbkm_verify_result(text='<img src=x onerror="window.__xss=1">')
+    posts = []
+    _mount(page, overrides=_zbkm_acars_overrides(result, msg, posts))
+    page.click("#modeSeg button[data-v=acars]")
+    badge = page.locator("#acarsFeed .xc-badge")
+    expect(badge).to_contain_text("מעבר לאופק · ראיות חזקות", timeout=15000)
+    expect(badge).to_contain_text("697 ק״מ")
+    page.locator("#acarsFeed .xc-verify-btn").first.click()
+    sheet = page.locator("#xcSheet")
+    expect(sheet).to_be_visible()
+    expect(sheet.locator(".xc-verdict b")).to_have_text("קליטה מעבר לאופק הרדיו — נתמכת בראיות חזקות")
+    expect(sheet.locator(".xc-verdict")).to_contain_text("אופק רדיו (k=4/3)")
+    expect(sheet.locator(".xc-lvl")).to_contain_text("חזקה")
+    expect(sheet.locator(".xc-crit li.ok")).to_have_count(len([c for c in result["evidence"] if c["ok"] is True]))
+    expect(sheet).to_contain_text("מנגנון ההתפשטות")
+    expect(sheet).to_contain_text("406F79")
+    expect(page.locator("#xcExpJson")).to_have_attribute(
+        "href", "/api/xcheck/events/0123456789abcdef/export?format=json")
+    assert posts == [{"src": "acars", "t": msg["t"], "tail": ".G-ZBKM", "label": "B6"}]
+    # ⚠ אבטחה: טקסט רדיו לא הופך ל-DOM
+    assert page.locator("#xcBody img").count() == 0          # (במפה יש img של אריחי Leaflet)
+    assert page.evaluate("window.__xss") is None
+    expect(page.locator("#xcMap.leaflet-container")).to_have_count(1, timeout=15000)
+    page.keyboard.press("Escape")
+    expect(sheet).to_be_hidden()
+
+
+def test_xcheck_rerun_with_manual_hex_and_server_error(page):
+    result, msg = _zbkm_verify_result()
+    posts = []
+    ov = _zbkm_acars_overrides(result, msg, posts)
+
+    def verify(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        posts.append(body)
+        if body.get("hex"):
+            route.fulfill(status=404, content_type="application/json",
+                          body=json.dumps({"ok": False, "error": "ההודעה לא נמצאה (לא בזיכרון ולא ביומן)"}))
+        else:
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True, "result": result, "saved": None}))
+    ov["/api/xcheck/verify"] = verify
+    _mount(page, overrides=ov)
+    page.click("#modeSeg button[data-v=acars]")
+    page.locator("#acarsFeed .xc-verify-btn").first.click(timeout=15000)
+    expect(page.locator("#xcSheet .xc-verdict")).to_be_visible()
+    expect(page.locator("#xcExpJson")).to_be_hidden()          # לא נשמר => אין ייצוא
+    page.fill("#xcHexIn", "406f79")
+    page.click("#xcRerun")
+    expect(page.locator("#xcBody")).to_contain_text("⚠ ההודעה לא נמצאה")
+    assert posts[-1]["hex"] == "406f79"
+
+
+def test_xcheck_home_panel_station_form_and_event_filters(page):
+    """מסך הבית: בלי תחנה — אזהרה מפורשת (לא ברירת מחדל שקטה); שמירת תחנה שולחת
+    את הערכים; רשימת האירועים מסוננת בשרת וקישורי הייצוא נושאים את אותו סינון."""
+    station_posts, event_urls = [], []
+    state = {"station": None}
+
+    def station(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        station_posts.append(body)
+        state["station"] = {**body, "set_at": 1.0}
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "station": state["station"]}))
+
+    def status(route, url):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "station": state["station"], "queue": 0,
+                                       "stats": {"done": 12, "dropped": 0}, "net": {"providers": {}}}))
+
+    def events(route, url):
+        event_urls.append(url)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "ok": True, "total": 1, "events": [{
+                "id": "0123456789abcdef", "t": 1792763140.0, "tail": ".G-ZBKM", "flight": "BA0060",
+                "verdict": "blos_supported", "distance_km": 696.7, "radio_horizon_km": 494.1,
+                "signal_dbfs": -46.9, "freq": 131.825, "adsb_status": "interpolated"}]}))
+
+    _mount(page, overrides={"/api/station": station, "/api/xcheck/status": status,
+                            "/api/xcheck/events": events})
+    page.click("#modeSeg button[data-v=home]")
+    expect(page.locator("#xcStationTxt")).to_contain_text("לא הוגדרה", timeout=15000)
+    expect(page.locator("#xcEvents .xc-ev")).to_have_count(1)
+    expect(page.locator("#xcEvents .xc-ev")).to_contain_text("697 ק״מ / אופק 494 ק״מ")
+    expect(page.locator("#xcEvents .xc-ev")).to_contain_text("ADS-B: אינטרפולציה")
+    page.click("#xcStationEdit")
+    page.fill("#xcStLat", "31.968")
+    page.fill("#xcStLon", "34.935")
+    page.fill("#xcStAlt", "150")
+    page.fill("#xcStName", "תל חדיד")
+    page.click("#xcStSave")
+    expect(page.locator("#xcStationTxt")).to_contain_text("150 m", timeout=15000)
+    assert station_posts == [{"lat": 31.968, "lon": 34.935, "alt_m": 150, "name": "תל חדיד",
+                              "source": "manual"}]
+    page.fill("#xcFMinKm", "600")
+    page.select_option("#xcFLevel", "strong")
+    expect(page.locator("#xcExportCsv")).to_have_attribute(
+        "href", re.compile(r"format=csv&min_km=600&evidence=strong"), timeout=15000)
+    assert any("min_km=600" in u and "evidence=strong" in u for u in event_urls)

@@ -36,6 +36,9 @@
   הצגה חיה בכרטיסים אחידים, שמירה ל-JSONL, ייצוא CSV/JSON, מפת Leaflet עם שובל מסלול.
 - **מודעוּת מרחבית (תמיד פעיל):** ניתוח ADS-B מקהילה (adsb.lol/adsb.fi) מסיק את
   **המסלול הפעיל** בנתב"ג ומחשב אינדיקציית **שיבוש GPS** — עמיד לשיבוש מקומי.
+- **הצלבת ADS-B + אופק רדיו (BLOS):** כל הודעת דאטה עם מזהה מטוס מוצלבת מול ADS-B
+  (snapshot/חיפוש ממוקד/trace היסטורי), ומוערכת מול אופק הרדיו של התחנה — *חריגה מאופק*
+  ו*רמת ראיות* בנפרד; אירועים חריגים נשמרים כראיה (ר' §5, `docs/adsb-crosscheck-design.md`).
 
 ---
 
@@ -93,7 +96,11 @@ webtune/
                             #   הקלטות, תמלול, METAR, מדדי RF, מעבר מצבים, ארכיון חיפוש. ~5200 שורות.
   adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS + סדרת סשן +
                             #   buffer מתגלגל לשחזור-סשן (docs/session-replay-design.md,
-                            #   שלב 1). thread נפרד. ניתן להרצה ידנית: `python3 adsb.py [--selftest]`.
+                            #   שלב 1) + שכבת הנתונים של ההצלבה (lookup ממוקד/trace/OpenSky,
+                            #   אינדקס hex, רישום↔hex). thread נפרד. ידני:
+                            #   `python3 adsb.py [--selftest | --lookup reg G-ZBKM | --trace 406f79 [epoch]]`.
+  xcheck.py                 # ★ הצלבת הודעות מול ADS-B + אופק רדיו/BLOS — פונקציות טהורות בלבד
+                            #   (גאודזיה, אופק, זהות, מיקום-בזמן, קריטריונים). ר' §5.
   static/
     index.html              # ה-UI כולו (HTML+CSS+JS inline, ~5800 שורות). PWA. 5 תצוגות:
                             #   🏠 מרכז (בית/standby/scan, כולל דוח סשן+התראות) + קול + ACARS +
@@ -146,6 +153,11 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_roster.py           # רוסטר מטוסים מאוחד: היתוך זהות ACARS/VDL2/ADS-B, מיון, /api/aircraft.
   test_archive.py          # ארכיון חיפוש רב-יומי: _day_bounds, ?day= ב-/api/acars ו-/api/vdl2.
   test_adsb_enrich.py      # היתוך ADS-B↔ACARS: העשרת /api/acars מ-snapshot של adsb.py (בלי רשת).
+  test_adsb_lookup.py      # הרחבת adsb.py להצלבה: זמן מדידה, by_hex, רישום↔hex, lookup (cache/קצב/
+                           #   fallback), parse/fetch trace, OpenSky, gzip/חסם גודל — רשת ממוקפת.
+  test_xcheck.py           # xcheck.py: Vincenty, אופק, זהות/טיסה, 4 קטגוריות מיקום, הערכה — G-ZBKM.
+  test_xcheck_api.py       # שילוב: /api/station, תור+worker דו-שלבי, /api/xcheck/verify (G-ZBKM היסטורי,
+                           #   re-decode, סתירה, בלי ADS-B), ראיות/סינון/ייצוא, worker לא קורא את ה-buffer.
   test_recordings.py       # ★ שמירת הקלטות (saved/, מכסה תחת מרוץ-מקביל, ?starred=1, ZIP) +
                            #   תמלול (5 מצבי tx.state, תור מבוסס-sidecar ששורד restart, שתי
                            #   שפות/מודלים, fallback מודל, retention עמיד ל-stat שנכשל).
@@ -186,6 +198,8 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
                             #   ומקלט GPS ב-USB (VK-162) כמיקום תחנה/חיישן שיבוש מקומי/שעה. טרם מומש.
   session-replay-design.md  # ★ תכנון "שחזור סשן" (מפה+אודיו על ציר זמן). שלבים 0–2 בוצעו
                             #   (buffer מתגלגל + POST /api/sessions) — ר' §11 למימוש שנותר (UI).
+  adsb-crosscheck-design.md # ★ הצלבת ACARS↔ADS-B + BLOS (מומש, v2.27.0): בדיקת ספקים (מה אומת/לא),
+                            #   שתי השאלות, קטגוריות מיקום, קריטריונים, ראיות, מה נדחה, בדיקת שלב 0 על ה-Pi.
 
 .github/workflows/ci.yml   # pytest + `bash -n`/shellcheck על install.sh ושני הסקריפטים.
 ```
@@ -207,13 +221,15 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
 | `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain (`--sdrplay-gain=N` או ריק=AGC), bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`, `station` — תחנת הקליטה `{lat,lon,alt_m,name,source,set_at}` או None, **בלי ברירת מחדל**) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
 | `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
 | `/var/lib/airam/satcom.jsonl` | היסטוריית SATCOM (שורדת restart, retention 5000) | _satcom_listener |
 | `/var/lib/airam/activity.jsonl` | יומן שידורים (retention 500) | _activity_watcher |
-| `/var/lib/airam/track.jsonl` | buffer מתגלגל של ADS-B ל-שחזור-סשן (90 דק', append גולמי + compaction נדיר — **לא** כתיבה-אטומית-על-כל-שורה, ר' §6) | adsb.py |
+| `/var/lib/airam/track.jsonl` | buffer מתגלגל של ADS-B ל-שחזור-סשן (90 דק', append גולמי + compaction נדיר — **לא** כתיבה-אטומית-על-כל-שורה, ר' §6). שורת מטוס: `[reg, lat, lon, alt, trk, gs, nic, hex, גיל-מיקום]` (שני האחרונים — הרחבת ההצלבה) | adsb.py |
+| `/var/lib/airam/reg_hex.json` | מיפוי רישום↔hex נלמד מה-polls (≤20000, LRU), נכתב אטומית לכל היותר כל 10 דק' — לזיהוי ה-hex של הודעה ישנה עבור trace | adsb.py |
+| `/var/lib/airam/xcheck_events.jsonl` | ראיות לאירועי קליטה חריגים (מעבר לאופק/גבולי, או "שמור כראיה"): הודעה מקורית, נקודות ADS-B מקוריות, תחנה, אופק, קריטריונים. append+fsync, "האחרון מנצח" לכל id, ≤2000 | app.py |
 | `/var/lib/airam/recordings/` | הקלטות MP3 (500 קבצים / 100MB) + sidecar תמלול `<file>.mp3.tx.json` | rtl_airband, נמחק ע"י app.py |
 | `/var/lib/airam/recordings/saved/` | הקלטות **שמורות** (★) — **תת-תיקייה, לא רשימה בקובץ צד**. עד 100 קבצים / 100MB, פטורות לגמרי מ-`_sweep_recordings` (‏`glob("*.mp3")` אינו רקורסיבי — הפטור מגיע ב*אפס* שורות לוגיקה, ר' §5/§12) | app.py (`/api/recordings/star`) |
 | `/var/lib/airam/sessions/<id>/` | סשן שמור (שחזור-סשן שלב 2) — `meta.json` (אטומי), `track.jsonl.gz` (חתך `track.jsonl` בטווח), `clips/*.mp3` (הקלטות רלוונטיות — שמורה מ*עתיקה*, לא-שמורה מ*ועברת*). אין retention אוטומטי — מחיקה היא `DELETE /api/sessions/<id>` בלבד | app.py (`POST /api/sessions`) |
@@ -491,6 +507,25 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   ‏`/recordings/<name>`), `api_session_export` (`GET .../export.zip`, אותו דפוס
   בדיוק כמו `api_starred_zip`). **בלי retention אוטומטי לסשנים** — מחיקה היא
   ‏`DELETE` מפורש בלבד, עקבי עם "לא מוחקים מה שהמשתמש הגן עליו".
+- **הצלבת ADS-B + אופק רדיו / BLOS (`docs/adsb-crosscheck-design.md`):** שלוש שכבות —
+  `adsb.py` (נתונים), `xcheck.py` (ניתוח טהור), וכאן תזמור. ה-listeners קוראים
+  `_xc_submit(src, rec)` אחרי ההתמדה — **הכנסה ל-heap בלבד** (נעילה לרגע, בלי רשת/I/O,
+  לעולם לא זורק; מלא ⇒ `dropped`). `_xc_worker` (thread יחיד) מריץ `_xc_run_job` בשני
+  שלבים: מיד, ושוב `XC_RECHECK_SEC`=40ש' אחרי הקליטה כשנמצאה התאמה אבל המיקום לא
+  "נמדד"/"אינטרפולציה" — נקודות snapshot/lookup של שלב 1 עוברות כ-`prior` (⚠ ה-worker
+  **לא** קורא את `track.jsonl` — עד ~5MB לכל הודעה). `_xc_evaluate` = זהות
+  (`xcheck.message_identity`, ‏hex מבני/משתמש בלבד) + כיוון (`_xc_direction` — ב-ACARS
+  מחושב *מחדש* לפי `_ACARS_DIR_BY_LABEL`, בגלל הודעות שנשמרו לפני תיקון B6) + פרטי ADS-C
+  (`_xc_adsc` — שדה `adsc` מ-`_adsc_details`, או re-decode ב-`_run_libacars` להודעה ישנה) +
+  איסוף נקודות (`_xc_collect`: snapshot ⇐ buffer (full בלבד) ⇐ `adsb.lookup` (רק כשהמטוס
+  לא ב-snapshot, או full בלי hex) ⇐ `fetch_trace` ⇐ `fetch_opensky_track`; כל מקור נרשם
+  ב-`sources`, גם "לא נמצא"; סתירה רק ממזהה חזק — `consider(weak=True)` למועמד לפי טיסה)
+  + `xcheck.position_at`/`assess`. התקציר (`xcheck.summary`) נשמר ב-`_xc_results` עם seq,
+  ומוגש ב-`/api/<src>?xseq=` (`_xc_feed_payload`). חריג (`xcheck.is_anomalous`) ⇒
+  `_xc_save_event`. **"אמת"** (`api_xcheck_verify`): מוצא את ההודעה *בשרת*
+  (`_xc_find_message` — זיכרון ואז jsonl; לא סומכים על מה שהדפדפן שלח), `full=True`,
+  תקציב `XC_VERIFY_BUDGET_SEC`=30. תחנה: `_sanitize_station`, `api_station`.
+  `_normalize_acars` מוסיף `adsc` (גובה/`ts_sec`/דיוק/earth-ref); `_normalize_satcom` — `aes`.
 - **`__main__`:** מרים את thread השחזור `_boot_restore` (מחזיר את המצב השמור, כולל
   שכתוב קונפיג ישן בשדרוג — `_config_stale`) + `_mode_reconcile_loop` (thread
   נפרד, רץ לאורך כל הסשן — לא רק פעם אחת באתחול כמו `_boot_restore`: כל
@@ -499,7 +534,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   `sdrplay.service` שההפעלה-מחדש הפנימית שלה, כקריסה עצמית ולא כ-restart job
   מפורש, לא בהכרח מופצת דרך `PartOf=` לצרכן שהיה פעיל; `off`/`scan`/`satcom`
   לא בטיפולו — scan יש לו thread ייעודי, satcom לא משוחזר אוטומטית בכוונה) +
-  threads (activity, acars, **vdl2**, **satcom**, transcribe, adsb),
+  threads (activity, acars, **vdl2**, **satcom**, **xcheck**, transcribe, adsb),
   `app.run(threaded=True)` — threaded **חובה** כי `/stream` הוא חיבור ארוך-טווח.
 
 ---
@@ -548,6 +583,17 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   ‏`read_track_slice(t_start, t_end)` (שלב 2) מגיש חתך-זמן מדויק (ac+gap כמו
   שהם) ל-`POST /api/sessions` ב-`app.py` — `adsb.py` רק קורא וממיין, gzip/כתיבת
   ‏`meta.json`/העברת קליפים הם אחריות `app.py` (הוא היחיד שמכיר `REC_DIR`/`saved/`).
+
+- **שכבת הנתונים של ההצלבה (`docs/adsb-crosscheck-design.md`, תאימות לאחור):**
+  `_ac_record` (משותף ל-poll ול-lookup) מוסיף `t_pos` (זמן *המדידה* = `now` של המקור −
+  `seen_pos`; ‏`_resp_now`: ‏readsb jv2 במילישניות), `src_type`, `nac_p`, `rc`, `alt_baro`/
+  `alt_geom`. `_S["by_hex"]` — אינדקס לפי hex **כולל מטוסים בלי רישום**; `_S["reg_hex"]` —
+  מיפוי נלמד (`reg_to_hex`, `_save_reg_hex`). `lookup(kind, value)` — חיפוש ממוקד (hex/reg/
+  callsign) ב-`LOOKUP_SOURCES` עם cache, **הגבלת קצב לכל ספק** (`_rate_take`), timeout ו-
+  fallback; `fetch_trace(hex, t)` — trace של tar1090 (⚠ לא API מתועד); `fetch_opensky_track` —
+  OAuth2 מ-`AIRAM_OPENSKY_CLIENT_ID/SECRET` (אופציונלי); `local_track_points` — נקודות מה-
+  buffer. כל הרשת תחת `_NET_LOCK` (נפרד מ-`_LOCK` — בקשה תקועה לא חוסמת את ה-poll),
+  `_http_get_json` חוסם גודל גם אחרי gzip. ‏`make_point`/`norm_hex` מוגדרים כאן (xcheck מייבא).
 
 החלפת מיקום השדה: ערוך `ARP_LAT/ARP_LON/RUNWAYS` בראש הקובץ.
 
@@ -690,6 +736,17 @@ renderFeed/renderDetail בדיוק**, בלי מסלול קוד נפרד. `exitAr
 `liveSnapshot` ומחדש polling. `show()` **לא** מחדש polling אם `archiveDay` עדיין
 מוגדר (מעבר בין תצוגות תוך כדי עיון בארכיון לא "שובר" אותו בטעות בחזרה).
 
+**הצלבת ADS-B (`xcOpen`/`xcRender`/`pollXc`):** בפקטורי `createDataView` — `?xseq=` בכל
+poll (cursor נפרד מ-`since`; התקציר מגיע *אחרי* ההודעה), `m.xc` נכנס ל-`msgSig`, ו-`renderMsg`
+מוסיף `xcBadge` (רק לחריגה/סתירה/התאמת מיקום — בלי רעש) ו-🔎 (`xc-verify-btn`) לכל הודעה
+עם מזהה, גם בארכיון. `#xcSheet` — גיליון גלובלי (z-index 1200: מעל סרגל האפליקציה ופקדי
+Leaflet של המפות שמתחת; `isolation` על המפה שלו) עם פסק-דין וראיות **בנפרד**, טבלאות,
+קריטריונים, "מה לא נקבע", מקורות שנוסו, מפה (תחנה + עיגולי אופק, מיקום ההודעה, ADS-B,
+מסלול), ICAO ידני ו"שמור כראיה". ‏`#xcPanel` במסך הבית: תחנה (טופס + geolocation —
+secure-context בלבד), אירועים עם סינון בשרת וקישורי ייצוא עם אותו סינון. ⚠ כל טקסט דינמי
+ב-`textContent` (`xcEl`/`xcLtr`/`xcMix` — ערך LTR מבודד + המשך בעברית); `apiSend` קיבל
+`timeoutMs` אופציונלי (‏"אמת" — 60ש').
+
 **יומן השידורים (תצוגת קול):** כל שורה כוללת ★/☆ (סימון/ביטול שמירה — `toggleStar`,
 36px, `--amber`/`--amber-rgb` ולא hex קשיח — טוקן מוגדר ל-light *ו*-dark, בניגוד
 לגרסה קודמת שהייתה בלתי-נראית בשמש). **כפתור התמלול (📝) אינו בשורה** — הוא חלק
@@ -812,7 +869,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
 | POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית), `skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12), `spectrum` (bool אופציונלי — `false` לכיבוי האבחון, ר' §9/§12) ו-`gain` (‏`null`=AGC (ברירת מחדל) או מספר=gRdB ידני 20–59, נחתך; ר' §12). לכולם: ברירת מחדל = הבחירה השמורה. ⚠ ב-`gain` בלבד `null` הוא **ערך משמעותי** (AGC מפורש) ולא היעדר — הזיהוי הוא לפי נוכחות המפתח בגוף הבקשה. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
 | GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור), `wait` (כש-`leg=None`: ‏`"window"` = אף רגל לא בחלון, לא תקלה / `"sdr"` = ה-SDR לא ב-USB, תקלה) |
-| GET | `/api/acars` | הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון; `?day=YYYY-MM-DD` ארכיון מהדיסק, snapshot סטטי) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט; לא ב-`?day=`). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
+| GET | `/api/acars` | (כל שלוש תצוגות הדאטה: גם `?xseq=` ⇒ `xcheck` {id: תקציר הצלבה} + `xcheck_cursor`) הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון; `?day=YYYY-MM-DD` ארכיון מהדיסק, snapshot סטטי) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט; לא ב-`?day=`). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM, עמודות `level`+`snr`) |
 | GET | `/api/vdl2` | הודעות VDL2 אחרונות (**היום בלבד**; `?all=1`; `?day=YYYY-MM-DD` ארכיון) + שדה `adsb`. אותה סכמת כרטיס כמו ACARS + `icao`; `snr` תמיד אמיתי (dumpvdl2 מספק רצפת רעש) |
 | GET | `/api/vdl2/export?format=csv\|json` | ייצוא VDL2 (CSV עם BOM, עמודות `icao`+`level`+`snr`) |
@@ -844,6 +901,13 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/sessions/<id>/track` | מסלול ה-ADS-B של הסשן, מפוענח מ-`track.jsonl.gz` |
 | GET | `/api/sessions/<id>/clips/<name>` | קליפ אודיו של הסשן — route ייעודי, לא הרחבת `/recordings/<name>` |
 | GET | `/api/sessions/<id>/export.zip` | ייצוא הסשן כולו (מטא-דאטה+מסלול+קליפים+`<clip>.txt` לכל קליף מתומלל, נקרא חי מה-sidecar), אותו דפוס כמו `starred.zip` |
+| GET/POST | `/api/station` | תחנת הקליטה: GET; POST `{lat, lon, alt_m, name?, source?}` או `{clear:true}` (אין ברירת מחדל). דרך `_guard` (POST) |
+| GET | `/api/xcheck/status` | מצב ההצלבה: תחנה, תור, מונים (`submitted`/`done`/`dropped`/`errors`/`events_saved`), `net` (`adsb.net_status`: לכל ספק ok/fail/limited/last_error, cache, reg↔hex) |
+| POST | `/api/xcheck/verify` | "אמת מול ADS-B": `{src, t, tail?, label?, hex?, station?, save?}` — ההודעה נמצאת *בשרת* (זיכרון ⇐ jsonl), איסוף מלא כולל trace/OpenSky, תוצאה מלאה (`horizon`, `rx_at`, `position_check`, `evidence`, `level`, `verdict`, `caveats`, `sources`, `adsb_points`, `track`). חריג נשמר אוטומטית; `save:true` שומר תמיד. 404 כשההודעה לא נמצאה. דרך `_guard` |
+| GET | `/api/xcheck/events` | אירועים שמורים (תקציר) — `?min_km=&max_km=&min_dbfs=&max_dbfs=&day=&evidence=&verdict=` |
+| GET | `/api/xcheck/events/export?format=json\|csv` | ייצוא (JSON = ראיות מלאות, CSV = סיכום עם BOM), אותו סינון |
+| GET/DELETE | `/api/xcheck/events/<id>` | אירוע מלא / מחיקה (כתיבה-מחדש אטומית). DELETE דרך `_guard` |
+| GET | `/api/xcheck/events/<id>/export?format=json\|csv` | ייצוא אירוע בודד |
 | GET | `/api/sdr` | חיווי SDR: `state` (`missing`/`ours`/`switching`/`checking`/`api_down`/`api_error`/`free`/`busy`/`unavailable`/`unknown`), `usb`/`usb_desc`, `mode`+`service_state` כש-`ours`, `label` כש-`free`, `suspects` (לפי שם תהליך — רמז) כש-`busy`, `checked_age`. "פנוי" = ה-SDRplay API מציע אותו (`SoapySDRUtil --find`), נבדק רק כש-AIR-AM לא מחזיק בו |
 | GET | `/api/power` | מתח/טמפ' ה-Pi (`vcgencmd`), מוגש מ-cache בן ~2 שניות (`_POWER_TTL`) |
 | GET | `/api/metar` | METAR נתב"ג (LLBG) |
@@ -1222,7 +1286,13 @@ enabled, ובשדרוג `disable rtl_airband` אידמפוטנטי. המצב מ�
   x25-data (CPDLC/ADS-C) + xid. `_normalize_vdl2` עדיין סובל כל סוג פריים (הסינון קונפיג, לא הבטחה).
 - **gain של SDRplay הפוך:** ערך **קטן יותר = רווח גדול יותר** (IFGR/RFGR הן *הפחתות*).
 - **בידוד מקורות חיצוניים:** כל קריאת רשת (ADS-B, METAR) חייבת לרוץ ב-thread ולהיכשל
-  חיננית — **הרדיו לעולם לא תלוי באינטרנט.**
+  חיננית — **הרדיו לעולם לא תלוי באינטרנט.** בהצלבה: listener ⇒ `_xc_submit` (תור בלבד);
+  רשת רק ב-`_xc_worker` או ב-`POST /api/xcheck/verify`.
+- **BLOS — שתי שאלות, לעולם לא אחת:** "חריגה מאופק הרדיו" (גאומטריה על מודל k=4/3) ≠
+  "אימות BLOS" (ראיות שהאות *שודר מהמטוס* שם ואז). ‏ADS-B **מחזק ולא מוכיח**: ADS-B ו-ADS-C
+  נגזרים שניהם מהניווט של המטוס (רק MLAT בלתי-תלוי). מנגנון התפשטות ושיבוש GPS — לעולם לא
+  נטענים כעובדה. אינטרפולציה רק בתנאים של `xcheck.position_at`; אחרת "לא מאומת"/"אין" —
+  לא מיקום מחושב. **אין ברירת מחדל לתחנה** (AIR-AM נייד; נתב"ג כברירת מחדל היה אופק שגוי בשקט).
 - **כתיבה אטומית + עמידה בניתוק חשמל** לקבצי קונפיג/state (`_atomic_write`) — אסור
   להשאיר קובץ חצי-כתוב. לא רק `tmp`+`rename` (אטומי מול קוראים מקבילים) אלא גם
   `fsync` על קובץ ה-tmp *ועל תיקיית היעד* — בלעדיו הנתונים יכולים לשבת ב-page cache
