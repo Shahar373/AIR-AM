@@ -9,6 +9,13 @@
 
 ## [Unreleased]
 
+### תוקן
+- **בדיקה רועדת ב-CI:** `test_full_run_two_prompts_summary_and_restore` נכשלה לסירוגין
+  (`atis.gone` = `None`): הבדיקה דוחסת זמן פי ~100, וחלון ה-ATIS היה ~0.2ש' בלבד — עצירת
+  scheduler אחת על runner רוקנה אותו. ה-fixture `fast` מגדיל את `EXP_REF_SEC` ל-0.6ש',
+  ונוספה בדיקה מפורשת שחלונות ה-ATIS אינם ריקים (הודעת כשל מסבירה במקום `None is True`).
+  שינוי בבדיקות בלבד — קבועי הייצור ו-`_experiment_summary` לא השתנו.
+
 ## [2.28.0] - 2026-10-23
 
 ### נוסף
