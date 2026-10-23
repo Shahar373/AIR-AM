@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [2.27.0] - 2026-10-23
+
 ### נוסף
 - **הצלבת ACARS/VDL2/SATCOM מול ADS-B והערכת קליטה מעבר לאופק (BLOS) (v2.27.0)** —
   ר' `docs/adsb-crosscheck-design.md`. מקרה הבדיקה: ADS-C של G-ZBKM (‏131.825, ‏23.10.2026,
