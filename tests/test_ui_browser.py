@@ -840,3 +840,69 @@ def test_home_tab_closes_replay_view(page):
     page.click("#modeSeg button[data-v=home]")
     expect(page.locator("#replayView")).to_be_hidden()
     expect(page.locator("#homeView")).to_be_visible()
+
+
+# --- פיצ'רים קטנים -----------------------------------------------------------
+
+def test_replay_next_prev_buttons_step_between_clips(page):
+    """⏮/⏭ בסרגל הדביק עוברים בין תשדורות בלי לגלול את הרשימה שמתחת."""
+    api = {**_standby_api(), **_replay_api("S-B")}
+    meta = api["/api/sessions/S-A"]
+    base = meta["session"]["t_start"]
+    meta["session"]["clips"] = [
+        {"file": f"airam_20251009_1010{i}0_132500000.mp3", "ts": base + 60 * (i + 1),
+         "dur": 4.0, "freq": 132.5, "tx": {"state": "none"}} for i in range(3)]
+    # קובץ שמע תקין (WAV שקט) — 404 היה מפעיל error => דילוג אוטומטי לקליף הבא
+    import io
+    import wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+        w.writeframes(b"\0\0" * 8000 * 4)
+    wav = buf.getvalue()
+
+    def clip(route, url):
+        route.fulfill(status=200, content_type="audio/wav", body=wav)
+    for c in meta["session"]["clips"]:
+        api["/api/sessions/S-A/clips/" + c["file"]] = clip
+    _mount(page, overrides=api)
+    page.evaluate("HTMLMediaElement.prototype.play = function () { return Promise.resolve(); }")
+    page.locator("#replayOpenListBtn").click()
+    page.locator(".replay-session-card button.primary").nth(0).click()
+    expect(page.locator("#replayTxList .replay-tx-row")).to_have_count(3)
+    page.locator("#replayNextBtn").click()
+    expect(page.locator("#replayTxList .replay-tx-row").nth(0)).to_have_class(re.compile(r"\bon\b"))
+    page.locator("#replayNextBtn").click()
+    expect(page.locator("#replayTxList .replay-tx-row").nth(1)).to_have_class(re.compile(r"\bon\b"))
+    page.locator("#replayPrevBtn").click()
+    expect(page.locator("#replayTxList .replay-tx-row").nth(0)).to_have_class(re.compile(r"\bon\b"))
+
+
+def test_activity_frequency_tap_tunes(page):
+    """נגיעה בתדר בשורת היומן מכווננת אליו; התדר הנוכחי לא לחיץ (אין מה לכוונן)."""
+    tunes = []
+
+    def tune(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        tunes.append(body["freq"])
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, **_default_api()["/api/state"],
+                                       "freq": body["freq"], "app_mode": "voice"}))
+    events = [{"ts": 1_760_000_000, "freq": 118.3, "file": None, "dur": 3.0},
+              {"ts": 1_760_000_100, "freq": 132.5, "file": None, "dur": 3.0}]
+    _mount(page, overrides={"/api/activity": {"ok": True, "events": events},
+                            "/api/tune": tune})
+    expect(page.locator("#activity .act-row .f.tunable")).to_have_count(1)
+    page.locator("#activity .act-row .f.tunable").click()
+    expect(page.locator("#status")).to_contain_text("מתחבר לסטרים", timeout=5000)
+    assert tunes == [118.3]
+
+
+def test_long_toast_stays_longer_and_tap_dismisses(page):
+    _mount(page)
+    page.evaluate("showToast('" + "א" * 180 + "')")
+    expect(page.locator("#toast")).to_be_visible()
+    page.wait_for_timeout(6000)                  # מעבר ל-5ש' הישנים — עדיין גלוי
+    expect(page.locator("#toast")).to_be_visible()
+    page.locator("#toastMsg").click()
+    expect(page.locator("#toast")).to_be_hidden()

@@ -778,6 +778,8 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 - **תמלול** (`#replayNowTx`) — הטקסט של התשדורת המתנגנת, מ-`tx` שמגיע חי
   מ-`GET /api/sessions/<id>`. מבחין בין חמשת מצבי ה-`tx.state` כמו יומן
   השידורים (§12: "לא ניסינו" ≠ "ניסינו ונכשלנו"), ו-`dir` לפי `tx.lang`.
+- **⏮/⏭** בסרגל הדביק (`stepReplayClip`) — מעבר בין תשדורות בלי לגלול את הרשימה;
+  ⏮ אחרי 2ש' לתוך תשדורת חוזר לתחילתה (כמו נגני מוזיקה).
 - **נגן**: `<audio>` יחיד משותף לשני מצבי השמעה — **"דלג על שקט"**
   (`#replaySkipSilence`, ברירת מחדל; `onReplayClipEnded` קופץ לקליפ הבא
   כש-`ended` **או** `error` מגיע — קובץ פגום בודד לא תוקע את הנגן) מול
@@ -836,7 +838,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET/DELETE | `/api/sessions/<id>` | GET: `meta.json` + שדה `tx` לכל קליף (**נקרא חי מה-sidecar**, לא מוקפא בשמירה — קליף יכול להתמלל אחריה). DELETE: מחיקת הסשן כולו (בלתי הפיך). דרך `_guard` (DELETE בלבד) |
 | GET | `/api/sessions/<id>/track` | מסלול ה-ADS-B של הסשן, מפוענח מ-`track.jsonl.gz` |
 | GET | `/api/sessions/<id>/clips/<name>` | קליפ אודיו של הסשן — route ייעודי, לא הרחבת `/recordings/<name>` |
-| GET | `/api/sessions/<id>/export.zip` | ייצוא הסשן כולו (מטא-דאטה+מסלול+קליפים), אותו דפוס כמו `starred.zip` |
+| GET | `/api/sessions/<id>/export.zip` | ייצוא הסשן כולו (מטא-דאטה+מסלול+קליפים+`<clip>.txt` לכל קליף מתומלל, נקרא חי מה-sidecar), אותו דפוס כמו `starred.zip` |
 | GET | `/api/sdr` | חיווי SDR: `state` (`missing`/`ours`/`switching`/`checking`/`api_down`/`api_error`/`free`/`busy`/`unavailable`/`unknown`), `usb`/`usb_desc`, `mode`+`service_state` כש-`ours`, `label` כש-`free`, `suspects` (לפי שם תהליך — רמז) כש-`busy`, `checked_age`. "פנוי" = ה-SDRplay API מציע אותו (`SoapySDRUtil --find`), נבדק רק כש-AIR-AM לא מחזיק בו |
 | GET | `/api/power` | מתח/טמפ' ה-Pi (`vcgencmd`), מוגש מ-cache בן ~2 שניות (`_POWER_TTL`) |
 | GET | `/api/metar` | METAR נתב"ג (LLBG) |

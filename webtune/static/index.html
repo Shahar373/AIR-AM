@@ -193,6 +193,10 @@
     }
     .statusbar::-webkit-scrollbar { display: none; }
     .statusbar > * { flex: none; }
+    /* ברצועה הנגללת (טלפון) מתח/SDR בתקלה היו מחוץ למסך — מקדימים אותם. ‏GPS לא:
+       השיבוש כרוני ליד נתב"ג, והוא היה דוחק את השאר החוצה כל הזמן. */
+    .statusbar > .pwr.warn, .statusbar > .pwr.bad,
+    .statusbar > .pill.err:not(#gpsPill), .statusbar > .pill.warn:not(#gpsPill) { order: -1; }
     .statusbar .sb-label { color: var(--text-faint); letter-spacing: .06em; font-weight: 600; }
     .statusbar .pwr { margin: 0; }
 
@@ -634,6 +638,7 @@
       border-radius: var(--r-sm); background: var(--panel-2); border: 1px solid var(--border); }
     .replay-player-controls { display: flex; align-items: center; gap: var(--sp-3); margin-top: .5rem; flex-wrap: wrap; }
     .replay-player-controls .play-main { width: 48px; height: 48px; font-size: 1.15rem; flex: none; }
+    .replay-player-controls .replay-step { width: 44px; height: 44px; padding: 0; flex: none; }
     .replay-time { display: flex; flex-direction: column; line-height: 1.25;
       font-family: var(--font-mono); font-variant-numeric: tabular-nums; direction: ltr; }
     /* שעון-קיר גדול: בתעופה "20:46" הוא המידע, לא "07:30 מתחילת הסשן" */
@@ -833,6 +838,8 @@
     .act-row .t { color: var(--dim); font-size: .76rem; min-width: 4.4em; flex: none; }
     .act-row .f { direction: ltr; font-variant-numeric: tabular-nums;
       color: var(--accent); font-size: .85rem; font-weight: 600; flex: none; }
+    .act-row .f.tunable { cursor: pointer; text-decoration: underline dotted;
+      text-underline-offset: 3px; padding: .35rem 0; }
     .act-row .n { color: var(--dim); flex: 1 1 4em; min-width: 3.5em;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .act-row .dur { color: var(--dim); font-size: .74rem; flex: none;
@@ -1569,7 +1576,11 @@
           <canvas id="replayDensity" class="replay-density"
                   title="צפיפות תשדורות לאורך הסשן — לחץ כדי לקפוץ"></canvas>
           <div class="replay-player-controls">
+            <!-- סדר DOM הפוך בכוונה: ב-RTL הראשון מוצג מימין, וכך ⏮ משמאל ו-⏭ מימין —
+                 פקדי מדיה לא משוקפים, וציר-הצפיפות שמעליהם מצויר משמאל לימין. -->
+            <button type="button" class="ghost replay-step" id="replayNextBtn" aria-label="התשדורת הבאה">⏭</button>
             <button type="button" class="play-main" id="replayPlayBtn" aria-label="נגן / השהה">▶</button>
+            <button type="button" class="ghost replay-step" id="replayPrevBtn" aria-label="התשדורת הקודמת">⏮</button>
             <div class="replay-time">
               <b id="replayClockTxt">--:--</b>
               <span id="replayTimeTxt">00:00 / 00:00</span>
@@ -2516,8 +2527,16 @@
       undoBtn.classList.toggle("hidden", !onUndo);   // תזכורת בלי "בטל" (למשל החלפת אנטנה)
       if (onUndo) undoBtn.onclick = () => { $("toast").classList.add("hidden"); clearTimeout(toastTimer); onUndo(); };
       $("toast").classList.remove("hidden");
-      toastTimer = setTimeout(() => $("toast").classList.add("hidden"), 5000);
+      // הסבר ארוך (למשל חיווי ה-SDR, ~200 תווים) לא נקרא ב-5ש' — זמן לפי אורך, עד 15ש'
+      toastTimer = setTimeout(() => $("toast").classList.add("hidden"),
+                              Math.max(5000, Math.min(15000, String(msg).length * 70)));
     }
+    // נגיעה בטוסט סוגרת אותו (חוץ מכפתור "בטל", שיש לו פעולה משלו)
+    $("toast").addEventListener("click", (e) => {
+      if (e.target.closest("#toastUndo")) return;
+      clearTimeout(toastTimer);
+      $("toast").classList.add("hidden");
+    });
 
     function renderPresets(active) {
       const box = $("presets");
@@ -4096,6 +4115,7 @@
         d.className = "act-tx";
         if ((ev.tx.lang || "en") === "he") d.dir = "rtl";   // תמלול עברי — RTL
         d.textContent = ev.text;
+        d.appendChild(mkCopyBtn(ev.text));
         return d;
       }
       if (st === "pending") {
@@ -4216,6 +4236,15 @@
         t.title = new Date(ev.ts * 1000).toLocaleString("he-IL");
         const f = document.createElement("span");
         f.className = "f"; f.textContent = ev.freq != null ? ev.freq.toFixed(3) : "—";
+        // נגיעה בתדר => כיוונון אליו (שידור ששמעת ביומן ורוצה להמשיך להאזין לו)
+        if (ev.freq != null && Math.abs(ev.freq - current) >= 5e-4) {
+          f.classList.add("tunable");
+          f.setAttribute("role", "button");
+          f.tabIndex = 0;
+          f.title = "כוונן ל-" + ev.freq.toFixed(3);
+          f.onclick = () => { showToast("מכוונן ל-" + ev.freq.toFixed(3) + " MHz"); tune(ev.freq); };
+          f.onkeydown = (e) => { if (e.key === "Enter") f.onclick(); };
+        }
         const n = document.createElement("span");
         n.className = "n";
         const p = ev.freq != null && presetFor(ev.freq);
@@ -6473,6 +6502,24 @@
       else showView("home");
     };
     $("replayPlayBtn").onclick = toggleReplayPlay;
+    // ⏮/⏭ — מעבר בין תשדורות בלי לגלול את הרשימה שמתחת לסרגל הדביק
+    function stepReplayClip(dir) {
+      if (!rp || !rp.clips.length) return;
+      const cur = rp.curClip || clipAtReplay(rp.playT);
+      const ref = cur ? cur.start : rp.playT;
+      let target = null;
+      if (dir > 0) target = nextReplayClipAfter(ref);
+      else {
+        // לחיצה אחרי 2ש' לתוך תשדורת => לתחילתה; אחרת — לקודמת
+        if (cur && rp.playT - cur.start > 2) target = cur;
+        else for (const c of rp.clips) { if (c.start < ref - 1e-3) target = c; }
+      }
+      if (!target) return;
+      seekAndContinue(target.start);
+      if (!rp.playing) playReplay();
+    }
+    $("replayPrevBtn").onclick = () => stepReplayClip(-1);
+    $("replayNextBtn").onclick = () => stepReplayClip(1);
     $("replaySkipSilence").addEventListener("change", () => {
       if (!rp) return;
       rp.skip = $("replaySkipSilence").checked;

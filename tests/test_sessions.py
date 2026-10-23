@@ -275,6 +275,28 @@ def test_export_zip_contains_meta_track_and_clips(client, paths):
         assert meta["id"] == sid
 
 
+def test_export_zip_includes_transcripts(client, paths):
+    """תמלול כל קליף נכלל ב-ZIP לצד הקליפ (כמו starred.zip) — ונקרא חי מה-sidecar,
+    כך שקליף שתומלל *אחרי* שמירת הסשן מגיע עם התמלול."""
+    now = time.time()
+    _write_track([_ac_row(now - 30, [("4X-EHD", 32.2, 34.7, 3200, 90.0, 180.0, 8)])])
+    _mk_rec(NAME1, age=30)
+    _mk_rec(NAME2, age=20)
+    sid = client.post("/api/sessions", json={"minutes": 5}).get_json()["id"]
+    clips = app.SESSIONS_DIR / sid / app.SESSION_CLIPS_DIRNAME
+    app._write_tx(clips / NAME1, "ok", text="CLEARED TO LAND RUNWAY 30")
+    app._write_tx(clips / NAME2, "empty")
+    r = client.get(f"/api/sessions/{sid}/export.zip")
+    tmp = paths / "export.zip"
+    tmp.write_bytes(r.data)
+    with zipfile.ZipFile(tmp) as z:
+        names = z.namelist()
+        txt = f"{app.SESSION_CLIPS_DIRNAME}/{NAME1}.txt"
+        assert txt in names
+        assert z.read(txt).decode().strip() == "CLEARED TO LAND RUNWAY 30"
+        assert f"{app.SESSION_CLIPS_DIRNAME}/{NAME2}.txt" not in names   # אין טקסט => אין קובץ
+
+
 def test_export_zip_404_for_unknown_session(client, paths):
     assert client.get("/api/sessions/20260101-0000/export.zip").status_code == 404
 

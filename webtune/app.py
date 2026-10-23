@@ -4562,6 +4562,10 @@ def api_session_export(session_id):
                         z.write(p, f"{SESSION_CLIPS_DIRNAME}/{p.name}")
                     except OSError:
                         continue
+                    # התמלול לצד הקליפ, כמו ב-starred.zip — נקרא חי מה-sidecar
+                    tx = _read_tx(p)
+                    if tx.get("text"):
+                        z.writestr(f"{SESSION_CLIPS_DIRNAME}/{p.name}.txt", tx["text"] + "\n")
         tmp.close()
         resp = send_file(tmp.name, mimetype="application/zip", as_attachment=True,
                          download_name=f"airam-session-{session_id}.zip")
