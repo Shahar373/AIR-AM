@@ -449,3 +449,70 @@ def test_live_worker_never_reads_track_buffer_and_interpolates_across_stages(cli
     with app._xc_res_lock:
         summ = app._xc_results[("acars", 3)][1]
     assert summ["adsb"] == "interpolated" and summ["v"] == "line_of_sight"
+
+
+# --- ייבוא trace ידני (ארכיון globe_history של adsb.lol) ------------------------
+
+def _trace_file(icao="406f79", reg="G-ZBKM", gz=True):
+    """קובץ trace_full בפורמט readsb (⚠ נקודות *סינתטיות* — בודקות את הצנרת)."""
+    import base64
+    import gzip as _gz
+    base = T_RX - 700.0
+    pts = _synthetic(ZBKM_LAT, ZBKM_LON, T_RX - 0.625, (-40, 45))
+    trace = [[p["t"] - base, p["lat"], p["lon"], 38000, 480.0, 120.0, 0, 0,
+              {"nic": 8, "nac_p": 9}, "adsb_icao", 38600] for p in pts]
+    body = json.dumps({"icao": icao, "r": reg, "t": "B789", "timestamp": base, "trace": trace}).encode()
+    return base64.b64encode(_gz.compress(body) if gz else body).decode()
+
+
+def test_verify_with_imported_trace_replaces_network_history(client, monkeypatch):
+    """globe.adsb.lol החזיר 403 על ה-Pi => המשתמש מעלה את הקובץ מהארכיון. הקובץ
+    משמש במקום trace/OpenSky מהרשת (לא נקראים בכלל), ונשמר בראיה כמקור "import"."""
+    _set_station(client)
+    _store_jsonl(app._normalize_acars(_raw_b6()))
+    calls = _mock_net(monkeypatch, lookup=_lookup_found_now, trace=_trace_zbkm)
+    r = client.post("/api/xcheck/verify", json={"src": "acars", "t": T_RX, "trace_b64": _trace_file(),
+                                                "trace_name": "trace_full_406f79.json"})
+    assert r.status_code == 200, r.get_json()
+    res = r.get_json()["result"]
+    assert calls["trace"] == [] and calls["opensky"] == []
+    imp = [s for s in res["sources"] if s["name"] == "import"][0]
+    assert imp["status"] == "ok" and imp["file"] == "trace_full_406f79.json" and imp["covers"]
+    assert res["rx_at"]["status"] == "interpolated" and res["rx_at"]["provider"] == "import"
+    assert res["verdict"] == "blos_supported" and res["match"]["by"] == "reg"
+    assert all(p["origin"] == "import" for p in res["adsb_points"])
+
+
+def test_imported_trace_of_another_aircraft_is_a_conflict(client, monkeypatch):
+    _set_station(client)
+    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _mock_net(monkeypatch)
+    res = client.post("/api/xcheck/verify", json={
+        "src": "acars", "t": T_RX, "trace_b64": _trace_file(icao="4ca123", reg="EI-XYZ")}).get_json()["result"]
+    imp = [s for s in res["sources"] if s["name"] == "import"][0]
+    assert imp["status"] == "conflict" and imp["points"] == 0
+    assert res["match"]["conflict"] == "reg_mismatch" and res["level"] == "conflict"
+    assert res["rx_at"]["status"] == "none"
+
+
+def test_imported_trace_without_comparable_identity_is_not_used(client, monkeypatch):
+    """הודעה עם מספר טיסה בלבד וקובץ בלי רישום — אין מה להשוות => לא בשימוש."""
+    _set_station(client)
+    _store_jsonl(app._normalize_acars(_raw_b6(tail=None)))
+    _mock_net(monkeypatch)
+    res = client.post("/api/xcheck/verify", json={
+        "src": "acars", "t": T_RX, "trace_b64": _trace_file(reg=None)}).get_json()["result"]
+    imp = [s for s in res["sources"] if s["name"] == "import"][0]
+    assert imp["status"] == "unmatched" and res["rx_at"]["status"] == "none"
+
+
+def test_imported_trace_input_errors(client, monkeypatch):
+    import base64
+    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _mock_net(monkeypatch)
+    post = lambda b64: client.post("/api/xcheck/verify", json={"src": "acars", "t": T_RX, "trace_b64": b64})
+    assert post("!!!not base64!!!").status_code == 400
+    assert post(base64.b64encode(b"not json").decode()).status_code == 400
+    assert post(_trace_file(gz=False)).status_code == 200                   # לא דחוס — גם תקין
+    monkeypatch.setattr(adsb, "TRACE_MAX_BYTES", 100)
+    assert post(_trace_file()).status_code == 413

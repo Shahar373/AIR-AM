@@ -10,6 +10,8 @@
 #  מיועד לרשת פרטית מהימנה בלבד. רץ כמשתמש לא-root (airam) עם sudoers ממוקד
 #  ל-restart בלבד; אימות PIN אופציונלי (AIRAM_PIN), כבוי כברירת מחדל.
 # ============================================================================
+import base64
+import binascii
 import collections
 import csv
 import gzip
@@ -6401,7 +6403,7 @@ def _xc_point(rec, provider, origin, t_fallback):
 _XC_BY_RANK = {"hex": 3, "reg": 2, "flight": 1, None: 0}
 
 
-def _xc_collect(rec, ident, *, network, full, prior=None, deadline=None):
+def _xc_collect(rec, ident, *, network, full, prior=None, deadline=None, imported=None):
     """אוסף נקודות ADS-B סביב זמן הקליטה: snapshot חי → buffer מקומי → lookup
     ממוקד → (full בלבד) trace היסטורי → OpenSky. כל מקור מתועד ב-sources —
     כולל מה *לא* נמצא ולמה ("לא ניסינו" ≠ "ניסינו ולא נמצא", §12)."""
@@ -6493,7 +6495,42 @@ def _xc_collect(rec, ident, *, network, full, prior=None, deadline=None):
                             "provider": res.get("provider"), "points": got,
                             "detail": "; ".join(res.get("errors") or []) or None})
 
-    if full and network:
+    if imported is not None:
+        # trace שהמשתמש העלה (adsb.import_trace). ⚠ הקובץ חייב לזהות את *המטוס הזה*
+        # לפי ה-icao/r שבו — קובץ של מטוס אחר שנבחר בטעות לא הופך לראיה. hex שנלמד
+        # מכאן מסומן "import": זיהוי לפי רישום תואם, לא hex מבני מההודעה.
+        meta = imported.get("meta") or {}
+        f_hex, f_reg = adsb.norm_hex(meta.get("icao")), adsb.norm_reg(meta.get("r"))
+        status, by = imported.get("status"), None
+        if status == "ok":
+            if ident["hex"] and f_hex and f_hex != ident["hex"]:
+                status = "conflict"
+                if not best["conflict"] and ident.get("hex_src") in ("message", "user"):
+                    best.update(conflict="hex_mismatch", conflict_src="import")
+            elif ident["reg"] and f_reg and f_reg != ident["reg"]:
+                status = "conflict"
+                if not best["conflict"]:
+                    best.update(conflict="reg_mismatch", conflict_src="import")
+            elif ident["hex"] and f_hex == ident["hex"]:
+                by = "hex" if ident.get("hex_src") in ("message", "user") else "reg"
+            elif ident["reg"] and f_reg == ident["reg"]:
+                by = "reg"
+            else:
+                status = "unmatched"            # אין בקובץ מזהה שאפשר להשוות להודעה
+        if by:
+            pts += imported["points"]
+            if not ident["hex"] and f_hex:
+                ident.update(hex=f_hex, hex_src="import")
+            if _XC_BY_RANK[by] > _XC_BY_RANK[best["by"]]:
+                best.update(by=by, meta={"hex": f_hex, "reg": meta.get("r"), "type": meta.get("t")})
+        covers = (imported.get("t_first") is not None
+                  and imported["t_first"] <= t <= imported["t_last"])
+        sources.append({"name": "import", "status": "ok" if by else status,
+                        "file": imported.get("name"), "points": len(imported["points"]) if by else 0,
+                        "covers": covers if by else None,
+                        "detail": imported.get("error") or (
+                            "הקובץ לא מזהה את המטוס שבהודעה" if status == "unmatched" else None)})
+    if full and network and imported is None:
         if ident["hex"] and budget_ok():
             tr = adsb.fetch_trace(ident["hex"], t)
             use = tr.get("status") == "ok"
@@ -6559,7 +6596,7 @@ def _xc_evidence_points(points, t):
 
 
 def _xc_evaluate(src, rec, *, network, full, hex_override=None, station=None, prior=None,
-                 deadline=None):
+                 deadline=None, imported=None):
     """הצלבה מלאה להודעה אחת => (תוצאה, נקודות). התוצאה = xcheck.assess + כל מה
     שנדרש כדי לחקור אותה אחר כך (ההודעה המקורית, הזהות, מקורות שנוסו, נקודות
     ADS-B מקוריות, מסלול, התחנה שבשימוש, גרסת התוכנה)."""
@@ -6567,7 +6604,8 @@ def _xc_evaluate(src, rec, *, network, full, hex_override=None, station=None, pr
     ident = xcheck.message_identity(rec, hex_override)
     direction, basis = _xc_direction(src, rec)
     adsc = _xc_adsc(rec, direction)
-    col = _xc_collect(rec, ident, network=network, full=full, prior=prior, deadline=deadline)
+    col = _xc_collect(rec, ident, network=network, full=full, prior=prior, deadline=deadline,
+                      imported=imported)
     pts = col["points"]
     rx_at = xcheck.position_at(pts, t)
     pos_at = (xcheck.position_at(pts, adsc["t"])
@@ -6854,7 +6892,8 @@ def api_xcheck_status():
 @app.route("/api/xcheck/verify", methods=["POST"])
 def api_xcheck_verify():
     """"אמת מול ADS-B" להודעה אחת (חיה או ישנה): ‏{src, t, tail?, label?, hex?,
-    station?, save?}. מושך גם trace היסטורי. אירוע חריג נשמר אוטומטית; ‏save:true
+    station?, save?, trace_b64?, trace_name?}. מושך גם trace היסטורי — או, כשהמשתמש
+    העלה קובץ trace (trace_b64), משתמש בו במקום ה-trace/OpenSky מהרשת. אירוע חריג נשמר אוטומטית; ‏save:true
     שומר כל תוצאה. בקשה חוסמת (רשת, ≤~XC_VERIFY_BUDGET_SEC) — בבקשת המשתמש בלבד,
     מחוץ לנתיב הרדיו. דרך _guard."""
     data = request.get_json(silent=True) or {}
@@ -6873,11 +6912,26 @@ def api_xcheck_verify():
         station, err = _sanitize_station(data["station"])
         if err:
             return jsonify(ok=False, error="תחנה: " + err), 400
+    imported = None
+    if data.get("trace_b64"):
+        # ‏trace ידני (ר' adsb.import_trace): base64 בגוף ה-JSON — פשוט מ-multipart, וה-UI
+        # ממילא שולח JSON. החסם נבדק *לפני* הפענוח, לא אחריו.
+        b64 = data["trace_b64"]
+        if not isinstance(b64, str) or len(b64) > adsb.TRACE_MAX_BYTES * 4 // 3 + 8:
+            return jsonify(ok=False, error="קובץ ה-trace גדול מדי"), 413
+        try:
+            raw = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError):
+            return jsonify(ok=False, error="קובץ ה-trace לא קודד כראוי"), 400
+        imported = adsb.import_trace(raw, data.get("trace_name"))
+        if imported["status"] != "ok":
+            return jsonify(ok=False, error="קובץ ה-trace לא תקין: " + (imported.get("error") or "")), 400
     rec = _xc_find_message(src, t, data.get("tail"), data.get("label"))
     if rec is None:
         return jsonify(ok=False, error="ההודעה לא נמצאה (לא בזיכרון ולא ביומן)"), 404
     res, _pts = _xc_evaluate(src, rec, network=True, full=True, hex_override=hex_override,
-                             station=station, deadline=time.monotonic() + XC_VERIFY_BUDGET_SEC)
+                             station=station, deadline=time.monotonic() + XC_VERIFY_BUDGET_SEC,
+                             imported=imported)
     _xc_store(src, rec.get("id"), res)
     saved = None
     if data.get("save") or xcheck.is_anomalous(res):

@@ -989,13 +989,19 @@ def _http_get_json(url, timeout, max_bytes, headers=None):
             body = resp.read(max_bytes + 1)
     except urllib.error.HTTPError as e:
         raise _HTTPStatus(e.code) from None
+    return _decode_json_bytes(body, max_bytes)
+
+
+def _decode_json_bytes(body, max_bytes):
+    """bytes => JSON, חסום בגודל גם אחרי gzip (פצצת דחיסה). משותף ל-GET ולקובץ
+    trace שהמשתמש מעלה (import_trace) — globe_history דוחס את קובצי ה-trace."""
     if len(body) > max_bytes:
-        raise ValueError("תשובה גדולה מהחסם")
+        raise ValueError("גדול מהחסם")
     if body[:2] == b"\x1f\x8b":
         d = zlib.decompressobj(16 + zlib.MAX_WBITS)
         body = d.decompress(body, max_bytes)
         if d.unconsumed_tail:
-            raise ValueError("תשובה דחוסה גדולה מהחסם")
+            raise ValueError("תוכן דחוס גדול מהחסם")
     return json.loads(body.decode("utf-8"))
 
 
@@ -1024,9 +1030,12 @@ def lookup(kind, value):
     if hit is not None:
         return {**hit, "cached": True}
     errors, limited = [], 0
+    # ⚠ הספק שה-poll משתמש בו כרגע — *אחרון*: ה-poll כבר פונה אליו כל 15ש' מאותה
+    # כתובת IP, ו-lookup נוסף אליו קיבל HTTP 429 בבדיקה על ה-Pi (23.10.2026, adsb.lol
+    # — "Rate limits are dynamic"). הספק השני פנוי, וה-poll עדיין נשאר גיבוי.
     with _LOCK:
-        order = [SOURCES[_S["src_idx"]][0]]          # הספק שעובד כרגע ב-poll — ראשון
-    order += [n for n, _t in LOOKUP_SOURCES if n not in order]
+        poll_src = SOURCES[_S["src_idx"]][0]
+    order = [n for n, _t in LOOKUP_SOURCES if n != poll_src] + [poll_src]
     for name in order:
         tmpl = dict(LOOKUP_SOURCES).get(name, {}).get(kind)
         if not tmpl:
@@ -1099,6 +1108,26 @@ def parse_trace(data, provider="adsb.lol"):
                               nac_p=details.get("nac_p"), provider=provider, origin="trace"))
     meta = {k: data.get(k) for k in ("icao", "r", "t", "desc") if data.get(k)}
     return pts, meta
+
+
+def import_trace(raw_bytes, name=None):
+    """trace שהמשתמש העלה ידנית — קובץ trace_full_<hex>.json מתוך הארכיון היומי של
+    adsb.lol ב-GitHub (globe_history_YYYY, ‏ODbL), למשל כש-globe.adsb.lol מחזיר 403
+    (נבדק על ה-Pi, 23.10.2026). אותו פורמט readsb בדיוק (parse_trace), דחוס או לא.
+    מחזיר {"status": "ok"|"invalid", "points", "meta", "t_first", "t_last", "error"}.
+    לעולם לא זורק. ⚠ קלט מהמשתמש — חסום בגודל, ולא נכתב לדיסק (רק הנקודות בראיה)."""
+    try:
+        data = _decode_json_bytes(raw_bytes, TRACE_MAX_BYTES)
+        pts, meta = parse_trace(data, provider="import")
+    except Exception as e:                      # JSON פגום/לא-trace/גדול מדי/gzip שבור
+        return {"status": "invalid", "points": [], "error": str(e)[:200]}
+    for p in pts:
+        p["origin"] = "import"
+    ts = [p["t"] for p in pts if p["t"] is not None]
+    return {"status": "ok" if pts else "invalid", "points": pts, "meta": meta,
+            "name": (str(name)[:120] if name else None),
+            "t_first": min(ts) if ts else None, "t_last": max(ts) if ts else None,
+            "error": None if pts else "אין נקודות בקובץ"}
 
 
 def fetch_trace(hex_, t):

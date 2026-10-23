@@ -163,10 +163,11 @@ def test_lookup_by_reg_builds_url_and_caches(monkeypatch):
 
     monkeypatch.setattr(adsb, "_http_get_json", fake)
     r = adsb.lookup("reg", ".G-ZBKM")
-    assert r["status"] == "ok" and r["provider"] == "adsb.lol"
-    assert calls == ["https://api.adsb.lol/v2/reg/G-ZBKM"]      # הנקודה הוסרה, המקף נשמר
+    # ה-poll על adsb.lol (src_idx=0) => ה-lookup מתחיל ב-adsb.fi (ר' test_lookup_avoids_poll_provider)
+    assert r["status"] == "ok" and r["provider"] == "adsb.fi"
+    assert calls == ["https://opendata.adsb.fi/api/v2/registration/G-ZBKM"]   # הנקודה הוסרה, המקף נשמר
     rec = r["aircraft"][0]
-    assert rec["t_pos"] == 1_792_763_145.5 and rec["provider"] == "adsb.lol"
+    assert rec["t_pos"] == 1_792_763_145.5 and rec["provider"] == "adsb.fi"
     assert adsb.reg_to_hex("G-ZBKM") == "406F79"                  # נלמד גם מ-lookup
     again = adsb.lookup("reg", "G-ZBKM")
     assert again["cached"] and len(calls) == 1                    # cache — בלי בקשה נוספת
@@ -177,7 +178,7 @@ def test_lookup_miss_is_cached_longer(monkeypatch):
     monkeypatch.setattr(adsb, "_http_get_json",
                         lambda url, *a, **k: calls.append(url) or _resp([]))
     assert adsb.lookup("hex", "406F79")["status"] == "miss"
-    assert calls == ["https://api.adsb.lol/v2/hex/406f79"]
+    assert calls == ["https://opendata.adsb.fi/api/v2/hex/406f79"]
     assert adsb.lookup("hex", "406f79")["status"] == "miss" and len(calls) == 1
 
 
@@ -186,17 +187,70 @@ def test_lookup_falls_back_to_second_provider(monkeypatch):
 
     def fake(url, *a, **k):
         calls.append(url)
-        if "adsb.lol" in url:
+        if "adsb.fi" in url:
             raise TimeoutError("timed out")
         return _resp([AC_ZBKM])
 
     monkeypatch.setattr(adsb, "_http_get_json", fake)
     r = adsb.lookup("reg", "G-ZBKM")
-    assert r["status"] == "ok" and r["provider"] == "adsb.fi"
-    assert calls[1] == "https://opendata.adsb.fi/api/v2/registration/G-ZBKM"
+    assert r["status"] == "ok" and r["provider"] == "adsb.lol"
+    assert calls[1] == "https://api.adsb.lol/v2/reg/G-ZBKM"
     assert any("timed out" in e for e in r["errors"])
     st = adsb.net_status()["providers"]
-    assert st["adsb.lol"]["fail"] == 1 and st["adsb.fi"]["ok"] == 1
+    assert st["adsb.fi"]["fail"] == 1 and st["adsb.lol"]["ok"] == 1
+
+
+@pytest.mark.parametrize("src_idx,first", [(0, "opendata.adsb.fi"), (1, "api.adsb.lol")])
+def test_lookup_avoids_poll_provider(monkeypatch, src_idx, first):
+    """⚠ נצפה על ה-Pi (23.10.2026): ‏lookup ל-adsb.lol קיבל HTTP 429 — ה-poll כבר פונה
+    אליו כל 15ש' מאותה כתובת. הספק שה-poll *לא* משתמש בו נשאל ראשון; ה-poll — אחרון."""
+    calls = []
+    monkeypatch.setattr(adsb, "_http_get_json", lambda url, *a, **k: calls.append(url) or _resp([]))
+    with adsb._LOCK:
+        adsb._S["src_idx"] = src_idx
+    adsb.lookup("hex", "406f79")
+    assert calls and first in calls[0]
+
+
+def test_lookup_429_on_first_falls_back_to_poll_provider(monkeypatch):
+    calls = []
+
+    def fake(url, *a, **k):
+        calls.append(url)
+        if "adsb.fi" in url:
+            raise adsb._HTTPStatus(429)
+        return _resp([AC_ZBKM])
+
+    monkeypatch.setattr(adsb, "_http_get_json", fake)
+    r = adsb.lookup("reg", "G-ZBKM")
+    assert r["status"] == "ok" and r["provider"] == "adsb.lol" and "HTTP 429" in r["errors"][0]
+
+
+# --- ייבוא trace ידני (ארכיון globe_history) ------------------------------------
+
+def test_import_trace_plain_and_gzip():
+    raw = json.dumps(TRACE).encode()
+    for blob in (raw, gzip.compress(raw)):
+        r = adsb.import_trace(blob, "trace_full_406f79.json")
+        assert r["status"] == "ok" and len(r["points"]) == 4
+        assert r["meta"]["icao"] == "406f79" and r["meta"]["r"] == "G-ZBKM"
+        assert r["t_first"] == T0 and r["t_last"] == T0 + 3200
+        assert all(p["origin"] == "import" and p["provider"] == "import" for p in r["points"])
+        assert r["name"] == "trace_full_406f79.json"
+
+
+@pytest.mark.parametrize("blob", [b"not json", b"[1,2,3]", json.dumps({"trace": []}).encode(),
+                                  json.dumps({"timestamp": 1.0, "trace": []}).encode(),
+                                  b"\x1f\x8b broken gzip"])
+def test_import_trace_rejects_invalid(blob):
+    r = adsb.import_trace(blob)
+    assert r["status"] == "invalid" and r["points"] == [] and r["error"]
+
+
+def test_import_trace_size_limit(monkeypatch):
+    monkeypatch.setattr(adsb, "TRACE_MAX_BYTES", 1000)
+    big = gzip.compress(json.dumps({**TRACE, "pad": "x" * 5000}).encode())
+    assert adsb.import_trace(big)["status"] == "invalid"            # גם אחרי פריסה
 
 
 def test_lookup_rate_limited_without_network(monkeypatch):

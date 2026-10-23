@@ -518,7 +518,9 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   מחושב *מחדש* לפי `_ACARS_DIR_BY_LABEL`, בגלל הודעות שנשמרו לפני תיקון B6) + פרטי ADS-C
   (`_xc_adsc` — שדה `adsc` מ-`_adsc_details`, או re-decode ב-`_run_libacars` להודעה ישנה) +
   איסוף נקודות (`_xc_collect`: snapshot ⇐ buffer (full בלבד) ⇐ `adsb.lookup` (רק כשהמטוס
-  לא ב-snapshot, או full בלי hex) ⇐ `fetch_trace` ⇐ `fetch_opensky_track`; כל מקור נרשם
+  לא ב-snapshot, או full בלי hex) ⇐ `fetch_trace` ⇐ `fetch_opensky_track` — או, כשהמשתמש
+  העלה קובץ (`imported`), הקובץ **במקום** שני האחרונים, ורק אם `icao`/`r` שבו תואמים
+  להודעה (סותר ⇒ conflict, בלי מזהה להשוואה ⇒ `unmatched`); כל מקור נרשם
   ב-`sources`, גם "לא נמצא"; סתירה רק ממזהה חזק — `consider(weak=True)` למועמד לפי טיסה)
   + `xcheck.position_at`/`assess`. התקציר (`xcheck.summary`) נשמר ב-`_xc_results` עם seq,
   ומוגש ב-`/api/<src>?xseq=` (`_xc_feed_payload`). חריג (`xcheck.is_anomalous`) ⇒
@@ -542,9 +544,9 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 ## 6. `webtune/adsb.py` — מסלול פעיל + שיבוש GPS
 
 מודול עצמאי (אפשר להריץ ולבדוק לבד). thread מושך כל `POLL_SEC`=15 שניות
-מטוסים סביב נתב"ג ממקור ADS-B קהילתי (adsb.lol, גיבוי adsb.fi — שניהם מרשים
-‏~1 בקשה/שנייה, אומת מה-README הרשמי של כל אחד; ר' `docs/session-replay-design.md`
-§6) ומסיק:
+מטוסים סביב נתב"ג ממקור ADS-B קהילתי (adsb.lol, גיבוי adsb.fi — ‏adsb.fi מרשה
+‏~1 בקשה/שנייה; ל-adsb.lol הקצב "דינמי" (שניהם מה-README הרשמי, ר'
+`docs/adsb-crosscheck-design.md` §3), ו-lookup נוסף אליו קיבל 429 על ה-Pi) ומסיק:
 
 - **מסלול פעיל:** מזהה מטוסים בגישה סופית (יורדים, מהירות גישה, track בכיוון מסלול)
   ובטיפוס (המראות). המסלול עם האירועים הטריים ביותר (דעיכה מעריכית) הוא הפעיל.
@@ -590,7 +592,10 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   `alt_geom`. `_S["by_hex"]` — אינדקס לפי hex **כולל מטוסים בלי רישום**; `_S["reg_hex"]` —
   מיפוי נלמד (`reg_to_hex`, `_save_reg_hex`). `lookup(kind, value)` — חיפוש ממוקד (hex/reg/
   callsign) ב-`LOOKUP_SOURCES` עם cache, **הגבלת קצב לכל ספק** (`_rate_take`), timeout ו-
-  fallback; `fetch_trace(hex, t)` — trace של tar1090 (⚠ לא API מתועד); `fetch_opensky_track` —
+  fallback — ⚠ **הספק שה-poll משתמש בו נשאל אחרון** (אחרת 429, נצפה על ה-Pi);
+  `fetch_trace(hex, t)` — trace של tar1090 (⚠ **403 בפועל**, ר' §9.1 בתכנון); `import_trace(bytes)` —
+  קובץ trace מהארכיון היומי של adsb.lol שהמשתמש מעלה (אותו `parse_trace`, `_decode_json_bytes`
+  חוסם גודל גם אחרי gzip); `fetch_opensky_track` —
   OAuth2 מ-`AIRAM_OPENSKY_CLIENT_ID/SECRET` (אופציונלי); `local_track_points` — נקודות מה-
   buffer. כל הרשת תחת `_NET_LOCK` (נפרד מ-`_LOCK` — בקשה תקועה לא חוסמת את ה-poll),
   `_http_get_json` חוסם גודל גם אחרי gzip. ‏`make_point`/`norm_hex` מוגדרים כאן (xcheck מייבא).
@@ -742,7 +747,8 @@ poll (cursor נפרד מ-`since`; התקציר מגיע *אחרי* ההודעה)
 עם מזהה, גם בארכיון. `#xcSheet` — גיליון גלובלי (z-index 1200: מעל סרגל האפליקציה ופקדי
 Leaflet של המפות שמתחת; `isolation` על המפה שלו) עם פסק-דין וראיות **בנפרד**, טבלאות,
 קריטריונים, "מה לא נקבע", מקורות שנוסו, מפה (תחנה + עיגולי אופק, מיקום ההודעה, ADS-B,
-מסלול), ICAO ידני ו"שמור כראיה". ‏`#xcPanel` במסך הבית: תחנה (טופס + geolocation —
+מסלול), ICAO ידני ו"שמור כראיה" (ו-📂 ייבוא trace — `FileReader` ⇒ base64; הקובץ נשמר ב-`xcCtx.trace`
+כדי ש"אמת שוב"/"שמור כראיה" לא יאבדו אותו). ‏`#xcPanel` במסך הבית: תחנה (טופס + geolocation —
 secure-context בלבד), אירועים עם סינון בשרת וקישורי ייצוא עם אותו סינון. ⚠ כל טקסט דינמי
 ב-`textContent` (`xcEl`/`xcLtr`/`xcMix` — ערך LTR מבודד + המשך בעברית); `apiSend` קיבל
 `timeoutMs` אופציונלי (‏"אמת" — 60ש').
@@ -903,7 +909,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/sessions/<id>/export.zip` | ייצוא הסשן כולו (מטא-דאטה+מסלול+קליפים+`<clip>.txt` לכל קליף מתומלל, נקרא חי מה-sidecar), אותו דפוס כמו `starred.zip` |
 | GET/POST | `/api/station` | תחנת הקליטה: GET; POST `{lat, lon, alt_m, name?, source?}` או `{clear:true}` (אין ברירת מחדל). דרך `_guard` (POST) |
 | GET | `/api/xcheck/status` | מצב ההצלבה: תחנה, תור, מונים (`submitted`/`done`/`dropped`/`errors`/`events_saved`), `net` (`adsb.net_status`: לכל ספק ok/fail/limited/last_error, cache, reg↔hex) |
-| POST | `/api/xcheck/verify` | "אמת מול ADS-B": `{src, t, tail?, label?, hex?, station?, save?}` — ההודעה נמצאת *בשרת* (זיכרון ⇐ jsonl), איסוף מלא כולל trace/OpenSky, תוצאה מלאה (`horizon`, `rx_at`, `position_check`, `evidence`, `level`, `verdict`, `caveats`, `sources`, `adsb_points`, `track`). חריג נשמר אוטומטית; `save:true` שומר תמיד. 404 כשההודעה לא נמצאה. דרך `_guard` |
+| POST | `/api/xcheck/verify` | "אמת מול ADS-B": `{src, t, tail?, label?, hex?, station?, save?, trace_b64?, trace_name?}` (‏`trace_b64` — קובץ trace מיובא, base64; 413 מעל `TRACE_MAX_BYTES`, 400 כשלא תקין) — ההודעה נמצאת *בשרת* (זיכרון ⇐ jsonl), איסוף מלא כולל trace/OpenSky, תוצאה מלאה (`horizon`, `rx_at`, `position_check`, `evidence`, `level`, `verdict`, `caveats`, `sources`, `adsb_points`, `track`). חריג נשמר אוטומטית; `save:true` שומר תמיד. 404 כשההודעה לא נמצאה. דרך `_guard` |
 | GET | `/api/xcheck/events` | אירועים שמורים (תקציר) — `?min_km=&max_km=&min_dbfs=&max_dbfs=&day=&evidence=&verdict=` |
 | GET | `/api/xcheck/events/export?format=json\|csv` | ייצוא (JSON = ראיות מלאות, CSV = סיכום עם BOM), אותו סינון |
 | GET/DELETE | `/api/xcheck/events/<id>` | אירוע מלא / מחיקה (כתיבה-מחדש אטומית). DELETE דרך `_guard` |
