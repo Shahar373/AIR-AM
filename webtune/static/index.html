@@ -658,7 +658,7 @@
     /* ---------- כפתורים ----------
        סקאלה מהודקת: הכפתורים ירשו 1rem מהגוף וזה היה גדול מדי לפקדי-ממשק —
        גופן .9rem, משקל 600, padding קומפקטי. פקדים משניים (chips/SDR) קטנים עוד. */
-    button, a.ghost {
+    button, a.ghost, label.ghost {
       font-family: inherit; font-size: .9rem; font-weight: 600; cursor: pointer;
       line-height: 1.25;
       color: var(--text);
@@ -669,7 +669,7 @@
       min-height: 38px;
       transition: transform .07s ease, background .15s ease, border-color .15s ease, box-shadow .15s ease;
     }
-    button:hover, a.ghost:hover { background: var(--hover); border-color: var(--border-strong); }
+    button:hover, a.ghost:hover, label.ghost:hover { background: var(--hover); border-color: var(--border-strong); }
     button:active, a.ghost:active { transform: translateY(1px) scale(.99); }
     button.primary {
       background: var(--accent);
@@ -677,7 +677,7 @@
       box-shadow: var(--sh-blue), inset 0 1px 0 rgba(255,255,255,.18);
     }
     button.primary:hover { background: var(--accent-hover); }
-    button.ghost, a.ghost {
+    button.ghost, a.ghost, label.ghost {
       color: var(--dim); font-weight: 500; font-size: .82rem; padding: .48rem .85rem; min-height: 34px;
       text-decoration: none; text-align: center; display: inline-flex;
       align-items: center; justify-content: center;
@@ -1371,6 +1371,10 @@
     }
     body.xc-open { overflow: hidden; }
     body.xc-open .toast { z-index: 1300; }
+    /* הכפתור הנראה הוא ה-label; ה-input עצמו מוסתר אבל נגיש (לא display:none — ייפול מה-tab order) */
+    .xc-file-in { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+    label.xc-file-btn { cursor: pointer; }
+    .xc-file-in:focus-visible + .xc-file-btn, label.xc-file-btn:focus-within { outline: 2px solid var(--accent); }
 
     .hidden { display: none !important; }
     .flex-col { display: flex; flex-direction: column; gap: .5rem; align-items: flex-start; }
@@ -2473,6 +2477,16 @@
           <a class="ghost hidden" id="xcExpCsv" download>⬇ CSV</a>
         </div>
         <p class="hint" id="xcCtrlHint" style="margin:.5rem 0 0">כתובת ICAO ידנית — כשההודעה נושאת רק רישום והמערכת לא מצאה את ה-hex.</p>
+        <div class="xc-ctrl" style="margin-top:.6rem">
+          <label class="ghost xc-file-btn" for="xcTraceFile">📂 ייבוא trace מהארכיון</label>
+          <input type="file" id="xcTraceFile" class="xc-file-in" accept=".json,.gz,application/json,application/gzip" />
+          <span class="hint" id="xcTraceName"></span>
+        </div>
+        <p class="hint" style="margin:.4rem 0 0">כשאין היסטוריה ברשת (globe.adsb.lol חוסם גישה ישירה): הורד את
+          הארכיון היומי מ-<span class="xc-ltr">github.com/adsblol/globe_history_2026</span> (releases, ‏~3GB ליום, במחשב —
+          לא ב-Pi), חלץ את <span class="xc-ltr">traces/XX/trace_full_&lt;hex&gt;.json</span> (‏XX = שני התווים
+          האחרונים של ה-hex, למשל <span class="xc-ltr">traces/79/trace_full_406f79.json</span>) והעלה אותו כאן.
+          הקובץ חייב להיות של אותו מטוס.</p>
       </div>
     </div>
   </div>
@@ -6516,13 +6530,14 @@
     const XC_STATUS = { measured: "נמדד", interpolated: "אינטרפולציה בין שתי נקודות",
                         unverified: "לא מאומת — הנקודה הקרובה רחוקה בזמן", none: "אין נתונים" };
     const XC_SRC_NAME = { snapshot: "ADS-B חי (poll)", buffer: "buffer מקומי (90 דק׳)", lookup: "חיפוש ממוקד",
-                          trace: "trace היסטורי", opensky: "OpenSky" };
+                          trace: "trace היסטורי", opensky: "OpenSky", import: "קובץ trace שיובא" };
     const XC_SRC_STATUS = { ok: "נמצא", miss: "לא נמצא", error: "שגיאה", rate_limited: "הגבלת קצב",
                             skipped: "דולג", no_hex: "אין כתובת ICAO", conflict: "סתירה — לא בשימוש",
-                            auth_required: "נדרשים פרטי גישה", out_of_range: "מחוץ לטווח", invalid: "קלט לא תקין" };
+                            auth_required: "נדרשים פרטי גישה", out_of_range: "מחוץ לטווח", invalid: "קלט לא תקין",
+                            unmatched: "לא תואם להודעה" };
     const XC_MATCH = { hex: "כתובת ICAO", reg: "רישום", flight: "מספר טיסה (עזר בלבד)" };
     const XC_HEX_SRC = { message: "מההודעה (מבני)", user: "הוזן ידנית", adsb_db: "ממאגר ADS-B לפי הרישום",
-                         flight_lookup: "מחיפוש לפי טיסה" };
+                         flight_lookup: "מחיפוש לפי טיסה", import: "מקובץ ה-trace שיובא" };
 
     function xcHasIdentity(m) { return !!((m.tail && !m.tail_is_station) || m.flight || m.icao || m.aes); }
     function xcBadge(s) {   // תג בכרטיס ההודעה — רק כשיש מה לומר (חריגה/סתירה/התאמת מיקום)
@@ -6594,7 +6609,9 @@
     }
 
     async function xcOpen(src, m, opts = {}) {
-      xcCtx = { src, msg: m };
+      // ‏trace שיובא נשמר בהקשר — "אמת שוב"/"שמור כראיה" חוזרים איתו ולא מאבדים אותו
+      xcCtx = { src, msg: m, trace: opts.trace || null };
+      if (!opts.trace) $("xcTraceName").textContent = "";
       xcShow();
       $("xcTitle").textContent = "אמת מול ADS-B · " + (m.tail || m.flight || m.icao || m.aes || "");
       if (!opts.keepHex) $("xcHexIn").value = "";
@@ -6603,6 +6620,7 @@
       const payload = { src, t: m.t, tail: m.tail ?? null, label: m.label ?? null };
       if (opts.hex) payload.hex = opts.hex;
       if (opts.save) payload.save = true;
+      if (opts.trace) { payload.trace_b64 = opts.trace.b64; payload.trace_name = opts.trace.name; }
       try {
         const res = await apiSend("POST", "/api/xcheck/verify", payload, 60000);
         const data = await res.json();
@@ -6635,12 +6653,32 @@
       if (!xcCtx) return;
       const hx = $("xcHexIn").value.trim();
       if (hx && !/^[0-9a-fA-F]{6}$/.test(hx)) { showToast("כתובת ICAO היא 6 ספרות hex (למשל 406F79)"); return; }
-      xcOpen(xcCtx.src, xcCtx.msg, { hex: hx || null, keepHex: true });
+      xcOpen(xcCtx.src, xcCtx.msg, { hex: hx || null, keepHex: true, trace: xcCtx.trace });
+    };
+    // ייבוא trace ידני: base64 בצד הדפדפן (FileReader) — הפענוח (כולל gzip) והבדיקה
+    // שהקובץ שייך לאותו מטוס נעשים בשרת (adsb.import_trace + _xc_collect).
+    const XC_TRACE_MAX = 6000000;   // = adsb.TRACE_MAX_BYTES
+    $("xcTraceFile").onchange = () => {
+      const f = $("xcTraceFile").files[0];
+      $("xcTraceFile").value = "";            // אותו קובץ שוב => עדיין onchange
+      if (!f || !xcCtx) return;
+      if (f.size > XC_TRACE_MAX) { showToast("הקובץ גדול מדי (מעל 6MB) — זה כנראה לא קובץ trace של מטוס בודד"); return; }
+      $("xcTraceName").textContent = f.name;
+      const rd = new FileReader();
+      rd.onload = () => {
+        const b64 = String(rd.result).split(",")[1] || "";
+        const hx = $("xcHexIn").value.trim();
+        xcOpen(xcCtx.src, xcCtx.msg, { hex: /^[0-9a-fA-F]{6}$/.test(hx) ? hx : null, keepHex: true,
+                                       trace: { b64, name: f.name } });
+      };
+      rd.onerror = () => showToast("קריאת הקובץ נכשלה");
+      rd.readAsDataURL(f);
     };
     $("xcSave").onclick = () => {
       if (!xcCtx) return;
       const hx = $("xcHexIn").value.trim();
-      xcOpen(xcCtx.src, xcCtx.msg, { hex: /^[0-9a-fA-F]{6}$/.test(hx) ? hx : null, save: true, keepHex: true });
+      xcOpen(xcCtx.src, xcCtx.msg, { hex: /^[0-9a-fA-F]{6}$/.test(hx) ? hx : null, save: true, keepHex: true,
+                                     trace: xcCtx.trace });
     };
 
     function xcRender(r, savedId) {

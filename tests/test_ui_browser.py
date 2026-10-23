@@ -1073,3 +1073,28 @@ def test_xcheck_home_panel_station_form_and_event_filters(page):
     expect(page.locator("#xcExportCsv")).to_have_attribute(
         "href", re.compile(r"format=csv&min_km=600&evidence=strong"), timeout=15000)
     assert any("min_km=600" in u and "evidence=strong" in u for u in event_urls)
+
+
+def test_xcheck_trace_import_is_sent_and_kept_for_save(page):
+    """ייבוא trace: הקובץ נשלח כ-base64 עם שמו, ו"שמור כראיה" אחריו שולח אותו שוב —
+    בלי זה השמירה הייתה מריצה אימות *בלי* הקובץ ושומרת ראיה חלשה יותר בשקט."""
+    import base64
+    result, msg = _zbkm_verify_result()
+    posts = []
+    _mount(page, overrides=_zbkm_acars_overrides(result, msg, posts))
+    page.click("#modeSeg button[data-v=acars]")
+    page.locator("#acarsFeed .xc-verify-btn").first.click(timeout=15000)
+    expect(page.locator("#xcSheet .xc-verdict")).to_be_visible()
+    body = b'{"icao":"406f79","r":"G-ZBKM","timestamp":1,"trace":[]}'
+    with page.expect_request("**/api/xcheck/verify") as imp_req:
+        page.set_input_files("#xcTraceFile", files=[{"name": "trace_full_406f79.json",
+                                                     "mimeType": "application/json", "buffer": body}])
+    expect(page.locator("#xcTraceName")).to_have_text("trace_full_406f79.json")
+    expect(page.locator("#xcSheet .xc-verdict")).to_be_visible()
+    with page.expect_request("**/api/xcheck/verify") as save_req:
+        page.click("#xcSave")
+    imported = json.loads(imp_req.value.post_data)
+    saved = json.loads(save_req.value.post_data)
+    assert base64.b64decode(imported["trace_b64"]) == body
+    assert imported["trace_name"] == "trace_full_406f79.json"
+    assert saved["save"] is True and saved["trace_b64"] == imported["trace_b64"]

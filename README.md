@@ -651,6 +651,12 @@ CPU**. מכיוון ש-AIR-AM קולט ACARS בלבד, זה חיסכון כמע�
 ב-`/etc/airam/airam.env`: ‏`AIRAM_OPENSKY_CLIENT_ID=` ‏`AIRAM_OPENSKY_CLIENT_SECRET=`).
 בלי אינטרנט — "אין נתונים", **הקליטה ממשיכה כרגיל** (ההצלבה רצה ב-thread נפרד).
 
+**⚠ היסטוריה ישנה (יותר מ-90 דק'):** נבדק על ה-Pi — ה-trace של globe.adsb.lol חסום (403).
+הדרך שעובדת: **📂 ייבוא trace מהארכיון** בגיליון האימות. מורידים במחשב את הארכיון היומי של
+adsb.lol (`github.com/adsblol/globe_history_2026` ← releases, ~3GB ליום), מחלצים רק את
+`traces/<2 התווים האחרונים של ה-hex>/trace_full_<hex>.json` (למשל `traces/79/trace_full_406f79.json`)
+ומעלים. הקובץ חייב להיות של אותו מטוס — קובץ של מטוס אחר מסומן כסתירה ולא משמש.
+
 בדיקה מה-Pi שהספקים עונים:
 
 ```bash
