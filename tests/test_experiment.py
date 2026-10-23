@@ -102,7 +102,11 @@ class FakeSDR:
 
 @pytest.fixture
 def fast(monkeypatch):
-    for k, v in (("EXP_REF_SEC", 0.25), ("EXP_FIXED_SEC", 0.25), ("EXP_AGC_SEC", 0.3),
+    # ⚠ EXP_REF_SEC (חלון ה-ATIS) נדיב יותר משאר החלונות: החציון נלקח מחלון אחד בלבד
+    # של ~0.2ש' אחרי ה-settle, ועצירת scheduler אחת באורך הזה על runner של CI רוקנה
+    # אותו (atis.gone=None — נכשל פעם אחת ב-test (3.13) ועבר באותו commit בריצה
+    # המקבילה). 0.6ש' משאיר ~0.55ש' של דגימות; שלוש הופעות ⇒ ~1ש' נוסף לבדיקה.
+    for k, v in (("EXP_REF_SEC", 0.6), ("EXP_FIXED_SEC", 0.25), ("EXP_AGC_SEC", 0.3),
                  ("EXP_AFTER_PROMPT_SEC", 0.25), ("EXP_FINAL_AGC_SEC", 0.25),
                  ("EXP_FIXED_SETTLE_SEC", 0.05), ("EXP_AGC_TAIL_SEC", 0.2), ("EXP_EARLY_SEC", 0.08),
                  ("EXP_CREEP_HEAD_SEC", 0.08), ("EXP_CREEP_TAIL_SEC", 0.1),
@@ -192,6 +196,8 @@ def test_full_run_two_prompts_summary_and_restore(client, world):
     assert by["clean_f20"]["drop"] == pytest.approx(12.0) and by["clean_f20"]["detects"] is True
     # AGC עם ATIS בחלון: 2dB — הסף לא היה מזהה (בדיוק מה שהניסוי נועד לחשוף)
     assert by["atiswin_agc"]["drop"] == pytest.approx(2.0) and by["atiswin_agc"]["detects"] is False
+    atis_empty = [ph for ph in ("p1", "p2") if res["atis"][ph] is None]
+    assert not atis_empty, f"חלון ה-ATIS בלי דגימות (תזמון?): {atis_empty}"
     assert res["atis"]["gone"] is True and res["atis"]["drop"] == pytest.approx(53.0)
     probes = {p["key"]: p for p in res["probes"]}
     assert probes["probe_product"]["detects"] is True
