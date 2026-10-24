@@ -40,7 +40,9 @@ done
 
 echo "--- מי עלול לתפוס את הפורט"
 for s in ModemManager gpsd gpsd.socket; do
-  printf '  %-14s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null || echo '-')"
+  # is-active מדפיס "inactive" *וגם* מחזיר קוד שגיאה — `|| echo` היה מוסיף שורת "-" מיותרת
+  st="$(systemctl is-active "$s" 2>/dev/null)"
+  printf '  %-14s %s\n' "$s" "${st:--}"
 done
 echo "  (ModemManager פעיל עלול 'לבדוק' את ttyACM ולשבש את ה-NMEA בדקות הראשונות)"
 
@@ -50,7 +52,7 @@ if [ -n "$DEV" ]; then
   else
     echo "--- האזנה ל-$DEV למשך ${SECS}s (כדאי ליד חלון)…"
     python3 - "$DEV" "$SECS" <<'PY'
-import math, os, select, statistics, sys, termios, time
+import math, os, select, signal, statistics, sys, termios, time
 from datetime import datetime, timezone
 
 dev, secs = sys.argv[1], float(sys.argv[2])
@@ -105,7 +107,18 @@ gga_fix = gga_all = 0
 sats_used, hdops, positions, offsets = [], [], [], []
 snr_by_sys = {}
 cap = open(CAPTURE, "w", encoding="ascii", errors="replace")
-while time.time() - t0 < secs:
+# Ctrl+C = "מספיק, סכם את מה שנאסף" (בלי traceback ובלי לאבד את הדגימות); אחרי
+# יציאה תקינה מכאן הסקריפט ממשיך לחלק ההיסטוריה. ‏select/read מתחדשים אחרי ה-handler
+# (PEP 475), והלולאה בודקת את הדגל לכל היותר אחרי שנייה.
+stop = []
+signal.signal(signal.SIGINT, lambda *_: stop.append(1))
+next_note = 30
+while time.time() - t0 < secs and not stop:
+    if time.time() - t0 >= next_note:                # סימן חיים — אחרת זה נראה תקוע
+        print(f"  … {next_note}s/{secs:.0f}s · {lines} שורות · "
+              + ("יש fix" if first_fix is not None else "עדיין אין fix")
+              + "  (Ctrl+C = עצור וסכם)", flush=True)
+        next_note += 30
     r, _, _ = select.select([fd], [], [], 1.0)
     if not r:
         continue
@@ -160,6 +173,8 @@ while time.time() - t0 < secs:
             bad += 1
 cap.close()
 os.close(fd)
+if stop:
+    print(f"  נעצר ידנית אחרי {time.time() - t0:.0f}s — מסכם את מה שנאסף")
 
 def med(v):
     return statistics.median(v) if v else None
@@ -191,6 +206,12 @@ if positions:
 if offsets:
     print(f"  שעון ה-Pi מול GPS (RMC): חציון {med(offsets):+.2f}s"
           "   (~+0.5–1s זה זמן ההגעה של ה-NMEA; עשרות שניות ומעלה = שעון לא מסונכרן או זמן מזויף)")
+    if med(offsets) < -0.5:
+        # GPS "מקדים" את ה-Pi — הגעה מאוחרת של ה-NMEA לא יכולה לתת שלילי. שני הסברים אפשריים:
+        print("  ⚠ שלילי = שעת ה-GPS מקדימה את ה-Pi. בדוק קודם: timedatectl (האם NTP מסונכרן).\n"
+              "    אם ה-Pi מסונכרן: ייתכן שהמקלט עוד לא קיבל מהלוויינים את מספר שניות-המעבר\n"
+              "    (leap seconds) ומשתמש בערך ישן מהקושחה — המידע משודר כל ~12.5 דק'.\n"
+              "    הרץ שוב אחרי ~15 דקות של חיבור רציף: אם הפער נעלם — זה היה זה.")
 print(f"  הקלטה גולמית מלאה: {CAPTURE}")
 PY
   fi
