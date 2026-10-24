@@ -192,6 +192,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_session.py          # דוח סשן: _interest_score, /api/session, /api/session/ack, adsb.session_series.
   test_replay_buffer.py    # שחזור-סשן שלב 1: buffer מתגלגל (append/compaction/gap-rows,
                            #   מטוס משובש נשמר עם lat/lon=None ולא מדולג) + GET /api/replay/buffer.
+  test_voice_channel.py    # מסנן ערוץ + FM notch: הקונפיג לכל בחירה, רשימה סגורה, שמירה מול השמטה,
+                           #   בדיקת אנטנה בתנאים קבועים + שחזור הבחירה, רולבק.
   test_denoise.py          # סינון רעשים: פלט UDP ב-render_config, פסק-הדין לחיווי, status-json של
                            #   Icecast (mount מת), _denoise_sync (לא זורק), כשל לא מכשיל כניסה לקול,
                            #   API/guard/501, /stream רשימה סגורה, עקביות קבועים מול הסקריפט/install.sh.
@@ -217,6 +219,9 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   denoise-design.md         # ★ סינון רעשים חי (מומש, v2.29.0): ארכיטקטורה מקבילית, ממצאי מקור (rtl_airband
                             #   udp_stream, Icecast fallback), הניסוי והחלטת המנוע, ניתוח כשלים, מה נדחה, אימות על ה-Pi.
   denoise-experiment/       # הניסוי עצמו, ניתן לשחזור (fetch.sh + run.py) — לא חלק מההתקנה/CI.
+  voice-channel-design.md   # ★ מסנן ערוץ / חלון / FM notch (מומש, v2.30.0): איך הערוץ של rtl_airband בנוי
+                            #   באמת (חלון BH7, לא "בין 5k"), מדידה מול rtl_airband אמיתי, למה לא "8k" ולא <1Msps.
+  voice-channel-experiment/ # measure.py — המדידה (צריך בינארי rtl_airband). לא חלק מההתקנה/CI.
   adsb-crosscheck-design.md # ★ הצלבת ACARS↔ADS-B + BLOS (מומש, v2.27.0): בדיקת ספקים (מה אומת/לא),
                             #   שתי השאלות, קטגוריות מיקום, קריטריונים, ראיות, מה נדחה, בדיקת שלב 0 על ה-Pi.
 
@@ -242,7 +247,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
 | `/usr/local/bin/airam-denoise`, `/usr/local/bin/airam-rnnoise` | שרשרת סינון הרעשים + המסנן (נבדקים חי ע"י `_denoise_missing`) | install.sh (שלבים 7, 4e) |
 | `/etc/icecast2/icecast.xml` | `<mount>` ל-`/clean.mp3` עם `fallback-mount` ל-`/live.mp3`, ‏`sources=4` | install.sh שלב 5 |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`, `denoise` — מתג סינון הרעשים (bool, ברירת מחדל False), `station` — תחנת הקליטה `{lat,lon,alt_m,name,source,set_at}` או None, **בלי ברירת מחדל**) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`, `denoise` — מתג סינון הרעשים (bool, ברירת מחדל False), `chan_filter` (standard/narrow/narrow8k), `fm_notch` (bool), `station` — תחנת הקליטה `{lat,lon,alt_m,name,source,set_at}` או None, **בלי ברירת מחדל**) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
 | `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
@@ -271,6 +276,13 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   (CSRF/DNS-rebind) + PIN אופציונלי. **כל route שמשנה מצב חייב לעבור דרכו.**
 - **בניית קונפיג קול:** `render_config` → `write_config` (כתיבה אטומית), `_squelch_line`
   (מקור-אמת יחיד לשורת ה-squelch). תמיד ערוץ יחיד ממורכז (centerfreq מוסט ב-DC_OFFSET).
+  **מסנן ערוץ + FM notch** (`docs/voice-channel-design.md`): `CHAN_FILTERS` (standard=fft 512 /
+  narrow=1024 / narrow8k=1024+`bandwidth` 8000) ⇒ `fft_size` בשורש הקונפיג ו-`bandwidth` בערוץ;
+  `fm_notch` ⇒ `rfnotch_ctrl=true` ב-`device_string`. ⚠ הערוץ של rtl_airband **אינו** "בין FFT"
+  (חלון BH7 רחב — נמדד), ‏`bandwidth` לבד השתיק את הערוץ מול שכן חזק (הסקוולץ' מודד את המסונן),
+  ו-`fft_size<256`/קצב שאינו כפולה של 16kHz אסורים. `_parse_tune`: מפתח שלא נשלח ⇒ **הערך השמור**.
+  `_probe_params`/`_exp_voice_params` לא נושאים אותם ⇒ בדיקת אנטנה/ניסוי בתנאים קבועים;
+  `_restore_after_probe`/`_rollback` מחזירים את בחירת המשתמש.
 - **restart מאומת + רולבק:** `_restart_and_verify` בודק שה-SDR נוכח ושהשירות עלה;
   `_rollback` מחזיר לקונפיג קודם אם נכשל **ומאומת** (מחזיר bool; כישלון ⇒ `_fail_to_off`).
   כיוונון אחד בכל רגע (`TUNE_LOCK`). **כל שמירת state אחרי פעולה ארוכה עוברת
@@ -918,7 +930,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/stream` | proxy same-origin ל-Icecast (נדרש כש-HTTPS, mixed-content). `?m=clean` ⇒ `/clean.mp3` (רשימה סגורה — כל ערך אחר ⇒ `/live.mp3`) |
 | GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `denoise`/`denoise_mount`/`denoise_available`, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `scan_plan`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`) |
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
-| POST | `/api/tune` | **כיוונון תדר** (קול). דרך `_guard`. |
+| POST | `/api/tune` | **כיוונון תדר** (קול). כולל `chan_filter` (standard/narrow/narrow8k) ו-`fm_notch` — מפתח שלא נשלח ⇒ הערך השמור. דרך `_guard`. |
 | POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית), `skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12), `spectrum` (bool אופציונלי — `false` לכיבוי האבחון, ר' §9/§12) ו-`gain` (‏`null`=AGC (ברירת מחדל) או מספר=gRdB ידני 20–59, נחתך; ר' §12). לכולם: ברירת מחדל = הבחירה השמורה. ⚠ ב-`gain` בלבד `null` הוא **ערך משמעותי** (AGC מפורש) ולא היעדר — הזיהוי הוא לפי נוכחות המפתח בגוף הבקשה. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
 | GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור), `wait` (כש-`leg=None`: ‏`"window"` = אף רגל לא בחלון, לא תקלה / `"sdr"` = ה-SDR לא ב-USB, תקלה) |
 | GET | `/api/acars` | (כל שלוש תצוגות הדאטה: גם `?xseq=` ⇒ `xcheck` {id: תקציר הצלבה} + `xcheck_cursor`) הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון; `?day=YYYY-MM-DD` ארכיון מהדיסק, snapshot סטטי) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט; לא ב-`?day=`). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |

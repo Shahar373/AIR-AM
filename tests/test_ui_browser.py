@@ -1212,3 +1212,24 @@ def test_denoise_reconnects_only_when_stream_may_be_on_fallback(page):
     expect(page.locator("#dnState")).to_contain_text("לא פעיל", timeout=10000)
     phase["state"] = "live"                     # חזר — מתחברים מחדש פעם אחת
     page.wait_for_function("window.__reloads === 2", timeout=10000)
+
+
+# --- מסנן ערוץ + FM notch (docs/voice-channel-design.md) ---------------------
+
+def test_channel_filter_and_fm_notch_load_from_state_and_are_sent(page):
+    """הבחירה נטענת מה-state, ושינוי שולח את *שני* השדות ב-/api/tune — כולל
+    ה-notch שלא נגעו בו (השרת היה שומר ממילא, אבל הדף לא אמור לסמוך על זה)."""
+    def tune(route, url):
+        body = json.loads(route.request.post_data)
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, **_default_api()["/api/state"], **body}))
+
+    st = {**_default_api()["/api/state"], "chan_filter": "narrow", "fm_notch": True}
+    _mount(page, overrides={"/api/state": st, "/api/tune": tune})
+    expect(page.locator("#chanSeg button.on")).to_have_attribute("data-v", "narrow", timeout=10000)
+    expect(page.locator("#fmNotch")).to_be_checked()
+    with page.expect_request(lambda r: r.url.endswith("/api/tune") and r.method == "POST") as req:
+        page.locator("#chanSeg button[data-v=narrow8k]").click(force=True)
+    expect(page.locator("#chanSeg button.on")).to_have_attribute("data-v", "narrow8k")
+    body = json.loads(req.value.post_data)
+    assert body["chan_filter"] == "narrow8k" and body["fm_notch"] is True

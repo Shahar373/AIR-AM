@@ -4,3 +4,6 @@ air-am-build/
 
 # ניסוי סינון הרעשים — קלטים שמורדים ע"י fetch.sh ותוצרים
 docs/denoise-experiment/data/
+
+# ניסוי מסנן הערוץ — קבצי IQ ותוצרים
+docs/voice-channel-experiment/data/

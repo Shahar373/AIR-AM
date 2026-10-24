@@ -61,6 +61,21 @@ DENOISE_SCRIPT = Path("/usr/local/bin/airam-denoise")
 DENOISE_RNNOISE = Path("/usr/local/bin/airam-rnnoise")
 DENOISE_INSTALL_HINT = "cd ~/AIR-AM && git pull && sudo ./install.sh"
 SAMPLE_RATE = 2.56          # Msps - ערוץ יחיד, חלון צר מספיק
+# מסנן הערוץ (docs/voice-channel-design.md). ⚠ הערוץ *אינו* "בין FFT ברוחב 5kHz":
+# rtl_airband מכפיל כל בלוק בחלון Blackman-Harris של 7 איברים ולוקח את עוצמת
+# הבין, והחלון הזה רחב בכמה בינים. נמדד (rtl_airband v5.2.0 אמיתי, IQ סינתטי):
+# ב-fft 512 התגובה שטוחה עד 4kHz, אבל שכן חזק ב-8.33/12.5kHz *עובר* (‎+3/+1.8dB
+# מעל האות). fft גדול יותר = בין צר יותר = פחות רעש ושכנים, ומעט פחות גבוהים.
+# ‏"bandwidth" (lowpass I/Q של rtl_airband) לבדו **מסוכן**: עם שכן חזק ב-8.33kHz
+# הוא השתיק את הערוץ כולו (הסקוולץ' מודד אז את האות המסונן) — לכן רק יחד עם 1024.
+# ⚠ fft_size קטן מ-256 לא מותר ב-rtl_airband, וקצב דגימה שאינו כפולה שלמה של
+# 16kHz (למשל 1Msps) משבש את השמע (נמדד) — לכן הקצב לא משתנה כאן.
+CHAN_FILTERS = {
+    "standard": {"fft": 512, "bandwidth": 0},      # ההתנהגות ההיסטורית
+    "narrow": {"fft": 1024, "bandwidth": 0},       # נמדד: רעש ‎-4.6dB, שכן 25kHz ‎-4.4dB, ‎-1.4dB ב-3kHz
+    "narrow8k": {"fft": 1024, "bandwidth": 8000},  # נמדד: שכנים ‎-37dB, רעש ‎-6.3dB, ‎-2.6dB ב-3kHz
+}
+CHAN_FILTER_DEFAULT = "standard"
 DC_OFFSET = 0.3             # MHz - מזיזים את centerfreq מהתדר כדי להתרחק מ-spike ה-DC
 # רווח SDRplay (מודל legacy של SoapySDRPlay3): שני אלמנטים נפרדים, וקטן יותר = רווח גדול יותר.
 #   IFGR - הפחתת רווח בתדר הביניים, 20–59 dB.
@@ -642,7 +657,12 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  "station": None,
                  # סינון רעשים חי (RNNoise + השוואת עוצמות) לסטרים /clean.mp3.
                  # מתג גלובלי; כבוי כברירת מחדל. ר' _denoise_sync.
-                 "denoise": False}
+                 "denoise": False,
+                 # מסנן הערוץ של הקול (CHAN_FILTERS) — ברירת המחדל = ההתנהגות ההיסטורית.
+                 "chan_filter": CHAN_FILTER_DEFAULT,
+                 # מסנן notch לשידורי FM/MW ב-RSP1B (rfnotch_ctrl של SoapySDRPlay3).
+                 # ⚠ ההנחתה שלו בתחום 118–137MHz לא נמדדה — מתג, לא ברירת מחדל.
+                 "fm_notch": False}
 
 
 # --- שורת ה-squelch: מקור אמת יחיד -----------------------------------------
@@ -662,17 +682,23 @@ def _squelch_line(squelch_mode, squelch_snr):
 
 
 # --- בניית קובץ ההגדרות ל-rtl_airband ------------------------------------
-def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT):
+def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
+                  chan_filter=CHAN_FILTER_DEFAULT, fm_notch=False):
     f = float(freq)
+    cf = CHAN_FILTERS.get(chan_filter, CHAN_FILTERS[CHAN_FILTER_DEFAULT])
+    # rfnotch_ctrl: הגדרת SoapySDRPlay3 שעוברת דרך ה-device_string (נקראת ע"י writeSetting
+    # בבנאי, *לפני* שהזרם עולה — ב-RSP1B היא rsp1aParams.rfNotchEnable). ערך קבוע, לא קלט.
+    dev = "driver=sdrplay" + (",rfnotch_ctrl=true" if fm_notch else "")
     lines = [
         "# נוצר אוטומטית ע\"י AIR-AM web tuner. שינויים ידניים נדרסים בכל כיוונון.",
         "localtime = true;   # חותמות הזמן בשמות קובצי ההקלטה בזמן מקומי",
         f'stats_filepath = "{STATS_PATH}";   # מדדי RF (signal/noise) ל-/api/metrics',
+        f"fft_size = {cf['fft']};   # מסנן הערוץ: {chan_filter if chan_filter in CHAN_FILTERS else CHAN_FILTER_DEFAULT}",
         "devices:",
         "(",
         "  {",
         '    type = "soapysdr";',
-        '    device_string = "driver=sdrplay";',
+        f'    device_string = "{dev}";',
     ]
     if not agc:
         # רווח ידני => שני אלמנטים. הגדרת gain מבטלת אוטומטית את ה-AGC בדרייבר.
@@ -687,6 +713,8 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
         f"        freq = {f:.4f};",
         f'        modulation = "{mod}";',
     ]
+    if cf["bandwidth"]:
+        lines.append(f"        bandwidth = {int(cf['bandwidth'])};")
     sq = _squelch_line(squelch_mode, squelch_snr)
     if sq is not None:
         lines.append(sq)
@@ -796,8 +824,10 @@ def _cleanup_orphan_tmp(dirs=None):
     return removed
 
 
-def write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT):
-    _atomic_write(CONFIG_PATH, render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr))
+def write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
+                 chan_filter=CHAN_FILTER_DEFAULT, fm_notch=False):
+    _atomic_write(CONFIG_PATH, render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr,
+                                             chan_filter, fm_notch))
 
 
 _state_corrupt_warned = False   # חד-פעמי לאירוע פגימה, לא לכל קריאה — ר' load_state
@@ -925,7 +955,8 @@ def _rollback(prev):
     log.warning("rollback to %.3f MHz", prev["freq"])
     try:
         write_config(prev["freq"], prev["mod"], prev["agc"], prev["if_gain"],
-                     prev["rf_gain"], prev["squelch_mode"], prev["squelch_snr"])
+                     prev["rf_gain"], prev["squelch_mode"], prev["squelch_snr"],
+                     prev.get("chan_filter", CHAN_FILTER_DEFAULT), bool(prev.get("fm_notch")))
         subprocess.run([*SUDO, "systemctl", "restart", "rtl_airband"],
                        capture_output=True, text=True, timeout=45)
     except Exception:
@@ -3007,8 +3038,11 @@ def _enter_voice(params):
                 _sysctl("stop", svc, timeout=30)
             except Exception:
                 pass
+    # chan_filter/fm_notch אופציונליים: בדיקת האנטנה והניסוי (_probe_params/_exp_voice_params)
+    # לא מעבירים אותם ⇒ רצים תמיד בתנאים הקבועים (standard, בלי notch) — בר-השוואה לבסיס.
     write_config(params["freq"], params["mod"], params["agc"], params["if_gain"],
-                 params["rf_gain"], params["squelch_mode"], params["squelch_snr"])
+                 params["rf_gain"], params["squelch_mode"], params["squelch_snr"],
+                 params.get("chan_filter", CHAN_FILTER_DEFAULT), bool(params.get("fm_notch")))
     res = _restart_and_verify()
     if res[0] is None:
         # אחרי ש-rtl_airband אומת בלבד, וב-best-effort: כשל בסינון לעולם לא
@@ -5024,7 +5058,9 @@ def _restore_after_probe(prev_state, prev_live):
                          "agc": prev_state["agc"], "if_gain": prev_state["if_gain"],
                          "rf_gain": prev_state["rf_gain"],
                          "squelch_mode": prev_state["squelch_mode"],
-                         "squelch_snr": prev_state["squelch_snr"]})
+                         "squelch_snr": prev_state["squelch_snr"],
+                         "chan_filter": prev_state.get("chan_filter", CHAN_FILTER_DEFAULT),
+                         "fm_notch": bool(prev_state.get("fm_notch"))})
         else:
             _enter_standby()
     except Exception:
@@ -5889,8 +5925,23 @@ def _parse_tune(data):
         squelch_snr = SNR_DEFAULT
     squelch_snr = max(SNR_MIN, min(SNR_MAX, squelch_snr))
 
+    # הגדרות "חומרה" קבועות (לא חלק מכיוונון רגעי): מפתח שלא נשלח ⇒ הערך השמור, לא
+    # ברירת המחדל — אחרת כל קורא שבונה פרמטרים בעצמו ("האזן למגדל", curl, ‏/api/mode
+    # עם freq) היה מאפס בשקט את מסנן הערוץ ואת ה-notch שהמשתמש בחר.
+    saved = None
+    if "chan_filter" not in data or "fm_notch" not in data:
+        saved = load_state()
+    # רשימה סגורה => שום ערך מהלקוח לא נכתב לקונפיג כמות שהוא
+    chan_filter = str(data["chan_filter"] if "chan_filter" in data
+                      else saved.get("chan_filter", CHAN_FILTER_DEFAULT))
+    if chan_filter not in CHAN_FILTERS:
+        chan_filter = CHAN_FILTER_DEFAULT
+    notch_raw = data["fm_notch"] if "fm_notch" in data else saved.get("fm_notch", False)
+    fm_notch = notch_raw if isinstance(notch_raw, bool) else str(notch_raw).lower() in ("true", "1", "on", "yes")
+
     return {"freq": freq, "mod": mod, "agc": agc, "if_gain": if_gain, "rf_gain": rf_gain,
-            "squelch_mode": squelch_mode, "squelch_snr": squelch_snr}, None
+            "squelch_mode": squelch_mode, "squelch_snr": squelch_snr,
+            "chan_filter": chan_filter, "fm_notch": fm_notch}, None
 
 
 def _voice_tune(params):
@@ -5912,9 +5963,10 @@ def _voice_tune(params):
         # satcom_gain/signal_baseline/scan_plan וכו' — עם satcom_bias_tee במיוחד,
         # load_state הבא היה ממזג מ-DEFAULT_STATE=True ומדליק bias-T מחדש בכניסה
         # הבאה ל-SATCOM גם כשהמשתמש כבר מזין LNA חיצוני (§12).
-        log.info("tune %.3f MHz mod=%s agc=%s if_gain=%d rf_gain=%d squelch=%s snr=%.1f (from %s)",
+        log.info("tune %.3f MHz mod=%s agc=%s if_gain=%d rf_gain=%d squelch=%s snr=%.1f filter=%s fm_notch=%s (from %s)",
                  params["freq"], params["mod"], params["agc"], params["if_gain"],
-                 params["rf_gain"], params["squelch_mode"], params["squelch_snr"], request.remote_addr)
+                 params["rf_gain"], params["squelch_mode"], params["squelch_snr"],
+                 params["chan_filter"], params["fm_notch"], request.remote_addr)
 
         err, detail, sdr_down = _enter_voice(params)
         if err:
