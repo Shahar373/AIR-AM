@@ -5,6 +5,7 @@
 #  בתדר/AGC/רווח ובמצב האנטנה (מחוברת/מנותקת). כך נבדק הניסוי מקצה לקצה —
 #  כולל שתי הפעולות הפיזיות — בלי חומרה. סנכרון דרך Event/join, לא sleep קבוע.
 # ============================================================================
+import json
 import threading
 import time
 import types
@@ -136,6 +137,22 @@ def world(paths, fast, monkeypatch):
     sdr.stop()
 
 
+def _last_rflog_noise():
+    """ערך ה-noise בשורת הרשם האחרונה (None כשאין) — מה שהרשם *ראה*, לא מה שה-SDR המדומה מדווח."""
+    try:
+        lines = app.RFLOG_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue                       # שורה שנכתבת ברגע זה
+        if isinstance(row, dict) and "noise" in row:
+            return row["noise"]
+    return None
+
+
 def _wait(pred, timeout=20):
     """המתנה מבוססת-מצב עם תקרה — לא sleep קבוע."""
     evt = threading.Event()
@@ -177,6 +194,13 @@ def test_full_run_two_prompts_summary_and_restore(client, world):
     st = client.get("/api/experiment").get_json()
     assert st["waiting"]["action"] == "disconnect" and st["eta_prompt_sec"] == 0
     world.connected = False
+    # ⚠ רעידה ב-CI (test (3.11), ‏instant=-58 במקום -60): הרשם קורא את קובץ ה-stats
+    # ורק *אחר כך* חותם זמן (_rflog_sample). קריאה של -58 לפני ההיפוך + עצירת
+    # scheduler ⇒ שורה עם הערך הישן וזמן אחרי t_ready, ובחלון head של 0.08ש' (דחוס
+    # פי ~100) היא יכלה להיות היחידה. במקום להרחיב חלון — סגירה דטרמיניסטית: מאשרים
+    # רק אחרי שהרשם עצמו רשם את הערך המנותק. הרשם הוא thread יחיד, אז כל שורה אחריו
+    # נקראה אחרי ההיפוך. (בייצור המשתמש מאשר שניות אחרי הניתוק — אין מרוץ כזה.)
+    assert _wait(lambda: _last_rflog_noise() == -60.0)
     assert client.post("/api/experiment", json={"action": "confirm"}).status_code == 200
 
     assert _wait(lambda: (app._exp["waiting"] or {}).get("action") == "reconnect")
