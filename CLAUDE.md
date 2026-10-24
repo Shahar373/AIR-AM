@@ -157,7 +157,8 @@ udev/
 tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/systemd ממוקפים).
   conftest.py              # מוסיף webtune/ ל-sys.path.
   test_app.py              # render_config, parse, presets, מדדים, יומן, רולבק/נפילה-ל-off.
-  test_acars.py            # נרמול ACARS, latlon, labels, ATIS, OOOI, actype, מעברי מצב.
+  test_acars.py            # נרמול ACARS, כיוון מבני (block ID), latlon, labels, ATIS, OOOI, actype,
+                           #   מעברי מצב; פערי קליטת 24.10.2026 (label 11/15/16, QP–QS, B3/B4, זנב פגום).
   test_vdl2.py             # נרמול VDL2 (מסלול A/B), env, מעברי מצב, ייצוא, health.
   test_satcom.py           # נרמול SATCOM (inmarsat-sniffer JSON, מאומת מהמקור), env, מעברי מצב, ייצוא,
                            #   שלושת מתגי ה-satcom (bias_tee/skip_c/spectrum), health/spectrum/log.
@@ -330,7 +331,11 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   SATCOM נשאר דלוק (bias-T) בזמן שה-UI מציג "ממתין". רגל "זהה" לא נכנסת מחדש רק
   כשהצרכן שלה עדיין `active` (ה-reconcile לא מטפל ב-scan).
 - **ACARS:** `_acars_listener` (thread, מאזין UDP 5556), `_normalize_acars` (הלב —
-  ממיר JSON גולמי לכרטיס אחיד: label→קטגוריה+כיוון, חילוץ נ"צ, ARINC-622, actype,
+  ממיר JSON גולמי לכרטיס אחיד: label→קטגוריה, **כיוון מבני מה-block ID**
+  (`_acars_block_dir`: ספרה=downlink / אות=uplink — הכלל של acarsdec עצמו, שפולט
+  msgno/flight רק ב-downlink; `block_id` נשמר בכרטיס. `_ACARS_DIR_BY_LABEL`/header —
+  רק נפילה, ר' §12), חילוץ נ"צ, ARINC-622, actype, `_clean_ident` (tail/flight עם תו
+  בקרה ⇒ None — פריים שתוקן חלקית, לא מטוס),
   **מדדי איכות קליטה** — `level`=dBFS מקורי מהמפענח (נשמר כמות שהוא); `snr` מחושב
   **רק** כש-`noise` קיים בקלט (acarsdec עצמו לא מספק רצפת רעש לכל הודעה — ראו
   bullet הבא — כך שב-ACARS אמיתי `snr` תמיד None; ה-dBm נדחה במכוון, ראו §12),
@@ -342,10 +347,15 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   גם אחרי prefix כמו `"- "`/`\n` (לא רק בתחילת הטקסט ממש), `_parse_fpn` תופס גם
   `"M3FPN/"` בלי קו-נטוי פותח — שני הפורמטים נצפו בקליטת SATCOM אמיתית, ר' §12),
   `_parse_label15` (נ"צ, גם עם
-  error — מבני), `_parse_sq` (squitter תחנה, בלי נ"צ), `_parse_autotune` (`:;`),
-  `_parse_loadsheet` (C1, ZFW/TOW/נוסעים), `_parse_pdc` (A3, אישור טרום-המראה),
+  error — מבני; שדה המעלות יכול להגיע מרופד ברווח, ‎`"E 34499"` — הפורמט היחיד שנקלט
+  בפועל), `_parse_sq` (squitter תחנה, בלי נ"צ), `_parse_autotune` (`:;`),
+  `_parse_loadsheet` (C1, ZFW/TOW/נוסעים), `_parse_pdc` (A3, אישור טרום-המראה; גם B4 —
+  הקריאה-החוזרת של המטוס — עם `title` אחר), `_parse_oooi_q` (QP–QS: מוצא+יעד+שעה, פריסת
+  acarsdec), `_parse_label11_pos` (11 בפורמט `POS/CAS/LAT/LON` — פורמט חברה, מעוגן בתבנית
+  ולא ב-label; מבני, גם עם error),
   `_parse_label16`/`_parse_nav_fuel` (16/1L, נ"צ עשרוני — לא-מתועדים ב-ARINC, זוהו
-  מקליטה אמיתית; **CPDLC נבדק ונמצא ללא תעבורה בפועל** בקליטה שנבדקה — לא מומש),
+  מקליטה אמיתית; ל-16 גם וריאנט מופרד-`/` בלי waypoint; **CPDLC נבדק ונמצא ללא תעבורה
+  בפועל** בקליטה שנבדקה — לא מומש),
   `_acars_adsb` (העשרת ADS-B לזנבות שבזיכרון — ראה §6),
   `_enter_acars` (כתיבת env + מעבר שירות), `_enter_standby` (כיבוי **ארבעת** הצרכנים, משאיר
   sdrplay חי), `_acars_window_error` (wrapper דק מעל `_window_error` הגנרי — ≤8 ערוצים,
@@ -460,9 +470,11 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 - **ציון מעניינוּת + דוח סשן** (ר' docs/field-station-roadmap.md): `_interest_score`
   (קריטריונים בינאריים על כרטיס מנורמל — קטגוריה לא-גנרית/decoded/pos_src=adsc/
   label עשיר — לא ציון מומצא; מוזרם לשדה `notable` בכל תוצאה של `_normalize_acars`,
-  כלומר גם ל-ACARS/VDL2/SATCOM כאחד). `GET /api/session`/`POST /api/session/ack`
+  כלומר גם ל-ACARS/VDL2/SATCOM כאחד; decoded של `_LINK_MGMT_LABELS` — SQ/SA/Q0/‎_d/5V —
+  לא נחשב: ב-24.10.2026 הן היו 138 מתוך 160 ה"מעניינות"). `GET /api/session`/`POST /api/session/ack`
   ("מה קרה בזמן שלא הסתכלת" — קורא jsonl מהדיסק, `?since=` דורס את `state
-  ["last_session_view_at"]`; idempotent, ה-ack הוא הפעולה היחידה שמקדם אותו).
+  ["last_session_view_at"]`; idempotent, ה-ack הוא הפעולה היחידה שמקדם אותו; ה"בולטות"
+  מאחדות שידור חוזר — אותו מטוס/label/MSN/טקסט — למופע האחרון).
 - **מד שדה מאוחד + בדיקת אנטנה** (ר' docs/field-station-roadmap.md): `_read_voice_metrics`
   (חולץ מ-`api_metrics`, משותף גם ל-`GET /api/signal` במצב voice), `_signal_verdict`
   (פסק דין *רק* מול `state["signal_baseline"]` — `DISCONNECT_DROP_DB`=10dB אינו סף
@@ -563,7 +575,9 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   "נמדד"/"אינטרפולציה" — נקודות snapshot/lookup של שלב 1 עוברות כ-`prior` (⚠ ה-worker
   **לא** קורא את `track.jsonl` — עד ~5MB לכל הודעה). `_xc_evaluate` = זהות
   (`xcheck.message_identity`, ‏hex מבני/משתמש בלבד) + כיוון (`_xc_direction` — ב-ACARS
-  מחושב *מחדש* לפי `_ACARS_DIR_BY_LABEL`, בגלל הודעות שנשמרו לפני תיקון B6) + פרטי ADS-C
+  מחושב *מחדש*: `block_id` שנשמר ⇐ MSN (רק downlink נושא אחד) ⇐ `_ACARS_DIR_BY_LABEL`,
+  בגלל הודעות שנשמרו לפני תיקוני B6 ו-C1/B3/B4; uplink שסווג downlink נבחן מול האופק
+  כאילו שודר מהמטוס) + פרטי ADS-C
   (`_xc_adsc` — שדה `adsc` מ-`_adsc_details`, או re-decode ב-`_run_libacars` להודעה ישנה) +
   איסוף נקודות (`_xc_collect`: snapshot ⇐ buffer (full בלבד) ⇐ `adsb.lookup` (רק כשהמטוס
   לא ב-snapshot, או full בלי hex) ⇐ `fetch_trace` ⇐ `fetch_opensky_track` — או, כשהמשתמש
@@ -943,7 +957,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/satcom/spectrum?ch=N&bins=N` | ספקטרום baseband של ערוץ בודד (proxy ל-`/api/spectrum` של הכלי, דורש `--spectrum`). **האבחון היחיד שמפריד "אין RF בכלל" מ"יש RF, לא נעול"** — `lock`/`ebno` מציגים את שניהם זהים. `mags_db` מוגש **כמות שהוא**, בלי סף/ציון מומצא (§12). `bins` נחתך ל-32..1024 כמו ב-`web.c`. `available:false` (לא שגיאה) כשכבוי/ערוץ לא קיים |
 | GET | `/api/satcom/log` | זנב `journalctl -u airam-satcom` (‎`SATCOM_LOG_TAIL_LINES`=40). שורות הפתיחה מכריעות אם ה-bias-T נדלק (`sdrplay: bias tee enabled` מול `bias tee not supported on this model`) — בשטח אין SSH. **על דרישה בלבד**, לא בפולינג (fork ל-journalctl) |
 | GET | `/api/aircraft` | רוסטר מטוסים מאוחד — היתוך ACARS+VDL2+SATCOM+ADS-B לפי זהות (רישום/icao/טיסה). חי בכל מצב |
-| GET | `/api/session` | דוח סשן ("מה קרה בזמן שלא הסתכלת"): כמות הודעות/מטוסים (וחדשים), עד `SESSION_HIGHLIGHTS_MAX` הודעות `notable` (ר' `_interest_score`), ומסלול פעיל/שיבוש GPS מתוך `adsb.session_series`. קורא מהדיסק (jsonl), לא מהזיכרון — עקבי עם `?day=`. `?since=<epoch>` דורס את הסמן השמור; `GET` idempotent — לא מקדם אותו |
+| GET | `/api/session` | דוח סשן ("מה קרה בזמן שלא הסתכלת"): כמות הודעות/מטוסים (וחדשים), עד `SESSION_HIGHLIGHTS_MAX` הודעות `notable` (ר' `_interest_score`; שידור חוזר — אותו MSN וטקסט — מאוחד), ומסלול פעיל/שיבוש GPS מתוך `adsb.session_series`. קורא מהדיסק (jsonl), לא מהזיכרון — עקבי עם `?day=`. `?since=<epoch>` דורס את הסמן השמור; `GET` idempotent — לא מקדם אותו |
 | POST | `/api/session/ack` | מקדם את הסמן (`state["last_session_view_at"]`) ל"עכשיו" — הפעולה המפורשת היחידה שמקדמת אותו. דרך `_guard` |
 | GET | `/api/signal` | מד שדה מאוחד למצב שרץ *בפועל* כרגע: רציף בקול (`_read_voice_metrics`), "הודעה אחרונה בלבד" ב-ACARS/VDL2 (`level`+`snr` — ACARS לעולם בלי `snr`, ר' §12), הפניה ל-`/api/satcom/health` ב-SATCOM. `verdict` (`ok`/`below_baseline`/`no_baseline`/`unknown`) תמיד מול `state["signal_baseline"]` בלבד — לעולם לא סף מומצא |
 | GET/POST | `/api/rflog` | רשם ניסוי RF: GET מצב (`active`/`until`/`rows`/`marks`/`size`); POST `{active}` הפעלה/עצירה (idempotent). דרך `_guard` (POST). ר' `docs/antenna-calibration-experiment.md` |
@@ -1346,6 +1360,16 @@ enabled, וגם לא `airam-denoise`, ובשדרוג `disable rtl_airband` אי�
   לא `#` בתחילת הטקסט ממש) ו-`"M3FPN/"` (בלי קו-נטוי פותח, בניגוד ל-VHF
   `"/FPN/"`) — שני הרחבות תוספתיות-בלבד (הפורמט המקורי נשאר תקין), שלא
   נוגעות במיקום כלל (`_parse_h1` תמיד היה string-only, לא lat/lon).
+- **⚠ כיוון ACARS: עובדה מבנית קודמת לטבלת labels — אותה משפחת-באג כמו כיוון ה-ADS-C.**
+  הכיוון חושב עד כה מ-`_ACARS_DIR_BY_LABEL` ומ-header ניתוב, בזמן שה-JSON של acarsdec נשא
+  כל הזמן את התשובה: `block_id` (ספרה = downlink, אות = uplink — ‏ARINC 618; acarsdec עצמו
+  פולט msgno/flight רק כשהוא ספרה, `output.c`). ניתוח קליטת 24.10.2026 (614 הודעות) מצא
+  19 שגויים ו-262 בלי כיוון: ‏C1 (‏loadsheet/NOTOC *אל* הקוקפיט) סומן downlink, ‏H1 דו-כיווני
+  סומן תמיד downlink, ו-DCL של המטוס (B3/B4) סומן uplink בגלל ה-header ‎`"/LLBG.DC1/"` —
+  אותה מלכודת כמו B6. זה לא קוסמטי: ההצלבה (§5) בוחנת downlink כשידור *מהמטוס* מול אופק
+  הרדיו, ו-uplink כ"לא רלוונטי". **הכלל:** טבלת labels היא נפילה ל-VDL2/SATCOM המסונתזים
+  (שדורסים ממילא בכיוון מבני משלהם) ולהודעות ישנות — לא מקור. label שראיה סותרת אותו (‏3L,
+  ‏12/12 בלי MSN) **מוסר** מהטבלה, לא "מתהפך" על סמך מדגם קטן.
 - **בנקי ACARS/VDL2 = חלון אחד כל אחד:** acarsdec/dumpvdl2 מפענחים ערוצים מרובים בתוך
   חלון דגימה אחד (~2MHz). צביר 131.x ו-136.x רחוקים ~5MHz ⇒ לעולם לא יחד. בנק חדש חייב
   לעבור `_acars_window_error`/`_vdl2_window_error` (שניהם wrappers מעל `_window_error`).

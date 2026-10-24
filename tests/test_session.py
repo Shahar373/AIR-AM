@@ -131,6 +131,27 @@ def test_session_highlights_only_notable_sorted_newest_first_and_capped(client, 
     assert all(h["mode"] == "acars" for h in data["highlights"])
 
 
+def test_session_highlights_collapse_retransmissions(client, paths):
+    """‏9H-SHO שידר את אותו OUT (‏QP, ‏MSN M27A) עשרים פעם ב-24.10.2026 — בלי איחוד
+    הוא היה ממלא את כל שמונה ה"בולטות". מופע אחד (האחרון), והשאר נשארות."""
+    now = time.time()
+    since = now - 3600
+    qp = app._normalize_acars({"label": "QP", "tail": "9H-SHO", "msgno": "M27A",
+                               "block_id": "7", "text": "LEBLLEBL16420007"})
+    assert qp["notable"] is True
+    for i in range(20):
+        app._append_acars_log({**qp, "t": since + 60 + i * 90})
+    other = app._normalize_acars({"label": "QR", "tail": "F-GSQI", "msgno": "M95A",
+                                  "block_id": "5", "text": "LFPGLLBG1136113618021521"})
+    app._append_acars_log({**other, "t": since + 30})
+    data = client.get("/api/session?since=" + str(since)).get_json()
+    assert data["counts"]["acars"] == 21                 # הספירה לא משתנה — רק התמצית
+    hl = data["highlights"]
+    assert [h["tail"] for h in hl] == ["9H-SHO", "F-GSQI"]
+    assert hl[0]["t"] == since + 60 + 19 * 90            # המופע האחרון
+    assert all("_key" not in h for h in hl)
+
+
 def test_session_counts_split_by_mode(client, paths):
     now = time.time()
     since = now - 3600

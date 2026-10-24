@@ -287,6 +287,22 @@ def test_verify_old_record_redecodes_and_recomputes_direction(client, monkeypatc
     assert res["verdict"] == "blos_supported"
 
 
+def test_xc_direction_stored_acars_prefers_structure():
+    """הצלבה על הודעה שמורה: block ID (מ-v2.31.0) ⇐ MSN (רק downlink נושא אחד) ⇐
+    label. ‏loadsheet של C1 שנשמר כ-downlink נבחן קודם כשידור *מהמטוס* מול האופק."""
+    c1 = {"label": "C1", "text": ".UTCKM1P IZ/241150\nAGM", "block_id": "C", "dir": "downlink"}
+    d, basis = app._xc_direction("acars", c1)
+    assert d == "uplink" and basis.startswith("מבני — block ID") and "חושב מחדש" in basis
+    # לפני v2.31.0 לא נשמר block ID — ‏MSN מכריע (‏B3 שה-header סיווג uplink)
+    b3 = {"label": "B3", "text": "/LLBG.DC1/RCD 024", "msgno": "M34A", "dir": "uplink"}
+    d, basis = app._xc_direction("acars", b3)
+    assert d == "downlink" and "MSN" in basis and "חושב מחדש" in basis
+    # בלי שניהם — הטבלה (C1 תוקן ל-uplink)
+    assert app._xc_direction("acars", {"label": "C1", "text": "X"})[0] == "uplink"
+    # ‏MSN לא מכריע ב-VDL2 (שם יש כתובת AVLC, ובלעדיה לא מניחים את כלל ה-acarsdec)
+    assert app._xc_direction("vdl2", {"label": "H1", "text": "X", "msgno": "M01A"})[0] is None
+
+
 def test_verify_user_hex_contradicted_by_trace_registration(client, monkeypatch):
     """hex שהמשתמש הזין שייך (לפי ה-trace) לרישום אחר => סתירת זהות; נקודות ה-trace
     לא משמשות, ואין פסק-דין BLOS מחוזק."""
