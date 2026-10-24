@@ -1098,3 +1098,117 @@ def test_xcheck_trace_import_is_sent_and_kept_for_save(page):
     assert base64.b64decode(imported["trace_b64"]) == body
     assert imported["trace_name"] == "trace_full_406f79.json"
     assert saved["save"] is True and saved["trace_b64"] == imported["trace_b64"]
+
+
+# --- סינון רעשים חי (docs/denoise-design.md) ---------------------------------
+
+def _dn(state, enabled=True, **kw):
+    return {"ok": True, "enabled": enabled, "available": True, "missing": [],
+            "install_hint": None, "state": state, "service": "active",
+            "live": state == "live", "mount": "clean.mp3", **kw}
+
+
+def test_denoise_toggle_reports_what_is_actually_heard(page):
+    """§12: "מסונן" מוצג רק כש-/clean.mp3 באמת חי. בזמן העלייה — "גולמי"."""
+    posts = []
+    phase = {"live": False}
+
+    def denoise(route, url):
+        if route.request.method == "POST":
+            posts.append(json.loads(route.request.post_data))
+            body = _dn("starting")
+        elif not posts:                                # לפני ההדלקה — כבוי
+            body = _dn("off", enabled=False)
+        else:
+            body = _dn("live" if phase["live"] else "starting")
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    _mount(page, overrides={"/api/denoise": denoise})
+    expect(page.locator("#dnState")).to_have_text("כבוי — שמע גולמי", timeout=10000)
+    page.click("#dnToggle")
+    expect(page.locator("#dnState")).to_contain_text("בינתיים שמע גולמי", timeout=10000)
+    assert posts == [{"enabled": True}]
+    expect(page.locator("#dnToggle")).to_be_checked()
+    phase["live"] = True                               # השירות עלה — ה-mount חי
+    expect(page.locator("#dnState")).to_have_text("פעיל — שומעים שמע מסונן", timeout=10000)
+
+
+def test_denoise_enabled_player_requests_clean_mount(page):
+    """מתג דלוק => הנגן מבקש /clean.mp3 (Icecast מגיש fallback כשהוא לא חי)."""
+    st = {**_default_api()["/api/state"], "denoise": True, "denoise_available": True,
+          "denoise_mount": "clean.mp3"}
+    _mount(page, overrides={"/api/state": st, "/api/denoise": _dn("live")})
+    expect(page.locator("#dnState")).to_have_text("פעיל — שומעים שמע מסונן", timeout=10000)
+    src = page.evaluate("document.getElementById('player').src")
+    assert "/clean.mp3?" in src and "airam.mp3" not in src
+
+
+def test_denoise_disabled_player_requests_raw_mount(page):
+    _mount(page, overrides={"/api/denoise": _dn("off", enabled=False)})
+    expect(page.locator("#dnState")).to_have_text("כבוי — שמע גולמי", timeout=10000)
+    assert "/airam.mp3?" in page.evaluate("document.getElementById('player').src")
+
+
+def test_denoise_not_installed_shows_command_and_reverts(page):
+    def denoise(route, url):
+        if route.request.method == "POST":
+            route.fulfill(status=501, content_type="application/json", body=json.dumps(
+                {**_dn("unavailable", enabled=False, available=False,
+                       missing=["airam-rnnoise"],
+                       install_hint="cd ~/AIR-AM && git pull && sudo ./install.sh"),
+                 "ok": False, "error": "סינון הרעשים לא מותקן (חסר: airam-rnnoise)"}))
+        else:
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(_dn("off", enabled=False)))
+
+    _mount(page, overrides={"/api/denoise": denoise})
+    expect(page.locator("#dnState")).to_have_text("כבוי — שמע גולמי", timeout=10000)
+    page.click("#dnToggle")
+    expect(page.locator("body")).to_contain_text("sudo ./install.sh", timeout=10000)
+    expect(page.locator("#dnToggle")).not_to_be_checked()
+
+
+def test_denoise_row_hidden_when_receiver_off(page):
+    st = {**_default_api()["/api/state"], "app_mode": "off"}
+    health = {**_default_api()["/api/health"], "app_mode": "off",
+              "services": {**_default_api()["/api/health"]["services"],
+                           "rtl_airband": "inactive"}}
+    _mount(page, overrides={"/api/state": st, "/api/health": health})
+    page.click("#modeSeg button[data-v=voice]")
+    expect(page.locator("#dnRow")).to_be_hidden(timeout=10000)
+
+
+def test_denoise_reconnects_only_when_stream_may_be_on_fallback(page):
+    """Icecast מוגדר בלי fallback-override: מאזין שישב על ה-fallback (גולמי) לא
+    חוזר לבד למסונן. הדף מתחבר מחדש — אבל רק כשהחיבור אולי על ה-fallback, לא
+    בכל poll (כל חיבור מחדש = קטיעת שמע)."""
+    phase = {"state": "starting"}
+    st = {**_default_api()["/api/state"], "denoise": True, "denoise_available": True,
+          "denoise_mount": "clean.mp3"}
+
+    def denoise(route, url):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps(_dn(phase["state"])))
+
+    _mount(page, overrides={"/api/state": st, "/api/denoise": denoise})
+    expect(page.locator("#dnState")).to_contain_text("בינתיים שמע גולמי", timeout=10000)
+    # "מנגן" — בלי מדיה אמיתית: נגן מושהה=false + כוונת משתמש; reloadStream מוחלף
+    # במונה ששומר על אותו חוזה של הדגל (ר' reloadStream האמיתי)
+    page.evaluate("""() => {
+      window.__reloads = 0;
+      reloadStream = () => { window.__reloads++;
+        dnOnFallback = !(denoise.enabled && denoise.state === "live"); };
+      Object.defineProperty(player, "paused", { get: () => false, configurable: true });
+      wantPlaying = true;
+      dnOnFallback = true;      // התחבר כשהסינון עוד לא היה חי => יושב על ה-fallback
+    }""")
+    phase["state"] = "live"
+    expect(page.locator("#dnState")).to_have_text("פעיל — שומעים שמע מסונן", timeout=10000)
+    page.wait_for_function("window.__reloads === 1", timeout=10000)
+    page.evaluate("pollDenoise()")              # עוד polls כשכבר חי — בלי קטיעות נוספות
+    page.evaluate("pollDenoise()")
+    assert page.evaluate("window.__reloads") == 1
+    phase["state"] = "failed"                   # הסינון קרס — Icecast העביר ל-fallback
+    expect(page.locator("#dnState")).to_contain_text("לא פעיל", timeout=10000)
+    phase["state"] = "live"                     # חזר — מתחברים מחדש פעם אחת
+    page.wait_for_function("window.__reloads === 2", timeout=10000)

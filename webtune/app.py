@@ -51,6 +51,15 @@ STATE_PATH = Path("/var/lib/airam/state.json")
 MOUNT = "live.mp3"          # שם ה-stream הקבוע ב-Icecast
 ICECAST_PORT = 8000
 SOURCE_PW = "airam"         # חייבת להיות זהה ל-SOURCE_PW ב-install.sh (נכתבת ל-Icecast שם)
+# סינון רעשים חי (docs/denoise-design.md): rtl_airband שולח עותק PCM ב-UDP
+# (udp_stream — *תמיד* בקונפיג, ר' render_config) => airam-denoise (RNNoise)
+# => mount נוסף ב-Icecast. /live.mp3, ההקלטות והתמלול לא עוברים דרכו כלל.
+DENOISE_SERVICE = "airam-denoise"
+DENOISE_UDP_PORT = 5559     # חייב להיות זהה ל-UDP_PORT ב-scripts/airam-denoise
+DENOISE_MOUNT = "clean.mp3"  # חייב להיות זהה ל-MOUNT ב-scripts/airam-denoise + ל-<mount> ב-install.sh
+DENOISE_SCRIPT = Path("/usr/local/bin/airam-denoise")
+DENOISE_RNNOISE = Path("/usr/local/bin/airam-rnnoise")
+DENOISE_INSTALL_HINT = "cd ~/AIR-AM && git pull && sudo ./install.sh"
 SAMPLE_RATE = 2.56          # Msps - ערוץ יחיד, חלון צר מספיק
 DC_OFFSET = 0.3             # MHz - מזיזים את centerfreq מהתדר כדי להתרחק מ-spike ה-DC
 # רווח SDRplay (מודל legacy של SoapySDRPlay3): שני אלמנטים נפרדים, וקטן יותר = רווח גדול יותר.
@@ -630,7 +639,10 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  # תחנת הקליטה להצלבת ADS-B/אופק הרדיו: {"lat","lon","alt_m","name",
                  # "source","set_at"} או None. ⚠ אין ברירת מחדל (לא נתב"ג): AIR-AM נייד,
                  # ומיקום מומצא היה מייצר אופק שגוי בשקט — בלי תחנה אין פסק-דין BLOS.
-                 "station": None}
+                 "station": None,
+                 # סינון רעשים חי (RNNoise + השוואת עוצמות) לסטרים /clean.mp3.
+                 # מתג גלובלי; כבוי כברירת מחדל. ר' _denoise_sync.
+                 "denoise": False}
 
 
 # --- שורת ה-squelch: מקור אמת יחיד -----------------------------------------
@@ -690,6 +702,19 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
         f'            name = "AIR-AM {f:.3f}";',
         '            username = "source";',
         f'            password = "{SOURCE_PW}";',
+        "          },",
+        # עותק PCM לסינון הרעשים (airam-denoise) — *תמיד*, גם כשהמתג כבוי:
+        # הדלקה/כיבוי לא מאתחלים את הרדיו ולא מפצלים הקלטה. sendto לא-חוסם
+        # שמתעלם מכשל (udp_stream.cpp) => בלי מאזין זה ~64KB/s לשום מקום.
+        # ⚠ כשל באתחול הפלט הזה מפיל את rtl_airband כולו (rtl_airband.cpp:
+        # "aborting") — לכן כתובת ופורט *מספריים* בלבד: בלי DNS, ו-connect
+        # של UDP בלופבק מצליח גם בלי שאיש מאזין. continuous => אפסים גם
+        # בסקוולץ' סגור, אחרת Icecast מנתק את /clean.mp3 אחרי source-timeout.
+        "          {",
+        '            type = "udp_stream";',
+        '            dest_address = "127.0.0.1";',
+        f"            dest_port = {DENOISE_UDP_PORT};",
+        "            continuous = true;",
         "          }" + ("," if record else ""),
     ]
     if record:
@@ -2626,7 +2651,8 @@ def _satcom_listener():
 
 
 HEALTH_SERVICES = ("rtl_airband", "icecast2", "sdrplay",
-                   "airam-acars", "airam-vdl2", "airam-satcom")
+                   "airam-acars", "airam-vdl2", "airam-satcom",
+                   DENOISE_SERVICE)   # לחיווי בלבד — לא משפיע על ok (ר' api_health)
 
 
 def _services_status(names):
@@ -2661,7 +2687,8 @@ def _is_active(service):
 def _sysctl(action, service, timeout=45):
     """systemctl פעולה משנת-מצב => דרך SUDO (sudoers ממוקד מתיר בדיוק את
     הפעולות האלה ל-airam: restart/stop של rtl_airband / airam-acars / airam-vdl2 /
-    airam-satcom, ו-reset-failed של airam-satcom בלבד — ר' _enter_satcom)."""
+    airam-satcom, reset-failed של airam-satcom בלבד — ר' _enter_satcom — ו-start/stop
+    של airam-denoise, ר' _denoise_sync)."""
     return subprocess.run([*SUDO, "systemctl", action, service],
                           capture_output=True, text=True, timeout=timeout)
 
@@ -2982,7 +3009,134 @@ def _enter_voice(params):
                 pass
     write_config(params["freq"], params["mod"], params["agc"], params["if_gain"],
                  params["rf_gain"], params["squelch_mode"], params["squelch_snr"])
-    return _restart_and_verify()
+    res = _restart_and_verify()
+    if res[0] is None:
+        # אחרי ש-rtl_airband אומת בלבד, וב-best-effort: כשל בסינון לעולם לא
+        # מכשיל כניסה לקול (ר' _denoise_sync). מכסה כיוונון, מעבר מצב, סריקה,
+        # שחזור באתחול, reconcile ושחזור אחרי בדיקת אנטנה — כולם עוברים כאן.
+        _denoise_after_voice()
+    return res
+
+
+# --- סינון רעשים חי: airam-denoise (docs/denoise-design.md) -----------------
+# *לא* צרכן SDR ולא מצב: שירות צד שקורא עותק UDP של השמע ומשדר /clean.mp3.
+# airam-web מיישר אותו לכוונה (מתג גלובלי ב-state) — הוא רץ ⇔ המתג דלוק +
+# הקול חי + הרכיבים מותקנים. PartOf=rtl_airband ביחידה עוצר/מאתחל אותו יחד
+# עם הרדיו, כך שכאן צריך רק *להפעיל* (ולעצור בכיבוי המתג).
+# ⚠ החוסן לא תלוי בקוד הזה: Icecast מוגדר עם fallback-mount (install.sh שלב 5),
+# כך שמי שמבקש /clean.mp3 כשהסינון לא חי מקבל /live.mp3 — ומי שמאזין כשהסינון
+# קורס מועבר אליו בלי ניתוק (נבדק). הקוד כאן אחראי ל*חיווי הכן* (§12): ה-UI
+# אומר "מסונן" רק כשה-mount באמת חי — אחרת המשתמש שומע גולמי ויודע את זה.
+_DENOISE_LOCK = threading.Lock()   # start/stop מקבילים (POST + reconcile + כניסה לקול)
+ICECAST_STATUS_TTL_SEC = 2.0       # /api/denoise ו-/api/health בפולינג מכל טלפון פתוח
+_ice_status = {"t": 0.0, "mounts": None}
+_ICE_STATUS_LOCK = threading.Lock()
+
+
+def _denoise_missing():
+    """רכיבים חסרים לסינון (רשימה ריקה = מותקן). נבדק *חי* בכל קריאה ולא פעם
+    אחת בעלייה — אותו לקח כמו whisper (§12): התקנה מאוחרת חייבת להיות מורגשת
+    בלי restart, ו"לא מותקן" חייב להיות מדווח, לא מוסתר."""
+    missing = [] if shutil.which("ffmpeg") else ["ffmpeg"]
+    missing += [p.name for p in (DENOISE_SCRIPT, DENOISE_RNNOISE) if not os.access(p, os.X_OK)]
+    return missing
+
+
+def _icecast_live_mounts():
+    """קבוצת ה-mounts ש*באמת* משדרים כרגע לפי status-json.xsl של Icecast, או None
+    כשאין תשובה. ⚠ mount שהמקור שלו מת נשאר ברשימה כרשומה בלי stream_start
+    (נצפה ב-Icecast 2.4.4 כשהיו לו מאזינים שהועברו ל-fallback) — לכן "חי" =
+    יש stream_start, לא "מופיע ברשימה". cache קצר: נקרא מכל טלפון בפולינג."""
+    now = time.monotonic()
+    with _ICE_STATUS_LOCK:
+        if now - _ice_status["t"] < ICECAST_STATUS_TTL_SEC:
+            return _ice_status["mounts"]
+    mounts = None
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{ICECAST_PORT}/status-json.xsl",  # noqa: S310
+                                    timeout=2) as r:
+            src = json.loads(r.read(256 * 1024)).get("icestats", {}).get("source")
+        src = src if isinstance(src, list) else ([src] if isinstance(src, dict) else [])
+        mounts = {str(s.get("listenurl", "")).rsplit("/", 1)[-1]
+                  for s in src if isinstance(s, dict) and s.get("stream_start")}
+    except Exception:
+        mounts = None                      # Icecast למטה / JSON שבור — "לא ידוע", לא "כבוי"
+    with _ICE_STATUS_LOCK:
+        _ice_status.update(t=now, mounts=mounts)
+    return mounts
+
+
+def _denoise_state(enabled, missing, voice_on, service, live):
+    """פסק-דין יחיד לחיווי — ה-UI לא מנחש. הערכים:
+      off         — המתג כבוי (שומעים גולמי, כמבוקש)
+      unavailable — דלוק אבל לא מותקן (שומעים גולמי; install_hint בתשובה)
+      idle        — דלוק, אבל הקול לא פעיל — אין מה לסנן
+      live        — /clean.mp3 משדר (שומעים מסונן)
+      starting    — השירות עולה, ה-mount עוד לא חי (שומעים גולמי בינתיים)
+      failed      — השירות לא רץ למרות שאמור (שומעים גולמי)
+      unknown     — השירות רץ אבל Icecast לא ענה — לא טוענים "מסונן" בלי ראיה"""
+    if not enabled:
+        return "off"
+    if missing:
+        return "unavailable"
+    if not voice_on:
+        return "idle"
+    if live is True:
+        return "live"
+    if service in ("active", "activating", "reloading"):
+        return "unknown" if live is None else "starting"
+    return "failed"
+
+
+def _denoise_status(services=None):
+    """מצב הסינון ל-/api/denoise ול-/api/health. services — מפה מוכנה מ-
+    _services_status (‏/api/health כבר מחזיק אותה => בלי fork נוסף)."""
+    enabled = bool(load_state().get("denoise"))
+    missing = _denoise_missing()
+    if services is None:
+        services = _services_status(("rtl_airband", DENOISE_SERVICE))
+    voice_on = services.get("rtl_airband") == "active"
+    service = services.get(DENOISE_SERVICE, "unknown")
+    # שאילתת Icecast רק כשיש בה טעם — המתג כבוי הוא המצב הנפוץ
+    live = None
+    if enabled and voice_on and not missing:
+        mounts = _icecast_live_mounts()
+        live = None if mounts is None else (DENOISE_MOUNT in mounts)
+    return {"enabled": enabled, "available": not missing, "missing": missing,
+            "install_hint": DENOISE_INSTALL_HINT if missing else None,
+            "state": _denoise_state(enabled, missing, voice_on, service, live),
+            "service": service, "live": live, "mount": DENOISE_MOUNT}
+
+
+def _denoise_sync():
+    """מיישר את airam-denoise לכוונה: רץ ⇔ המתג דלוק + rtl_airband חי + מותקן.
+    idempotent, בטוח לקריאה מכל מקום, **לעולם לא זורק** — ולעולם לא נוגע
+    ברדיו: גם כשל מלא כאן משאיר את /live.mp3 ואת ההקלטות בדיוק כמו שהיו.
+    לא מחזיק TUNE_LOCK (נקרא גם מתוך _enter_voice שכבר מחזיק אותו)."""
+    try:
+        want = (bool(load_state().get("denoise")) and not _denoise_missing()
+                and _is_active("rtl_airband"))
+        with _DENOISE_LOCK:
+            cur = _services_status((DENOISE_SERVICE,))[DENOISE_SERVICE]
+            running = cur in ("active", "activating", "reloading")
+            if want and not running:
+                r = _sysctl("start", DENOISE_SERVICE, timeout=15)
+                if r is not None and getattr(r, "returncode", 0) != 0:
+                    log.warning("denoise: start נכשל: %s", (r.stderr or "").strip()[:200])
+            elif running and not want:
+                _sysctl("stop", DENOISE_SERVICE, timeout=15)
+    except Exception:
+        log.exception("denoise sync נכשל (מתעלמים — הרדיו לא מושפע)")
+
+
+def _denoise_after_voice():
+    """וו אחרי כניסה מוצלחת לקול. בלי מתג דלוק — אפס פעולות (אף fork): הנתיב
+    הזה רץ בכל כיוונון, והמתג הכבוי הוא ברירת המחדל."""
+    try:
+        if load_state().get("denoise"):
+            _denoise_sync()
+    except Exception:
+        log.exception("denoise after voice נכשל (מתעלמים)")
 
 
 def _fail_to_off(st, err, detail, log_prefix):
@@ -3350,7 +3504,10 @@ def live_playlist():
     """Playlist המצביע על סטרים ה-Icecast. פתיחה בנגן שמע חיצוני (VLC וכו')
     מנגנת ברקע בצורה חסינה, ללא תלות בדפדפן."""
     host = request.host.split(":", 1)[0]          # רק ה-hostname, בלי פורט ה-web
-    url = f"http://{host}:{ICECAST_PORT}/{MOUNT}"
+    # המתג גלובלי => גם הנגן החיצוני מקבל את המסונן כשהוא דלוק. בטוח גם כשהסינון
+    # לא חי: Icecast מגיש את /live.mp3 למבקשי /clean.mp3 (fallback-mount).
+    mount = DENOISE_MOUNT if load_state().get("denoise") else MOUNT
+    url = f"http://{host}:{ICECAST_PORT}/{mount}"
     body = "#EXTM3U\n#EXTINF:-1,AIR-AM live\n" + url + "\n"
     return app.response_class(body, mimetype="audio/x-mpegurl")
 
@@ -3360,7 +3517,11 @@ def stream_proxy():
     """Reverse-proxy לסטרים ה-Icecast, same-origin => עובד גם בדף HTTPS בלי
     mixed-content. נחוץ כשהדף מוגש ב-HTTPS (למשל מאחורי 'tailscale serve'):
     סטרים HTTP ישיר מ-Icecast היה נחסם. ב-HTTP/LAN הנגן ניגש ל-Icecast ישירות."""
-    upstream = f"http://127.0.0.1:{ICECAST_PORT}/{MOUNT}"
+    # ?m=clean => הסטרים המסונן. רשימה סגורה (לא שם mount חופשי מהלקוח) — אין
+    # דרך להפוך את ה-proxy לגישה לכל נתיב ב-Icecast המקומי. /clean.mp3 שאינו חי
+    # מוגש ע"י Icecast מ-/live.mp3 (fallback-mount) => אין כאן מקרה קצה נוסף.
+    mount = DENOISE_MOUNT if request.args.get("m") == "clean" else MOUNT
+    upstream = f"http://127.0.0.1:{ICECAST_PORT}/{mount}"
     try:
         up = urllib.request.urlopen(upstream, timeout=10)   # noqa: S310 (לוקאלהוסט בלבד)
     except Exception:
@@ -3429,6 +3590,7 @@ def api_state():
         # מערכת / _boot_restore עוד בדרך). True גם ב-off — standby מכוון אינו תקלה.
         st["mode_ok"] = (live is not None) or (saved == "off")
     st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT, version=VERSION,
+              denoise_mount=DENOISE_MOUNT, denoise_available=not _denoise_missing(),
               acars_banks=ACARS_BANKS, vdl2_banks=VDL2_BANKS, satcom_banks=SATCOM_BANKS)
     return jsonify(st)
 
@@ -3661,8 +3823,33 @@ def api_health():
         mode = active or saved
         ok = (voice_ok if mode == "voice" else acars_ok if mode == "acars"
               else vdl2_ok if mode == "vdl2" else satcom_ok if mode == "satcom" else off_ok)
+    # הסינון לא נכנס ל-ok בכוונה: כשל בו לא פוגע ברדיו (Icecast מגיש /live.mp3
+    # למבקשי /clean.mp3), ו"תקלה" אדומה במסך הבית בגללו הייתה שולחת לבדוק SDR.
     return jsonify(ok=ok, app_mode=mode,
-                   services=services, sdr_present=_sdr_present(), stats_age=stats_age)
+                   services=services, sdr_present=_sdr_present(), stats_age=stats_age,
+                   denoise=_denoise_status(services))
+
+
+@app.route("/api/denoise", methods=["GET", "POST"])
+def api_denoise():
+    """סינון רעשים חי (docs/denoise-design.md). GET: מצב (ר' _denoise_state).
+    POST {enabled: bool}: מתג גלובלי (state) + יישור מיידי של השירות. לא נוגע
+    ברדיו ולא ב-TUNE_LOCK — הפלט ל-UDP קיים בקונפיג תמיד, אז אין restart.
+    דרך _guard (POST)."""
+    if request.method == "POST":
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not isinstance(data.get("enabled"), bool):
+            return jsonify(ok=False, error="נדרש {\"enabled\": true|false}"), 400
+        enabled = data["enabled"]
+        missing = _denoise_missing()
+        if enabled and missing:
+            # לא שומרים "דלוק" שלא יכול לעבוד — מחזירים את הפקודה שמתקנת (כמו whisper)
+            return jsonify(ok=False, error="סינון הרעשים לא מותקן (חסר: " + ", ".join(missing) + ")",
+                           **_denoise_status()), 501
+        _merge_state({"denoise": enabled})
+        log.info("denoise %s (from %s)", "on" if enabled else "off", request.remote_addr)
+        _denoise_sync()
+    return jsonify(ok=True, **_denoise_status())
 
 
 # שורת מדד בקובץ ה-stats של rtl_airband (פורמט Prometheus):
@@ -7130,12 +7317,13 @@ BOOT_SDR_WAIT_SEC = 90    # המתנה ל-SDR באתחול לפני ניסיון
 
 def _config_stale():
     """קונפיג הקול חסר או ישן (שדרוג: בלי stats_filepath למדדי RF / localtime
-    להקלטות) => צריך שכתוב לפני שמרימים את rtl_airband."""
+    להקלטות / udp_stream לסינון הרעשים) => צריך שכתוב לפני שמרימים את rtl_airband."""
     try:
         cur = CONFIG_PATH.read_text()
     except OSError:
         return True
-    return "stats_filepath" not in cur or "localtime" not in cur
+    return ("stats_filepath" not in cur or "localtime" not in cur
+            or "udp_stream" not in cur)
 
 
 def _boot_restore():
@@ -7153,6 +7341,8 @@ def _boot_restore():
         # מדלג עליו וסבב הסריקה תמיד מתחיל מחדש מרגל 0 אחרי restart של airam-web
         # (גם אם רגל מסוימת כבר רצה תקין) — פשטות מכוונת, לא באג.
         if live == mode and not (mode == "voice" and _config_stale()):
+            if mode == "voice":
+                _denoise_after_voice()   # הקול כבר רץ — אולי בלי הסינון (שדרוג/restart)
             return   # restart של airam-web באמצע סשן: הצרכן השמור כבר רץ
         if mode == "off":
             if live:   # אחרי reboot ממילא כלום לא רץ => no-op
@@ -7277,13 +7467,17 @@ def _mode_reconcile_once():
 
 def _mode_reconcile_loop():
     """thread רקע: קורא ל-_mode_reconcile_once כל MODE_RECONCILE_INTERVAL_SEC.
-    כשל בבדיקה בודדת לא מפיל את ה-thread — מנסה שוב במחזור הבא."""
+    כשל בבדיקה בודדת לא מפיל את ה-thread — מנסה שוב במחזור הבא.
+    גם מיישר את סינון הרעשים (_denoise_sync — שני forks לדקה): מכסה את מה
+    שהווים הישירים לא רואים, למשל airam-web שאותחל בזמן שהקול כבר רץ, או
+    התקנה של הרכיבים אחרי שהמתג כבר הודלק."""
     while True:
         time.sleep(MODE_RECONCILE_INTERVAL_SEC)
         try:
             _mode_reconcile_once()
         except Exception:
             log.exception("mode reconcile crashed (ignored)")
+        _denoise_sync()   # לעולם לא זורק
 
 
 if __name__ == "__main__":

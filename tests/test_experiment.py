@@ -5,6 +5,7 @@
 #  בתדר/AGC/רווח ובמצב האנטנה (מחוברת/מנותקת). כך נבדק הניסוי מקצה לקצה —
 #  כולל שתי הפעולות הפיזיות — בלי חומרה. סנכרון דרך Event/join, לא sleep קבוע.
 # ============================================================================
+import json
 import threading
 import time
 import types
@@ -102,14 +103,15 @@ class FakeSDR:
 
 @pytest.fixture
 def fast(monkeypatch):
-    # ⚠ EXP_REF_SEC (חלון ה-ATIS) נדיב יותר משאר החלונות: החציון נלקח מחלון אחד בלבד
-    # של ~0.2ש' אחרי ה-settle, ועצירת scheduler אחת באורך הזה על runner של CI רוקנה
-    # אותו (atis.gone=None — נכשל פעם אחת ב-test (3.13) ועבר באותו commit בריצה
-    # המקבילה). 0.6ש' משאיר ~0.55ש' של דגימות; שלוש הופעות ⇒ ~1ש' נוסף לבדיקה.
-    for k, v in (("EXP_REF_SEC", 0.6), ("EXP_FIXED_SEC", 0.25), ("EXP_AGC_SEC", 0.3),
-                 ("EXP_AFTER_PROMPT_SEC", 0.25), ("EXP_FINAL_AGC_SEC", 0.25),
-                 ("EXP_FIXED_SETTLE_SEC", 0.05), ("EXP_AGC_TAIL_SEC", 0.2), ("EXP_EARLY_SEC", 0.08),
-                 ("EXP_CREEP_HEAD_SEC", 0.08), ("EXP_CREEP_TAIL_SEC", 0.1),
+    # ⚠ כל חלון *נמדד* (שהבדיקה מסיקה ממנו) ≥ ~0.4ש' — מעל עצירת scheduler אחת על
+    # runner של CI. חלונות של 0.2ש' התרוקנו כל פעם במקום אחר: חלון ה-ATIS (v2.28.1),
+    # ה-head של after_disconnect, ו-steady של clean_f35 (v2.29.0) — אותו שורש, לא שלוש
+    # תקלות. היחסים הפנימיים נשמרים: settle<חלון, tail<חלון, head ו-tail של after_prompt
+    # לא חופפים. EXP_EARLY_SEC לא נבדק כאן ונשאר קצר. מחיר: ~6ש' נוספות לבדיקה.
+    for k, v in (("EXP_REF_SEC", 0.6), ("EXP_FIXED_SEC", 0.6), ("EXP_AGC_SEC", 0.6),
+                 ("EXP_AFTER_PROMPT_SEC", 0.5), ("EXP_FINAL_AGC_SEC", 0.6),
+                 ("EXP_FIXED_SETTLE_SEC", 0.05), ("EXP_AGC_TAIL_SEC", 0.45), ("EXP_EARLY_SEC", 0.08),
+                 ("EXP_CREEP_HEAD_SEC", 0.25), ("EXP_CREEP_TAIL_SEC", 0.2),
                  ("EXP_REF_SETTLE_SEC", 0.05), ("EXP_STALE_WINDOW_SEC", 0.1),
                  ("ANTENNA_CHECK_SAMPLE_SEC", 0.5), ("RFLOG_POLL_SEC", 0.01)):
         monkeypatch.setattr(app, k, v)
@@ -134,6 +136,22 @@ def world(paths, fast, monkeypatch):
     sdr.start()
     yield sdr
     sdr.stop()
+
+
+def _last_rflog_noise():
+    """ערך ה-noise בשורת הרשם האחרונה (None כשאין) — מה שהרשם *ראה*, לא מה שה-SDR המדומה מדווח."""
+    try:
+        lines = app.RFLOG_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue                       # שורה שנכתבת ברגע זה
+        if isinstance(row, dict) and "noise" in row:
+            return row["noise"]
+    return None
 
 
 def _wait(pred, timeout=20):
@@ -177,6 +195,13 @@ def test_full_run_two_prompts_summary_and_restore(client, world):
     st = client.get("/api/experiment").get_json()
     assert st["waiting"]["action"] == "disconnect" and st["eta_prompt_sec"] == 0
     world.connected = False
+    # ⚠ רעידה ב-CI (test (3.11), ‏instant=-58 במקום -60): הרשם קורא את קובץ ה-stats
+    # ורק *אחר כך* חותם זמן (_rflog_sample). קריאה של -58 לפני ההיפוך + עצירת
+    # scheduler ⇒ שורה עם הערך הישן וזמן אחרי t_ready, ובחלון head של 0.08ש' (דחוס
+    # פי ~100) היא יכלה להיות היחידה. במקום להרחיב חלון — סגירה דטרמיניסטית: מאשרים
+    # רק אחרי שהרשם עצמו רשם את הערך המנותק. הרשם הוא thread יחיד, אז כל שורה אחריו
+    # נקראה אחרי ההיפוך. (בייצור המשתמש מאשר שניות אחרי הניתוק — אין מרוץ כזה.)
+    assert _wait(lambda: _last_rflog_noise() == -60.0)
     assert client.post("/api/experiment", json={"action": "confirm"}).status_code == 200
 
     assert _wait(lambda: (app._exp["waiting"] or {}).get("action") == "reconnect")

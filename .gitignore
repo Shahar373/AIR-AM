@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 air-am-build/
+
+# ניסוי סינון הרעשים — קלטים שמורדים ע"י fetch.sh ותוצרים
+docs/denoise-experiment/data/

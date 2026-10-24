@@ -1,0 +1,40 @@
+[Unit]
+Description=AIR-AM - live noise reduction (RNNoise) for the voice stream (/clean.mp3)
+Documentation=https://github.com/xiph/rnnoise
+# *לא* צרכן SDR: קורא עותק UDP של השמע מ-rtl_airband ומשדר mount נוסף ב-Icecast.
+# לכן בלי Conflicts — הוא חי רק *לצד* מצב הקול, אף פעם לא במקומו.
+After=rtl_airband.service icecast2.service
+# PartOf => עצירה/restart של rtl_airband (מעבר מצב, כיוונון) מופצים לכאן:
+# יציאה מקול עוצרת את הסינון, כיוונון מאתחל אותו יחד עם הרדיו. ההפעלה עצמה
+# — רק ע"י airam-web (_denoise_sync), כשהמתג דלוק והקול חי.
+PartOf=rtl_airband.service
+# מתאושש לנצח, כמו שאר השירותים: כשל כאן לא נוגע ברדיו (Icecast מעביר את
+# המאזינים ל-/live.mp3), אז אין סיבה "לוותר" ולהשאיר את המתג דלוק בלי סינון.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/airam-denoise
+# לא-root: צריך רק UDP בלופבק וחיבור ל-Icecast המקומי.
+User=airam
+Group=airam
+Restart=always
+RestartSec=3
+# שלושה תהליכים בצינור — עצירה הורגת את כולם (גם בלי bash כאב תקין)
+KillMode=control-group
+# הרדיו קודם: בעומס CPU הסינון נסוג, לא rtl_airband (שרץ ב-root, nice 0, weight 100)
+Nice=10
+CPUWeight=20
+# חיזוק: אין צורך בדיסק, בהתקנים או בהרשאות
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# אין [Install] בכוונה: לא enabled. airam-web (המתזמר) מפעיל אותו כשהמתג
+# "סינון רעשים" דלוק *וגם* הקול חי — ר' _denoise_sync ב-app.py.
