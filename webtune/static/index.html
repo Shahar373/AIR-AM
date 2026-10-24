@@ -495,6 +495,15 @@
 
     .player-row { display: flex; gap: .5rem; margin-top: .6rem; }
     .player-row button, .player-row a { flex: 1; }
+    /* סינון רעשים חי (🎧 AI) — מתג גלובלי + שורת מצב כנה (מה *באמת* נשמע) */
+    .dn-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+      margin-top: .6rem; padding: .55rem .75rem; border: 1px solid var(--border);
+      border-radius: var(--r-ctrl); background: var(--panel-2); }
+    .dn-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .dn-ttl { font-size: .9rem; font-weight: 600; }
+    .dn-st { font-size: .78rem; color: var(--dim); }
+    .dn-st.live { color: var(--green); }
+    .dn-st.warn { color: var(--amber); }
 
     /* ---------- שחזור-סשן: כרטיס-בית + רשימה + נגן (docs/session-replay-design.md §9) ---------- */
     .replay-save-row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
@@ -1765,6 +1774,18 @@
       <a id="extBtn" class="ghost" href="/live.m3u" role="button"
          title="פתח את הסטרים בנגן שמע חיצוני (ממשיך לנגן ברקע)">🎧 נגן חיצוני</a>
     </div>
+    <!-- סינון רעשים חי: RNNoise + השוואת עוצמות, בשרת (docs/denoise-design.md).
+         מתג גלובלי. ההקלטות והתמלול נשארים גולמיים תמיד. -->
+    <div class="dn-row" id="dnRow">
+      <div class="dn-txt">
+        <span class="dn-ttl">✨ סינון רעשים (AI)</span>
+        <span class="dn-st" id="dnState">—</span>
+      </div>
+      <label class="switch" title="הפחתת רעש רקע והשוואת עוצמות בין דוברים">
+        <input type="checkbox" id="dnToggle" aria-label="סינון רעשים" />
+        <span class="track"></span>
+      </label>
+    </div>
 
     <details class="err hidden" id="errBox">
       <summary>פרטי שגיאה</summary>
@@ -2501,6 +2522,12 @@
     const $ = (id) => document.getElementById(id);
     const player = $("player");
     let cfg = { port: 8000, mount: "live.mp3", presets: [] };
+    // סינון רעשים חי — מקור-האמת הוא השרת (state בתשובת /api/denoise ו-/api/health)
+    let denoise = { enabled: false, available: false, state: "off" };
+    // האם החיבור הנוכחי עלול לשבת על ה-fallback (גולמי): נקבע בכל reloadStream,
+    // ונדלק כשהמצב יוצא מ-live (Icecast העביר את המאזין). מתחברים מחדש רק כשזה
+    // נכון — לא בכל מעבר ל-live (למשל unknown⇐live רגע אחרי ▶ על סטרים שכבר מסונן).
+    let dnOnFallback = true;
     let current = 132.5;          // התדר הפעיל (לכיוונון-מחדש בשינוי הגדרות)
     let retryTimer = null;
     let connectTimer = null;
@@ -2597,16 +2624,22 @@
     // בדף HTTPS (למשל מאחורי tailscale serve) ניגשים לסטרים same-origin דרך
     // ה-proxy => סטרים HTTP ישיר מ-Icecast היה נחסם כ-mixed-content. ב-HTTP/LAN
     // ניגשים ל-Icecast ישירות (פחות עומס ו-latency נמוך).
-    const streamURL = () =>
-      location.protocol === "https:"
-        ? `/stream?t=${Date.now()}`
-        : `http://${location.hostname}:${cfg.port}/${cfg.mount}?t=${Date.now()}`;
+    // סינון דלוק => מבקשים /clean.mp3 *תמיד* (גם כשהוא עוד לא חי): Icecast מגיש
+    // לו את /live.mp3 כ-fallback ומעביר אליו בלי ניתוק אם הסינון קורס — לכן אין
+    // כאן לוגיקת החלפה בכשל. מה שנשמע בפועל מוצג בכנות ב-renderDenoise.
+    const streamURL = () => {
+      const clean = denoise.enabled && denoise.available;
+      return location.protocol === "https:"
+        ? `/stream?${clean ? "m=clean&" : ""}t=${Date.now()}`
+        : `http://${location.hostname}:${cfg.port}/${clean ? (cfg.denoise_mount || "clean.mp3") : cfg.mount}?t=${Date.now()}`;
+    };
 
     // קישור לנגן חיצוני. באנדרואיד: Android Intent => מערכת ההפעלה מציגה בורר
     // אפליקציות (VLC וכו') ומעבירה את הסטרים החוצה, במקום שכרום ינגן בכרטיסייה.
     // בשאר המכשירים: playlist רגיל (/live.m3u).
     function appStreamHref() {
-      const path = `${location.hostname}:${cfg.port}/${cfg.mount}`;
+      const mount = denoise.enabled && denoise.available ? (cfg.denoise_mount || "clean.mp3") : cfg.mount;
+      const path = `${location.hostname}:${cfg.port}/${mount}`;
       if (/Android/i.test(navigator.userAgent)) {
         const fb = encodeURIComponent(`http://${path}`);
         return "intent://" + path + "#Intent;scheme=http;" +
@@ -2838,6 +2871,8 @@
       clearTimeout(retryTimer);
       player.onerror = null;
       player.src = streamURL();
+      // החיבור הזה ישב על ה-fallback (גולמי) אם הסינון לא חי ברגע זה — ר' applyDenoise
+      dnOnFallback = !(denoise.enabled && denoise.state === "live");
       player.load();
       player.play().then(() => setStatus("משדר · live", "live")).catch(() => {
         setStatus("מוכן — לחץ ▶ להאזנה", "live");
@@ -2847,6 +2882,66 @@
         else setStatus("הסטרים לא זמין — נסה לסנכרן", "err");
       };
     }
+
+    /* ---------- סינון רעשים חי (docs/denoise-design.md) ---------- */
+    // השרת מחליט מה המצב (state); כאן רק מציגים אותו. "מסונן" מוצג *רק* כש-
+    // /clean.mp3 באמת משדר — בכל מצב אחר המאזין שומע את /live.mp3 (fallback של
+    // Icecast) וחייב לדעת את זה (§12: "לא ניסינו"/"נכשלנו" ≠ "עובד").
+    const DN_TEXT = {
+      off:         ["כבוי — שמע גולמי", ""],
+      unavailable: ["לא מותקן — שמע גולמי", "warn"],
+      idle:        ["דלוק — יופעל עם הקול", ""],
+      live:        ["פעיל — שומעים שמע מסונן", "live"],
+      starting:    ["עולה… בינתיים שמע גולמי", "warn"],
+      failed:      ["לא פעיל — שומעים שמע גולמי", "warn"],
+      unknown:     ["מצב לא ידוע — ייתכן ששומעים גולמי", "warn"],
+    };
+    let dnBusy = false;   // POST בדרך — לא דורסים את המתג מתשובת poll ישנה
+    function renderDenoise() {
+      const [txt, cls] = DN_TEXT[denoise.state] || DN_TEXT.unknown;
+      const el = $("dnState");
+      el.textContent = txt;
+      el.className = "dn-st" + (cls ? " " + cls : "");
+      if (!dnBusy) $("dnToggle").checked = !!denoise.enabled;
+      $("dnRow").title = denoise.state === "unavailable" && denoise.install_hint
+        ? "להתקנה: " + denoise.install_hint : "";
+    }
+    // הסינון חי וה-player אולי על ה-fallback (התחבר לפני שהסינון עלה, או שהסינון
+    // קרס ו-Icecast העביר אותו) => מתחברים מחדש. Icecast בכוונה לא מחזיר לבד
+    // (בלי fallback-override — ר' install.sh).
+    function applyDenoise(d) {
+      if (!d || dnBusy) return;
+      denoise = { ...denoise, ...d };
+      renderDenoise();
+      if (denoise.state !== "live") { dnOnFallback = true; return; }
+      if (denoise.enabled && dnOnFallback && wantPlaying && !player.paused) reloadStream();
+    }
+    async function pollDenoise() {
+      try { applyDenoise(await fetchJSON("/api/denoise")); } catch (e) { /* ה-poll הבא */ }
+    }
+    $("dnToggle").addEventListener("change", async (ev) => {
+      const want = ev.target.checked;
+      dnBusy = true;
+      $("dnState").textContent = want ? "מפעיל…" : "מכבה…";
+      let d = null;
+      try {
+        const res = await apiSend("POST", "/api/denoise", { enabled: want });
+        d = await res.json();
+        if (!res.ok || d.ok === false) {
+          showToast(d.error ? d.error + (d.install_hint ? " — " + d.install_hint : "") : "שינוי הסינון נכשל");
+        }
+      } catch (e) {
+        showToast("אין קשר לשרת — הסינון לא שונה");
+      } finally {
+        dnBusy = false;
+      }
+      if (d) { const prev = denoise; denoise = { ...denoise, ...d }; renderDenoise();
+        // כיבוי בזמן נגינה => חזרה מיידית ל-/live.mp3; הדלקה — מחכים ל-live
+        // (applyDenoise מתחבר מחדש) כדי לא לקטוע פעמיים את השמע
+        if (prev.enabled && !denoise.enabled && wantPlaying && !player.paused) reloadStream();
+      } else { $("dnToggle").checked = !want; renderDenoise(); }
+      pollDenoise();
+    });
 
     /* ---------- כיוונון ---------- */
     async function tune(freq) {
@@ -3034,6 +3129,8 @@
     // rtl_airband מרענן את הקובץ כל ~1 שנייה => פולינג כל שנייה למשוב כמעט-רציף
     // (לכיוון אנטנה בזמן אמת), רק כשהדף גלוי ובתצוגת קול (המדדים הם של rtl_airband)
     setInterval(() => { if (!document.hidden && appMode === "voice") pollMetrics(); }, 1000);
+    // סינון רעשים: מהר יותר מ-pollGlobalState (10ש') רק כשדלוק ובתצוגת הקול
+    setInterval(() => { if (!document.hidden && appMode === "voice" && denoise.enabled) pollDenoise(); }, 4000);
     pollMetrics();
 
     /* ---------- מד שדה מאוחד: קול / ACARS / VDL2 (ל-SATCOM יש כלי משלו: #satcomAimPanel) ----------
@@ -4570,6 +4667,7 @@
           if (live === "satcom" && appMode === "satcom") { pollSatcomHealth(); pollSatcomSpectrum(); }
         }
         updateSdrPip(); renderPower();
+        applyDenoise(h.denoise);   // מתג גלובלי — אולי שונה מטלפון אחר
         if (scanning) {
           try {
             const sc = await fetchJSON("/api/scan");
@@ -4617,7 +4715,7 @@
       segSet("modeSeg", mode);
       renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acars/vdl2/satcom.active — עדכן בכל מעבר
       if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); pollExperiment(); pollXc(); }
-      if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); pollRflog(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
+      if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); pollRflog(); pollDenoise(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
       if (mode === "acars") acarsFm.poll();
       if (mode === "vdl2") vdl2Fm.poll();
       if (mode === "acars") acars.show(); else acars.hide();   // תצוגת ACARS מנוהלת בפקטורי (כמו VDL2/SATCOM)
@@ -4855,6 +4953,7 @@
       // כשה-SDR תפוס במצב אחר או כבוי (וגם reloadStream כבר no-op שם)
       const row = document.querySelector(".player-row");
       if (row) row.classList.toggle("hidden", show || sdrOff);
+      $("dnRow").classList.toggle("hidden", show || sdrOff);
     }
     function renderPower() {
       // כפתור כיבוי/הפעלה משקף את מצב ה-SDR (standby או פעיל). אייקון+תווית
@@ -7373,6 +7472,11 @@
     fetchJSON("/api/state").then((st) => {
       document.body.classList.remove("loading");   // הצלחה => מבטלים את שלד הטעינה
       cfg = st;
+      // לפני כל streamURL(): הסטרים הראשון כבר צריך לבקש את ה-mount הנכון
+      denoise = { ...denoise, enabled: !!st.denoise, available: !!st.denoise_available,
+                  state: st.denoise ? "unknown" : "off" };
+      renderDenoise();
+      if (st.denoise) pollDenoise();
       if (st.version) $("verTag").textContent = "v" + st.version + " · SDRplay RSP1B";
       segSet("modSeg", st.mod === "nfm" ? "nfm" : "am");
       $("agc").checked = st.agc !== false;

@@ -34,7 +34,8 @@ apt-get install -y \
   libmp3lame-dev libshout3-dev \
   libconfig++-dev libfftw3-dev \
   zlib1g-dev libxml2-dev libglib2.0-dev \
-  icecast2 python3 python3-flask
+  icecast2 python3 python3-flask \
+  ffmpeg
 
 # ----------------------------------------------------------------------------
 # 2. SDRplay API  (הורדה + חילוץ + התקנה אוטומטית, ללא אישור רישיון אינטראקטיבי)
@@ -365,6 +366,67 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+# 4e. RNNoise + airam-rnnoise  (סינון רעשים חי לסטרים הקול — /clean.mp3)
+# ----------------------------------------------------------------------------
+# ר' docs/denoise-design.md. נבחר במדידה מול חמשת המודלים של arnndn המובנה
+# ב-ffmpeg (כולם פגעו במובנות של דובר חלש; RNNoise v0.2 שיפר את שלושת הדוברים).
+# ⚠ tarball ה-release מ-GitHub ולא git clone: ב-git חסר המודל (rnnoise_data.c),
+# ו-autogen.sh מוריד אותו מ-media.xiph.org — עוד שרת שצריך להיות זמין. ב-tarball
+# הרשמי המודל כבר בפנים. ה-sha256 נעוץ => קובץ שהוחלף/נקטע לא נבנה בשקט.
+# ‏airam-rnnoise.c נבנה סטטית מול librnnoise.a => בינארי אחד, בלי .so להתקין
+# (אותו לקח כמו whisper-cli: BUILD_SHARED_LIBS). המקור שלו חלק מהחתימה.
+# ⚠ ה-tarball של v0.2 **לא נבנה על ARM** (נבדק ב-cross-compile ל-aarch64): נתיב ה-NEON
+# (src/vec_neon.h) כולל os_support.h — קובץ שלא קיים בפרויקט. על x86 הנתיב הזה לא
+# נכלל, ולכן זה לא נראה שם. התיקון הוא commit ‏372f7b4 של upstream (אפריל 2024, GitHub
+# ‏#222) — אחרי ה-release. מחילים *רק* אותו ולא עוברים ל-HEAD: אחרי v0.2 השתנתה
+# ארכיטקטורת הרשת, והמודל שנמדד (§4 במסמך) הוא של v0.2. אומת: הפלט על aarch64
+# (qemu) זהה לפלט על x86 ב-‎55dB SNR.
+RNNOISE_VER="0.2"
+RNNOISE_SHA256="90fce4b00b9ff24c08dbfe31b82ffd43bae383d85c5535676d28b0a2b11c0d37"
+RNNOISE_PATCH="$REPO_DIR/tools/rnnoise-0.2-372f7b4-arm-build-fix.patch"
+RNNOISE_BUILD_SIG="$(cat <(printf '%s %s ' "$RNNOISE_VER" "$RNNOISE_SHA256") "$REPO_DIR/tools/airam-rnnoise.c" "$RNNOISE_PATCH" | sha256sum | awk '{print $1}')"
+AIRAM_RNNOISE_MARK="/usr/local/share/airam/airam-rnnoise.build-sig"
+# ⚠ כשל כאן *לא* עוצר את ההתקנה (warn, לא die): הסינון הוא פיצ'ר צד, והרדיו עצמו
+# (Icecast/שרת הווב/systemd בשלבים הבאים) לא יכול להישאר לא-מותקן בגללו. בלי
+# marker => הרצה חוזרת תנסה שוב; ה-UI מציג "לא מותקן" + הפקודה (_denoise_missing).
+# פונקציה ולא בלוק: בתוך תנאי `if` ה-set -e כבוי, לכן כל שלב מסתיים ב-|| return 1.
+build_rnnoise() {
+  cd "$BUILD_DIR" || return 1
+  local tgz="rnnoise-${RNNOISE_VER}.tar.gz" out_len
+  if [[ ! -f "$tgz" ]] || ! echo "$RNNOISE_SHA256  $tgz" | sha256sum -c --status; then
+    curl -fL --retry 3 -o "$tgz.part" \
+      "https://github.com/xiph/rnnoise/releases/download/v${RNNOISE_VER}/${tgz}" \
+      && mv -f "$tgz.part" "$tgz" \
+      || { rm -f "$tgz.part"; warn "הורדת RNNoise נכשלה."; return 1; }
+  fi
+  echo "$RNNOISE_SHA256  $tgz" | sha256sum -c --status \
+    || { warn "RNNoise: sha256 לא תואם — הקובץ שהורד אינו ה-release הנעוץ. לא נבנה."; return 1; }
+  rm -rf "rnnoise-${RNNOISE_VER}" && tar xzf "$tgz" && cd "rnnoise-${RNNOISE_VER}" || return 1
+  patch -p1 -s < "$RNNOISE_PATCH" || { warn "החלת תיקון ה-ARM על RNNoise נכשלה."; return 1; }
+  # --disable-shared: רק librnnoise.a (לקישור סטטי); בלי דוגמאות/תיעוד (doxygen)
+  ./configure --disable-shared --disable-examples --disable-doc \
+    && make -j"$(nproc)" \
+    && cc -O2 -o airam-rnnoise "$REPO_DIR/tools/airam-rnnoise.c" -Iinclude .libs/librnnoise.a -lm \
+    && install -m755 airam-rnnoise /usr/local/bin/airam-rnnoise \
+    || { warn "בניית RNNoise/airam-rnnoise נכשלה."; return 1; }
+  # בדיקת עשן: שקט נכנס => שקט יוצא, באותו אורך (פריים 480 => 4800 דגימות = 10 פריימים)
+  out_len="$(head -c 19200 /dev/zero | /usr/local/bin/airam-rnnoise | wc -c)"
+  [[ "$out_len" == "19200" ]] \
+    || { warn "airam-rnnoise לא עובד כמצופה (פלט ${out_len}B במקום 19200B)."; return 1; }
+}
+if [[ -x /usr/local/bin/airam-rnnoise ]] && [[ "$(cat "$AIRAM_RNNOISE_MARK" 2>/dev/null)" == "$RNNOISE_BUILD_SIG" ]]; then
+  log "RNNoise ${RNNOISE_VER} + airam-rnnoise כבר מותקנים - מדלג."
+else
+  log "בונה RNNoise ${RNNOISE_VER} + airam-rnnoise (סינון רעשים)..."
+  if build_rnnoise; then
+    mkdir -p "$(dirname "$AIRAM_RNNOISE_MARK")"
+    printf '%s' "$RNNOISE_BUILD_SIG" > "$AIRAM_RNNOISE_MARK"
+  else
+    warn "סינון הרעשים לא יהיה זמין (שאר המערכת מותקנת כרגיל). להרצה חוזרת: sudo ./install.sh"
+  fi
+fi
+
+# ----------------------------------------------------------------------------
 # 5. Icecast2  -  ללא סיסמה למאזין (סיסמת source פנימית קבועה)
 # ----------------------------------------------------------------------------
 log "מגדיר Icecast2 (מאזינים ללא סיסמה, latency נמוך)..."
@@ -390,10 +452,27 @@ ensure_limit burst-on-connect 0
 ensure_limit burst-size 0
 ensure_limit queue-size 65536
 ensure_limit source-timeout 10
+# שני מקורות קבועים: /live.mp3 (rtl_airband) + /clean.mp3 (airam-denoise). ברירת
+# המחדל של Debian היא 2 — בדיוק במכסה, וכל מקור נוסף היה נדחה. 4 = מרווח.
+ensure_limit sources 4
+# /clean.mp3 (סינון רעשים): fallback-mount ל-/live.mp3 — זה מה שהופך את הסינון
+# ל"לא נקודת כשל": מאזין שמבקש /clean.mp3 כשהסינון לא חי מקבל את הגולמי, ומאזין
+# מחובר מועבר אליו בלי ניתוק כשהסינון קורס (נבדק מול Icecast 2.4.4 — "passing
+# 1 listeners to /live.mp3"). בכוונה *בלי* fallback-override: הוא היה מעביר
+# ל-/clean.mp3 גם את מי שבחר במפורש /live.mp3 (VLC דרך live.m3u) — הדף עצמו
+# מתחבר מחדש למסונן כשהוא חוזר. אידמפוטנטי: נוסף פעם אחת לפני </icecast>.
+if ! grep -q "<mount-name>/clean.mp3</mount-name>" "$ICE"; then
+  if grep -q "</icecast>" "$ICE"; then
+    sed -i -E 's#^([[:space:]]*)</icecast>#    <mount type="normal">\n        <mount-name>/clean.mp3</mount-name>\n        <fallback-mount>/live.mp3</fallback-mount>\n    </mount>\n\1</icecast>#' "$ICE"
+  else
+    warn "לא נמצא </icecast> ב-$ICE - הוסף ידנית <mount> ל-/clean.mp3 עם fallback-mount ל-/live.mp3"
+  fi
+fi
 # tripwire: sed על XML עיוור להערות/שינויי פורמט - מוודאים שכל ערך באמת נקלט
 # כתג פעיל בתחילת שורה, אחרת מזהירים ברעש (burst שגוי => חזרת ה-latency של 30 שניות).
 for kv in "source-password ${SOURCE_PW}" "burst-on-connect 0" "burst-size 0" \
-          "queue-size 65536" "source-timeout 10"; do
+          "queue-size 65536" "source-timeout 10" "sources 4" \
+          "fallback-mount /live.mp3"; do
   tag="${kv% *}"; val="${kv#* }"
   grep -Eq "^[[:space:]]*<$tag>$val</$tag>" "$ICE" \
     || warn "אימות Icecast נכשל: <$tag> אינו $val ב-$ICE - תקן ידנית (פורמט הקובץ השתנה?)"
@@ -428,6 +507,7 @@ done
 # reset-failed ל-airam-satcom בלבד: היחידה היחידה עם StartLimitBurst סופי (בטיחות
 # bias-T, ר' systemd/airam-satcom.service) — _enter_satcom צריך לאפס תקרה קודמת
 # כדי שכניסה ידנית מחדש מה-UI תמיד תעבוד גם אחרי כמה קריסות רצופות.
+# start/stop ל-airam-denoise (סינון רעשים — *לא* צרכן SDR): מתג גלובלי מה-UI.
 # ⚠ נכתב תחילה לקובץ זמני ומאומת *לפני* שהוא מגיע ל-/etc/sudoers.d/airam —
 # לא ישירות ליעד. sudo מסרב לרוץ *בכלל* כשקובץ כלשהו תחת sudoers.d לא תקין,
 # כולל לניסיונות התיקון של המשתמש עצמו (sudo ...) — קובץ פגום שנשאר ביעד
@@ -445,6 +525,8 @@ airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-vdl2
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-satcom
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-satcom
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed airam-satcom
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl start airam-denoise
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-denoise
 EOF
 visudo -cf "$SUDOERS_TMP" >/dev/null \
   || { rm -f "$SUDOERS_TMP"; die "קובץ sudoers לא תקין (נבדק לפני התקנה — /etc/sudoers.d/airam לא נגע)."; }
@@ -480,6 +562,9 @@ cp -r "$REPO_DIR/webtune/." /opt/airam/webtune/   # אידמפוטנטי (לא �
 # שער המוכנות ל-SDRplay (ExecStartPre של rtl_airband)
 cp "$REPO_DIR/scripts/airam-wait-sdrplay" /usr/local/bin/
 chmod 755 /usr/local/bin/airam-wait-sdrplay
+# שרשרת סינון הרעשים (ExecStart של airam-denoise.service) — ר' שלב 4e
+cp "$REPO_DIR/scripts/airam-denoise" /usr/local/bin/
+chmod 755 /usr/local/bin/airam-denoise
 # כלל udev: הפעלה מחדש של שירותי ה-SDR בעת חיבור ה-RSP1B (התאוששות מהירה)
 cp "$REPO_DIR/udev/99-airam.rules" /etc/udev/rules.d/
 udevadm control --reload-rules 2>/dev/null || true
@@ -553,11 +638,13 @@ cp "$REPO_DIR/systemd/airam-web.service"    /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-acars.service"  /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-vdl2.service"   /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-satcom.service" /etc/systemd/system/
+cp "$REPO_DIR/systemd/airam-denoise.service" /etc/systemd/system/
 systemctl daemon-reload
 # אף צרכן SDR (rtl_airband / airam-acars / airam-vdl2 / airam-satcom) אינו
 # enabled בכוונה: אין "מצב ראשי" — airam-web (המתזמר, enabled) קורא את
 # state.json באתחול ומשחזר את המצב השמור האחרון, כולל off. Conflicts ב-units
-# מבטיח שלא ירוצו יחד.
+# מבטיח שלא ירוצו יחד. airam-denoise (סינון רעשים) גם הוא לא enabled — airam-web
+# מפעיל אותו כשהמתג דלוק והקול חי, ו-PartOf=rtl_airband עוצר אותו יחד עם הקול.
 systemctl enable sdrplay.service airam-web.service
 # שדרוג מגרסה ישנה (rtl_airband היה enabled ועלה תמיד באתחול) — אידמפוטנטי.
 systemctl disable rtl_airband.service >/dev/null 2>&1 || true

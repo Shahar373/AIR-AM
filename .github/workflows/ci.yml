@@ -35,14 +35,14 @@ jobs:
       # ב-job הזה בכוונה, כדי שהחבילה המהירה תמשיך לחסום מהר. ר' ה-job שאחריו.
       - run: python -m pytest tests/ -v
       - name: bash syntax check
-        run: bash -n install.sh scripts/airam-wait-sdrplay scripts/airam-resilience-check scripts/airam-gps-probe
+        run: bash -n install.sh scripts/airam-wait-sdrplay scripts/airam-resilience-check scripts/airam-gps-probe scripts/airam-denoise
       - name: shellcheck
         # bash -n -o תחביר בלבד; shellcheck תופס בעיות סמנטיות אמיתיות (משתנה
         # לא-מצוטט שנשבר עם רווח, קוד שלעולם לא רץ וכו') שהיו שם ולא נתפסו —
         # ר' תיקון ה-"|| true"‎ ב-ls|head תחת set -e -o pipefail. -S warning
         # (לא error/style) כדי לא להיכשל על הערות info סגנוניות שכבר קיימות
         # בכוונה בקוד (כמו A && B || die, ש-shellcheck מציין כ-info בלבד).
-        run: shellcheck -S warning install.sh scripts/airam-wait-sdrplay scripts/airam-resilience-check scripts/airam-gps-probe
+        run: shellcheck -S warning install.sh scripts/airam-wait-sdrplay scripts/airam-resilience-check scripts/airam-gps-probe scripts/airam-denoise
       - name: systemd unit files verify
         # מריצים אימות אמיתי (לא רק בדיקת syntax) על כל היחידות — תופס בעיות
         # כמו מפתח במקטע הלא-נכון (StartLimitIntervalSec תחת [Service] במקום
