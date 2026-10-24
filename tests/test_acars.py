@@ -335,12 +335,14 @@ def test_normalize_category_from_labels():
 
 
 def test_label_3l_uld_category():
-    """regression: label 3L (ULD/cargo) — מתוך קליטה אמיתית D-AIDA (596b4ef0...)."""
+    """regression: label 3L (ULD/cargo) — מתוך קליטה אמיתית D-AIDA (596b4ef0...).
+    ⚠ הכיוון כבר *לא* "downlink" לפי label: כל 12 ההודעות של 3L בייצוא היו בלי MSN
+    (‏block ID אות ⇒ uplink, ר' _acars_block_dir) — 3L הוסר מטבלת הנפילה."""
     n = app._normalize_acars({"timestamp": 1.0, "label": "3L",
                                "tail": "D-AIDA", "text": "531183D1934/12,935/12,936/12"})
     assert "ULD" in n["category"] or "מטען" in n["category"]
     assert n["group"] == "tech"
-    assert n["dir"] == "downlink"
+    assert n["dir"] is None                       # בלי block ID — לא מנחשים
 
 
 def test_label_5v_and_a4_known():
@@ -395,7 +397,8 @@ def test_normalize_position_from_text():
 def test_acars_direction_heuristic():
     # label מוכר: OOOI/position/login => downlink; ‏A6/AA (ADS-C/CPDLC מהקרקע) => uplink
     assert app._acars_direction("QA", None) == "downlink"
-    assert app._acars_direction("H1", "HELLO") == "downlink"
+    # ‏H1 דו-כיווני (ARINC 620: ‏to/from terminal) — בלי block ID לא מנחשים
+    assert app._acars_direction("H1", "HELLO") is None
     assert app._acars_direction("A6", None) == "uplink"
     assert app._acars_direction("AA", None) == "uplink"
     assert app._acars_direction("A9", None) == "uplink"   # ATIS מהקרקע
@@ -656,9 +659,11 @@ def test_label_a9_group():
 
 
 def test_label_c1_direction():
+    """C1 = הודעה למדפסת הקוקפיט — uplink. ‏14/14 בלוקי C1 בקליטת 24.10.2026
+    (‏loadsheet ו-NOTOC של 4X-EMF) היו בלי MSN; הטבלה סיווגה אותם downlink."""
     n = app._normalize_acars({"timestamp": 1.0, "label": "C1", "tail": "4X-A",
                                "text": "COMPANY MSG"})
-    assert n["dir"] == "downlink"
+    assert n["dir"] == "uplink"
 
 
 # --- _parse_atis -----------------------------------------------------------
@@ -1203,7 +1208,7 @@ def test_loadsheet_in_normalize():
     n = app._normalize_acars({"timestamp": 1.0, "label": "C1", "tail": "4X-EMF",
                               "text": "LOADSHEET\nZFW   33937  MAX    42600"})
     assert n["decoded"] == "ZFW 33937"            # בלי יחידה מומצאת — הטקסט לא נושא אחת
-    assert n["dir"] == "downlink"                 # C1 כבר ממופה downlink
+    assert n["dir"] == "uplink"                   # loadsheet נשלח מהקרקע למדפסת הקוקפיט
 
 
 def test_parse_label16_real_capture():
@@ -1283,6 +1288,169 @@ def test_parse_pdc_rejects_garbage():
 # ============================================================================
 #  פיצ'רים חדשים: בנקי תדרים + ולידציית חלון, תצוגת "היום בלבד", standby
 # ============================================================================
+
+# --- קליטת VHF של 24.10.2026 (תל חדיד): פערים שנמצאו בניתוח -----------------
+# הטקסטים, הזנבות וה-MSN אמיתיים (ייצוא airam-acars-20261024). ה-block ID לא נשמר
+# בייצוא — הערכים כאן מייצגים את מה ש-acarsdec פולט: ספרה בבלוק downlink (שרק בו
+# יש msgno/flight), אות ב-uplink (output.c: ‏IS_DOWNLINK_BLK).
+
+def _acarsdec(label, text, block_id, **kw):
+    m = {"timestamp": 1792840000.0, "freq": 131.725, "level": -40.0, "error": 0,
+         "mode": "2", "label": label, "block_id": block_id, "ack": False, "text": text}
+    m.update(kw)
+    return m
+
+
+def test_acars_block_dir_digit_letter_and_garbage():
+    assert app._acars_block_dir("2") == "downlink"
+    assert app._acars_block_dir("A") == "uplink"
+    assert app._acars_block_dir("x") == "uplink"
+    for bad in (None, "", "AB", "\x01", "#", 7):
+        assert app._acars_block_dir(bad) is None      # פריים פגום/חסר — לא מנחשים
+
+
+def test_block_id_beats_label_and_header():
+    """ה-block ID מכריע גם מול ה-header וגם מול טבלת ה-labels."""
+    # ‏B0 (‏AFN logon, ‏01.07.2026): downlink שמתחיל בכתובת תחנת קרקע — ה-header סיווג uplink
+    b0 = app._normalize_acars(_acarsdec(
+        "B0", "/OEJN.AFN/FMHUAE256,.A6-EWC,896175,180656/FPON29337E035362,1/FCOADS,01/FCOATC,01B039",
+        "6", tail="A6-EWC", flight="EK0256", msgno="L36A"))
+    assert app._acars_direction("B0", b0["text"]) == "uplink"   # בלי block ID — היה שגוי
+    assert b0["dir"] == "downlink" and b0["block_id"] == "6"
+    # ‏H1 מהקרקע (‏F-GSQI, היום): הטבלה אמרה downlink לכל H1
+    h1 = app._normalize_acars(_acarsdec("H1", "RONFUELQTY", "N", tail="F-GSQI"))
+    assert h1["dir"] == "uplink"
+    # ‏Q0 בבלוק uplink נשאר uplink, למרות "Q0": "downlink" בטבלה
+    assert app._normalize_acars(_acarsdec("Q0", None, "B"))["dir"] == "uplink"
+    # ‎_d (ack) — הכיוון תלוי רק במי ששלח: 37 מהמטוס ו-179 מהקרקע היום, כולם היו None
+    assert app._normalize_acars(_acarsdec("_d", None, "3", msgno="S41A"))["dir"] == "downlink"
+    assert app._normalize_acars(_acarsdec("_d", None, "Q"))["dir"] == "uplink"
+
+
+def test_c1_loadsheet_block_is_uplink_real_capture():
+    """14/14 בלוקי C1 של 4X-EMF (‏loadsheet ו-NOTOC) היו בלי MSN — uplink למדפסת."""
+    text = ".UTCKM1P IZ/241150\nAGM\nFI IZ0815/AN 4X-EMF\n-  LOADSHEET\nFINAL"
+    n = app._normalize_acars(_acarsdec("C1", text, "C", tail="4X-EMF"))
+    assert n["dir"] == "uplink"
+
+
+def test_label15_space_padded_degrees_real_capture():
+    """‏T7AVI אחרי ההמראה מנתב"ג: אפס מוביל של המעלות הגיע כרווח (‎"E 34499") —
+    המעלות ה-3-ספרתיות הנוקשות דחו את שתי ההודעות (lat=null), וגם את MSSML מ-11.07."""
+    a = app._normalize_acars(_acarsdec("15", "(2N32003E 34499---  4--- 23(Z", "7",
+                                       tail="T7AVI", flight="XA0001", msgno="M07A"))
+    assert (a["lat"], a["lon"], a["pos_src"]) == (32.005, 34.83167, "label15")
+    b = app._normalize_acars(_acarsdec("15", "(2N31577E 34484OFF2410261202E1919------- (Z", "8",
+                                       tail="T7AVI", flight="XA0001", msgno="M08A"))
+    assert (b["lat"], b["lon"]) == (31.96167, 34.80667)
+    assert b["group"] == "position" and b["dir"] == "downlink"
+    m = app._parse_label15("(2N32045E 34579--- 25--- 21(Z")          # ‏MSSML, ‏11.07.2026
+    assert m == (32.075, 34.965)
+    # הרוחב הקבוע נשמר: רווח רק *במקום* ספרה מובילה, לא בנוסף לה
+    assert app._parse_label15("(2N32003E 034499") is None
+    assert app._parse_label15("(2N32016E034538ELY315") == (32.02667, 34.89667)   # הצורה המלאה
+
+
+def test_label16_slash_variant_real_capture():
+    """‏TK647 (‏TC-LCO): וריאנט מופרד-'/' בלי waypoint — לא זוהה (lat=null)."""
+    text = "/N 30.796/E 31.504/38000/2410/1124/06312/1313/"
+    n = app._normalize_acars(_acarsdec("16", text, "1", tail="TC-LCO", flight="TK0647", msgno="M21A"))
+    assert (n["lat"], n["lon"], n["pos_src"]) == (30.796, 31.504, "label16")
+    assert n["decoded"] == "38000ft"                    # שאר השדות לא מתויגים
+    # מגודר כמו label 16 הרגיל — פורמט רופף, לא נחלץ עם error
+    assert app._normalize_acars(_acarsdec("16", text, "1", error=1))["lat"] is None
+
+
+_L11_A = ("POS\nCAS 280,LAT N 32.424,LON E 31.721,ALT 34008,FOB 147000,UTC 111500,"
+          "PD ----.--,WD  53,WS   16,TAT - 20")
+_L11_B = ("POS\nCAS 281,LAT N 33.807,LON E 33.426,ALT 34002,FOB 143880,UTC 113101,"
+          "PD ----.--,WD  20,WS   16,TAT - 20")
+
+
+def test_label11_pos_report_real_capture():
+    """‏B-5930/MU224: שתי הודעות label 11 עם נ"צ עשרוני — שתיהן lat=null עד עכשיו.
+    הראשונה הגיעה עם error=1 ונחלצת (פורמט בשמות שדות, מבני כמו 1L)."""
+    a = app._normalize_acars(_acarsdec("11", _L11_A, "5", error=1, tail="B-5930",
+                                       flight="MU0224", msgno="M58A"))
+    assert (a["lat"], a["lon"], a["pos_src"]) == (32.424, 31.721, "label11")
+    assert a["decoded"] == "UTC 11:15:00z · דלק 147000 · 34008ft · CAS 280kt"   # FOB בלי יחידה
+    assert a["group"] == "position" and a["notable"] is True
+    b = app._normalize_acars(_acarsdec("11", _L11_B, "7", tail="B-5930", msgno="M60A"))
+    assert (b["lat"], b["lon"]) == (33.807, 33.426)
+    # ההודעה עם error=1 עקבית עם זו שבלי שגיאה: ‏~447kt ב-16 דק' (CAS 280 ב-FL340)
+    import xcheck
+    kt = xcheck.geodesic_km(a["lat"], a["lon"], b["lat"], b["lon"]) / (961 / 3600) / 1.852
+    assert 420 < kt < 480
+
+
+def test_label11_requires_its_own_format():
+    # הפורמט ש-acarsdec עצמו מפרש ל-label 11 (‏"/DS …/ETA") — לא דיווח מיקום
+    assert app._parse_label11_pos("ARR01LLBG0123/DS LLBG/ETA 1234") is None
+    assert app._parse_label11_pos(_L11_A.replace("LON E", "LONG E")) is None
+    assert app._parse_label11_pos(None) is None
+    # רק ב-label 11: אותו טקסט ב-label אחר לא מייצר "label11"
+    assert app._normalize_acars(_acarsdec("H1", _L11_A, "2"))["pos_src"] != "label11"
+
+
+def test_oooi_qp_qr_qs_real_capture():
+    """‏QP/QR/QS נפלו ל-"Label QP" בלי decoded. הפריסה (מוצא+יעד+שעה) של acarsdec."""
+    qr = app._normalize_acars(_acarsdec("QR", "LFPGLLBG1136113618021521", "5",
+                                        tail="F-GSQI", flight="AF0966", msgno="M95A"))
+    assert qr["category"] == "OOOI · נחיתה (On)" and qr["group"] == "oooi"
+    assert qr["decoded"] == "LFPG→LLBG · ON 11:36"
+    qs = app._normalize_acars(_acarsdec("QS", "LFPGLLBG11450211FL114512", "7", msgno="M97A"))
+    assert qs["decoded"] == "LFPG→LLBG · IN 11:45"
+    # ‏9H-SHO שידר את אותו OUT עשרים פעם — מפוענח כמו שהוא, בלי לפרש את הזוג LEBL→LEBL
+    qp = app._normalize_acars(_acarsdec("QP", "LEBLLEBL16420007", "7", tail="9H-SHO", msgno="M27A"))
+    assert qp["decoded"] == "LEBL→LEBL · OUT 16:42"
+    # גם בלי block ID (נפילה לטבלה) — downlink
+    assert app._normalize_acars({"timestamp": 1.0, "label": "QS"})["dir"] == "downlink"
+    assert app._parse_oooi_q("QR", "LFPG LLBG 1136") is None       # לא בפורמט — לא מנחשים
+    assert app._parse_oooi_q("QR", "LFPGLLBG2560") is None         # שעה לא חוקית
+
+
+def test_dcl_b3_b4_real_capture():
+    """‏4X-EMF/IZ815: בקשת אישור יציאה (B3) וקריאה-חוזרת (B4) — שתיהן מהמטוס, אבל
+    ה-header ‎"/LLBG.DC1/"/"/TLVCDYA.DC1/" סיווג אותן uplink ו-"Label B3"."""
+    b3 = app._normalize_acars({"timestamp": 1.0, "label": "B3", "tail": "4X-EMF", "msgno": "M34A",
+                               "text": "/LLBG.DC1/RCD 024\nAIZ815-LLBG-GATE L3-LLER\nATIS P\n-TYP/E19563DF"})
+    assert b3["category"] == "בקשת אישור יציאה (DCL)" and b3["group"] == "clearance"
+    assert b3["dir"] == "downlink"                      # גם בלי block ID
+    b4 = app._normalize_acars(_acarsdec(
+        "B4", "/TLVCDYA.DC1/CDA 1154 261024 LLBG PDC 868\nAIZ815 CLRD TO LLER OFF 26 VIA TOMAL4E\n"
+              "SQUAWK 4512 NEXT FREQ 121.750 ATIS P\nCLIMB INIT ALT 4000  PLEASE ACK DC1F86",
+        "4", tail="4X-EMF", flight="IZ0815", msgno="M37A"))
+    assert b4["dir"] == "downlink"
+    assert b4["decoded"] == ("קריאה חוזרת של האישור: ל-LLER · המראה 26 · SID TOMAL4E · "
+                             "Squawk 4512 · תדר הבא 121.750 · טפס ל-4000ft")
+    # ‏A3 (האישור מהקרקע) שומר את הכותרת המקורית
+    assert app._parse_pdc("CLRD TO LLER OFF 26").startswith("אישור טרום-המראה: ")
+
+
+def test_link_management_decoded_is_not_notable_real_capture():
+    """‏SQ+SA היו 138 מתוך 160 ה"מעניינות" היום — רק כי יש להן decoded."""
+    sa = app._normalize_acars(_acarsdec("SA", "0EV110902VS", "2", tail="4L-GIT", msgno="M72A"))
+    assert sa["decoded"] and sa["notable"] is False
+    sq = app._normalize_acars(_acarsdec("SQ", "02XSTLVLLBG03200N03452EV136975/", "x"))
+    assert sq["decoded"] and sq["notable"] is False
+    # decoded של תוכן אמיתי נשאר "מעניין"
+    atis = app._normalize_acars(_acarsdec(
+        "A9", "/TLVATYA.TI2/LLBG DEP ATIS P\n1150Z LLBG DEP INFO P.\nTIME 1150.\nDEP RWY 26.\n"
+              "ARR RWY 21.\nWIND 340 DEG, 10 KT.\nCAVOK.\nT 29. DP 20. QNH 1011.", "A", tail="4X-EMF"))
+    assert atis["decoded"] and atis["notable"] is True
+    tune = app._normalize_acars(_acarsdec(":;", "131475", "A", tail="F-GSQI"))
+    assert tune["decoded"] == "כוונון אוטומטי ל-131.475MHz" and tune["notable"] is True
+
+
+def test_tail_with_control_char_is_not_an_identity_real_capture():
+    """‏'4L-B\x01T' (‏error=3) יצר מטוס מזויף ברוסטר לצד 4L-GIT. הטקסט נשמר."""
+    n = app._normalize_acars(_acarsdec("Q0", "S08AGH0080", "\x7f", error=3, tail="4L-B\x01T"))
+    assert n["tail"] is None and n["text"] == "S08AGH0080"
+    assert app._aircraft_identity(n) is None
+    assert app._normalize_acars(_acarsdec("H1", "X", "2", flight="LY\x00315"))["flight"] is None
+    # רישום מרופד בנקודה (מוסכמת acarsdec) לא נפגע
+    assert app._normalize_acars(_acarsdec("H1", "X", "2", tail=".4X-EHD"))["tail"] == ".4X-EHD"
+
 
 # --- בנקי תדרים + ולידציית חלון דגימה ---------------------------------------
 

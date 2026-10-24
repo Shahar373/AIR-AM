@@ -195,11 +195,21 @@ ACARS_LABELS = {
     "QB": ("OOOI · המראה (Off)", "oooi"),
     "QC": ("OOOI · נחיתה (On)", "oooi"),
     "QD": ("OOOI · חניה (In)", "oooi"),
+    # QP–QS: אותם ארבעה אירועים, בפורמט שנושא גם יעד (מוצא+יעד+שעה — ר' _parse_oooi_q).
+    # נצפו בקליטת 24.10.2026 (QP/QR/QS) ונפלו עד כה ל-"Label QP" הגנרי.
+    "QP": ("OOOI · יציאה (Out)", "oooi"),
+    "QQ": ("OOOI · המראה (Off)", "oooi"),
+    "QR": ("OOOI · נחיתה (On)", "oooi"),
+    "QS": ("OOOI · חניה (In)", "oooi"),
     "80": ("OOOI · דוח OFFRP/INRP (80)", "oooi"),
     "A9": ("ATIS · מידע שדה (A9)", "comm"),
     "B9": ("בקשת אישור ATC", "clearance"),
     "BA": ("אישור ATC (clearance)", "clearance"),
     "A3": ("אישור טרום-המראה (PDC)", "clearance"),
+    # DCL (ARINC 623) בכיוון המטוס — נצפו בקליטת 24.10.2026 (‏4X-EMF, ‏IZ815): ‏B3 = בקשת
+    # אישור יציאה (‎"/LLBG.DC1/RCD …"), ‏B4 = הקריאה-החוזרת של האישור (‎"…/CDA … CLRD TO …").
+    "B3": ("בקשת אישור יציאה (DCL)", "clearance"),
+    "B4": ("קריאה חוזרת של אישור יציאה (DCL)", "clearance"),
     "16": ("דיווח מיקום (label 16)", "text"),
     "1L": ("דוח ניווט/דלק (1L)", "text"),
     # ארבעת אלה נצפו בקליטת SATCOM אמיתית (Alphasat, 16 דק', 206 הודעות) —
@@ -216,13 +226,21 @@ ACARS_LABELS = {
 # כיוון ההודעה (best-effort, חלקי בכוונה — כמו ACARS_LABELS): downlink = מטוס→קרקע
 # (דיווח/בקשה מהמטוס), uplink = קרקע→מטוס (אישור/הודעת חברה אל המטוס). רק labels שאנו
 # בטוחים בהם; השאר נופלים ל-heuristic של header או ל-None (לא מנחשים).
+# ⚠ זו *נפילה* בלבד: מסגרת acarsdec נושאת block ID, והוא מכריע (_acars_block_dir).
+# קליטת 24.10.2026 הראתה למה: הטבלה הזו (וה-header) טעו ב-19 מתוך 614 הודעות — 14
+# בלוקים של C1 (‏loadsheet ו-NOTOC אל מדפסת הקוקפיט: uplink, לא downlink), שתי H1
+# (‏H1 דו-כיווני — הוסר מכאן), B3/B4 שה-header ‎"/LLBG.DC1/…" סיווג כ-uplink, ופריים
+# Q0 פגום אחד — ועוד 262 (בעיקר ‎_d/5V) נשארו בלי כיוון בכלל.
+# ‏3L הוסר: 12/12 הודעות 3L בייצוא היו בלי MSN (block ID אות ⇒ uplink), בניגוד לערך הקודם.
 _ACARS_DIR_BY_LABEL = {
-    "H1": "downlink", "5Z": "downlink", "C1": "downlink",
+    "5Z": "downlink",
+    "C1": "uplink",     # הודעה למדפסת הקוקפיט (loadsheet וכו') — מהקרקע
     "QA": "downlink", "QB": "downlink", "QC": "downlink", "QD": "downlink",
+    "QP": "downlink", "QQ": "downlink", "QR": "downlink", "QS": "downlink",
     "80": "downlink",   # דוח OOOI (OFFRP/INRP) מהמטוס
     "Q0": "downlink",   # link test ממטוס
     "B9": "downlink",   # בקשת אישור מהמטוס
-    "3L": "downlink",   # נתוני ULD/מטען מהמטוס
+    "B3": "downlink", "B4": "downlink",   # DCL: בקשה + קריאה-חוזרת מהמטוס
     "WX": "downlink",   # בקשת METAR לשדות גיבוי מהמטוס
     "SA": "downlink",   # media advisory — המטוס מדווח על מצב הקישורים שלו
     "15": "downlink",   # דיווח מיקום מהמטוס
@@ -1354,9 +1372,24 @@ def _decode_libacars_app(label, text, direction):
     return result
 
 
+def _acars_block_dir(block_id):
+    """כיוון *מבני* מה-block ID של מסגרת ACARS (ARINC 618): ספרה 0–9 = downlink
+    (מטוס→קרקע), אות = uplink (קרקע→מטוס). זה הכלל של acarsdec עצמו (output.c:
+    ‏IS_DOWNLINK_BLK — ולכן msgno/flight נפלטים *רק* בבלוק downlink), לא heuristic.
+    None כשאין block ID, או כשהתו אינו ספרה/אות לטינית (פריים פגום — לא מנחשים)."""
+    if not isinstance(block_id, str) or len(block_id) != 1:
+        return None
+    if "0" <= block_id <= "9":
+        return "downlink"
+    if "A" <= block_id <= "Z" or "a" <= block_id <= "z":
+        return "uplink"
+    return None
+
+
 def _acars_direction(label, text):
-    """heuristic שמרני לכיוון ההודעה: 'uplink' (קרקע→מטוס) / 'downlink' (מטוס→קרקע) / None.
-    label מוכר קודם (אמין), אחרת header ניתוב בטקסט => uplink. None כשלא חד-משמעי (לא מנחשים)."""
+    """heuristic שמרני לכיוון ההודעה כשאין block ID (ר' _acars_block_dir): 'uplink'
+    (קרקע→מטוס) / 'downlink' (מטוס→קרקע) / None. label מוכר קודם, אחרת header ניתוב
+    בטקסט => uplink. None כשלא חד-משמעי (לא מנחשים)."""
     d = _ACARS_DIR_BY_LABEL.get(label)
     if d:
         return d
@@ -1443,6 +1476,23 @@ def _parse_oooi_80(text):
     return " · ".join(pairs) if pairs else None
 
 
+# OOOI בפורמט QP–QS: מוצא(4) + יעד(4) + HHMM, במיקומים קבועים — הפריסה של acarsdec
+# עצמו (label.c: ‏label_qp/qq/qr/qs). דוגמאות מקליטת 24.10.2026: ‏QR ‎"LFPGLLBG1136…"
+# (‏F-GSQI נחת 11:36), ‏QS ‎"LFPGLLBG1145…". השאר אחרי השעה לא מתויג (לא מנחשים).
+_OOOI_Q_EVENT = {"QP": "OUT", "QQ": "OFF", "QR": "ON", "QS": "IN"}
+_OOOI_Q_RE = re.compile(r"^([A-Z]{4})([A-Z]{4})([01]\d|2[0-3])([0-5]\d)")
+
+
+def _parse_oooi_q(label, text):
+    """OOOI של QP/QQ/QR/QS: ‏"LFPG→LLBG · ON 11:36", או None כשהטקסט לא בפורמט."""
+    ev = _OOOI_Q_EVENT.get(label)
+    m = _OOOI_Q_RE.match(text.strip()) if (ev and isinstance(text, str)) else None
+    if not m:
+        return None
+    sa, da, hh, mm = m.groups()
+    return f"{sa}→{da} · {ev} {hh}:{mm}"
+
+
 def _extract_actype(label, text):
     """Best-effort: מחלץ סוג מטוס (למשל B738, A320) מטקסט H1/C1. מחזיר string או None."""
     if label not in ("H1", "C1") or not text:
@@ -1504,7 +1554,13 @@ _FPN_MAX_WPTS = 8
 
 # דיווח מיקום קלאסי (label 15): '(2' + NS+DD+MMf + EW+DDD+MMf. אותו קידוד דקות
 # של /.POS/ (_ddmmf). דקות נאכפות [0-5]\d => כמעט בלי false positives.
-_L15_RE = re.compile(r"^\(2([NS])(\d{2})([0-5]\d\d)([EW])(\d{3})([0-5]\d\d)")
+# ⚠ שדה המעלות ברוחב קבוע, והאפס המוביל יכול להגיע כ*רווח* — ובפועל זה הפורמט
+# היחיד שנקלט: שלוש הודעות ה-‎"(2…" האמיתיות בייצוא (‏T7AVI ×2 אחרי ההמראה מנתב"ג
+# ב-24.10.2026, ‏MSSML ב-11.07) הן ‎"E 34499…", ו-‎\d{3} דחה את כולן (lat=null).
+# ‏int(" 34") = 34, ולכן _ddmmf לא משתנה. בחלופה המרופדת הדקות חייבות להסתיים לפני
+# ספרה נוספת — אחרת ‎"E 034499" (רווח *וגם* אפס) היה נקרא כ-‎" 03"+‎"449".
+_L15_RE = re.compile(r"^\(2([NS])( \d|\d{2})([0-5]\d\d)([EW])"
+                     r"(\d{3}|(?:  \d| \d{2})(?=[0-5]\d\d(?!\d)))([0-5]\d\d)")
 
 # squitter תחנת קרקע (label SQ): '0' + version + 2 אותיות + IATA(3) + ICAO(4) +
 # נ"צ התחנה + אות מדיה + תדר kHz + '/'. דוגמה: 02XSTLVLLBG03200N03452EV136975/
@@ -1687,17 +1743,28 @@ def _parse_loadsheet(text):
 # לא ברורים דיים כדי לתייג (לא מנחשים) — מחלצים רק waypoint+נ"צ+גובה.
 _L16_RE = re.compile(
     r"^([A-Z0-9\-]{2,8})\s*,([NS])\s*([\d.]+),([EW])\s*([\d.]+),(\d{4,5})")
+# וריאנט מופרד-'/' בלי waypoint (קליטת 24.10.2026, ‏TC-LCO/TK647):
+# ‎'/N 30.796/E 31.504/38000/2410/1124/06312/1313/' — אותם נ"צ עשרוני + גובה בראש.
+# השדות שאחרי הגובה לא מתויגים (מדגם יחיד — לא מנחשים).
+_L16_SLASH_RE = re.compile(r"^/([NS])\s*(\d{1,2}\.\d+)/([EW])\s*(\d{1,3}\.\d+)/(\d{3,5})/")
 
 
 def _parse_label16(text):
-    """label 16: נ"צ עשרוני + גובה. פחות נוקשה-פורמט מ-/.POS//label15 (שדות
-    באורך משתנה) => לא נחלץ עם error (בניגוד לפורמטים המבניים ה-DDMM)."""
+    """label 16: נ"צ עשרוני + גובה (שני וריאנטים — ר' למעלה). פחות נוקשה-פורמט
+    מ-/.POS//label15 (שדות באורך משתנה) => לא נחלץ עם error (בניגוד לפורמטים
+    המבניים ה-DDMM)."""
     if not text:
         return None
     m = _L16_RE.match(text.strip())
-    if not m:
-        return None
-    wpt, ns, la, ew, lo, alt = m.groups()
+    if m:
+        wpt, ns, la, ew, lo, alt = m.groups()
+        prefix = f"WPT {wpt.strip()} · "
+    else:
+        m = _L16_SLASH_RE.match(text.strip())
+        if not m:
+            return None
+        ns, la, ew, lo, alt = m.groups()
+        prefix = ""
     try:
         lat, lon = float(la), float(lo)
     except ValueError:
@@ -1708,7 +1775,38 @@ def _parse_label16(text):
         lon = -lon
     if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
         return None
-    return round(lat, 5), round(lon, 5), f"WPT {wpt.strip()} · {int(alt)}ft"
+    return round(lat, 5), round(lon, 5), f"{prefix}{int(alt)}ft"
+
+
+# דיווח מיקום בפורמט POS/CAS/LAT/LON (label 11, קליטת 24.10.2026, ‏B-5930/MU224):
+# ‎'POS\nCAS 280,LAT N 32.424,LON E 31.721,ALT 34008,FOB 147000,UTC 111500,PD ----.--,…'
+# פורמט חברה ולא ARINC — acarsdec עצמו מפרש label 11 בפורמט אחר לגמרי (‏"/DS …/ETA",
+# label.c), ולכן העוגן הוא התבנית המלאה, לא ה-label לבדו. שישה שדות בשמם ובסדר קבוע
+# => מבני כמו 1L (נחלץ גם עם error). אומת על שתי ההודעות של אותה טיסה: זו עם error=1
+# (‏11:15:00z) וזו שבלי (‏11:31:01z) רחוקות 221 ק"מ ב-16 דק' — ‏~447kt, עקבי עם CAS 280
+# ב-FL340. ‏WD/WS/TAT/PD לא מתויגים (לא מנחשים), ו-FOB בלי יחידה — הטקסט לא נושא אחת.
+_L11_POS_RE = re.compile(
+    r"^POS\s+CAS\s*(\d{2,3}),LAT\s*([NS])\s*(\d{1,2}\.\d+),LON\s*([EW])\s*(\d{1,3}\.\d+),"
+    r"ALT\s*(\d{3,5}),FOB\s*(\d+),UTC\s*([01]\d|2[0-3])([0-5]\d)([0-5]\d)")
+
+
+def _parse_label11_pos(text):
+    """label 11 בפורמט POS/CAS/LAT/LON: ‏(lat, lon, decoded) או None."""
+    if not text:
+        return None
+    m = _L11_POS_RE.match(text.strip())
+    if not m:
+        return None
+    cas, ns, la, ew, lo, alt, fob, hh, mm, ss = m.groups()
+    lat, lon = float(la), float(lo)
+    if ns == "S":
+        lat = -lat
+    if ew == "W":
+        lon = -lon
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+        return None
+    decoded = f"UTC {hh}:{mm}:{ss}z · דלק {fob} · {int(alt)}ft · CAS {cas}kt"
+    return round(lat, 5), round(lon, 5), decoded
 
 
 # דוח ניווט/דלק (label 1L, לא מתועד רשמית): נ"צ עשרוני + UTC/דלק/גובה/מהירות/ETA.
@@ -1753,9 +1851,10 @@ _PDC_FREQ_RE = re.compile(r"\bNEXT FREQ ([\d.]+)")
 _PDC_CLIMB_RE = re.compile(r"\bCLIMB INIT ALT (\d+)")
 
 
-def _parse_pdc(text):
+def _parse_pdc(text, title="אישור טרום-המראה"):
     """PDC (label A3): יעד/מסלול-המראה/SID/סקוואק/תדר הבא/גובה טיפוס ראשוני —
-    כל שדה אופציונלי, מוצגים רק אלה שנמצאו."""
+    כל שדה אופציונלי, מוצגים רק אלה שנמצאו. משמש גם את B4 (הקריאה-החוזרת של
+    המטוס מצטטת את אותו אישור) — עם title אחר, כדי לא להציג downlink כאישור מהקרקע."""
     if not text:
         return None
     parts = []
@@ -1777,10 +1876,14 @@ def _parse_pdc(text):
     m = _PDC_CLIMB_RE.search(text)
     if m:
         parts.append(f"טפס ל-{m.group(1)}ft")
-    return "אישור טרום-המראה: " + " · ".join(parts) if parts else None
+    return f"{title}: " + " · ".join(parts) if parts else None
 
 
 _INTEREST_LABELS = {"A3", "C1", "15", "16", "1L"}   # labels שידועים כבעלי תוכן עשיר (PDC/loadsheet/מיקום/ניווט)
+# ניהול קישור: גם כשיש להן decoded (‏SQ: תחנה+תדר; ‏SA: מצב מדיה) זו תעבורה תפעולית
+# חוזרת, לא תוכן. בקליטת 24.10.2026 ‏SQ+SA היו 138 מתוך 160 ההודעות שסומנו "מעניינת"
+# (‏86%) — והציפו את דוח הסשן ואת ההתראות.
+_LINK_MGMT_LABELS = {"SQ", "SA", "Q0", "_d", "5V"}
 
 
 def _interest_score(rec):
@@ -1791,7 +1894,7 @@ def _interest_score(rec):
     מ-ADS-C (איכות המיקום הגבוהה ביותר), או label שידוע כבעל תוכן עשיר."""
     if rec.get("group") not in (None, "comm", "text"):
         return True
-    if rec.get("decoded"):
+    if rec.get("decoded") and rec.get("label") not in _LINK_MGMT_LABELS:
         return True
     if rec.get("pos_src") == "adsc":
         return True
@@ -1843,6 +1946,16 @@ def _adsc_details(obj):
     return out
 
 
+def _clean_ident(v):
+    """tail/flight עם תו בקרה (‎< 0x20 או DEL) => None. ‏ACARS הוא 7-bit ותו כזה לא
+    יכול להיות חלק מרישום/טיסה — זה פריים שתוקן חלקית: בקליטת 24.10.2026 ‎'4L-B\\x01T'
+    (‏error=3, המקסימום ש-acarsdec מתקן) יצר מטוס מזויף ברוסטר לצד ‏4L-GIT האמיתי.
+    לא "מנקים" את התו (‎'4L-BT' היה רישום מומצא) — הזהות פשוט לא ידועה; הטקסט נשמר."""
+    if isinstance(v, str) and any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in v):
+        return None
+    return v
+
+
 def _normalize_acars(m):
     """מצמצם הודעת acarsdec JSON לשדות שה-UI מציג, בפורמט *אחיד* לכל סוגי ההודעות:
     קטגוריה קריאה (label => תיאור), קבוצה (לצבע), ומיקום (lat/lon) כשזמין. עמיד
@@ -1888,7 +2001,7 @@ def _normalize_acars(m):
     # שנצפו בפועל (‎.TCARC/‎.CNTMM) הן אותיות בלבד בלי ספרה, בעוד שרישומי מטוס
     # אמיתיים כמעט תמיד מכילים ספרה — לכן ספרה כלשהי בתג פוסלת את הסיווג
     # כתחנת-קרקע, גם אם הצורה הכללית תואמת את הרג'קס.
-    tail_val = g("tail", "registration")
+    tail_val = _clean_ident(g("tail", "registration"))
     tail_is_station = (bool(tail_val) and bool(_UPLINK_HEADER_RE.match(str(tail_val)))
                        and not any(ch.isdigit() for ch in str(tail_val)))
 
@@ -1969,6 +2082,14 @@ def _normalize_acars(m):
             if decoded is None:
                 decoded = pos[2]
 
+    # label 11 בפורמט POS/CAS/LAT/LON: שישה שדות בשמם ברצף קבוע => מבני כמו 1L.
+    if lat is None and label == "11" and text:
+        pos = _parse_label11_pos(text)
+        if pos:
+            lat, lon, pos_src = pos[0], pos[1], "label11"
+            if decoded is None:
+                decoded = pos[2]
+
     # נפילה: מיקום מקודד בטקסט חופשי — אבל *רק* מ-frame נקי. acarsdec error>0 = ביטים
     # שתוקנו/לא-תוקנו; ספרה אחת שהתהפכה בקואורדינטה => מטוס במקום שגוי על המפה. ADS-C
     # (libacars) לעיל מוגן-CRC ולכן נשמר גם עם error; ה-heuristic הטקסטואלי לא — לכן מגודר.
@@ -2009,7 +2130,12 @@ def _normalize_acars(m):
             decoded = _parse_loadsheet(text)
         elif label == "A3":
             decoded = _parse_pdc(text)
+        elif label == "B4":
+            decoded = _parse_pdc(text, title="קריאה חוזרת של האישור")
+        elif label in _OOOI_Q_EVENT:
+            decoded = _parse_oooi_q(label, text)
 
+    block_id = g("block_id")
     rec = {
         "t": g("timestamp") or time.time(),   # epoch seconds (float) מ-acarsdec (חסר => עכשיו)
         "freq": g("freq"),                    # MHz
@@ -2019,14 +2145,17 @@ def _normalize_acars(m):
         "category": category,                 # תיאור קריא אחיד (label/ARINC-622)
         "group": group,                       # קבוצה לצבע ב-UI / עמודה בייצוא
         "tail": tail_val,
-        "flight": g("flight", "fid"),
+        "flight": _clean_ident(g("flight", "fid")),
         "mode": g("mode"),
         "msgno": g("msgno"),
-        "dir": _acars_direction(label, text),  # "uplink" | "downlink" | None (best-effort)
+        "block_id": block_id,                 # תו ה-block ID הגולמי (ARINC 618) — מקור הכיוון
+        # כיוון: block ID מבני קודם (כל מסגרת acarsdec); בלעדיו — label/header best-effort
+        # (‏VDL2/SATCOM המסונתזים אינם נושאים block ID ודורסים בכיוון מבני משלהם).
+        "dir": _acars_block_dir(block_id) or _acars_direction(label, text),
         "lat": lat,
         "lon": lon,
         "pos_src": pos_src,                   # "adsc" | "pos-report" | "label15" | "nav-fuel"
-                                               # | "label16" | "text" | None
+                                               # | "label11" | "label16" | "text" | None
         "decoded": decoded,                   # טקסט מפוענח קצר (CPDLC/ATIS/OOOI וכו') או None
         "text": text,
         "error": m.get("error"),
@@ -6476,6 +6605,9 @@ def api_session():
     counts = {}
     ident_window, ident_before = set(), set()
     highlights = []
+    # הודעה שלא אושרה משודרת שוב עם אותו MSN ואותו טקסט — ב-24.10.2026 ‏9H-SHO שידר
+    # את אותו OUT (‏QP) 20 פעם. "בולטות" היא תמצית, לא פיד: מופע אחד (האחרון) לכל הודעה.
+    hl_seen = set()
     for mode, reader in readers.items():
         try:
             recs = reader()
@@ -6497,10 +6629,18 @@ def api_session():
             if r.get("notable"):
                 highlights.append({"t": t, "mode": mode, "tail": r.get("tail"),
                                    "flight": r.get("flight"), "category": r.get("category"),
-                                   "decoded": r.get("decoded")})
+                                   "decoded": r.get("decoded"),
+                                   "_key": (mode, ident, r.get("label"), r.get("msgno"),
+                                            r.get("text"), r.get("decoded"))})
         counts[mode] = n_window
     highlights.sort(key=lambda h: h["t"], reverse=True)
-    highlights = highlights[:SESSION_HIGHLIGHTS_MAX]
+    uniq = []
+    for h in highlights:
+        k = h.pop("_key")
+        if k not in hl_seen:
+            hl_seen.add(k)
+            uniq.append(h)
+    highlights = uniq[:SESSION_HIGHLIGHTS_MAX]
 
     try:
         airspace_series = adsb.session_series(since=since)
@@ -6591,14 +6731,22 @@ def _xc_event_id(src, rec):
 
 def _xc_direction(src, rec):
     """(direction, basis). VDL2/SATCOM — הכיוון המבני שנשמר (AVLC/ISU). ACARS —
-    מחושב *מחדש* לפי הכללים הנוכחיים: הודעה שנשמרה לפני תיקון (למשל B6 שסווג
-    uplink עד v2.26.0) מקבלת את הכיוון הנכון, והשינוי מתועד ב-basis."""
+    מחושב *מחדש*: block ID שנשמר (מ-v2.31.0), אחרת MSN (acarsdec מוסיף msgno *רק*
+    לבלוק downlink — ר' _acars_block_dir), ורק אז הכללים לפי label/header. הודעה
+    שנשמרה לפני תיקון (B6 שסווג uplink עד v2.26.0; ‏C1/B3/B4 עד v2.30.0) מקבלת את
+    הכיוון הנכון, והשינוי מתועד ב-basis. ⚠ קריטי להצלבה: uplink שסווג downlink
+    (‏loadsheet של C1) היה נבחן כשידור *מהמטוס* מול אופק הרדיו."""
     if src == "vdl2" and rec.get("icao") and rec.get("dir"):
         return rec["dir"], "מבני — כתובת AVLC"
     if src == "satcom" and rec.get("aes") and rec.get("dir"):
         return rec["dir"], "מבני — שכבת ISU"
     label, text = rec.get("label"), rec.get("text")
-    if label in _ACARS_DIR_BY_LABEL:
+    d = _acars_block_dir(rec.get("block_id")) if src == "acars" else None
+    if d:
+        basis = "מבני — block ID של המסגרת"
+    elif src == "acars" and rec.get("msgno"):
+        d, basis = "downlink", "מבני — יש מספר הודעה (MSN), שנשלח רק מהמטוס"
+    elif label in _ACARS_DIR_BY_LABEL:
         d, basis = _ACARS_DIR_BY_LABEL[label], f"לפי label {label}"
     else:
         d = _acars_direction(label, text)
