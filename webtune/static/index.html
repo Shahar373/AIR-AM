@@ -1925,6 +1925,22 @@
         <button type="button" data-v="nfm">NFM</button>
       </div>
     </div>
+    <!-- מסנן הערוץ + FM notch (docs/voice-channel-design.md) — נמדדו, ברירת מחדל = ההתנהגות הקודמת -->
+    <div class="setting" title="צר = פחות רעש ושכנים, מעט פחות גבוהים. נמדד — ר' המסמך">
+      <span>מסנן ערוץ</span>
+      <div class="seg" id="chanSeg">
+        <button type="button" data-v="standard" class="on">רגיל</button>
+        <button type="button" data-v="narrow">צר</button>
+        <button type="button" data-v="narrow8k">צר+</button>
+      </div>
+    </div>
+    <div class="setting" title="מחליש שידורי FM/MW חזקים לפני ה-LNA. ההשפעה על 118–137MHz לא נמדדה — השווה SNR דלוק/כבוי">
+      <span>FM notch</span>
+      <label class="switch">
+        <input type="checkbox" id="fmNotch" />
+        <span class="track"></span>
+      </label>
+    </div>
 
     <!-- בקרת רווח (Gain) — בסגנון SDRplay: AGC, System/IF/RF gain + חיווי עומס -->
     <div class="setting gain-head">
@@ -2964,6 +2980,8 @@
           rf_gain: sliderToRFGR(),
           squelch_mode: segValue("sqSeg"),
           squelch_snr: getSnr(),
+          chan_filter: segValue("chanSeg"),
+          fm_notch: $("fmNotch").checked,
         });
         const data = await res.json();
         if (!data.ok) {
@@ -7187,6 +7205,8 @@
     $("syncBtn").onclick = () => { setStatus("מסנכרן…", "busy"); reloadStream(); };
 
     segInit("modSeg", retune);
+    segInit("chanSeg", retune);
+    $("fmNotch").onchange = retune;
     segInit("sqSeg", (v) => {
       showManual(v === "manual");
       retune();
@@ -7385,6 +7405,7 @@
       freq: 134.6, mod: "am", agc: true,
       if_gain: sliderToIFGR(), rf_gain: sliderToRFGR(),
       squelch_mode: "auto", squelch_snr: getSnr(),
+      chan_filter: segValue("chanSeg"), fm_notch: $("fmNotch").checked,
     });
     $("acarsTowerBtn").onclick = towerTune;
     // כפתורי בקרת SDR בסרגל VDL2 (קוראים applyMode עם mode="vdl2")
@@ -7479,6 +7500,8 @@
       if (st.denoise) pollDenoise();
       if (st.version) $("verTag").textContent = "v" + st.version + " · SDRplay RSP1B";
       segSet("modSeg", st.mod === "nfm" ? "nfm" : "am");
+      segSet("chanSeg", ["standard", "narrow", "narrow8k"].includes(st.chan_filter) ? st.chan_filter : "standard");
+      $("fmNotch").checked = !!st.fm_notch;
       $("agc").checked = st.agc !== false;
       // state שומר ב-IFGR/RFGR (הפחתת רווח) => המרה לערכי הסליידר (רווח)
       const ifgr = Number(st.if_gain);
