@@ -148,6 +148,10 @@ scripts/
                            # airam-rnnoise → ffmpeg (פס+dynaudnorm+MP3) → Icecast /clean.mp3.
   airam-resilience-check   # תמונת מצב לקריאה בלבד לבדיקות עמידות בבית (ר' docs/resilience-test.md).
                            # לא מותקן — מריצים מהעותק: sudo ~/AIR-AM/scripts/airam-resilience-check
+  airam-listening-lab      # שלב 0 של docs/audio-comfort-design.md (Python, stdlib+ffmpeg): הקלטות אמיתיות ⇒
+                           # מועמדי סינון (EQ / RNNoise מעורבב / SpeexDSP) + הבקרה ⇒ דף השוואה עיוורת בפורט
+                           # 8090. ערבוב מיושר בהשהיה שנמדדת בקורלציה (לא מנחשים). לא מותקן. בדיקות:
+                           # tests/test_listening_lab.py (RNNoise מזויף = השהיה טהורה).
   airam-gps-probe          # שלב 0 של docs/long-term-stats-design.md, קריאה בלבד: מקלט GPS ב-USB (fix, לוויינים,
                            # SNR, פיזור מיקום/מרחק מנתב"ג, פער שעון) + כמה ימים 5000 הודעות מכסות. לא מותקן.
 

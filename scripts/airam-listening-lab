@@ -1,0 +1,639 @@
+#!/usr/bin/env python3
+# ============================================================================
+#  AIR-AM  -  מעבדת האזנה: השוואה עיוורת של חלופות לסינון הרעשים
+# ----------------------------------------------------------------------------
+#  שלב 0 ב-docs/audio-comfort-design.md. לוקח הקלטות *אמיתיות* מה-Pi, מעביר כל
+#  אחת דרך כמה שרשראות סינון, ומגיש דף לטלפון שבו מאזינים ומדרגים בלי לדעת
+#  איזו גרסה היא איזו. הזהויות נחשפות רק בסוף.
+#
+#    sudo ~/AIR-AM/scripts/airam-listening-lab            # 5 הקלטות אחרונות
+#    sudo ~/AIR-AM/scripts/airam-listening-lab -n 8       # יותר הקלטות
+#    sudo ~/AIR-AM/scripts/airam-listening-lab a.mp3 b.mp3   # קבצים מסוימים
+#    sudo ~/AIR-AM/scripts/airam-listening-lab --rebuild  # לזרוק דירוגים ולבנות מחדש
+#
+#  ואז לפתוח בטלפון את הכתובת שמודפסת (פורט 8090). Ctrl-C לסיום.
+#
+#  לא מותקן ולא נוגע בשירותי AIR-AM: קורא הקלטות, כותב רק ל-/tmp/airam-lab.
+#  הרצה חוזרת ממשיכה מאותו מקום (הדירוגים נשמרים) אלא אם נתת --rebuild.
+#  sudo רק אם תיקיית ההקלטות לא קריאה למשתמש שלך.
+#
+#  תלויות: python3 + ffmpeg (כבר מותקנים). אופציונלי — בלעדיהם המועמד מדולג
+#  ומדווח, לא נכשל:
+#    /usr/local/bin/airam-rnnoise     (install.sh שלב 4e)
+#    libspeexdsp                      (sudo apt install libspeexdsp1)
+#
+#  מגבלות ידועות: ההקלטות הן MP3 (השרשרת החיה מקבלת PCM); ATIS עם סקוולץ' פתוח
+#  לא מוקלט ולכן לא נבדק כאן; העוצמות לא מושוות בין גרסאות.
+# ============================================================================
+import argparse
+import ctypes
+import ctypes.util
+import json
+import math
+import os
+import random
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import time
+from array import array
+from collections import Counter
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from operator import mul
+from pathlib import Path
+
+REC_DIR = Path("/var/lib/airam/recordings")
+OUT_DIR = Path("/tmp/airam-lab")
+RNNOISE_BIN = "/usr/local/bin/airam-rnnoise"
+PORT = 8090
+
+REC_NAME_RE = re.compile(r"^airam_\d{8}_\d{6}_(\d+)\.mp3$")   # כמו _REC_NAME_RE ב-app.py
+REC_BYTES_PER_SEC = 6000      # CBR 48kbps — כמו ב-app.py
+MIN_SEC = 3.0                 # קצר מזה = אין מספיק דיבור לשפוט
+MAX_SEC = 20.0                # הקלטה ארוכה נחתכת (7 גרסאות × N הקלטות זה הרבה האזנה)
+
+RATE = 16000                  # הקצב של rtl_airband (WAVE_RATE)
+RN_RATE = 48000               # RNNoise עובד רק ב-48k
+RN_FRAME = 480
+
+# השרשרת שרצה היום במוצר — חייב להיות זהה ל-POST_AF ב-scripts/airam-denoise
+# (נבדק ב-tests/test_listening_lab.py).
+PROD_AF = ("aresample=16000,highpass=f=250:poles=2,lowpass=f=3000:poles=2"
+           ",dynaudnorm=f=100:g=7:p=0.7:m=30:t=0.003")
+
+# המועמדים. dry = חלק האות הגולמי בערבוב (§4 במסמך): שום רכיב לא מונחת ביותר
+# מ-20·log10(dry). "prod" הוא בקרה — הגרסה שנפסלה; אם היא לא מדורגת גרוע גם
+# כאן, המעבדה לא משחזרת את התלונה ואין לסמוך על שאר התוצאות.
+VARIANTS = [
+    {"id": "eq",   "kind": "eq",      "label": "EQ רך בלבד (בלי מסנן רעש)"},
+    {"id": "rn50", "kind": "rnmix",   "dry": 0.50, "label": "RNNoise + 50% גולמי (הנחתה עד 6dB)"},
+    {"id": "rn25", "kind": "rnmix",   "dry": 0.25, "label": "RNNoise + 25% גולמי (הנחתה עד 12dB)"},
+    {"id": "sp8",  "kind": "speex",   "db": -8,    "label": "SpeexDSP, הנחתה עד 8dB"},
+    {"id": "sp15", "kind": "speex",   "db": -15,   "label": "SpeexDSP, הנחתה עד 15dB"},
+    {"id": "prod", "kind": "prod",    "label": "הגרסה הנוכחית (RNNoise 100% + נורמליזציה) — בקרה"},
+]
+VARIANT_BY_ID = {v["id"]: v for v in VARIANTS}
+EQ_AF = "highpass=f=300:poles=2,highshelf=f=1800:g=-6"
+SLOT_LETTERS = "אבגדהוזח"
+RATE_KEYS = ("less", "unnatural", "missing")
+
+LAG_MAX = 2400                # 50ms ב-48k — הרבה מעל כל השהיה סבירה של RNNoise
+LAG_MIN_CONF = 0.5            # קורלציה מנורמלת; מתחת לזה ההקלטה לא משתתפת בהכרעה
+
+
+# --- בחירת הקלטות -----------------------------------------------------------
+def rec_freq(name):
+    m = REC_NAME_RE.match(name)
+    return int(m.group(1)) if m else None
+
+
+def pick_recordings(rec_dir, n, min_sec=MIN_SEC):
+    """עד n הקלטות אחרונות, ארוכות מספיק, בסבב בין התדרים (לא חמש מאותו תדר)."""
+    cands = []
+    for d in (rec_dir, rec_dir / "saved"):
+        try:
+            paths = list(d.glob("*.mp3"))
+        except OSError:
+            continue
+        for p in paths:
+            f = rec_freq(p.name)
+            if f is None:
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            if st.st_size < min_sec * REC_BYTES_PER_SEC:
+                continue
+            cands.append((st.st_mtime, f, p))
+    cands.sort(reverse=True)
+    groups = {}
+    for item in cands:
+        groups.setdefault(item[1], []).append(item)   # dict שומר סדר: התדר הטרי ראשון
+    out = []
+    while len(out) < n and any(groups.values()):
+        for g in groups.values():
+            if g and len(out) < n:
+                out.append(g.pop(0)[2])
+    return out
+
+
+# --- עיבוד אות (stdlib בלבד) -------------------------------------------------
+def ffmpeg(args, stdin_bytes=None):
+    """מריץ ffmpeg ומחזיר stdout. זורק RuntimeError עם ה-stderr בכשל."""
+    head = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    if stdin_bytes is None:
+        head.append("-nostdin")       # בלי זה ffmpeg קורא מהטרמינל ותוקע הרצה ברקע
+    r = subprocess.run(head + args,
+                       input=stdin_bytes, capture_output=True)
+    if r.returncode != 0:
+        raise RuntimeError("ffmpeg: " + r.stderr.decode("utf-8", "replace").strip()[-300:])
+    return r.stdout
+
+
+def pcm_in(rate):
+    return ["-f", "f32le", "-ar", str(rate), "-ac", "1", "-i", "pipe:0"]
+
+
+def decode(path):
+    return ffmpeg(["-t", str(MAX_SEC), "-i", str(path), "-ar", str(RATE), "-ac", "1",
+                   "-f", "f32le", "pipe:1"])
+
+
+def filt(pcm, rate, af, out_rate):
+    return ffmpeg(pcm_in(rate) + ["-af", af, "-ar", str(out_rate), "-ac", "1",
+                                  "-f", "f32le", "pipe:1"], pcm)
+
+
+def to_mp3(pcm, rate, dest):
+    ffmpeg(pcm_in(rate) + ["-ar", str(RATE), "-ac", "1", "-c:a", "libmp3lame", "-b:a", "64k",
+                           "-y", str(dest)], pcm)
+
+
+def floats(b):
+    a = array("f")
+    a.frombytes(b[:len(b) - len(b) % 4])
+    return a
+
+
+def run_rnnoise(pcm48, binary):
+    r = subprocess.run([binary], input=pcm48, capture_output=True)
+    if r.returncode != 0:
+        raise RuntimeError("airam-rnnoise: " + r.stderr.decode("utf-8", "replace").strip()[-200:])
+    return r.stdout
+
+
+def _ncorr(a, b):
+    ea = sum(map(mul, a, a))
+    eb = sum(map(mul, b, b))
+    if ea <= 0 or eb <= 0:
+        return 0.0
+    return sum(map(mul, a, b)) / math.sqrt(ea * eb)
+
+
+def estimate_lag(dry, wet, max_lag=LAG_MAX):
+    """בכמה דגימות המסונן מאחר אחרי הגולמי. מחזיר (lag, confidence).
+
+    קורלציה מנורמלת על רבע השנייה החזק ביותר בגולמי: חיפוש גס על כל דגימה
+    שלישית (האות הועלה מ-16k, אז אין aliasing) ואז עידון סביב המקסימום.
+    confidence נמוך = ההקלטה לא מתאימה למדידה (כמעט כולה רעש שהמסנן מחק).
+    """
+    win = 12000
+    n = min(len(dry), len(wet) - max_lag)
+    if n < win:
+        return 0, 0.0
+    step = 2400
+    best_s, best_e = 0, -1.0
+    for s in range(0, n - win + 1, step):
+        seg = dry[s:s + win:8]
+        e = sum(map(mul, seg, seg))
+        if e > best_e:
+            best_s, best_e = s, e
+    s = best_s
+    ref3 = dry[s:s + win:3]
+    coarse, cbest = 0, -2.0
+    for lag in range(0, max_lag + 1, 3):
+        c = _ncorr(ref3, wet[s + lag:s + lag + win:3])
+        if c > cbest:
+            coarse, cbest = lag, c
+    ref = dry[s:s + win]
+    lag, conf = coarse, -2.0
+    for cand in range(max(0, coarse - 3), min(max_lag, coarse + 3) + 1):
+        c = _ncorr(ref, wet[s + cand:s + cand + win])
+        if c > conf:
+            lag, conf = cand, c
+    return lag, conf
+
+
+def consensus_lag(measures):
+    """ההשהיה היא תכונה קבועה של המנוע ⇒ לוקחים את הערך השכיח בין המדידות האמינות.
+    None כשאין אף מדידה אמינה — לא מנחשים (ערבוב לא מיושר = מסנן מסרק)."""
+    good = [lag for lag, conf in measures if conf >= LAG_MIN_CONF]
+    if not good:
+        return None
+    return Counter(good).most_common(1)[0][0]
+
+
+def mix(dry, wet, lag, a):
+    """a·dry (מושהה ב-lag) + (1−a)·wet."""
+    n = min(len(dry) + lag, len(wet))
+    b = 1.0 - a
+    out = array("f", [b * w for w in wet[:min(lag, n)]])
+    out.extend(a * d + b * w for d, w in zip(dry[:max(0, n - lag)], wet[lag:n]))
+    return out
+
+
+def load_speex():
+    name = ctypes.util.find_library("speexdsp") or "libspeexdsp.so.1"
+    try:
+        lib = ctypes.CDLL(name)
+    except OSError:
+        return None
+    lib.speex_preprocess_state_init.restype = ctypes.c_void_p
+    lib.speex_preprocess_state_init.argtypes = [ctypes.c_int, ctypes.c_int]
+    lib.speex_preprocess_ctl.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+    lib.speex_preprocess_run.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.speex_preprocess_state_destroy.argtypes = [ctypes.c_void_p]
+    return lib
+
+
+def speex_denoise(lib, pcm16k, max_atten_db):
+    """SpeexDSP preprocess ב-16kHz, פריים 20ms. max_atten_db שלילי (תקרת ההנחתה)."""
+    frame = 320
+    src = floats(pcm16k)
+    s16 = array("h", [max(-32768, min(32767, int(x * 32767.0))) for x in src])
+    n = len(s16) - len(s16) % frame
+    del s16[n:]
+    st = lib.speex_preprocess_state_init(frame, RATE)
+    if not st:
+        raise RuntimeError("speex_preprocess_state_init נכשל")
+    try:
+        for req, val in ((0, 1), (2, 0), (4, 0), (8, 0), (18, int(max_atten_db))):
+            v = ctypes.c_int(val)      # DENOISE on, AGC/VAD/DEREVERB off, NOISE_SUPPRESS
+            lib.speex_preprocess_ctl(st, req, ctypes.byref(v))
+        if n:
+            buf = (ctypes.c_int16 * n).from_buffer(s16)
+            base = ctypes.addressof(buf)
+            for off in range(0, n, frame):
+                lib.speex_preprocess_run(st, base + off * 2)
+            del buf
+    finally:
+        lib.speex_preprocess_state_destroy(st)
+    return array("f", [x / 32768.0 for x in s16]).tobytes()
+
+
+# --- בניית המעבדה -----------------------------------------------------------
+def build(paths, out_dir, rnnoise_bin=RNNOISE_BIN, rng=random, log=print):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    skipped = {}
+    have_rn = os.access(rnnoise_bin, os.X_OK)
+    if not have_rn:
+        why = f"{rnnoise_bin} לא נמצא (install.sh שלב 4e)"
+        for v in VARIANTS:
+            if v["kind"] in ("rnmix", "prod"):
+                skipped[v["id"]] = why
+    speex = load_speex()
+    if speex is None:
+        for v in VARIANTS:
+            if v["kind"] == "speex":
+                skipped[v["id"]] = "libspeexdsp לא נמצא (sudo apt install libspeexdsp1)"
+
+    # שלב 1: פענוח + RNNoise לכל ההקלטות, ומדידת ההשהיה על כולן.
+    work = []
+    for p in paths:
+        log(f"  מפענח {p.name}")
+        raw = decode(p)
+        item = {"path": p, "raw": raw}
+        if have_rn:
+            dry48 = filt(raw, RATE, "anull", RN_RATE)
+            wet48 = run_rnnoise(dry48, rnnoise_bin)
+            item["dry48"], item["wet48"] = floats(dry48), floats(wet48)
+            item["lag"] = estimate_lag(item["dry48"], item["wet48"])
+        work.append(item)
+    lag = consensus_lag([w["lag"] for w in work]) if have_rn else None
+    if have_rn:
+        log("  השהיית RNNoise שנמדדה: " + (f"{lag} דגימות ({lag / 48.0:.1f}ms)" if lag is not None
+                                            else "לא נמדדה באמינות"))
+        if lag is None:
+            for v in VARIANTS:
+                if v["kind"] == "rnmix":
+                    skipped[v["id"]] = "השהיית RNNoise לא נמדדה באמינות — בלי יישור הערבוב מעוות"
+
+    # שלב 2: כל המועמדים לכל הקלטה, בשמות קבצים שלא מסגירים את הזהות.
+    recs = []
+    for i, w in enumerate(work):
+        log(f"  מעבד {w['path'].name}")
+        raw = w["raw"]
+        to_mp3(raw, RATE, out_dir / f"r{i}_raw.mp3")
+        made = {}
+        for v in VARIANTS:
+            if v["id"] in skipped:
+                continue
+            if v["kind"] == "eq":
+                made[v["id"]] = (filt(raw, RATE, EQ_AF, RATE), RATE)
+            elif v["kind"] == "rnmix":
+                made[v["id"]] = (mix(w["dry48"], w["wet48"], lag, v["dry"]).tobytes(), RN_RATE)
+            elif v["kind"] == "prod":
+                made[v["id"]] = (filt(w["wet48"].tobytes(), RN_RATE, PROD_AF, RATE), RATE)
+            elif v["kind"] == "speex":
+                made[v["id"]] = (speex_denoise(speex, raw, v["db"]), RATE)
+        order = list(made)
+        rng.shuffle(order)
+        for slot, vid in enumerate(order):
+            pcm, rate = made[vid]
+            to_mp3(pcm, rate, out_dir / f"r{i}_{slot}.mp3")
+        f = rec_freq(w["path"].name)
+        recs.append({"name": w["path"].name, "freq_mhz": round(f / 1e6, 3) if f else None,
+                     "sec": round(len(raw) / 4 / RATE, 1), "order": order})
+    lab = {"built_at": time.time(), "recs": recs, "skipped": skipped, "rn_lag": lag,
+           "ratings": {}, "done": [], "revealed": False}
+    save_lab(out_dir, lab)
+    return lab
+
+
+def save_lab(out_dir, lab):
+    tmp = out_dir / "lab.json.tmp"
+    tmp.write_text(json.dumps(lab, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, out_dir / "lab.json")
+
+
+def load_lab(out_dir):
+    try:
+        lab = json.loads((out_dir / "lab.json").read_text(encoding="utf-8"))
+        return lab if isinstance(lab, dict) and isinstance(lab.get("recs"), list) else None
+    except (OSError, ValueError):
+        return None
+
+
+# --- תוצאות -----------------------------------------------------------------
+def summarize(lab):
+    """לכל מועמד: בכמה הקלטות *שסומנו כגמורות* הוא דורג בכל קריטריון.
+    'נקי' = פחות רעש, בלי 'לא טבעי' ובלי 'חסרה מילה'. עובר = נקי ברוב ההקלטות."""
+    done = set(lab.get("done", []))
+    rows = {}
+    for i, rec in enumerate(lab["recs"]):
+        if i not in done:
+            continue
+        for slot, vid in enumerate(rec["order"]):
+            r = lab["ratings"].get(f"{i}:{slot}", {})
+            row = rows.setdefault(vid, {"id": vid, "n": 0, "less": 0, "unnatural": 0,
+                                        "missing": 0, "clean": 0})
+            row["n"] += 1
+            for k in RATE_KEYS:
+                row[k] += 1 if r.get(k) else 0
+            if r.get("less") and not r.get("unnatural") and not r.get("missing"):
+                row["clean"] += 1
+    out = []
+    for v in VARIANTS:
+        row = rows.get(v["id"])
+        if row:
+            row["label"] = v["label"]
+            row["passes"] = row["clean"] * 2 > row["n"]
+            out.append(row)
+    return out
+
+
+def results_text(lab):
+    lines = ["AIR-AM — מעבדת האזנה: תוצאות",
+             f"הקלטות שדורגו: {len(set(lab.get('done', [])))} מתוך {len(lab['recs'])}",
+             "השהיית RNNoise: " + (f"{lab['rn_lag']} דגימות" if lab.get("rn_lag") is not None else "—"),
+             "",
+             "מועמד | הקלטות | פחות רעש | לא טבעי | חסרה מילה | נקי | עובר"]
+    for r in summarize(lab):
+        lines.append(f"{r['id']:5} | {r['n']} | {r['less']} | {r['unnatural']} | {r['missing']} | "
+                     f"{r['clean']} | {'כן' if r['passes'] else 'לא'}   # {r['label']}")
+    for vid, why in lab.get("skipped", {}).items():
+        lines.append(f"{vid:5} | לא נבנה: {why}")
+    lines += ["", "הקלטות:"]
+    for i, rec in enumerate(lab["recs"]):
+        mark = "✓" if i in set(lab.get("done", [])) else " "
+        lines.append(f" {mark} {rec['name']}  {rec['sec']}s  סדר: {' '.join(rec['order'])}")
+    return "\n".join(lines) + "\n"
+
+
+def public_view(lab):
+    """מה שהדף מקבל. לפני החשיפה — בלי זהויות המועמדים (האזנה עיוורת)."""
+    revealed = bool(lab.get("revealed"))
+    recs = []
+    for rec in lab["recs"]:
+        r = {"name": rec["name"], "freq_mhz": rec["freq_mhz"], "sec": rec["sec"],
+             "slots": len(rec["order"])}
+        if revealed:
+            r["labels"] = [VARIANT_BY_ID[v]["label"] for v in rec["order"]]
+        recs.append(r)
+    view = {"recs": recs, "ratings": lab["ratings"], "done": lab.get("done", []),
+            "revealed": revealed, "skipped": list(lab.get("skipped", {}).values())}
+    if revealed:
+        view["summary"] = summarize(lab)
+        view["text"] = results_text(lab)
+    return view
+
+
+# --- שרת --------------------------------------------------------------------
+AUDIO_RE = re.compile(r"^/a/(r\d+_(?:raw|\d+)\.mp3)$")
+
+
+def parse_range(header, size):
+    """'bytes=a-b' ⇒ (start, end) כולל, או None. iOS Safari דורש Range ל-<audio>."""
+    m = re.match(r"^bytes=(\d*)-(\d*)$", header or "")
+    if not m or (not m.group(1) and not m.group(2)):
+        return None
+    if not m.group(1):
+        n = int(m.group(2))
+        return (max(0, size - n), size - 1) if n else None
+    start = int(m.group(1))
+    end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+    return (start, end) if start <= end and start < size else None
+
+
+def make_handler(out_dir, lock):
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, body, ctype="application/json; charset=utf-8", extra=None):
+            if isinstance(body, (dict, list)):
+                body = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            elif isinstance(body, str):
+                body = body.encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path == "/":
+                return self._send(200, PAGE, "text/html; charset=utf-8")
+            if path == "/api/lab":
+                with lock:
+                    return self._send(200, public_view(load_lab(out_dir)))
+            m = AUDIO_RE.match(path)
+            if m:                                  # רק שמות בתבנית ⇒ אין path traversal
+                try:
+                    data = (out_dir / m.group(1)).read_bytes()
+                except OSError:
+                    return self._send(404, {"error": "not found"})
+                rng = parse_range(self.headers.get("Range"), len(data))
+                if rng:
+                    s, e = rng
+                    return self._send(206, data[s:e + 1], "audio/mpeg",
+                                      {"Content-Range": f"bytes {s}-{e}/{len(data)}",
+                                       "Accept-Ranges": "bytes"})
+                return self._send(200, data, "audio/mpeg", {"Accept-Ranges": "bytes"})
+            self._send(404, {"error": "not found"})
+
+        def do_POST(self):
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                data = json.loads(self.rfile.read(min(n, 4096)) or b"{}")
+                assert isinstance(data, dict)
+            except (ValueError, AssertionError):
+                return self._send(400, {"error": "bad json"})
+            with lock:
+                lab = load_lab(out_dir)
+                if self.path == "/api/rate":
+                    rec, slot, key = data.get("rec"), data.get("slot"), data.get("key")
+                    if (not isinstance(rec, int) or not isinstance(slot, int) or key not in RATE_KEYS
+                            or not 0 <= rec < len(lab["recs"])
+                            or not 0 <= slot < len(lab["recs"][rec]["order"])):
+                        return self._send(400, {"error": "bad rating"})
+                    lab["ratings"].setdefault(f"{rec}:{slot}", {})[key] = bool(data.get("value"))
+                elif self.path == "/api/done":
+                    rec = data.get("rec")
+                    if not isinstance(rec, int) or not 0 <= rec < len(lab["recs"]):
+                        return self._send(400, {"error": "bad rec"})
+                    done = set(lab.get("done", []))
+                    (done.add if data.get("value", True) else done.discard)(rec)
+                    lab["done"] = sorted(done)
+                elif self.path == "/api/reveal":
+                    lab["revealed"] = True
+                    (out_dir / "results.txt").write_text(results_text(lab), encoding="utf-8")
+                else:
+                    return self._send(404, {"error": "not found"})
+                save_lab(out_dir, lab)
+                self._send(200, public_view(lab))
+    return H
+
+
+PAGE = r"""<!doctype html>
+<html lang="he" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AIR-AM — מעבדת האזנה</title>
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--fg:#16181d;--mut:#667;--bd:#d9dce3;--on:#1668dc;--bad:#c62828;--ok:#1b7f3b}
+@media(prefers-color-scheme:dark){:root{--bg:#111318;--card:#1b1e25;--fg:#e8eaf0;--mut:#99a;--bd:#333845;--on:#4c8dff;--bad:#ef6b6b;--ok:#4fc27a}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
+main{max-width:720px;margin:0 auto;padding:12px}h1{font-size:20px;margin:8px 0}
+p.h{color:var(--mut);margin:4px 0 12px}
+.rec{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;margin:12px 0}
+.rec.done{border-color:var(--ok)}.rec h2{font-size:16px;margin:0 0 8px}
+.v{border-top:1px solid var(--bd);padding:10px 0}.v b{font-size:18px}
+.v .who{color:var(--mut);font-size:13px}
+audio{width:100%;height:40px;margin:4px 0}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+button{font:inherit;min-height:44px;padding:6px 12px;border-radius:10px;border:1px solid var(--bd);background:var(--card);color:var(--fg)}
+button.on{background:var(--on);border-color:var(--on);color:#fff}
+button.on.bad{background:var(--bad);border-color:var(--bad)}
+button.big{width:100%;margin-top:8px;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:14px}td,th{border-bottom:1px solid var(--bd);padding:6px 4px;text-align:right}
+pre{white-space:pre-wrap;direction:rtl;background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:10px;font-size:12px;overflow:auto}
+.pass{color:var(--ok);font-weight:600}.fail{color:var(--bad)}
+</style></head><body><main>
+<h1>מעבדת האזנה — סינון רעשים</h1>
+<p class="h">לכל הקלטה: האזן קודם לגולמי, ואז לכל גרסה. סמן מה ששמעת. אתה לא יודע איזו גרסה היא איזו — זה מכוון. מומלץ עם אוזניות, באותה עוצמה.</p>
+<div id="skip" class="h"></div><div id="recs"></div>
+<button class="big" id="reveal">חשוף תוצאות</button><div id="res"></div>
+</main><script>
+var L="אבגדהוזח",lab=null;
+var KEYS=[["less","🔉 פחות רעש",""],["unnatural","🤖 לא טבעי","bad"],["missing","✂ חסרה מילה","bad"]];
+function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e}
+function post(u,b){return fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)}).then(function(r){return r.json()})}
+function chipState(){
+  document.querySelectorAll("button[data-k]").forEach(function(b){
+    var r=lab.ratings[b.dataset.r+":"+b.dataset.s]||{};b.classList.toggle("on",!!r[b.dataset.k])});
+  document.querySelectorAll(".rec").forEach(function(d){
+    var on=lab.done.indexOf(+d.dataset.r)>=0;d.classList.toggle("done",on);
+    d.querySelector(".fin").textContent=on?"✓ דורגה — לחץ לביטול":"סיימתי לדרג את ההקלטה הזו"})}
+function build(){
+  var box=document.getElementById("recs");box.textContent="";
+  document.getElementById("skip").textContent=lab.skipped.length?"מועמדים שלא נבנו: "+lab.skipped.join(" · "):"";
+  lab.recs.forEach(function(rec,i){
+    var d=el("div","rec");d.dataset.r=i;
+    d.appendChild(el("h2",null,"הקלטה "+(i+1)+" · "+(rec.freq_mhz||"?")+" MHz · "+rec.sec+" ש'"));
+    var raw=el("div","v");raw.appendChild(el("b",null,"גולמי"));raw.appendChild(aud("r"+i+"_raw"));d.appendChild(raw);
+    for(var s=0;s<rec.slots;s++){(function(s){
+      var v=el("div","v");v.appendChild(el("b",null,"גרסה "+L[s]));
+      if(rec.labels)v.appendChild(el("div","who",rec.labels[s]));
+      v.appendChild(aud("r"+i+"_"+s));var c=el("div","chips");
+      KEYS.forEach(function(k){var b=el("button",k[2],k[1]);b.dataset.r=i;b.dataset.s=s;b.dataset.k=k[0];
+        b.onclick=function(){var cur=(lab.ratings[i+":"+s]||{})[k[0]];
+          post("/api/rate",{rec:i,slot:s,key:k[0],value:!cur}).then(function(j){lab=j;chipState()})};c.appendChild(b)});
+      v.appendChild(c);d.appendChild(v)})(s)}
+    var f=el("button","big fin");f.onclick=function(){
+      post("/api/done",{rec:i,value:lab.done.indexOf(i)<0}).then(function(j){lab=j;chipState()})};d.appendChild(f);
+    box.appendChild(d)});
+  chipState();results()}
+function aud(n){var a=el("audio");a.controls=true;a.preload="none";a.src="/a/"+n+".mp3";
+  a.addEventListener("play",function(){document.querySelectorAll("audio").forEach(function(o){if(o!==a)o.pause()})});return a}
+function results(){
+  var r=document.getElementById("res");r.textContent="";if(!lab.revealed)return;
+  document.getElementById("reveal").style.display="none";
+  var t=el("table"),h=el("tr");["מועמד","הקלטות","פחות רעש","לא טבעי","חסרה מילה","נקי","עובר"].forEach(function(x){h.appendChild(el("th",null,x))});t.appendChild(h);
+  lab.summary.forEach(function(s){var tr=el("tr");
+    [s.label,s.n,s.less,s.unnatural,s.missing,s.clean].forEach(function(x){tr.appendChild(el("td",null,x))});
+    tr.appendChild(el("td",s.passes?"pass":"fail",s.passes?"כן":"לא"));t.appendChild(tr)});
+  r.appendChild(el("h1",null,"תוצאות"));r.appendChild(t);
+  r.appendChild(el("p","h","העתק את הטקסט הבא ושלח אותו (נשמר גם ב-results.txt על ה-Pi):"));r.appendChild(el("pre",null,lab.text))}
+document.getElementById("reveal").onclick=function(){
+  if(!lab.done.length){alert("סמן לפחות הקלטה אחת כ'סיימתי לדרג' לפני החשיפה.");return}
+  if(confirm("לחשוף את זהות הגרסאות? אחרי החשיפה ההאזנה כבר לא עיוורת."))post("/api/reveal",{}).then(function(j){lab=j;build()})};
+fetch("/api/lab").then(function(r){return r.json()}).then(function(j){lab=j;build()});
+</script></body></html>
+"""
+
+
+def my_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("192.0.2.1", 9))        # UDP connect לא שולח דבר — רק בוחר ממשק
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return socket.gethostname()
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="AIR-AM — מעבדת האזנה עיוורת לסינון רעשים")
+    ap.add_argument("files", nargs="*", help="קובצי MP3 מסוימים (ברירת מחדל: ההקלטות האחרונות)")
+    ap.add_argument("-n", type=int, default=5, help="כמה הקלטות (ברירת מחדל 5)")
+    ap.add_argument("--rec-dir", type=Path, default=REC_DIR)
+    ap.add_argument("--out", type=Path, default=OUT_DIR)
+    ap.add_argument("--port", type=int, default=PORT)
+    ap.add_argument("--rnnoise", default=RNNOISE_BIN)
+    ap.add_argument("--rebuild", action="store_true", help="לבנות מחדש ולזרוק דירוגים קיימים")
+    ap.add_argument("--no-serve", action="store_true", help="רק לבנות, בלי שרת")
+    a = ap.parse_args(argv)
+
+    if not shutil.which("ffmpeg"):
+        sys.exit("ffmpeg חסר (sudo apt install ffmpeg)")
+    lab = None if a.rebuild else load_lab(a.out)
+    if lab:
+        print(f"ממשיך מעבדה קיימת ב-{a.out} ({len(lab['recs'])} הקלטות). --rebuild לבנייה מחדש.")
+    else:
+        paths = [Path(f) for f in a.files] or pick_recordings(a.rec_dir, a.n)
+        if not paths:
+            sys.exit(f"לא נמצאו הקלטות של {MIN_SEC:.0f} שניות ומעלה ב-{a.rec_dir}.\n"
+                     "הקלטות נוצרות רק כשהסקוולץ' אינו 'פתוח'. אם התיקייה לא קריאה — הרץ עם sudo.")
+        if a.out.exists():
+            shutil.rmtree(a.out)
+        print(f"בונה מעבדה מ-{len(paths)} הקלטות:")
+        try:
+            lab = build(paths, a.out, a.rnnoise)
+        except (RuntimeError, OSError) as e:
+            sys.exit(f"הבנייה נכשלה: {e}")
+    for vid, why in lab.get("skipped", {}).items():
+        print(f"  [!] {vid} לא נבנה: {why}")
+    if a.no_serve:
+        return
+    srv = ThreadingHTTPServer(("0.0.0.0", a.port), make_handler(a.out, threading.Lock()))
+    print(f"\nפתח בטלפון:  http://{my_ip()}:{a.port}\nCtrl-C לסיום. התוצאות יישמרו ב-{a.out}/results.txt")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print()
+    lab = load_lab(a.out)
+    if lab and lab.get("done"):
+        print(results_text(lab))
+
+
+if __name__ == "__main__":
+    main()
