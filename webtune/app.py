@@ -52,13 +52,23 @@ MOUNT = "live.mp3"          # שם ה-stream הקבוע ב-Icecast
 ICECAST_PORT = 8000
 SOURCE_PW = "airam"         # חייבת להיות זהה ל-SOURCE_PW ב-install.sh (נכתבת ל-Icecast שם)
 # סינון רעשים חי (docs/denoise-design.md): rtl_airband שולח עותק PCM ב-UDP
-# (udp_stream — *תמיד* בקונפיג, ר' render_config) => airam-denoise (RNNoise)
+# (udp_stream — *תמיד* בקונפיג, ר' render_config) => airam-denoise (מנוע נבחר)
 # => mount נוסף ב-Icecast. /live.mp3, ההקלטות והתמלול לא עוברים דרכו כלל.
 DENOISE_SERVICE = "airam-denoise"
 DENOISE_UDP_PORT = 5559     # חייב להיות זהה ל-UDP_PORT ב-scripts/airam-denoise
 DENOISE_MOUNT = "clean.mp3"  # חייב להיות זהה ל-MOUNT ב-scripts/airam-denoise + ל-<mount> ב-install.sh
 DENOISE_SCRIPT = Path("/usr/local/bin/airam-denoise")
 DENOISE_RNNOISE = Path("/usr/local/bin/airam-rnnoise")
+DENOISE_SPEEXDN = Path("/usr/local/bin/airam-speexdn")
+DENOISE_ENV_PATH = Path("/etc/airam/denoise.env")   # EnvironmentFile של airam-denoise.service
+# המנועים — רשימה סגורה, ורק מה שעבר את מעבדת ההאזנה העיוורת על הקלטות אמיתיות
+# (docs/audio-comfort-design.md, 13.11.2026). RNNoise 100% + נורמליזציה (v2.29.0)
+# נפסל שם ("לא טבעי" ב-3/3) ולכן אינו אופציה. הפרמטרים עצמם בסקריפט.
+DENOISE_ENGINES = {
+    "rnmix": {"label": "RNNoise עדין"},   # 50% גולמי מיושר — airam-rnnoise --mix
+    "speex": {"label": "Speex"},          # תקרת הנחתה 15dB — airam-speexdn
+}
+DENOISE_ENGINE_DEFAULT = "rnmix"    # כבר מותקן אצל כולם (שלב 4e) — Speex דורש שלב 4f
 DENOISE_INSTALL_HINT = "cd ~/AIR-AM && git pull && sudo ./install.sh"
 SAMPLE_RATE = 2.56          # Msps - ערוץ יחיד, חלון צר מספיק
 # מסנן הערוץ (docs/voice-channel-design.md). ⚠ הערוץ *אינו* "בין FFT ברוחב 5kHz":
@@ -673,9 +683,10 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  # "source","set_at"} או None. ⚠ אין ברירת מחדל (לא נתב"ג): AIR-AM נייד,
                  # ומיקום מומצא היה מייצר אופק שגוי בשקט — בלי תחנה אין פסק-דין BLOS.
                  "station": None,
-                 # סינון רעשים חי (RNNoise + השוואת עוצמות) לסטרים /clean.mp3.
-                 # מתג גלובלי; כבוי כברירת מחדל. ר' _denoise_sync.
+                 # סינון רעשים חי לסטרים /clean.mp3. מתג גלובלי; כבוי כברירת מחדל.
+                 # ר' _denoise_sync. denoise_engine — מתוך DENOISE_ENGINES.
                  "denoise": False,
+                 "denoise_engine": DENOISE_ENGINE_DEFAULT,
                  # מסנן הערוץ של הקול (CHAN_FILTERS) — ברירת המחדל = ההתנהגות ההיסטורית.
                  "chan_filter": CHAN_FILTER_DEFAULT,
                  # מסנן notch לשידורי FM/MW ב-RSP1B (rfnotch_ctrl של SoapySDRPlay3).
@@ -3196,13 +3207,31 @@ _ice_status = {"t": 0.0, "mounts": None}
 _ICE_STATUS_LOCK = threading.Lock()
 
 
-def _denoise_missing():
-    """רכיבים חסרים לסינון (רשימה ריקה = מותקן). נבדק *חי* בכל קריאה ולא פעם
-    אחת בעלייה — אותו לקח כמו whisper (§12): התקנה מאוחרת חייבת להיות מורגשת
-    בלי restart, ו"לא מותקן" חייב להיות מדווח, לא מוסתר."""
+def _denoise_engine(st=None):
+    """המנוע השמור, תמיד מתוך הרשימה הסגורה (state ישן/פגום ⇒ ברירת המחדל)."""
+    e = (st if st is not None else load_state()).get("denoise_engine")
+    return e if e in DENOISE_ENGINES else DENOISE_ENGINE_DEFAULT
+
+
+def _denoise_missing(engine=None):
+    """רכיבים חסרים לסינון במנוע הנתון (ברירת מחדל: השמור). רשימה ריקה = מותקן.
+    נבדק *חי* בכל קריאה ולא פעם אחת בעלייה — אותו לקח כמו whisper (§12): התקנה
+    מאוחרת חייבת להיות מורגשת בלי restart, ו"לא מותקן" חייב להיות מדווח."""
+    if engine not in DENOISE_ENGINES:
+        engine = _denoise_engine()
     missing = [] if shutil.which("ffmpeg") else ["ffmpeg"]
-    missing += [p.name for p in (DENOISE_SCRIPT, DENOISE_RNNOISE) if not os.access(p, os.X_OK)]
+    binary = DENOISE_RNNOISE if engine == "rnmix" else DENOISE_SPEEXDN
+    missing += [p.name for p in (DENOISE_SCRIPT, binary) if not os.access(p, os.X_OK)]
     return missing
+
+
+def write_denoise_env(engine):
+    """/etc/airam/denoise.env — EnvironmentFile של airam-denoise.service (systemd,
+    לא shell). הערך תמיד מהרשימה הסגורה; הסקריפט גם הוא מסרב לכל דבר אחר."""
+    if engine not in DENOISE_ENGINES:
+        engine = DENOISE_ENGINE_DEFAULT
+    _atomic_write(DENOISE_ENV_PATH, "# נכתב אוטומטית ע\"י AIR-AM (סינון רעשים). שינויים ידניים נדרסים.\n"
+                                    f"AIRAM_DENOISE_ENGINE={engine}\n")
 
 
 def _icecast_live_mounts():
@@ -3254,8 +3283,10 @@ def _denoise_state(enabled, missing, voice_on, service, live):
 def _denoise_status(services=None):
     """מצב הסינון ל-/api/denoise ול-/api/health. services — מפה מוכנה מ-
     _services_status (‏/api/health כבר מחזיק אותה => בלי fork נוסף)."""
-    enabled = bool(load_state().get("denoise"))
-    missing = _denoise_missing()
+    st = load_state()
+    enabled = bool(st.get("denoise"))
+    engine = _denoise_engine(st)
+    missing = _denoise_missing(engine)
     if services is None:
         services = _services_status(("rtl_airband", DENOISE_SERVICE))
     voice_on = services.get("rtl_airband") == "active"
@@ -3265,7 +3296,12 @@ def _denoise_status(services=None):
     if enabled and voice_on and not missing:
         mounts = _icecast_live_mounts()
         live = None if mounts is None else (DENOISE_MOUNT in mounts)
-    return {"enabled": enabled, "available": not missing, "missing": missing,
+    engines = []
+    for eid, e in DENOISE_ENGINES.items():
+        m = missing if eid == engine else _denoise_missing(eid)
+        engines.append({"id": eid, "label": e["label"], "available": not m, "missing": m})
+    return {"enabled": enabled, "engine": engine, "engines": engines,
+            "available": not missing, "missing": missing,
             "install_hint": DENOISE_INSTALL_HINT if missing else None,
             "state": _denoise_state(enabled, missing, voice_on, service, live),
             "service": service, "live": live, "mount": DENOISE_MOUNT}
@@ -3277,12 +3313,16 @@ def _denoise_sync():
     ברדיו: גם כשל מלא כאן משאיר את /live.mp3 ואת ההקלטות בדיוק כמו שהיו.
     לא מחזיק TUNE_LOCK (נקרא גם מתוך _enter_voice שכבר מחזיק אותו)."""
     try:
-        want = (bool(load_state().get("denoise")) and not _denoise_missing()
+        st = load_state()
+        engine = _denoise_engine(st)
+        want = (bool(st.get("denoise")) and not _denoise_missing(engine)
                 and _is_active("rtl_airband"))
         with _DENOISE_LOCK:
             cur = _services_status((DENOISE_SERVICE,))[DENOISE_SERVICE]
             running = cur in ("active", "activating", "reloading")
             if want and not running:
+                # המנוע נקרא מה-env רק בהפעלה => כותבים אותו ממש לפני (אטומי)
+                write_denoise_env(engine)
                 r = _sysctl("start", DENOISE_SERVICE, timeout=15)
                 if r is not None and getattr(r, "returncode", 0) != 0:
                     log.warning("denoise: start נכשל: %s", (r.stderr or "").strip()[:200])
@@ -3754,6 +3794,7 @@ def api_state():
         st["mode_ok"] = (live is not None) or (saved == "off")
     st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT, version=VERSION,
               denoise_mount=DENOISE_MOUNT, denoise_available=not _denoise_missing(),
+              denoise_engine=_denoise_engine(st),
               acars_banks=ACARS_BANKS, vdl2_banks=VDL2_BANKS, satcom_banks=SATCOM_BANKS)
     return jsonify(st)
 
@@ -3995,22 +4036,37 @@ def api_health():
 
 @app.route("/api/denoise", methods=["GET", "POST"])
 def api_denoise():
-    """סינון רעשים חי (docs/denoise-design.md). GET: מצב (ר' _denoise_state).
-    POST {enabled: bool}: מתג גלובלי (state) + יישור מיידי של השירות. לא נוגע
-    ברדיו ולא ב-TUNE_LOCK — הפלט ל-UDP קיים בקונפיג תמיד, אז אין restart.
-    דרך _guard (POST)."""
+    """סינון רעשים חי (docs/denoise-design.md, docs/audio-comfort-design.md). GET:
+    מצב (ר' _denoise_state). POST {enabled?: bool, engine?: str} (לפחות אחד):
+    מתג גלובלי ו/או מנוע (state) + יישור מיידי של השירות. לא נוגע ברדיו ולא
+    ב-TUNE_LOCK — הפלט ל-UDP קיים בקונפיג תמיד, אז אין restart לרדיו. החלפת
+    מנוע בזמן ריצה = stop+start ל-airam-denoise בלבד (Icecast מגיש את הגולמי
+    בשנייה שבאמצע). דרך _guard (POST)."""
     if request.method == "POST":
         data = request.get_json(silent=True)
-        if not isinstance(data, dict) or not isinstance(data.get("enabled"), bool):
-            return jsonify(ok=False, error="נדרש {\"enabled\": true|false}"), 400
-        enabled = data["enabled"]
-        missing = _denoise_missing()
+        if (not isinstance(data, dict) or not ({"enabled", "engine"} & data.keys())
+                or ("enabled" in data and not isinstance(data["enabled"], bool))
+                or ("engine" in data and data["engine"] not in DENOISE_ENGINES)):
+            return jsonify(ok=False, error="נדרש {\"enabled\": true|false} ו/או {\"engine\": "
+                           + "|".join(DENOISE_ENGINES) + "}"), 400
+        st = load_state()
+        enabled = data.get("enabled", bool(st.get("denoise")))
+        engine = data.get("engine", _denoise_engine(st))
+        missing = _denoise_missing(engine)
         if enabled and missing:
             # לא שומרים "דלוק" שלא יכול לעבוד — מחזירים את הפקודה שמתקנת (כמו whisper)
             return jsonify(ok=False, error="סינון הרעשים לא מותקן (חסר: " + ", ".join(missing) + ")",
                            **_denoise_status()), 501
-        _merge_state({"denoise": enabled})
-        log.info("denoise %s (from %s)", "on" if enabled else "off", request.remote_addr)
+        changed_engine = engine != _denoise_engine(st)
+        _merge_state({"denoise": enabled, "denoise_engine": engine})
+        log.info("denoise %s engine=%s (from %s)", "on" if enabled else "off", engine,
+                 request.remote_addr)
+        if changed_engine:
+            # המנוע נקרא רק בהפעלה — עוצרים, ו-_denoise_sync מפעיל עם ה-env החדש
+            with _DENOISE_LOCK:
+                if _services_status((DENOISE_SERVICE,))[DENOISE_SERVICE] in (
+                        "active", "activating", "reloading"):
+                    _sysctl("stop", DENOISE_SERVICE, timeout=15)
         _denoise_sync()
     return jsonify(ok=True, **_denoise_status())
 

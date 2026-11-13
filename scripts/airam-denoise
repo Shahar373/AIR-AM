@@ -3,20 +3,21 @@
 #  airam-denoise — סינון רעשים חי לסטרים הקול (ExecStart של airam-denoise.service)
 # ----------------------------------------------------------------------------
 #  rtl_airband (פלט udp_stream: f32le מונו 16kHz, אפסים כשהסקוולץ' סגור)
-#    ─UDP 127.0.0.1:5559─► ffmpeg (16k→48k)
-#    ─► airam-rnnoise (RNNoise v0.2)
-#    ─► ffmpeg (48k→16k, פס 250–3000Hz, dynaudnorm, MP3 CBR 48k)
-#    ─► Icecast /clean.mp3   (fallback-mount ל-/live.mp3 — ר' install.sh שלב 5)
+#    ─UDP 127.0.0.1:5559─► ffmpeg ─► מנוע ─► ffmpeg (MP3 CBR 48k) ─► Icecast /clean.mp3
+#                                              (fallback-mount ל-/live.mp3 — install.sh שלב 5)
+#
+#  המנוע (AIRAM_DENOISE_ENGINE, מ-/etc/airam/denoise.env שכותב app.py; רשימה סגורה):
+#    rnmix — RNNoise ב-48k, מעורבב 50% עם הגולמי (מיושר בזמן). ברירת המחדל.
+#    speex — SpeexDSP ב-16k, תקרת הנחתה 15dB.
+#  שני אלה *ורק* אלה עברו את מעבדת ההאזנה העיוורת על הקלטות אמיתיות (13.11.2026,
+#  docs/audio-comfort-design.md). הגרסה הקודמת — RNNoise 100% + dynaudnorm — דורגה
+#  "לא טבעית" ב-3/3 הקלטות ונפסלה: אין כאן נורמליזציה ואין EQ, בדיוק כמו במעבדה.
+#  הפרמטרים חייבים להיות זהים למעבדה (נבדק ב-tests/test_denoise_tools.py).
 #
 #  ⚠ זה **לא** נתיב הרדיו: /live.mp3, ההקלטות והתמלול לא עוברים כאן בכלל.
 #  כשל/קריסה כאן => Icecast מעביר את מאזיני /clean.mp3 ל-/live.mp3 בלי ניתוק,
 #  וכל השרשרת יוצאת יחד (מעלה הזרם מקבל SIGPIPE, מורד הזרם EOF) => systemd
 #  מאתחל את היחידה כולה. נבדק — ר' docs/denoise-design.md.
-#
-#  הפרמטרים נבחרו במדידה (שם, §4): RNNoise v0.2 הוא היחיד שלא פגע במובנות של
-#  דובר חלש; dynaudnorm אחרי הסינון — לפניו הוא היה מגביר את הרעש ב-14–16dB.
-#  ‏t=0.003 (סף dynaudnorm) מונע הגברה של שאריות רעש וזנבות סקוולץ'.
-#  ‏dynaudnorm מוסיף ~0.35ש' lookahead (f×g/2) — סה"כ ~0.7ש' השהיה, נמדד.
 # ============================================================================
 set -euo pipefail
 
@@ -25,12 +26,31 @@ ICECAST_PORT="${AIRAM_ICECAST_PORT:-8000}"
 MOUNT="${AIRAM_DENOISE_MOUNT:-clean.mp3}"       # חייב להיות זהה ל-DENOISE_MOUNT ב-app.py
 SOURCE_PW="${AIRAM_SOURCE_PW:-airam}"           # סיסמת source פנימית (כמו SOURCE_PW ב-install.sh)
 RNNOISE="${AIRAM_RNNOISE_BIN:-/usr/local/bin/airam-rnnoise}"
+SPEEXDN="${AIRAM_SPEEXDN_BIN:-/usr/local/bin/airam-speexdn}"
+ENGINE="${AIRAM_DENOISE_ENGINE:-rnmix}"
 
-POST_AF="aresample=16000,highpass=f=250:poles=2,lowpass=f=3000:poles=2"
-POST_AF="$POST_AF,dynaudnorm=f=100:g=7:p=0.7:m=30:t=0.003"
+# rnmix: חלק הגולמי בערבוב, וההשהיה של RNNoise (דגימות ב-48k) שנמדדה במעבדה על ה-Pi.
+RN_MIX="0.5"
+RN_DELAY="959"
+# speex: תקרת ההנחתה (dB)
+SPEEX_DB="-15"
+
+case "$ENGINE" in
+  rnmix|speex) ;;
+  *) echo "airam-denoise: מנוע לא מוכר '$ENGINE' — משתמש ב-rnmix" >&2; ENGINE=rnmix ;;
+esac
 
 command -v ffmpeg >/dev/null || { echo "airam-denoise: ffmpeg חסר" >&2; exit 1; }
-[[ -x "$RNNOISE" ]] || { echo "airam-denoise: $RNNOISE חסר" >&2; exit 1; }
+if [[ "$ENGINE" == rnmix ]]; then
+  [[ -x "$RNNOISE" ]] || { echo "airam-denoise: $RNNOISE חסר" >&2; exit 1; }
+  RATE=48000
+  FILTER=("$RNNOISE" --mix "$RN_MIX" --delay "$RN_DELAY")
+else
+  [[ -x "$SPEEXDN" ]] || { echo "airam-denoise: $SPEEXDN חסר" >&2; exit 1; }
+  RATE=16000
+  FILTER=("$SPEEXDN" "$SPEEX_DB")
+fi
+echo "airam-denoise: מנוע $ENGINE (${FILTER[*]})" >&2
 
 # reuse=1: אתחול מהיר אחרי קריסה לא נכשל על "Address already in use" בזמן
 # שהמופע הקודם עוד משחרר את הפורט (נצפה באב-הטיפוס).
@@ -40,11 +60,11 @@ command -v ffmpeg >/dev/null || { echo "airam-denoise: ffmpeg חסר" >&2; exit 
 ffmpeg -nostdin -hide_banner -loglevel warning \
     -f f32le -ar 16000 -ac 1 \
     -i "udp://127.0.0.1:${UDP_PORT}?reuse=1&overrun_nonfatal=1" \
-    -af aresample=48000 -f f32le - \
-  | "$RNNOISE" \
+    -af "aresample=${RATE}" -f f32le - \
+  | "${FILTER[@]}" \
   | ffmpeg -nostdin -hide_banner -loglevel warning \
-    -f f32le -ar 48000 -ac 1 -i - \
-    -af "$POST_AF" -ac 1 -ar 16000 \
+    -f f32le -ar "$RATE" -ac 1 -i - \
+    -ac 1 -ar 16000 \
     -c:a libmp3lame -b:a 48k \
     -content_type audio/mpeg -ice_name "AIR-AM (מסונן)" \
     -f mp3 "icecast://source:${SOURCE_PW}@127.0.0.1:${ICECAST_PORT}/${MOUNT}"

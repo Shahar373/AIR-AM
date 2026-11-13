@@ -413,6 +413,10 @@ build_rnnoise() {
   out_len="$(head -c 19200 /dev/zero | /usr/local/bin/airam-rnnoise | wc -c)"
   [[ "$out_len" == "19200" ]] \
     || { warn "airam-rnnoise לא עובד כמצופה (פלט ${out_len}B במקום 19200B)."; return 1; }
+  # ובמצב הערבוב שהמוצר מריץ בפועל (scripts/airam-denoise, מנוע rnmix)
+  out_len="$(head -c 19200 /dev/zero | /usr/local/bin/airam-rnnoise --mix 0.5 --delay 959 | wc -c)"
+  [[ "$out_len" == "19200" ]] \
+    || { warn "airam-rnnoise --mix לא עובד כמצופה (פלט ${out_len}B במקום 19200B)."; return 1; }
 }
 if [[ -x /usr/local/bin/airam-rnnoise ]] && [[ "$(cat "$AIRAM_RNNOISE_MARK" 2>/dev/null)" == "$RNNOISE_BUILD_SIG" ]]; then
   log "RNNoise ${RNNOISE_VER} + airam-rnnoise כבר מותקנים - מדלג."
@@ -423,6 +427,43 @@ else
     printf '%s' "$RNNOISE_BUILD_SIG" > "$AIRAM_RNNOISE_MARK"
   else
     warn "סינון הרעשים לא יהיה זמין (שאר המערכת מותקנת כרגיל). להרצה חוזרת: sudo ./install.sh"
+  fi
+fi
+
+# ----------------------------------------------------------------------------
+# 4f. airam-speexdn  (מנוע סינון שני — SpeexDSP, קלאסי, בלי מודל)
+# ----------------------------------------------------------------------------
+# ר' docs/audio-comfort-design.md: אחד משני המועמדים שעברו את מעבדת ההאזנה העיוורת
+# (התקרה של 15dB). libspeexdsp מ-apt (Debian 12/13), לא בנייה ממקור. כמו 4e: כשל
+# כאן = warn — המנוע פשוט לא יוצע ב-UI ("לא מותקן"), והמנוע השני ממשיך לעבוד.
+# החתימה כוללת את מקור ה-C ואת גרסת libspeexdsp (שדרוג apt => בנייה מחדש).
+AIRAM_SPEEXDN_MARK="/usr/local/share/airam/airam-speexdn.build-sig"
+build_speexdn() {
+  apt-get install -y libspeexdsp-dev || { warn "התקנת libspeexdsp-dev נכשלה."; return 1; }
+  local out_len
+  # pkg-config מחזיר כמה דגלים — הפיצול בכוונה
+  # shellcheck disable=SC2046
+  cc -O2 -o "$BUILD_DIR/airam-speexdn" "$REPO_DIR/tools/airam-speexdn.c" \
+      $(pkg-config --cflags --libs speexdsp) -lm \
+    && install -m755 "$BUILD_DIR/airam-speexdn" /usr/local/bin/airam-speexdn \
+    || { warn "בניית airam-speexdn נכשלה."; return 1; }
+  # בדיקת עשן: שקט נכנס => שקט יוצא, באותו אורך (פריים 320 => 4800 דגימות = 15 פריימים)
+  out_len="$(head -c 19200 /dev/zero | /usr/local/bin/airam-speexdn -15 | wc -c)"
+  [[ "$out_len" == "19200" ]] \
+    || { warn "airam-speexdn לא עובד כמצופה (פלט ${out_len}B במקום 19200B)."; return 1; }
+}
+SPEEXDN_BUILD_SIG="$(cat <(pkg-config --modversion speexdsp 2>/dev/null || echo none) "$REPO_DIR/tools/airam-speexdn.c" | sha256sum | awk '{print $1}')"
+if [[ -x /usr/local/bin/airam-speexdn ]] && [[ "$(cat "$AIRAM_SPEEXDN_MARK" 2>/dev/null)" == "$SPEEXDN_BUILD_SIG" ]]; then
+  log "airam-speexdn כבר מותקן - מדלג."
+else
+  log "בונה airam-speexdn (סינון רעשים — מנוע Speex)..."
+  if build_speexdn; then
+    # החתימה אחרי ההתקנה: לפני apt אין pkg-config לספרייה => "none" בחישוב הראשון
+    SPEEXDN_BUILD_SIG="$(cat <(pkg-config --modversion speexdsp 2>/dev/null || echo none) "$REPO_DIR/tools/airam-speexdn.c" | sha256sum | awk '{print $1}')"
+    mkdir -p "$(dirname "$AIRAM_SPEEXDN_MARK")"
+    printf '%s' "$SPEEXDN_BUILD_SIG" > "$AIRAM_SPEEXDN_MARK"
+  else
+    warn "מנוע Speex לא יהיה זמין (RNNoise ושאר המערכת מותקנים כרגיל). להרצה חוזרת: sudo ./install.sh"
   fi
 fi
 

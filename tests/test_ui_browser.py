@@ -1168,6 +1168,62 @@ def test_denoise_not_installed_shows_command_and_reverts(page):
     expect(page.locator("#dnToggle")).not_to_be_checked()
 
 
+_ENGINES = [{"id": "rnmix", "label": "RNNoise עדין", "available": True, "missing": []},
+            {"id": "speex", "label": "Speex", "available": True, "missing": []}]
+
+
+def test_denoise_engine_switch_posts_and_reflects_server(page):
+    """בורר המנוע שולח {engine} בלבד (לא מכבה/מדליק), ומציג את מה שהשרת החזיר."""
+    posts = []
+    cur = {"engine": "rnmix"}
+    st = {**_default_api()["/api/state"], "denoise": True, "denoise_available": True,
+          "denoise_engine": "rnmix"}
+
+    def denoise(route, url):
+        if route.request.method == "POST":
+            body = json.loads(route.request.post_data)
+            posts.append(body)
+            cur["engine"] = body["engine"]
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps(_dn("live", engine=cur["engine"], engines=_ENGINES)))
+
+    _mount(page, overrides={"/api/state": st, "/api/denoise": denoise})
+    expect(page.locator('#dnEngSeg button[data-v="rnmix"]')).to_have_class(re.compile(r"\bon\b"),
+                                                                           timeout=10000)
+    page.click('#dnEngSeg button[data-v="speex"]')
+    expect(page.locator('#dnEngSeg button[data-v="speex"]')).to_have_class(re.compile(r"\bon\b"),
+                                                                           timeout=10000)
+    assert posts == [{"engine": "speex"}]
+    expect(page.locator("#dnToggle")).to_be_checked()
+
+
+def test_denoise_engine_not_installed_disabled_and_failure_reverts(page):
+    engines = [_ENGINES[0], {"id": "speex", "label": "Speex", "available": False,
+                             "missing": ["airam-speexdn"]}]
+    st = {**_default_api()["/api/state"], "denoise": True, "denoise_available": True,
+          "denoise_engine": "rnmix"}
+
+    def denoise(route, url):
+        if route.request.method == "POST":
+            route.fulfill(status=501, content_type="application/json", body=json.dumps(
+                {**_dn("live", engine="rnmix", engines=engines), "ok": False,
+                 "error": "סינון הרעשים לא מותקן (חסר: airam-speexdn)",
+                 "install_hint": "cd ~/AIR-AM && git pull && sudo ./install.sh"}))
+        else:
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(_dn("live", engine="rnmix", engines=engines)))
+
+    _mount(page, overrides={"/api/state": st, "/api/denoise": denoise})
+    sp = page.locator('#dnEngSeg button[data-v="speex"]')
+    expect(sp).to_be_disabled(timeout=10000)
+    assert "airam-speexdn" in sp.get_attribute("title")
+    # גם אם נלחץ (למשל disabled לא הספיק להתעדכן) — 501 מחזיר את הבחירה
+    page.evaluate("""() => { const b = document.querySelector('#dnEngSeg button[data-v="speex"]');
+                            b.disabled = false; b.click(); }""")
+    expect(page.locator("body")).to_contain_text("airam-speexdn", timeout=10000)
+    expect(page.locator('#dnEngSeg button[data-v="rnmix"]')).to_have_class(re.compile(r"\bon\b"))
+
+
 def test_denoise_row_hidden_when_receiver_off(page):
     st = {**_default_api()["/api/state"], "app_mode": "off"}
     health = {**_default_api()["/api/health"], "app_mode": "off",
@@ -1175,7 +1231,7 @@ def test_denoise_row_hidden_when_receiver_off(page):
                            "rtl_airband": "inactive"}}
     _mount(page, overrides={"/api/state": st, "/api/health": health})
     page.click("#modeSeg button[data-v=voice]")
-    expect(page.locator("#dnRow")).to_be_hidden(timeout=10000)
+    expect(page.locator("#dnBox")).to_be_hidden(timeout=10000)   # גם בורר המנוע
 
 
 def test_denoise_reconnects_only_when_stream_may_be_on_fallback(page):

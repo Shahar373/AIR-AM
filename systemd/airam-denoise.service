@@ -1,5 +1,5 @@
 [Unit]
-Description=AIR-AM - live noise reduction (RNNoise) for the voice stream (/clean.mp3)
+Description=AIR-AM - live noise reduction (RNNoise mix / SpeexDSP) for the voice stream (/clean.mp3)
 Documentation=https://github.com/xiph/rnnoise
 # *לא* צרכן SDR: קורא עותק UDP של השמע מ-rtl_airband ומשדר mount נוסף ב-Icecast.
 # לכן בלי Conflicts — הוא חי רק *לצד* מצב הקול, אף פעם לא במקומו.
@@ -14,6 +14,10 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+# המנוע הנבחר (AIRAM_DENOISE_ENGINE=rnmix|speex) — app.py כותב אטומית לפני כל
+# הפעלה. מנותח ע"י systemd (לא shell), והסקריפט מקבל רק רשימה סגורה. '-' = חסר
+# זה תקין (ברירת המחדל בסקריפט: rnmix).
+EnvironmentFile=-/etc/airam/denoise.env
 ExecStart=/usr/local/bin/airam-denoise
 # לא-root: צריך רק UDP בלופבק וחיבור ל-Icecast המקומי.
 User=airam
