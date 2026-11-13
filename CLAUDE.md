@@ -219,6 +219,9 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
                             #   (buffer מתגלגל + POST /api/sessions) — ר' §11 למימוש שנותר (UI).
   denoise-design.md         # ★ סינון רעשים חי (מומש, v2.29.0): ארכיטקטורה מקבילית, ממצאי מקור (rtl_airband
                             #   udp_stream, Icecast fallback), הניסוי והחלטת המנוע, ניתוח כשלים, מה נדחה, אימות על ה-Pi.
+  audio-comfort-design.md   # ⚠ המשך ל-denoise-design: האזנה על ATC אמיתי פסלה את RNNoise+dynaudnorm (רובוטי,
+                            #   מילים נבלעות). תכנון: הנחתה חלקית (ערבוב עם הגולמי), רמות, מעבדת האזנה עיוורת
+                            #   על ה-Pi *לפני* מימוש. טרם מומש.
   denoise-experiment/       # הניסוי עצמו, ניתן לשחזור (fetch.sh + run.py) — לא חלק מההתקנה/CI.
   voice-channel-design.md   # ★ מסנן ערוץ / חלון / FM notch (מומש, v2.30.0): איך הערוץ של rtl_airband בנוי
                             #   באמת (חלון BH7, לא "בין 5k"), מדידה מול rtl_airband אמיתי, למה לא "8k" ולא <1Msps.
