@@ -43,12 +43,12 @@ def _speechish(n, rate, seed=1):
 
 
 # --- עקביות מול המוצר --------------------------------------------------------
-def test_prod_chain_matches_denoise_script():
-    """הבקרה ("prod") חייבת להיות בדיוק השרשרת שהמשתמש שמע ופסל."""
-    src = (ROOT / "scripts" / "airam-denoise").read_text(encoding="utf-8")
-    parts = [p.split('"')[1] for p in src.splitlines() if p.startswith("POST_AF=")]
-    assert len(parts) == 2 and parts[1].startswith("$POST_AF")
-    assert lab.PROD_AF == parts[0] + parts[1][len("$POST_AF"):]
+def test_prod_chain_is_the_rejected_v2_29_chain():
+    """הבקרה ("prod") היא השרשרת של v2.29.0 שהמשתמש שמע ופסל — מוקפאת כאן, כי
+    scripts/airam-denoise כבר לא מריץ אותה. בלי הבקרה המעבדה לא יכולה להראות
+    שהיא משחזרת את התלונה (ר' docs/audio-comfort-design.md)."""
+    assert lab.PROD_AF == ("aresample=16000,highpass=f=250:poles=2,lowpass=f=3000:poles=2"
+                           ",dynaudnorm=f=100:g=7:p=0.7:m=30:t=0.003")
 
 
 def test_rec_name_regex_matches_app():

@@ -59,8 +59,8 @@ RATE = 16000                  # הקצב של rtl_airband (WAVE_RATE)
 RN_RATE = 48000               # RNNoise עובד רק ב-48k
 RN_FRAME = 480
 
-# השרשרת שרצה היום במוצר — חייב להיות זהה ל-POST_AF ב-scripts/airam-denoise
-# (נבדק ב-tests/test_listening_lab.py).
+# השרשרת של v2.29.0 (RNNoise 100% + dynaudnorm) שנפסלה במעבדה — מוקפאת כאן כבקרה,
+# כי scripts/airam-denoise כבר לא מריץ אותה (נבדק ב-tests/test_listening_lab.py).
 PROD_AF = ("aresample=16000,highpass=f=250:poles=2,lowpass=f=3000:poles=2"
            ",dynaudnorm=f=100:g=7:p=0.7:m=30:t=0.003")
 
@@ -73,7 +73,7 @@ VARIANTS = [
     {"id": "rn25", "kind": "rnmix",   "dry": 0.25, "label": "RNNoise + 25% גולמי (הנחתה עד 12dB)"},
     {"id": "sp8",  "kind": "speex",   "db": -8,    "label": "SpeexDSP, הנחתה עד 8dB"},
     {"id": "sp15", "kind": "speex",   "db": -15,   "label": "SpeexDSP, הנחתה עד 15dB"},
-    {"id": "prod", "kind": "prod",    "label": "הגרסה הנוכחית (RNNoise 100% + נורמליזציה) — בקרה"},
+    {"id": "prod", "kind": "prod",    "label": "הגרסה שנפסלה (RNNoise 100% + נורמליזציה) — בקרה"},
 ]
 VARIANT_BY_ID = {v["id"]: v for v in VARIANTS}
 EQ_AF = "highpass=f=300:poles=2,highshelf=f=1800:g=-6"

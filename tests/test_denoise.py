@@ -21,6 +21,7 @@ def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "STATS_PATH", tmp_path / "stats.txt")
     monkeypatch.setattr(app, "PRESETS_PATH", tmp_path / "presets.json")
+    monkeypatch.setattr(app, "DENOISE_ENV_PATH", tmp_path / "denoise.env")
     rec = tmp_path / "recordings"
     rec.mkdir()
     monkeypatch.setattr(app, "REC_DIR", rec)
@@ -42,7 +43,7 @@ def _clean_ice_cache():
 @pytest.fixture
 def installed(monkeypatch):
     """הרכיבים "מותקנים"."""
-    monkeypatch.setattr(app, "_denoise_missing", lambda: [])
+    monkeypatch.setattr(app, "_denoise_missing", lambda engine=None: [])
 
 
 class Sys:
@@ -216,7 +217,7 @@ def test_sync_does_not_start_without_voice(paths, monkeypatch, installed):
 
 
 def test_sync_does_not_start_when_not_installed(paths, monkeypatch):
-    monkeypatch.setattr(app, "_denoise_missing", lambda: ["airam-rnnoise"])
+    monkeypatch.setattr(app, "_denoise_missing", lambda engine=None: ["airam-rnnoise"])
     s = Sys(monkeypatch)
     app.save_state({**app.DEFAULT_STATE, "denoise": True})
     app._denoise_sync()
@@ -328,7 +329,7 @@ def test_api_post_disable(client, monkeypatch, installed):
 
 def test_api_post_not_installed_501_and_state_unchanged(client, monkeypatch):
     """לא שומרים "דלוק" שלא יכול לעבוד — ומחזירים את פקודת ההתקנה."""
-    monkeypatch.setattr(app, "_denoise_missing", lambda: ["airam-rnnoise"])
+    monkeypatch.setattr(app, "_denoise_missing", lambda engine=None: ["airam-rnnoise"])
     Sys(monkeypatch)
     r = client.post("/api/denoise", json={"enabled": True})
     d = r.get_json()
@@ -459,3 +460,104 @@ def test_unit_never_conflicts_with_sdr_consumers():
     """הסינון חי *לצד* הקול — Conflicts כאן היה עוצר את הרדיו בהדלקת המתג."""
     unit = (ROOT / "systemd" / "airam-denoise.service").read_text(encoding="utf-8")
     assert not any(line.startswith("Conflicts=") for line in unit.splitlines())
+
+
+# --- בחירת מנוע (docs/audio-comfort-design.md) -----------------------------------
+
+def test_engine_default_and_bad_saved_value(paths):
+    assert app._denoise_engine() == app.DENOISE_ENGINE_DEFAULT
+    app.save_state({**app.DEFAULT_STATE, "denoise_engine": "prod"})   # מנוע שנפסל / ערך זר
+    assert app._denoise_engine() == app.DENOISE_ENGINE_DEFAULT
+
+
+def test_missing_is_per_engine(monkeypatch, tmp_path):
+    monkeypatch.setattr(app.shutil, "which", lambda name: "/usr/bin/" + name)
+    for name in ("DENOISE_SCRIPT", "DENOISE_RNNOISE", "DENOISE_SPEEXDN"):
+        monkeypatch.setattr(app, name, tmp_path / name)
+    for p in (app.DENOISE_SCRIPT, app.DENOISE_RNNOISE):
+        p.write_text("#!/bin/sh\n")
+        p.chmod(0o755)
+    assert app._denoise_missing("rnmix") == []
+    assert app._denoise_missing("speex") == [app.DENOISE_SPEEXDN.name]
+
+
+def test_sync_writes_engine_env_before_start(paths, monkeypatch, installed):
+    s = Sys(monkeypatch)
+    seen = []
+    real = s._sysctl
+
+    def spy(action, svc, timeout=45):
+        seen.append(app.DENOISE_ENV_PATH.read_text() if app.DENOISE_ENV_PATH.exists() else None)
+        return real(action, svc, timeout)
+    monkeypatch.setattr(app, "_sysctl", spy)
+    app.save_state({**app.DEFAULT_STATE, "denoise": True, "denoise_engine": "speex"})
+    app._denoise_sync()
+    assert seen and "AIRAM_DENOISE_ENGINE=speex\n" in seen[0]
+
+
+def test_write_env_refuses_unknown_engine(paths):
+    app.write_denoise_env("$(reboot)")
+    assert "AIRAM_DENOISE_ENGINE=rnmix\n" in app.DENOISE_ENV_PATH.read_text()
+
+
+def test_api_switch_engine_while_running_restarts_only_denoise(client, monkeypatch, installed):
+    s = Sys(monkeypatch, units={app.DENOISE_SERVICE: "active"})
+    app.save_state({**app.DEFAULT_STATE, "denoise": True})
+    d = client.post("/api/denoise", json={"engine": "speex"}).get_json()
+    assert d["ok"] is True and d["engine"] == "speex" and d["enabled"] is True
+    assert s.calls == [("stop", app.DENOISE_SERVICE), ("start", app.DENOISE_SERVICE)]
+    assert app.load_state()["denoise_engine"] == "speex"
+    assert "AIRAM_DENOISE_ENGINE=speex" in app.DENOISE_ENV_PATH.read_text()
+    assert all(svc == app.DENOISE_SERVICE for _, svc in s.calls)      # הרדיו לא נגע
+
+
+def test_api_same_engine_no_restart(client, monkeypatch, installed):
+    s = Sys(monkeypatch, units={app.DENOISE_SERVICE: "active"})
+    app.save_state({**app.DEFAULT_STATE, "denoise": True})
+    client.post("/api/denoise", json={"engine": app.DENOISE_ENGINE_DEFAULT})
+    assert s.calls == []
+
+
+def test_api_engine_while_off_just_saves(client, monkeypatch, installed):
+    s = Sys(monkeypatch)
+    d = client.post("/api/denoise", json={"engine": "speex"}).get_json()
+    assert d["engine"] == "speex" and d["enabled"] is False and s.calls == []
+
+
+def test_api_unavailable_engine_while_enabled_501_unchanged(client, monkeypatch):
+    monkeypatch.setattr(app, "_denoise_missing",
+                        lambda engine=None: ["airam-speexdn"] if engine == "speex" else [])
+    s = Sys(monkeypatch, units={app.DENOISE_SERVICE: "active"})
+    app.save_state({**app.DEFAULT_STATE, "denoise": True})
+    r = client.post("/api/denoise", json={"engine": "speex"})
+    assert r.status_code == 501 and "airam-speexdn" in r.get_json()["error"]
+    assert app.load_state()["denoise_engine"] == app.DENOISE_ENGINE_DEFAULT
+    assert s.calls == []
+
+
+def test_api_enable_with_engine_in_one_call(client, monkeypatch, installed):
+    s = Sys(monkeypatch)
+    d = client.post("/api/denoise", json={"enabled": True, "engine": "speex"}).get_json()
+    assert d["enabled"] is True and d["engine"] == "speex"
+    assert s.calls == [("start", app.DENOISE_SERVICE)]
+
+
+@pytest.mark.parametrize("body", [{"engine": "prod"}, {"engine": None}, {"engine": 1},
+                                  {"engine": "../x"}, {"enabled": True, "engine": "bogus"}])
+def test_api_bad_engine_400(client, monkeypatch, installed, body):
+    s = Sys(monkeypatch)
+    assert client.post("/api/denoise", json=body).status_code == 400
+    assert s.calls == []
+
+
+def test_status_lists_engines_with_availability(client, monkeypatch):
+    monkeypatch.setattr(app, "_denoise_missing",
+                        lambda engine=None: ["airam-speexdn"] if engine == "speex" else [])
+    Sys(monkeypatch)
+    d = client.get("/api/denoise").get_json()
+    eng = {e["id"]: e for e in d["engines"]}
+    assert set(eng) == set(app.DENOISE_ENGINES)
+    assert eng["rnmix"]["available"] is True and eng["speex"]["available"] is False
+    assert d["engine"] == app.DENOISE_ENGINE_DEFAULT
+    st = client.get("/api/state").get_json()
+    assert st["denoise_engine"] == app.DENOISE_ENGINE_DEFAULT

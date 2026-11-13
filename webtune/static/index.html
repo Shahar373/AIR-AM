@@ -504,6 +504,12 @@
     .dn-st { font-size: .78rem; color: var(--dim); }
     .dn-st.live { color: var(--green); }
     .dn-st.warn { color: var(--amber); }
+    /* בחירת מנוע — רק שני המועמדים שעברו את מעבדת ההאזנה (docs/audio-comfort-design.md) */
+    .dn-eng-row { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
+      margin-top: var(--sp-2); }
+    .dn-eng-row .lbl { font-size: .78rem; color: var(--dim); }
+    .dn-eng-row .seg button { min-height: 36px; }
+    .dn-eng-row .seg button:disabled { opacity: .45; }
 
     /* ---------- שחזור-סשן: כרטיס-בית + רשימה + נגן (docs/session-replay-design.md §9) ---------- */
     .replay-save-row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
@@ -1774,17 +1780,26 @@
       <a id="extBtn" class="ghost" href="/live.m3u" role="button"
          title="פתח את הסטרים בנגן שמע חיצוני (ממשיך לנגן ברקע)">🎧 נגן חיצוני</a>
     </div>
-    <!-- סינון רעשים חי: RNNoise + השוואת עוצמות, בשרת (docs/denoise-design.md).
-         מתג גלובלי. ההקלטות והתמלול נשארים גולמיים תמיד. -->
+    <!-- סינון רעשים חי, בשרת (docs/denoise-design.md, docs/audio-comfort-design.md).
+         מתג + מנוע גלובליים. ההקלטות והתמלול נשארים גולמיים תמיד. -->
+    <div id="dnBox">
     <div class="dn-row" id="dnRow">
       <div class="dn-txt">
-        <span class="dn-ttl">✨ סינון רעשים (AI)</span>
+        <span class="dn-ttl">✨ סינון רעשים</span>
         <span class="dn-st" id="dnState">—</span>
       </div>
-      <label class="switch" title="הפחתת רעש רקע והשוואת עוצמות בין דוברים">
+      <label class="switch" title="הפחתה חלקית של רעש הרקע — לא מוחקת דיבור">
         <input type="checkbox" id="dnToggle" aria-label="סינון רעשים" />
         <span class="track"></span>
       </label>
+    </div>
+    <div class="dn-eng-row">
+      <span class="lbl">מנוע:</span>
+      <div class="seg" id="dnEngSeg" role="group" aria-label="מנוע סינון">
+        <button type="button" data-v="rnmix" class="on" title="RNNoise מעורבב חצי-חצי עם השמע הגולמי">RNNoise עדין</button>
+        <button type="button" data-v="speex" title="SpeexDSP קלאסי, הנחתה עד 15dB">Speex</button>
+      </div>
+    </div>
     </div>
 
     <details class="err hidden" id="errBox">
@@ -2539,7 +2554,7 @@
     const player = $("player");
     let cfg = { port: 8000, mount: "live.mp3", presets: [] };
     // סינון רעשים חי — מקור-האמת הוא השרת (state בתשובת /api/denoise ו-/api/health)
-    let denoise = { enabled: false, available: false, state: "off" };
+    let denoise = { enabled: false, available: false, state: "off", engine: "rnmix", engines: [] };
     // האם החיבור הנוכחי עלול לשבת על ה-fallback (גולמי): נקבע בכל reloadStream,
     // ונדלק כשהמצב יוצא מ-live (Icecast העביר את המאזין). מתחברים מחדש רק כשזה
     // נכון — לא בכל מעבר ל-live (למשל unknown⇐live רגע אחרי ▶ על סטרים שכבר מסונן).
@@ -2918,7 +2933,18 @@
       const el = $("dnState");
       el.textContent = txt;
       el.className = "dn-st" + (cls ? " " + cls : "");
-      if (!dnBusy) $("dnToggle").checked = !!denoise.enabled;
+      if (!dnBusy) {
+        $("dnToggle").checked = !!denoise.enabled;
+        segSet("dnEngSeg", denoise.engine || "rnmix");
+      }
+      // מנוע שלא מותקן לא נבחר מכאן (השרת היה מחזיר 501 ממילא כשהמתג דלוק)
+      for (const e of denoise.engines || []) {
+        const b = $("dnEngSeg").querySelector('button[data-v="' + e.id + '"]');
+        if (!b) continue;
+        b.disabled = !e.available && e.id !== denoise.engine;
+        b.title = e.available ? b.title.replace(/ — לא מותקן.*$/, "")
+          : b.title.replace(/ — לא מותקן.*$/, "") + " — לא מותקן (" + (e.missing || []).join(", ") + ")";
+      }
       $("dnRow").title = denoise.state === "unavailable" && denoise.install_hint
         ? "להתקנה: " + denoise.install_hint : "";
     }
@@ -2935,6 +2961,29 @@
     async function pollDenoise() {
       try { applyDenoise(await fetchJSON("/api/denoise")); } catch (e) { /* ה-poll הבא */ }
     }
+    // החלפת מנוע: השרת מאתחל רק את airam-denoise; בשנייה שבאמצע Icecast מגיש את
+    // הגולמי, ו-applyDenoise מחבר מחדש כשהמסונן חוזר ל-live.
+    segInit("dnEngSeg", async (eng) => {
+      const prevEng = denoise.engine;
+      dnBusy = true;
+      $("dnState").textContent = denoise.enabled ? "מחליף מנוע…" : "נשמר";
+      let d = null;
+      try {
+        const res = await apiSend("POST", "/api/denoise", { engine: eng });
+        d = await res.json();
+        if (!res.ok || d.ok === false) {
+          showToast(d.error ? d.error + (d.install_hint ? " — " + d.install_hint : "") : "החלפת המנוע נכשלה");
+        }
+      } catch (e) {
+        showToast("אין קשר לשרת — המנוע לא הוחלף");
+      } finally {
+        dnBusy = false;
+      }
+      if (d) { denoise = { ...denoise, ...d }; if (denoise.state !== "live") dnOnFallback = true; }
+      else denoise.engine = prevEng;
+      renderDenoise();
+      pollDenoise();
+    });
     $("dnToggle").addEventListener("change", async (ev) => {
       const want = ev.target.checked;
       dnBusy = true;
@@ -4971,7 +5020,7 @@
       // כשה-SDR תפוס במצב אחר או כבוי (וגם reloadStream כבר no-op שם)
       const row = document.querySelector(".player-row");
       if (row) row.classList.toggle("hidden", show || sdrOff);
-      $("dnRow").classList.toggle("hidden", show || sdrOff);
+      $("dnBox").classList.toggle("hidden", show || sdrOff);   // מתג + מנוע
     }
     function renderPower() {
       // כפתור כיבוי/הפעלה משקף את מצב ה-SDR (standby או פעיל). אייקון+תווית
@@ -7495,6 +7544,7 @@
       cfg = st;
       // לפני כל streamURL(): הסטרים הראשון כבר צריך לבקש את ה-mount הנכון
       denoise = { ...denoise, enabled: !!st.denoise, available: !!st.denoise_available,
+                  engine: st.denoise_engine || "rnmix",
                   state: st.denoise ? "unknown" : "off" };
       renderDenoise();
       if (st.denoise) pollDenoise();

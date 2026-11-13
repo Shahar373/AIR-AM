@@ -32,7 +32,8 @@
 - **מצב קול (📻):** בורר תדרים ל-Air band (AM, 118–137 MHz) דרך `rtl_airband` →
   `Icecast2` → נגן הדפדפן. פריסטים לנתב"ג + תדר חופשי, בקרת gain/squelch, מדדי RF
   חיים (SNR/signal/noise), יומן שידורים + הקלטות MP3, תמלול ATC אופציונלי, METAR,
-  **סינון רעשים חי (AI) + השוואת עוצמות** — סטרים מקביל `/clean.mp3` (ר' §5, `docs/denoise-design.md`).
+  **סינון רעשים חי** (הפחתה *חלקית*, שני מנועים: RNNoise מעורבב / Speex) — סטרים מקביל
+  `/clean.mp3` (ר' §5, `docs/denoise-design.md`, `docs/audio-comfort-design.md`).
 - **מצב ACARS (📡):** פענוח הודעות נתונים דיגיטליות של מטוסים דרך `acarsdec`,
   הצגה חיה בכרטיסים אחידים, שמירה ל-JSONL, ייצוא CSV/JSON, מפת Leaflet עם שובל מסלול.
 - **מודעוּת מרחבית (תמיד פעיל):** ניתוח ADS-B מקהילה (adsb.lol/adsb.fi) מסיק את
@@ -66,7 +67,8 @@
    thread ברקע ב-airam-web:  adsb.py ─HTTP─► adsb.lol / adsb.fi  (מסלול פעיל + GPS)
 
    סינון רעשים (מקבילי, לא בנתיב):  rtl_airband ─UDP 5559─► airam-denoise
-        (ffmpeg | airam-rnnoise | ffmpeg) ─► Icecast /clean.mp3 ──fallback-mount──► /live.mp3
+        (ffmpeg | airam-rnnoise --mix ‖ airam-speexdn | ffmpeg) ─► Icecast /clean.mp3
+        ──fallback-mount──► /live.mp3
 ```
 
 **העיקרון המכריע — SDR אחד, בהחלפה:** ל-RSP1B יכול לגשת **תהליך אחד בלבד** בכל רגע.
@@ -128,6 +130,9 @@ config/
 tools/
   airam-rnnoise.c          # מסנן סטרימינג (RNNoise v0.2, f32le 48k stdin→stdout) — במקום
                            #   rnnoise_demo שנשבר בצינור. נבנה סטטית ע"י install.sh שלב 4e.
+                           #   ‏--mix A --delay N: ערבוב עם הגולמי דרך קו השהיה (מנוע rnmix).
+  airam-speexdn.c          # מסנן סטרימינג (SpeexDSP preprocess, f32le 16k) — מנוע speex, תקרת
+                           #   הנחתה. נבנה ע"י install.sh שלב 4f. זהה בבייט ל-speex_denoise במעבדה.
   rnnoise-0.2-372f7b4-arm-build-fix.patch  # commit upstream — בלעדיו v0.2 לא נבנה על ARM (NEON).
 
 systemd/
@@ -144,8 +149,10 @@ systemd/
 scripts/
   airam-wait-sdrplay       # שער מוכנות (ExecStartPre): מחכה שה-API *באמת* יענה, ומרים
                            # מחדש את sdrplay אם הוא "active" אבל ServiceNotResponding.
-  airam-denoise            # ExecStart של airam-denoise.service: UDP 5559 → ffmpeg (16k→48k) →
-                           # airam-rnnoise → ffmpeg (פס+dynaudnorm+MP3) → Icecast /clean.mp3.
+  airam-denoise            # ExecStart של airam-denoise.service: UDP 5559 → ffmpeg → מנוע לפי
+                           # AIRAM_DENOISE_ENGINE (rnmix: airam-rnnoise --mix 0.5 --delay 959 ב-48k /
+                           # speex: airam-speexdn -15 ב-16k) → ffmpeg (MP3) → Icecast /clean.mp3.
+                           # ⚠ בלי נורמליזציה/EQ — הפרמטרים זהים למעבדה (נבדק ב-CI).
   airam-resilience-check   # תמונת מצב לקריאה בלבד לבדיקות עמידות בבית (ר' docs/resilience-test.md).
                            # לא מותקן — מריצים מהעותק: sudo ~/AIR-AM/scripts/airam-resilience-check
   airam-listening-lab      # שלב 0 של docs/audio-comfort-design.md (Python, stdlib+ffmpeg): הקלטות אמיתיות ⇒
@@ -201,7 +208,11 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
                            #   בדיקת אנטנה בתנאים קבועים + שחזור הבחירה, רולבק.
   test_denoise.py          # סינון רעשים: פלט UDP ב-render_config, פסק-הדין לחיווי, status-json של
                            #   Icecast (mount מת), _denoise_sync (לא זורק), כשל לא מכשיל כניסה לקול,
-                           #   API/guard/501, /stream רשימה סגורה, עקביות קבועים מול הסקריפט/install.sh.
+                           #   API/guard/501, /stream רשימה סגורה, עקביות קבועים מול הסקריפט/install.sh,
+                           #   בחירת מנוע (env לפני start, החלפה = restart לסינון בלבד, 400/501).
+  test_denoise_tools.py    # ★ המנועים מול המעבדה: airam-speexdn זהה בבייט, airam-rnnoise מול RNNoise
+                           #   מזויף (tests/stubs — השהיה טהורה) ⇒ יישור מדויק, פרמטרי הסקריפט = העוברים.
+  test_listening_lab.py    # מעבדת ההאזנה: יישור/ערבוב, סבב תדרים, עיוורון, שרת, בנייה מקצה לקצה.
   test_sessions.py         # שחזור-סשן שלב 2: POST/GET /api/sessions, GET/DELETE
                            #   ‏/api/sessions/<id>, /track, /clips/<name>, /export.zip —
                            #   כולל שמורה (★) מועתקת מול לא-שמורה מועברת, חיתוך minutes
@@ -223,9 +234,9 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
                             #   (buffer מתגלגל + POST /api/sessions) — ר' §11 למימוש שנותר (UI).
   denoise-design.md         # ★ סינון רעשים חי (מומש, v2.29.0): ארכיטקטורה מקבילית, ממצאי מקור (rtl_airband
                             #   udp_stream, Icecast fallback), הניסוי והחלטת המנוע, ניתוח כשלים, מה נדחה, אימות על ה-Pi.
-  audio-comfort-design.md   # ⚠ המשך ל-denoise-design: האזנה על ATC אמיתי פסלה את RNNoise+dynaudnorm (רובוטי,
-                            #   מילים נבלעות). תכנון: הנחתה חלקית (ערבוב עם הגולמי), רמות, מעבדת האזנה עיוורת
-                            #   על ה-Pi *לפני* מימוש. טרם מומש.
+  audio-comfort-design.md   # ★ המשך ל-denoise-design (מומש, v2.32.0): האזנה על ATC אמיתי פסלה את RNNoise+
+                            #   dynaudnorm ("רובוטי"). הנחתה חלקית, מעבדת האזנה עיוורת על ה-Pi *לפני* מימוש,
+                            #   תוצאותיה (§9ב — הבקרה שוחזרה, rn50+sp15 עברו), ושני מנועים לבחירה (§9ג).
   denoise-experiment/       # הניסוי עצמו, ניתן לשחזור (fetch.sh + run.py) — לא חלק מההתקנה/CI.
   voice-channel-design.md   # ★ מסנן ערוץ / חלון / FM notch (מומש, v2.30.0): איך הערוץ של rtl_airband בנוי
                             #   באמת (חלון BH7, לא "בין 5k"), מדידה מול rtl_airband אמיתי, למה לא "8k" ולא <1Msps.
@@ -253,9 +264,10 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
 | `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain (`--sdrplay-gain=N` או ריק=AGC), bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
-| `/usr/local/bin/airam-denoise`, `/usr/local/bin/airam-rnnoise` | שרשרת סינון הרעשים + המסנן (נבדקים חי ע"י `_denoise_missing`) | install.sh (שלבים 7, 4e) |
+| `/usr/local/bin/airam-denoise`, `/usr/local/bin/airam-rnnoise`, `/usr/local/bin/airam-speexdn` | שרשרת סינון הרעשים + שני המנועים (נבדקים חי, פר-מנוע, ע"י `_denoise_missing`) | install.sh (שלבים 7, 4e, 4f) |
+| `/etc/airam/denoise.env` | `AIRAM_DENOISE_ENGINE=rnmix\|speex` — EnvironmentFile של `airam-denoise` (systemd, לא shell) | app.py (`write_denoise_env`, ממש לפני כל start) |
 | `/etc/icecast2/icecast.xml` | `<mount>` ל-`/clean.mp3` עם `fallback-mount` ל-`/live.mp3`, ‏`sources=4` | install.sh שלב 5 |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`, `denoise` — מתג סינון הרעשים (bool, ברירת מחדל False), `chan_filter` (standard/narrow/narrow8k), `fm_notch` (bool), `station` — תחנת הקליטה `{lat,lon,alt_m,name,source,set_at}` או None, **בלי ברירת מחדל**) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`, `denoise` — מתג סינון הרעשים (bool, ברירת מחדל False), `denoise_engine` (`rnmix`/`speex`, ברירת מחדל `rnmix`), `chan_filter` (standard/narrow/narrow8k), `fm_notch` (bool), `station` — תחנת הקליטה `{lat,lon,alt_m,name,source,set_at}` או None, **בלי ברירת מחדל**) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
 | `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
@@ -518,7 +530,10 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   `render_config` כותב **תמיד** פלט `udp_stream` (‏`127.0.0.1:DENOISE_UDP_PORT`=5559,
   `continuous = true`) — הדלקה/כיבוי בלי restart לרדיו. ⚠ כשל באתחול הפלט הזה מפיל את
   rtl_airband כולו (`rtl_airband.cpp`: "aborting") ⇒ כתובת ופורט **מספריים בלבד**, בלי DNS.
-  ‏`_config_stale` מזהה קונפיג בלי `udp_stream` (שדרוג). `_denoise_sync` (רץ ⇔ `state
+  ‏`_config_stale` מזהה קונפיג בלי `udp_stream` (שדרוג). **מנועים** (`docs/audio-comfort-design.md`):
+  `DENOISE_ENGINES` (רשימה סגורה — רק מה שעבר את מעבדת ההאזנה), `_denoise_engine` (השמור, ערך זר ⇒
+  ברירת מחדל), `_denoise_missing(engine)` פר-מנוע, `write_denoise_env` (נכתב ב-`_denoise_sync` ממש
+  לפני `start` — המנוע נקרא רק בהפעלה; החלפה ב-`api_denoise` = stop ואז sync). `_denoise_sync` (רץ ⇔ `state
   ["denoise"]` + rtl_airband חי + `_denoise_missing()` ריק; idempotent, **לעולם לא זורק**,
   לא מחזיק TUNE_LOCK) — נקרא מ-`_enter_voice` (דרך `_denoise_after_voice`, **רק אחרי**
   `_restart_and_verify` הצליח ובלי fork כשהמתג כבוי), מ-`POST /api/denoise`, מענף "הקול
@@ -729,8 +744,9 @@ iOS: מתג ההשתקה משתיק Web Audio — רמז בלבד; ה-workaround
 המצב למציאות בלי לחטוף את הטאב. כפתורי עצירה ⇒ `applyMode("off")` (גם עצירת סריקה);
 כפתור ⏻ מחזיר את `prev_mode` (יכול להיות `"scan"`). עיצוב responsive (multi-column
 בטאבלט/דסקטופ; `.mode-cards` הוא `auto-fit` כדי לזרום נכון גם עם 5 כרטיסים).
-**סינון רעשים חי** (`#dnRow` בפאנל הרדיו, מוסתר יחד עם `.player-row` כשהמקלט לא בקול):
-מתג `#dnToggle` ⇒ `POST /api/denoise`; `#dnState` מציג את `state` מהשרת דרך `DN_TEXT` —
+**סינון רעשים חי** (`#dnBox` בפאנל הרדיו — `#dnRow` + בורר המנוע `#dnEngSeg` — מוסתר יחד עם
+`.player-row` כשהמקלט לא בקול): מתג `#dnToggle` ⇒ `POST /api/denoise {enabled}`; בורר המנוע ⇒
+`POST /api/denoise {engine}` (מנוע לא מותקן — `disabled` עם הרכיב החסר ב-title; כשל ⇒ חזרה לשמור); `#dnState` מציג את `state` מהשרת דרך `DN_TEXT` —
 **"שומעים שמע מסונן" רק ב-`live`**, בכל מצב אחר "שמע גולמי" (כי זה מה שה-fallback מגיש).
 `streamURL()`/`appStreamHref()` מבקשים `/clean.mp3` (או `/stream?m=clean` ב-HTTPS) כשהמתג
 דלוק — **תמיד**, גם כשהוא עוד לא חי: אין לוגיקת החלפה בקליינט, Icecast עושה אותה.
@@ -997,7 +1013,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/power` | מתח/טמפ' ה-Pi (`vcgencmd`), מוגש מ-cache בן ~2 שניות (`_POWER_TTL`) |
 | GET | `/api/metar` | METAR נתב"ג (LLBG) |
 | GET | `/api/health` | בריאות השירותים. כולל `denoise` (כמו `/api/denoise`) — **לא** משפיע על `ok` |
-| GET/POST | `/api/denoise` | סינון רעשים חי. GET: `enabled`/`available`/`missing`/`install_hint`/`state`/`service`/`live`/`mount`. POST `{enabled: bool}` (400 על כל דבר אחר; 501 + `install_hint` כשלא מותקן — **לא** נשמר "דלוק"). בלי TUNE_LOCK ובלי restart לרדיו. דרך `_guard` (POST) |
+| GET/POST | `/api/denoise` | סינון רעשים חי. GET: `enabled`/`engine`/`engines` (`[{id,label,available,missing}]`)/`available`/`missing`/`install_hint`/`state`/`service`/`live`/`mount`. POST `{enabled?: bool, engine?: "rnmix"\|"speex"}` — לפחות אחד (400 על כל דבר אחר; 501 + `install_hint` כשהמנוע לא מותקן והמתג דלוק — **לא** נשמר). החלפת מנוע בזמן ריצה = stop+start ל-`airam-denoise` בלבד. בלי TUNE_LOCK ובלי restart לרדיו. דרך `_guard` (POST) |
 
 **כלל:** כל route שמשנה מצב חומרה/קונפיג = `POST` + עובר `_guard` + (אם רלוונטי) `TUNE_LOCK`.
 
@@ -1070,7 +1086,8 @@ tarball (‏sha256 נעוץ — ב-git חסר המודל, ו-autogen מוריד 
 + תיקון ה-ARM של upstream (`tools/rnnoise-0.2-372f7b4-arm-build-fix.patch` — ⚠ בלעדיו
 v0.2 **לא נבנה על Pi**: נתיב NEON כולל `os_support.h` שלא קיים) + `tools/airam-rnnoise.c`
 סטטית, בדיקת עשן, חתימה כוללת את מקור ה-C ואת הטלאי. **כשל כאן = warn, לא die** —
-פיצ'ר צד לא חוסם את התקנת הרדיו**). 5. `Icecast2`
+פיצ'ר צד לא חוסם את התקנת הרדיו**; **4f: `airam-speexdn` (מנוע Speex) מול `libspeexdsp-dev`
+מ-apt, חתימה = מקור ה-C + גרסת הספרייה, אותו warn-לא-die**). 5. `Icecast2`
 (מאזין בלי סיסמה; `<mount>` ל-`/clean.mp3` עם `fallback-mount` ל-`/live.mp3` — אידמפוטנטי,
 ‏`sources=4`). 6. קונפיג התחלתי + state (6b: יצירת משתמש `airam` + sudoers ממוקד —
 **11 פקודות systemctl**: restart/stop × rtl_airband/airam-acars/airam-vdl2/
@@ -1402,9 +1419,14 @@ enabled, וגם לא `airam-denoise`, ובשדרוג `disable rtl_airband` אי�
   תהפוך אותם להגדרה שהמשתמש עורך או לשם מארח. (3) בלי `Conflicts` ביחידה — הוא חי *לצד*
   הקול. (4) הקלטות/תמלול/שחזור-סשן **גולמיים תמיד**: ההקלטה היא הראיה. (5) "מסונן" מוצג רק
   כש-`/clean.mp3` באמת חי (`stream_start`); Icecast שלא עונה = "לא ידוע", לא "מסונן".
-  (6) **המנוע נבחר במדידה** — `arnndn` (ffmpeg) נפסל כי פגע בדובר החלש; אל תחליף מנוע
-  או פרמטר בלי להריץ את `docs/denoise-experiment/` (ובעיקר בלי להאזין לפלט). (7) הסדר
-  סינון ⇐ נורמליזציה קבוע — נורמליזציה לבד מגבירה רעש ב-19–23dB (נמדד).
+  (6) **המנוע נבחר באוזן, לא במדד** — ⚠ הבחירה של v2.29.0 (RNNoise 100% + dynaudnorm) נבחרה
+  לפי ESTOI על דיבור סינתטי ונפסלה בהאזנה על ATC אמיתי ("רובוטי"). מנוע/פרמטר חדש נכנס
+  **רק** אחרי `scripts/airam-listening-lab` על הקלטות אמיתיות, כולל הבקרה (שחייבת להיות
+  מדורגת גרוע — אחרת המעבדה לא משחזרת את מה שהמשתמש שומע). הפרמטרים בסקריפט חייבים להיות
+  זהים למעבדה (`tests/test_denoise_tools.py`). (7) **הנחתה חלקית, לא ניקוי:** ערבוב עם הגולמי
+  (rnmix) או תקרת הנחתה (speex) — כך שום רכיב לא נמחק. ערבוב **חייב** קו השהיה מיושר
+  (`--delay`, נמדד במעבדה) — בלעדיו זה מסנן מסרק. (8) בלי נורמליזציה בשרשרת — היא הגבירה
+  את שאריות הסינון; אם תחזור, רק אחרי סינון (לבד היא מגבירה רעש ב-19–23dB, נמדד) ורק דרך המעבדה.
 - **BLOS — שתי שאלות, לעולם לא אחת:** "חריגה מאופק הרדיו" (גאומטריה על מודל k=4/3) ≠
   "אימות BLOS" (ראיות שהאות *שודר מהמטוס* שם ואז). ‏ADS-B **מחזק ולא מוכיח**: ADS-B ו-ADS-C
   נגזרים שניהם מהניווט של המטוס (רק MLAT בלתי-תלוי). מנגנון התפשטות ושיבוש GPS — לעולם לא

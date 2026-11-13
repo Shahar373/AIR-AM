@@ -31,9 +31,10 @@ jobs:
       # ולכן שגיאת תחביר שם לא נתפסת בשום מקום אחר — הדף פשוט נשבר אצל המשתמש.
       # אם node חסר הבדיקה מדלגת (skipif) במקום להיכשל.
       - run: node --version
-      # ffmpeg + libspeexdsp ל-tests/test_listening_lab.py (בנייה מקצה לקצה ומועמד
-      # ה-SpeexDSP). בלעדיהם הבדיקות האלה מדלגות — לכן מתקינים, אחרת לא נבדקות בכלל.
-      - run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg libspeexdsp1
+      # ffmpeg + libspeexdsp-dev ל-tests/test_listening_lab.py ול-tests/test_denoise_tools.py
+      # (בנייה מקצה לקצה, ‏airam-speexdn מול המעבדה בבייט). בלעדיהם הבדיקות האלה מדלגות —
+      # לכן מתקינים, אחרת לא נבדקות בכלל.
+      - run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg libspeexdsp-dev pkg-config
       # בדיקות הדפדפן (test_ui_browser.py) מדלגות כאן — playwright לא מותקן
       # ב-job הזה בכוונה, כדי שהחבילה המהירה תמשיך לחסום מהר. ר' ה-job שאחריו.
       - run: python -m pytest tests/ -v
