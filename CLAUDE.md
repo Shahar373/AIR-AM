@@ -165,6 +165,7 @@ scripts/
                            # מריץ בעצמו standby / קול כפול / קול+ACARS (serial מפורש, biasT_ctrl=false), דוגם כל שנייה
                            # get_throttled/EXT5V_V/CPU/stats, fsync ל-/var/tmp/airam-dual-probe/. "נכשל" רק מדגלי ה-Pi,
                            # overflow, מדד שקפא או תהליך שמת — בלי ספים שלנו. --unplug לתצפית ניתוק. לא מותקן.
+                           # ⚠ SIGHUP (SSH שנפל) = ניקוי מלא: התהליכים שלו ב-session משלהם ובלעדיו היו נשארים.
 
 udev/
   99-airam.rules           # חיבור RSP1B (Vendor 1df7) → restart אוטומטי לשירותי SDR.
@@ -230,6 +231,8 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   dual-sdr-feasibility.md   # היתכנות שני SDR (RSP1A+RSP1B) — קול כפול / קול+ACARS, בספק 3A. טרם מומש:
                             #   בדיקת מקור (serial חובה בכל צרכן, rtl_airband נופל כשמכשיר חסר, השער
                             #   של airam-wait-sdrplay מפיל את הצרכן השני), תקציב 600mA, ומדידה (§7, airam-dual-sdr-probe).
+  dual-sdr-home-test.md     # נוהל צעד-אחר-צעד להרצת airam-dual-sdr-probe בבית (לא בשטח — רק ספק הכוח של השטח):
+                            #   חיבורים, tmux, הורדת הסקריפט מהענף, standby, פענוח הפלט, שליחת התוצאות, תקלות.
   antenna-calibration-experiment.md  # ניסוי: האם "בדוק אנטנה" מזהה ניתוק ב-VHF תחת AGC? מה ידוע
                             #   מהמקור (rtl_airband/SoapySDRPlay3), נוהל ליד נתב"ג, והחלטות לפי תוצאה.
   intelligence-design.md    # תכנון "תמונת מצב מתכללת": אירועים עם רמת טענה (נצפה/הוסק/אפשרי) וראיות,

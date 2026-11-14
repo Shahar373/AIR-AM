@@ -412,3 +412,46 @@ def test_phase_timeline_unplug_observation():
     assert tl[0]["alive_at_end"]["acarsdec"] is True and tl[1]["alive_at_end"]["acarsdec"] is False
     assert [p["primary_live"]["134.600"] for p in tl] == [True, True, False]
     assert [p["sdrplay_restarted"] for p in tl] == [False, False, True]
+
+
+def _procs_with(text):
+    out = []
+    for p in Path("/proc").iterdir():
+        if p.name.isdigit():
+            try:
+                if text in (p / "cmdline").read_bytes().decode(errors="replace"):
+                    out.append(int(p.name))
+            except OSError:
+                pass
+    return out
+
+
+@pytest.mark.parametrize("sig", ["SIGHUP", "SIGTERM"])
+def test_hangup_mid_run_stops_children_and_keeps_summary(fakes, sig):
+    # SSH שנפל באמצע ריצה של 20 דק': rtl_airband רץ ב-session משלו, ובלי ניקוי
+    # הוא היה נשאר ומחזיק את שני המקלטים.
+    import signal as _signal
+    import time as _time
+    env = dict(fakes["env"])
+    out = fakes["tmp"] / "out"
+    code = (f"import importlib.machinery,importlib.util,sys;"
+            f"l=importlib.machinery.SourceFileLoader('p',{str(SCRIPT)!r});"
+            f"s=importlib.util.spec_from_loader('p',l);m=importlib.util.module_from_spec(s);l.exec_module(m);"
+            f"m.ACARS_UDP_PORT={_free_udp_port()};m.STOP_GRACE_SEC=3;sys.exit(m.main(sys.argv[1:]))")
+    p = subprocess.Popen([sys.executable, "-c", code, "--out", str(out), "--interval", "0.2",
+                          "--secs", "60", "--only", "dual-voice"],
+                         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+    conf = out / "airband-dual-voice.conf"
+    deadline = _time.time() + 30
+    while _time.time() < deadline and not (conf.exists() and _procs_with(str(conf))):
+        _time.sleep(0.2)
+    assert _procs_with(str(conf)), "rtl_airband המזויף לא עלה"
+    _time.sleep(1.0)
+    p.send_signal(getattr(_signal, sig))
+    p.wait(30)
+    assert p.returncode == 130
+    _time.sleep(0.5)
+    assert _procs_with(str(conf)) == []                       # לא נשאר תהליך שמחזיק מקלט
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["interrupted"] is True

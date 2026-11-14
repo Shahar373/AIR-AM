@@ -973,8 +973,13 @@ def main(argv=None):
     print(f"--- פלט: {out}")
 
     def stop_sig(signum, frame):
+        if signum == signal.SIGHUP:
+            # ה-SSH נפל: הטרמינל איננו, ו-print אליו היה זורק באמצע הניקוי. התהליכים
+            # שלנו רצים ב-session משלהם — בלי הניקוי הם נשארים ומחזיקים את המקלטים.
+            sys.stdout = sys.stderr = open(os.devnull, "w")
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stop_sig)
+    signal.signal(signal.SIGHUP, stop_sig)
 
     probe = Probe(args, out)
     baseline = None
