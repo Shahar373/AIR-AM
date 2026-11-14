@@ -1,0 +1,414 @@
+"""scripts/airam-dual-sdr-probe — מדידת שלב 0 לשני SDR (docs/dual-sdr-feasibility.md §7).
+
+שני חלקים: פונקציות טהורות (פענוח פלטים, חלון התדרים, הקונפיג, פסק הדין), וריצה
+מקצה לקצה מול כלים מזויפים ב-PATH (rtl_airband שכותב stats, acarsdec ששולח JSON
+ב-UDP, vcgencmd/SoapySDRUtil/systemctl/lsusb) — בלי חומרה.
+"""
+import importlib.machinery
+import importlib.util
+import json
+import os
+import socket
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+import pytest
+
+SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "airam-dual-sdr-probe"
+_loader = importlib.machinery.SourceFileLoader("airam_dual_sdr_probe", str(SCRIPT))
+_spec = importlib.util.spec_from_loader("airam_dual_sdr_probe", _loader)
+probe = importlib.util.module_from_spec(_spec)
+_loader.exec_module(probe)
+
+FIND_TWO = """\
+######################################################
+##     Soapy SDR -- the SDR abstraction library     ##
+######################################################
+
+Found device 0
+  driver = sdrplay
+  label = SDRplay Dev0 RSP1A 1234567890
+  serial = 1234567890
+
+Found device 1
+  driver = sdrplay
+  label = SDRplay Dev1 RSP1B 2305ABCDEF
+  serial = 2305ABCDEF
+
+"""
+
+PMIC = """\
+     3V7_WL_SW_A current(0)=0.00390372A
+   VDD_CORE_A current(7)=2.00000000A
+     3V7_WL_SW_V volt(8)=3.60000000V
+   VDD_CORE_V volt(15)=0.90000000V
+      EXT5V_V volt(24)=5.08000000V
+"""
+
+
+# --- פענוח ------------------------------------------------------------------
+
+def test_parse_find_two_devices_with_models():
+    devs = probe.parse_find(FIND_TWO)
+    assert [d["serial"] for d in devs] == ["1234567890", "2305ABCDEF"]
+    assert [d["model"] for d in devs] == ["RSP1A", "RSP1B"]
+
+
+def test_parse_find_ignores_other_drivers_and_empty():
+    assert probe.parse_find("") == []
+    assert probe.parse_find("Found device 0\n  driver = rtlsdr\n  serial = 1\n") == []
+
+
+def test_parse_lsusb_only_sdrplay():
+    text = ("Bus 001 Device 002: ID 1df7:3010 SDRplay RSP1A\n"
+            "Bus 003 Device 004: ID 1546:01a7 u-blox GPS\n"
+            "Bus 002 Device 003: ID 1df7:3050 SDRplay\n")
+    assert len(probe.parse_lsusb(text)) == 2
+
+
+def test_throttled_decode_and_names():
+    assert probe.decode_throttled("throttled=0x50005") == 0x50005
+    assert probe.decode_throttled("garbage") is None
+    names = probe.throttle_names(0x50005)
+    assert "undervoltage עכשיו" in names and "undervoltage מאז האתחול" in names
+    assert probe.throttle_names(0) == []
+
+
+def test_pmic_ext5v_and_rails_exclude_ext5v():
+    assert probe.parse_ext5v(PMIC) == 5.08
+    # 3.6×0.0039 + 0.9×2.0 — EXT5V (אין לו current) לא נכנס
+    assert probe.parse_rails_w(PMIC) == pytest.approx(3.6 * 0.00390372 + 1.8, abs=1e-3)
+    assert probe.parse_rails_w("") is None
+
+
+def test_parse_stats_rtl_airband_format():
+    text = textwrap.dedent("""\
+        # HELP channel_dbfs_noise_level Squelch noise_level as dBFS.
+        # TYPE channel_dbfs_noise_level gauge
+        channel_dbfs_noise_level{freq="134.600"}\t-38.120
+        channel_dbfs_noise_level{freq="120.500",label="APP"}\t-41.500
+        channel_dbfs_signal_level{freq="134.600"}\t-30.000
+        buffer_overflow_count{device="0"}\t0
+        buffer_overflow_count{device="1"}\t3
+        output_overrun_count{device="0"}\t0
+        output_overrun_count{mixer="0"}\t1
+        """)
+    st = probe.parse_stats(text)
+    assert st["noise"] == {"134.600": -38.12, "120.500": -41.5}
+    assert st["overflow"] == {"0": 0, "1": 3}
+    assert st["overrun"]["mixer=0"] == 1
+
+
+# --- חלון התדרים ------------------------------------------------------------
+
+def test_plan_center_single_matches_app_dc_offset():
+    c, need = probe.plan_center(["134.600"])
+    assert c == pytest.approx(134.9)          # f + DC_OFFSET כמו render_config
+    assert need <= probe.IF_BW_KHZ
+
+
+@pytest.mark.parametrize("freqs", [["120.500", "121.400"], ["121.400", "121.500"],
+                                   ["120.500", "121.400", "121.500"]])
+def test_plan_center_fits_and_keeps_dc_clear(freqs):
+    c, need = probe.plan_center(freqs)
+    khz = [round(float(f) * 1000) for f in freqs]
+    assert all(abs(f - round(c * 1000)) >= probe.DC_GUARD_KHZ for f in khz)
+    assert all(abs(f - round(c * 1000)) <= probe.IF_BW_KHZ / 2 - probe.EDGE_GUARD_KHZ for f in khz)
+
+
+@pytest.mark.parametrize("freqs", [["134.600", "120.500"], ["134.600", "132.500"], ["120.500", "121.950"]])
+def test_plan_center_rejects_wider_than_window(freqs):
+    # אותם זוגות שהמסמך (§2) מסווג כ"לא בחלון של 2.56Msps"
+    with pytest.raises(ValueError):
+        probe.plan_center(freqs)
+
+
+def test_norm_freqs_and_acars_window():
+    assert probe.norm_freqs("120.5, 121.4") == ["120.500", "121.400"]
+    for bad in ("", "abc", "50.0", "120.5,120.5"):
+        with pytest.raises(ValueError):
+            probe.norm_freqs(bad)
+    probe.check_acars(probe.ACARS_FREQS_DEFAULT)
+    with pytest.raises(ValueError):
+        probe.check_acars(["131.550", "136.975"])
+    with pytest.raises(ValueError):
+        probe.check_acars([f"{131 + i * 0.025:.3f}" for i in range(9)])
+
+
+# --- קונפיג -----------------------------------------------------------------
+
+def test_render_conf_pins_serial_and_bias_off():
+    conf = probe.render_conf([{"serial": "AAA", "freqs": ["134.600"], "balance": -1.0},
+                              {"serial": "BBB", "freqs": ["120.500", "121.400"], "balance": 1.0}],
+                             "/x/stats.txt", "/x/rec")
+    assert 'device_string = "driver=sdrplay,serial=AAA,biasT_ctrl=false";' in conf
+    assert 'device_string = "driver=sdrplay,serial=BBB,biasT_ctrl=false";' in conf
+    assert "driver=sdrplay\"" not in conf                       # אף מכשיר לא נפתח "במזל"
+    assert conf.count('type = "soapysdr";') == 2
+    assert conf.count('type = "mixer";') == 3 and conf.count('type = "file";') == 3
+    assert "balance = -1.0;" in conf and "balance = 1.0;" in conf
+    assert 'stats_filepath = "/x/stats.txt";' in conf
+    assert f'mountpoint = "{probe.MOUNT}";' in conf
+    # split_on_transmission רק בפלט ה-file של הערוץ, לא במיקסר (config.cpp אוסר)
+    mixers_block = conf.split("devices:")[0]
+    assert "split_on_transmission" not in mixers_block
+    # סוגריים מאוזנים — קונפיג libconfig תקין מבנית
+    for o, c in ("()", "{}"):
+        assert conf.count(o) == conf.count(c)
+
+
+def test_render_conf_rejects_out_of_window_device():
+    with pytest.raises(ValueError):
+        probe.render_conf([{"serial": "A", "freqs": ["134.600", "120.500"]}], "/s", "/r")
+
+
+def test_assign_roles_rsp1b_is_primary():
+    devs = probe.parse_find(FIND_TWO)
+    a, b, warn = probe.assign_roles(devs)
+    assert a["model"] == "RSP1B" and b["model"] == "RSP1A" and warn is None
+
+
+def test_assign_roles_explicit_and_errors():
+    devs = probe.parse_find(FIND_TWO)
+    a, b, _ = probe.assign_roles(devs, "1234567890", "2305ABCDEF")
+    assert a["serial"] == "1234567890"
+    for sa, sb in (("1234567890", None), ("X", "2305ABCDEF"), ("1234567890", "1234567890")):
+        with pytest.raises(ValueError):
+            probe.assign_roles(devs, sa, sb)
+    with pytest.raises(ValueError):
+        probe.assign_roles(devs[:1])
+
+
+def test_assign_roles_ambiguous_warns():
+    devs = [{"serial": "1", "label": "x", "model": None}, {"serial": "2", "label": "y", "model": None}]
+    _, _, warn = probe.assign_roles(devs)
+    assert warn
+
+
+# --- פסק הדין ---------------------------------------------------------------
+
+def _s(t, thr=0, v=5.05, noise=None, ovf=None, age=0.5):
+    st = None
+    if noise is not None:
+        st = {"noise": noise, "signal": {}, "overflow": ovf or {"0": 0}, "overrun": {}}
+    return {"t_rel": t, "throttled": thr, "v_in": v, "cpu": {"rtl_airband": 20.0},
+            "cpu_sys_pct": 10.0, "stats": st, "stats_age": age}
+
+
+def test_summarize_pass():
+    ss = [_s(i, noise={"134.600": -38 - i * 0.1}) for i in range(10)]
+    r = probe.summarize(ss, expect_freqs=["134.600"], baseline={"v_in_median": 5.1})
+    assert r["verdict"] == "pass", r["fail"]
+    assert r["v_in_min_vs_standby"] == pytest.approx(-0.05)
+
+
+def test_summarize_fails_on_pi_flags_not_on_our_thresholds():
+    # מתח נמוך *בלי* דגל של ה-Pi ⇒ לא נכשל (אין לנו סף); דגל ⇒ נכשל
+    low = [_s(i, v=4.70, noise={"f": -38 - i}) for i in range(5)]
+    assert probe.summarize(low, expect_freqs=["f"])["verdict"] == "pass"
+    flagged = [_s(i, thr=0x50005 if i == 3 else 0, noise={"f": -38 - i}) for i in range(5)]
+    r = probe.summarize(flagged, expect_freqs=["f"])
+    assert r["verdict"] == "fail"
+    assert any("undervoltage" in f for f in r["fail"])
+
+
+def test_summarize_sticky_flag_already_set_is_note_not_fail():
+    ss = [_s(i, thr=0x50000, noise={"f": -38 - i}) for i in range(5)]
+    r = probe.summarize(ss, expect_freqs=["f"])
+    assert r["verdict"] == "pass" and r["notes"]
+
+
+def test_summarize_overflow_and_frozen_and_stale():
+    ss = [_s(i, noise={"a": -38 - i, "b": -40.0}, ovf={"0": 0, "1": i}) for i in range(5)]
+    r = probe.summarize(ss, expect_freqs=["a", "b"])
+    assert any("overflow" in f for f in r["fail"])
+    assert any("קפא" in f and "b" in f for f in r["fail"])
+    stale = [_s(i, noise={"a": -38 - i}, age=60) for i in range(5)]
+    assert any("לא התעדכן" in f for f in probe.summarize(stale, expect_freqs=["a"])["fail"])
+
+
+def test_summarize_no_samples_keeps_death_reason():
+    r = probe.summarize([], died="rtl_airband")
+    assert r["verdict"] == "fail" and "rtl_airband" in r["fail"][0]
+
+
+def test_summarize_zero_acars_is_note_not_fail():
+    ss = [_s(i, noise={"f": -38 - i}) for i in range(5)]
+    r = probe.summarize(ss, expect_freqs=["f"], acars={"count": 0, "by_freq": {}, "unparsed": 0})
+    assert r["verdict"] == "pass" and any("ACARS" in n or "acarsdec" in n for n in r["notes"])
+
+
+# --- מקצה לקצה מול כלים מזויפים --------------------------------------------
+
+FAKES = {
+    "SoapySDRUtil": f"""\
+import sys
+sys.stdout.write({FIND_TWO!r})
+""",
+    "lsusb": """\
+import sys
+if "-t" in sys.argv:
+    print("/:  Bus 001.Port 001: Dev 001, Class=root_hub, Driver=xhci-hcd/1p, 480M")
+else:
+    print("Bus 001 Device 002: ID 1df7:3010 SDRplay")
+    print("Bus 003 Device 002: ID 1df7:3050 SDRplay")
+""",
+    "systemctl": """\
+import os, sys
+if "is-active" in sys.argv:
+    active = os.environ.get("FAKE_ACTIVE", "")
+    print("active" if sys.argv[-1] == active else "inactive")
+    sys.exit(0 if sys.argv[-1] == active else 3)
+if "show" in sys.argv:
+    print("12345")
+""",
+    "vcgencmd": f"""\
+import os, sys
+a = sys.argv[1:]
+if a[:1] == ["get_throttled"]:
+    print("throttled=" + os.environ.get("FAKE_THROTTLED", "0x0"))
+elif a[:1] == ["pmic_read_adc"]:
+    sys.stdout.write({PMIC!r})
+elif a[:1] == ["get_config"]:
+    print("usb_max_current_enable=0")
+""",
+    "rtl_airband": """\
+import os, random, re, signal, sys, time
+conf = open(sys.argv[sys.argv.index("-c") + 1]).read()
+stats = re.search(r'stats_filepath = "([^"]+)"', conf).group(1)
+freqs = re.findall(r"^\\s*freq = ([0-9.]+);", conf, re.M)
+ndev = conf.count('type = "soapysdr"')
+signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+ovf = 0
+while True:
+    if os.environ.get("FAKE_OVERFLOW"):
+        ovf += 1
+    lines = [f'channel_dbfs_noise_level{{freq="{float(f):.3f}"}}\\t{-40 + random.random():.3f}' for f in freqs]
+    lines += [f'buffer_overflow_count{{device="{d}"}}\\t{ovf if d == ndev - 1 else 0}' for d in range(ndev)]
+    open(stats + ".tmp", "w").write("\\n".join(lines) + "\\n")
+    os.replace(stats + ".tmp", stats)
+    time.sleep(0.1)
+""",
+    "acarsdec": """\
+import json, signal, socket, sys, time
+host, port = sys.argv[sys.argv.index("-j") + 1].split(":")
+assert any(a.startswith("driver=sdrplay,serial=") and "biasT_ctrl=false" in a for a in sys.argv)
+signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+while True:
+    s.sendto(json.dumps({"freq": 131.55, "tail": ".4X-EHD", "level": -20.1}).encode(), (host, int(port)))
+    time.sleep(0.1)
+""",
+}
+
+
+def _free_udp_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+@pytest.fixture
+def fakes(tmp_path, monkeypatch):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name, body in FAKES.items():
+        p = bindir / name
+        p.write_text(f"#!{sys.executable}\n" + body)
+        p.chmod(0o755)
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"app_mode": "off"}))
+    env = dict(os.environ, PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}",
+               AIRAM_STATE=str(state), AIRAM_PROBE_NOROOT="1")
+    return {"env": env, "state": state, "tmp": tmp_path}
+
+
+def _run(fakes, *args, extra_env=None):
+    env = dict(fakes["env"], **(extra_env or {}))
+    out = fakes["tmp"] / "out"
+    port = _free_udp_port()
+    # ה-port של ACARS קבוע בסקריפט; הבדיקה מריצה אותו ב-subprocess עם port פנוי דרך -c
+    code = (f"import importlib.machinery,importlib.util,sys;"
+            f"l=importlib.machinery.SourceFileLoader('p',{str(SCRIPT)!r});"
+            f"s=importlib.util.spec_from_loader('p',l);m=importlib.util.module_from_spec(s);l.exec_module(m);"
+            f"m.ACARS_UDP_PORT={port};m.STARTUP_SEC=10;m.STOP_GRACE_SEC=3;"
+            f"sys.exit(m.main(sys.argv[1:]))")
+    r = subprocess.run([sys.executable, "-c", code, "--out", str(out), "--interval", "0.2", *args],
+                       env=env, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+    summary = json.loads((out / "summary.json").read_text()) if (out / "summary.json").exists() else None
+    return r, summary, out
+
+
+def test_end_to_end_both_scenarios_pass(fakes):
+    r, summary, out = _run(fakes, "--secs", "2", "--baseline-secs", "1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    sc = summary["scenarios"]
+    assert set(sc) == {"baseline", "dual-voice", "voice-acars"}
+    assert all(v["verdict"] == "pass" for v in sc.values()), json.dumps(sc, ensure_ascii=False)
+    assert sc["dual-voice"]["live_freqs"] == {"134.600": True, "120.500": True, "121.400": True}
+    assert sc["voice-acars"]["acars"]["count"] > 0
+    assert summary["primary"]["model"] == "RSP1B"
+    conf = (out / "airband-dual-voice.conf").read_text()
+    assert "serial=2305ABCDEF" in conf and "serial=1234567890" in conf
+    lines = (out / "samples.jsonl").read_text().splitlines()
+    assert lines and all(json.loads(l)["scenario"] for l in lines)
+    assert not (out / "rec").exists()                       # ההקלטות של הבדיקה נמחקו
+
+
+def test_refuses_when_airam_not_in_standby(fakes):
+    fakes["state"].write_text(json.dumps({"app_mode": "voice"}))
+    r, summary, _ = _run(fakes, "--secs", "1")
+    assert r.returncode == 2 and summary is None
+    assert "standby" in r.stdout
+
+
+def test_refuses_when_consumer_unit_active(fakes):
+    r, summary, _ = _run(fakes, "--secs", "1", extra_env={"FAKE_ACTIVE": "airam-acars"})
+    assert r.returncode == 2 and "airam-acars" in r.stdout
+
+
+def test_info_is_read_only_even_when_not_standby(fakes):
+    fakes["state"].write_text(json.dumps({"app_mode": "voice"}))
+    r, summary, out = _run(fakes, "--info")
+    assert r.returncode == 0 and "2305ABCDEF" in r.stdout
+    assert not out.exists()
+
+
+def test_overflow_fails_dual_voice(fakes):
+    r, summary, _ = _run(fakes, "--secs", "2", "--only", "dual-voice", extra_env={"FAKE_OVERFLOW": "1"})
+    assert r.returncode == 1
+    assert summary["scenarios"]["dual-voice"]["verdict"] == "fail"
+
+
+def test_undervoltage_aborts_scenario(fakes):
+    r, summary, _ = _run(fakes, "--secs", "20", "--only", "dual-voice",
+                         extra_env={"FAKE_THROTTLED": "0x50005"})
+    assert r.returncode == 1
+    d = summary["scenarios"]["dual-voice"]
+    assert d["verdict"] == "fail" and d["duration_sec"] < 10
+    assert any("נעצר" in f for f in d["fail"])
+
+
+def test_phase_timeline_unplug_observation():
+    # לפני: הראשי זורם, שניהם חיים · מנותק: acarsdec מת, הראשי עדיין זורם ·
+    # חובר: sdrplay אותחל (udev) והראשי קפא — בדיוק מה ש-§7.4 במסמך שואל
+    def s(t, alive, val):
+        return {"t_rel": t, "alive": alive,
+                "stats": {"noise": {"134.600": val}, "signal": {}, "overflow": {}, "overrun": {}}}
+    both, prim = {"rtl_airband": True, "acarsdec": True}, {"rtl_airband": True, "acarsdec": False}
+    samples = ([s(i, both, -40 + i) for i in range(0, 5)] +
+               [s(i, prim, -40 + i) for i in range(5, 10)] +
+               [s(i, prim, -40.0) for i in range(10, 15)])
+    marks = [{"phase": "לפני", "t_rel": 0, "sdrplay_start": 1},
+             {"phase": "מנותק", "t_rel": 5, "sdrplay_start": 1},
+             {"phase": "חובר", "t_rel": 10, "sdrplay_start": 1},
+             {"phase": "end", "t_rel": 15, "sdrplay_start": 2}]
+    tl = probe.phase_timeline(samples, marks, ["134.600"])
+    assert [p["phase"] for p in tl] == ["לפני", "מנותק", "חובר"]
+    assert tl[0]["alive_at_end"]["acarsdec"] is True and tl[1]["alive_at_end"]["acarsdec"] is False
+    assert [p["primary_live"]["134.600"] for p in tl] == [True, True, False]
+    assert [p["sdrplay_restarted"] for p in tl] == [False, False, True]

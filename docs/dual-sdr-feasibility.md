@@ -1,6 +1,6 @@
 # היתכנות — שני SDR בו-זמנית (RSP1A + RSP1B) על Pi 5 בספק 3A
 
-> מסמך היתכנות. סטטוס: **בדיקת מקור בוצעה, מדידה על ה-Pi טרם בוצעה** (§7). שום דבר מזה
+> מסמך היתכנות. סטטוס: **בדיקת מקור בוצעה; סקריפט המדידה מוכן, מדידה על ה-Pi טרם בוצעה** (§7). שום דבר מזה
 > לא מומש בקוד. המטרה: להחליט *אם* ו*באיזה סדר* לבנות שני שימושים —
 > **(א) קול בשני ערוצים או יותר בו-זמנית**, **(ב) מצב מעורב: קול + ACARS** — בהינתן שה-Pi
 > יוזן ככל הנראה ב-**5V/3A בלבד**.
@@ -19,7 +19,7 @@
 | ספק 3A כולו | **⚠ זה הסיכון האמיתי — ולא נמדד.** שרשרת ה-3A שלך כבר הראתה undervoltage **במנוחה** (README) | §4.2 |
 | ארכיטקטורה | שימוש (א) — שינוי קטן (תהליך אחד). שימוש (ב) — **שובר את "SDR אחד, בהחלפה"** ודורש קיבוע מכשיר לפי serial בכל מקום | §5 |
 
-**ההמלצה:** לא לכתוב קוד לפני מדידה של חצי שעה על ה-Pi (§7). אם המדידה עוברת: קודם
+**ההמלצה:** לא לכתוב קוד לפני מדידה של חצי שעה על ה-Pi (§7 — `scripts/airam-dual-sdr-probe`). אם המדידה עוברת: קודם
 **שלב 1** (כמה ערוצים בתוך החלון של SDR אחד — עובד גם בלי ה-RSP1A), אחר כך **קול כפול**
 (`voice2`), ואחרון **קול + ACARS** (`voice_acars`). ‏SATCOM והסריקה מחוץ למצב הכפול.
 
@@ -226,94 +226,60 @@ rtl_airband מפענח כמה ערוצים מתוך **חלון דגימה אחד
 
 ---
 
-## 7. שלב 0 — מדידה על ה-Pi (בלי לגעת בקוד)
+## 7. שלב 0 — מדידה על ה-Pi: `scripts/airam-dual-sdr-probe`
 
-כל השלב רץ ידנית, עם AIR-AM ב-**standby** (🏠 ⇒ עצור), כדי שאף צרכן שלנו לא יחזיק מכשיר.
-
-**7.1 זיהוי ותשתית**
+הסקריפט מריץ את כל השלב לבד (Python, ספרייה סטנדרטית בלבד, לא מותקן — רץ מהעותק).
+תנאי: AIR-AM ב-**standby** (🏠 ⇒ עצור). הוא **מסרב** לרוץ אם צרכן כלשהו פעיל, ולא מכבה
+את AIR-AM בעצמו — כדי לא לשנות את המצב השמור מאחורי הגב.
 
 ```bash
-lsusb -d 1df7:
+sudo ~/AIR-AM/scripts/airam-dual-sdr-probe --info
 ```
 
 ```bash
-lsusb -t
+sudo ~/AIR-AM/scripts/airam-dual-sdr-probe
 ```
 
 ```bash
-SoapySDRUtil --find="driver=sdrplay"
+sudo ~/AIR-AM/scripts/airam-dual-sdr-probe --unplug
 ```
 
-```bash
-vcgencmd get_config usb_max_current_enable; vcgencmd get_throttled; vcgencmd pmic_read_adc EXT5V_V
-```
+הראשונה — זיהוי בלבד (קריאה בלבד, גם לא ב-standby): שורות `lsusb`, הטופולוגיה (`lsusb -t`),
+שני ה-serials מ-`SoapySDRUtil --find`, ‏`usb_max_current_enable`, מה שהקושחה זיהתה מהספק,
+‏`get_throttled` ו-`EXT5V_V`. השנייה — שלושה תרחישים (ברירת מחדל ~21 דקות; `--secs` לקצר):
 
-מצופה: שתי שורות ב-lsusb, ‏**שני** serials ב-find (עם `RSP1A`/`RSP1B` בתווית), ו-`usb_max_current_enable=0`.
+| תרחיש | מה רץ | משך |
+|--------|-------|-----|
+| `baseline` | כלום — standby, לבסיס השוואה | 60ש' |
+| `dual-voice` | rtl_airband אחד, שני מקלטים: ראשי 134.600, משני 120.500+121.400, מיקסר סטריאו ל-`/airam-probe.mp3` + הקלטה לכל ערוץ | 600ש' |
+| `voice-acars` | rtl_airband על הראשי + acarsdec על המשני (בנק ברירת המחדל, UDP 5566 — לא הפורט של airam-web) | 600ש' |
+| `unplug` (`--unplug`) | כמו `voice-acars`, עם בקשה לנתק ולחבר את המשני (§7.4) | ~2 דק' + ההמתנה לך |
 
-**7.2 קול כפול** — קונפיג זמני ל-rtl_airband עם שני מכשירים (להחליף את ה-serials):
+**איך זה רץ:** ‏`serial=` מפורש לכל מקלט ו-`biasT_ctrl=false` מפורש (§3.1, §4.1). ה-RSP1B
+ראשי כברירת מחדל (`--serial-a`/`--serial-b` לקבוע אחרת). תדרים: `--a`, ‏`--b`, ‏`--acars` —
+נבדקים מול החלון של §2 לפני שמתחילים. כל שנייה: ‏`get_throttled`, ‏`EXT5V_V`, סכום הרכבות
+הפנימיות של ה-PMIC (**בלי** USB — רק להשוואה בין תרחישים), טמפרטורה, CPU של המערכת ושל
+כל תהליך (כולל `sdrplay_apiService`), וקובץ ה-stats של rtl_airband. הדגימות נכתבות עם `fsync`
+ל-`/var/tmp/airam-dual-probe/<זמן>/samples.jsonl` — שורד כיבוי פתאומי. בסיום: עצירה ב-SIGTERM
+(‏SIGKILL רק אחרי 10ש' — הוא עוקף את שחרור המכשיר ב-SoapySDRPlay3), ובדיקה שה-API רואה
+שוב את שני המקלטים.
 
-```bash
-sudo tee /tmp/dual.conf >/dev/null <<'EOF'
-stats_filepath = "/tmp/dual_stats.txt";
-devices: (
-  { type = "soapysdr"; device_string = "driver=sdrplay,serial=RSP1B_SERIAL";
-    sample_rate = 2.56; mode = "multichannel"; centerfreq = 134.9;
-    channels: ( { freq = 134.600; modulation = "am";
-      outputs: ( { type = "icecast"; server = "127.0.0.1"; port = 8000; mountpoint = "dual1.mp3";
-                   username = "source"; password = "airam"; } ); } ); },
-  { type = "soapysdr"; device_string = "driver=sdrplay,serial=RSP1A_SERIAL";
-    sample_rate = 2.56; mode = "multichannel"; centerfreq = 121.0;
-    channels: ( { freq = 120.500; modulation = "am";
-      outputs: ( { type = "icecast"; server = "127.0.0.1"; port = 8000; mountpoint = "dual2.mp3";
-                   username = "source"; password = "airam"; } ); },
-              { freq = 121.400; modulation = "am";
-      outputs: ( { type = "icecast"; server = "127.0.0.1"; port = 8000; mountpoint = "dual3.mp3";
-                   username = "source"; password = "airam"; } ); } ); }
-);
-EOF
-```
+**7.4 ניתוק** (`--unplug`): אחרי 30ש' הסקריפט מבקש לנתק את המשני, ואחרי 30ש' לחבר אותו
+בחזרה. לכל שלב נרשם: מי חי, האם המדד של הראשי עדיין זז, והאם `sdrplay.service` אותחל
+(החיבור מחדש מפעיל את כלל ה-udev). זו **תצפית**, לא מבחן עבר/נכשל.
 
-```bash
-sudo rtl_airband -f -c /tmp/dual.conf
-```
+**7.5 רף להחלטה** — הספים הם של המכשירים עצמם, לא שלנו. תרחיש **נכשל** אם:
 
-בטרמינל שני, 10 דקות:
+- ה-Pi דיווח undervoltage/throttling **בזמן** התרחיש, או שדלק דגל "מאז האתחול" חדש
+  (דגל שכבר היה דלוק לפני כן — נרשם כהערה, לא ככישלון). undervoltage עוצר את התרחיש מיד
+  (`--keep-going` כדי להמשיך — לא מומלץ על כרטיס SD).
+- `buffer_overflow_count` של מקלט כלשהו עלה (USB/CPU לא עמדו בקצב).
+- מדד הרעש של ערוץ **קפא** ב-30ש' האחרונות (המקלט כנראה לא מזרים), או שקובץ ה-stats הפסיק להתעדכן.
+- תהליך יצא באמצע.
 
-```bash
-for i in $(seq 600); do echo "$(date +%T) $(vcgencmd pmic_read_adc EXT5V_V | grep -o '=[0-9.]*') $(vcgencmd get_throttled)"; sleep 1; done | tee /tmp/dual_power.log
-```
-
-```bash
-top -b -d 10 -n 60 | grep -E "rtl_airband|sdrplay_api|acarsdec" | tee /tmp/dual_cpu.log
-```
-
-```bash
-grep buffer_overflow /tmp/dual_stats.txt
-```
-
-האזנה: `http://<IP>:8000/dual1.mp3` (וגם 2 ו-3).
-
-**7.3 קול + ACARS** — אותו קונפיג בלי המכשיר השני (רק RSP1B), ובמקביל:
-
-```bash
-sudo acarsdec -g -10 -m 160 -o 1 -d driver=sdrplay,serial=RSP1A_SERIAL 130.450 131.425 131.525 131.550 131.725 131.825 131.850
-```
-
-אותן שלוש פקודות מדידה.
-
-**7.4 ניתוק** — בזמן ש-7.3 רץ: לנתק את ה-RSP1A ולחבר בחזרה. לרשום: האם ה-rtl_airband
-על ה-RSP1B ממשיך? (החיבור מחדש מאתחל את `sdrplay.service` דרך udev — מצופה שגם הוא ייקטע,
-ובהרצה ידנית בלי systemd אולי לא יתאושש לבד.)
-
-**7.5 רף להחלטה** — הספים הם של המכשירים עצמם, לא שלנו:
-
-- **עובר:** אין ביט undervoltage חדש ב-`get_throttled` לאורך 10 דקות בכל תרחיש;
-  `buffer_overflow_count` לא עולה; אודיו בכל ה-mounts; acarsdec מדפיס הודעות.
-- **נכשל ⇒ פתרון חומרה לפני קוד:** ביט undervoltage, כיבוי, או overflow מתמשך.
-- **לתעד בכל מקרה:** ‏CPU לכל תהליך, ‏EXT5V_V מינימלי מול ה-baseline ב-standby, ומה קרה
-  ב-7.4. זה נכנס לכאן כ-§7.6 לפני כל מימוש.
-
----
+לא נכשל, רק נרשם: מתח נמוך **בלי** דגל של ה-Pi, אחוזי CPU, אפס הודעות ACARS (אולי שקט),
+ו-`/airam-probe.mp3` שלא חי ב-Icecast. שלח את `summary.json`; התוצאות ייכנסו לכאן כ-§7.6
+לפני כל מימוש.
 
 ## 8. שלבי מימוש (אחרי ששלב 0 עבר)
 

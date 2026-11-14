@@ -161,6 +161,10 @@ scripts/
                            # tests/test_listening_lab.py (RNNoise מזויף = השהיה טהורה).
   airam-gps-probe          # שלב 0 של docs/long-term-stats-design.md, קריאה בלבד: מקלט GPS ב-USB (fix, לוויינים,
                            # SNR, פיזור מיקום/מרחק מנתב"ג, פער שעון) + כמה ימים 5000 הודעות מכסות. לא מותקן.
+  airam-dual-sdr-probe     # שלב 0 של docs/dual-sdr-feasibility.md (Python, stdlib): מסרב לרוץ אם AIR-AM לא ב-standby;
+                           # מריץ בעצמו standby / קול כפול / קול+ACARS (serial מפורש, biasT_ctrl=false), דוגם כל שנייה
+                           # get_throttled/EXT5V_V/CPU/stats, fsync ל-/var/tmp/airam-dual-probe/. "נכשל" רק מדגלי ה-Pi,
+                           # overflow, מדד שקפא או תהליך שמת — בלי ספים שלנו. --unplug לתצפית ניתוק. לא מותקן.
 
 udev/
   99-airam.rules           # חיבור RSP1B (Vendor 1df7) → restart אוטומטי לשירותי SDR.
@@ -213,6 +217,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_denoise_tools.py    # ★ המנועים מול המעבדה: airam-speexdn זהה בבייט, airam-rnnoise מול RNNoise
                            #   מזויף (tests/stubs — השהיה טהורה) ⇒ יישור מדויק, פרמטרי הסקריפט = העוברים.
   test_listening_lab.py    # מעבדת ההאזנה: יישור/ערבוב, סבב תדרים, עיוורון, שרת, בנייה מקצה לקצה.
+  test_dual_sdr_probe.py   # airam-dual-sdr-probe: פענוח find/lsusb/throttled/pmic/stats, חלון התדרים, הקונפיג (serial,
+                           #   bias-T כבוי), פסק הדין, ציר הניתוק, ומקצה לקצה מול rtl_airband/acarsdec/vcgencmd מזויפים.
   test_sessions.py         # שחזור-סשן שלב 2: POST/GET /api/sessions, GET/DELETE
                            #   ‏/api/sessions/<id>, /track, /clips/<name>, /export.zip —
                            #   כולל שמורה (★) מועתקת מול לא-שמורה מועברת, חיתוך minutes
@@ -223,7 +229,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   satcom-feasibility.md     # היתכנות ואפיון מצב SATCOM (מומש).
   dual-sdr-feasibility.md   # היתכנות שני SDR (RSP1A+RSP1B) — קול כפול / קול+ACARS, בספק 3A. טרם מומש:
                             #   בדיקת מקור (serial חובה בכל צרכן, rtl_airband נופל כשמכשיר חסר, השער
-                            #   של airam-wait-sdrplay מפיל את הצרכן השני), תקציב 600mA, ונוהל מדידה (§7).
+                            #   של airam-wait-sdrplay מפיל את הצרכן השני), תקציב 600mA, ומדידה (§7, airam-dual-sdr-probe).
   antenna-calibration-experiment.md  # ניסוי: האם "בדוק אנטנה" מזהה ניתוק ב-VHF תחת AGC? מה ידוע
                             #   מהמקור (rtl_airband/SoapySDRPlay3), נוהל ליד נתב"ג, והחלטות לפי תוצאה.
   intelligence-design.md    # תכנון "תמונת מצב מתכללת": אירועים עם רמת טענה (נצפה/הוסק/אפשרי) וראיות,
