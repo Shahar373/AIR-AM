@@ -221,6 +221,9 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 docs/                       # מסמכי תכנון/החלטות. מתעדים *למה* — ומה נדחה ועל סמך מה.
   field-station-roadmap.md  # מפת הדרכים שהובילה למד השדה, דוח הסשן ורוסטר המטוסים.
   satcom-feasibility.md     # היתכנות ואפיון מצב SATCOM (מומש).
+  dual-sdr-feasibility.md   # היתכנות שני SDR (RSP1A+RSP1B) — קול כפול / קול+ACARS, בספק 3A. טרם מומש:
+                            #   בדיקת מקור (serial חובה בכל צרכן, rtl_airband נופל כשמכשיר חסר, השער
+                            #   של airam-wait-sdrplay מפיל את הצרכן השני), תקציב 600mA, ונוהל מדידה (§7).
   antenna-calibration-experiment.md  # ניסוי: האם "בדוק אנטנה" מזהה ניתוק ב-VHF תחת AGC? מה ידוע
                             #   מהמקור (rtl_airband/SoapySDRPlay3), נוהל ליד נתב"ג, והחלטות לפי תוצאה.
   intelligence-design.md    # תכנון "תמונת מצב מתכללת": אירועים עם רמת טענה (נצפה/הוסק/אפשרי) וראיות,

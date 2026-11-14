@@ -1,0 +1,349 @@
+# היתכנות — שני SDR בו-זמנית (RSP1A + RSP1B) על Pi 5 בספק 3A
+
+> מסמך היתכנות. סטטוס: **בדיקת מקור בוצעה, מדידה על ה-Pi טרם בוצעה** (§7). שום דבר מזה
+> לא מומש בקוד. המטרה: להחליט *אם* ו*באיזה סדר* לבנות שני שימושים —
+> **(א) קול בשני ערוצים או יותר בו-זמנית**, **(ב) מצב מעורב: קול + ACARS** — בהינתן שה-Pi
+> יוזן ככל הנראה ב-**5V/3A בלבד**.
+
+---
+
+## 0. השורה התחתונה
+
+| שאלה | תשובה | על מה זה נשען |
+|------|-------|----------------|
+| הכלים תומכים בשני RSP במקביל? | **כן** | SoapySDRPlay3 ו-rtl_airband במקור (§3) |
+| שני ערוצי קול **קרובים** (עד ~1.3MHz זה מזה) | **אפשר כבר היום עם SDR אחד**, בלי חומרה ובלי תוספת זרם | חלון 1.536MHz ב-2.56Msps (§2) |
+| מגדל 134.600 + גישה 120.500 (14MHz זה מזה) | **רק עם שני SDR** | ל-RSP אין חלון רחב מ-8MHz (§2) |
+| קול + ACARS בו-זמנית | **רק עם שני SDR** (שני תהליכים, וכל אחד צריך מכשיר משלו) | §3.3 |
+| זרם USB בספק 3A | **נכנס, בלי bias-T**: 2×185mA = 370mA מתוך תקרה של 600mA | גיליונות הנתונים, נייר הלבן של Raspberry Pi (§4.1) |
+| ספק 3A כולו | **⚠ זה הסיכון האמיתי — ולא נמדד.** שרשרת ה-3A שלך כבר הראתה undervoltage **במנוחה** (README) | §4.2 |
+| ארכיטקטורה | שימוש (א) — שינוי קטן (תהליך אחד). שימוש (ב) — **שובר את "SDR אחד, בהחלפה"** ודורש קיבוע מכשיר לפי serial בכל מקום | §5 |
+
+**ההמלצה:** לא לכתוב קוד לפני מדידה של חצי שעה על ה-Pi (§7). אם המדידה עוברת: קודם
+**שלב 1** (כמה ערוצים בתוך החלון של SDR אחד — עובד גם בלי ה-RSP1A), אחר כך **קול כפול**
+(`voice2`), ואחרון **קול + ACARS** (`voice_acars`). ‏SATCOM והסריקה מחוץ למצב הכפול.
+
+---
+
+## 1. מה נבדק ואיך
+
+**נבדק במקור** (גרסאות שה-`install.sh` בונה):
+
+- **SoapySDRPlay3** (`master`, ‏48bd8b4): ‏`Registration.cpp`, ‏`Settings.cpp`, ‏`Streaming.cpp`.
+- **RTLSDR-Airband v5.2.0** (ה-tag הנעוץ): ‏`rtl_airband.cpp`, ‏`input-soapysdr.cpp`, ‏`mixer.cpp`,
+  ‏`output.cpp`, ‏`config.cpp`, וקובצי הדוגמה `config/two_dongles_multiple_outputs.conf` ו-`mixers.conf`.
+- **acarsdec** (`master`, ‏339f63e): ‏`soapy.c`. ‏**dumpvdl2 v2.6.0**.
+- הקוד של AIR-AM: ‏`render_config`, ‏`_sdr_present`/`_sdr_usb`, ‏`scripts/airam-wait-sdrplay`, היחידות ב-`systemd/`, ‏`udev/99-airam.rules`.
+
+**לא נבדק — דורש את ה-Pi עם שני המכשירים:**
+
+- התנהגות **שירות ה-API** של SDRplay (`sdrplay_apiService`, קוד סגור) עם שני מכשירים פתוחים
+  משני תהליכים. ‏SoapySDRPlay3 מניח שזה עובד (§3.1), אבל לא ראינו את זה רץ.
+- **CPU וצריכת חשמל בפועל**. אין ב-repo אף מדידה של rtl_airband או acarsdec על Pi 5.
+- המפרט של SDRplay ושל Raspberry Pi לא היה נגיש מסביבת הבדיקה (`sdrplay.com` ו-`pip-assets.raspberrypi.com`
+  חסומים ברשת). המספרים ב-§4 מגיעים מתקצירים של מקורות חיצוניים, והם מסומנים ככאלה.
+
+---
+
+## 2. שאלה מקדימה: כמה מזה כבר אפשרי עם SDR אחד?
+
+rtl_airband מפענח כמה ערוצים מתוך **חלון דגימה אחד** (`mode = "multichannel"`). AIR-AM דוגם
+היום 2.56Msps, ושם SoapySDRPlay3 בוחר מסנן IF של **1.536MHz** (`getBwEnumForRate`: ‏
+‎<5M⇐1.536, <6M⇐5, <7M⇐6, <8M⇐7, אחרת 8MHz). כלומר: כל הערוצים חייבים לשבת בתוך 1.536MHz,
+עם מרווח מהשוליים, ובלי ערוץ על ה-DC.
+
+חישוב על ששת הפריסטים, לכל זוג (מרכז אופטימלי, ≥100kHz מה-DC, 100kHz מכל שוליים):
+
+| זוג | מרחק | מה צריך |
+|-----|------|---------|
+| גישה 120.500 + Control 121.400 / Guard 121.500 | 0.9–1.0MHz | **SDR אחד, היום** |
+| Control 121.400 + Delivery 121.950 / Guard 121.500 | 0.1–0.55MHz | **SDR אחד, היום** |
+| Delivery 121.950 + Guard 121.500 | 0.45MHz | **SDR אחד, היום** |
+| גישה + Delivery, מגדל + ATIS, קרקע מערב + גישה/Control/Delivery | 1.45–3.9MHz | SDR אחד ב-5.12Msps (פי 2 CPU ו-USB) |
+| מגדל + קרקע מזרח, קרקע מזרח + Delivery/Guard | 5.4–7.7MHz | SDR אחד ב-8.192Msps — לא מעשי בספק 3A |
+| **מגדל + גישה/Control/Guard/Delivery/קרקע מערב**, ‏ATIS + כל צביר ה-120–121 | 10.5–16.5MHz | **רק שני SDR** |
+
+**המשמעות:** "גישה + Control + Guard" כבר עכשיו יכולים לרוץ יחד על ה-RSP1B, **בלי תוספת
+זרם**. אבל הזוג שכנראה הכי מעניין — **מגדל וגישה** — דורש שני מקלטים. ועם שני מקלטים, כל
+אחד מהם יכול לקלוט כמה ערוצים: למשל RSP1B על המגדל ו-RSP1A על גישה + Control + Guard
+(טווח של 1.0MHz) — **ארבעה ערוצים, עדיין ב-2.56Msps לכל מכשיר**.
+
+**ACARS + קול על SDR אחד — לא.** ‏acarsdec ו-rtl_airband הם שני תהליכים, וכל מכשיר נפתח
+ע"י תהליך אחד (§3.1). זה לא עניין של רוחב חלון.
+
+---
+
+## 3. תוכנה — מה המקור אומר
+
+### 3.1 SoapySDRPlay3 — שני מכשירים: כן. בחירה לפי serial: חובה
+
+- **בחירה לפי serial קיימת:** ‏`findSDRPlay` מסנן לפי `args["serial"]`
+  (`Registration.cpp:55`), והבנאי מסרב בלי serial שנפתר (`Settings.cpp`, ‏`SoapySDRPlay::SoapySDRPlay`).
+- **ריבוי מכשירים באותו תהליך:** המכשירים שנבחרו נשמרים במפה סטטית לפי מזהה
+  (`selectedRSPDevices`, ‏`Settings.cpp:73`), וה-callbacks מקבלים את המופע דרך context —
+  אין handle גלובלי יחיד (בניגוד ל-API 2 הישן).
+- **ריבוי תהליכים:** נעילת ה-API (`sdrplay_api_LockDeviceApi`) "חיה בשירות, לא בתהליך —
+  כל התהליכים במכונה חולקים אותה" (הערה ב-`Settings.cpp:31`). ‏`sdrplay_api_GetDevices` לא
+  מחזיר מכשיר שתהליך אחר כבר בחר (כבר אומת ב-AIR-AM, ר' `/api/sdr` ב-CLAUDE.md §5).
+- **⚠ המלכודת:** ‏`device_string = "driver=sdrplay"` בלי serial ⇒ Soapy פותח **את הראשון
+  שהשירות מחזיר**. עם מכשיר אחד זה תמיד נכון. עם שניים — זה תלוי בסדר ההפעלה ובסדר
+  ה-USB. התהליך השני "יעבוד במקרה" על המכשיר שנשאר, אבל **איזה מכשיר מחובר לאיזו אנטנה —
+  נקבע במזל**. היום **כל** הצרכנים ב-AIR-AM לא מקובעים:
+
+  | איפה | היום |
+  |------|------|
+  | `render_config` (`webtune/app.py`) | `device_string = "driver=sdrplay"` |
+  | `systemd/airam-acars.service` | `-d driver=sdrplay` |
+  | `systemd/airam-vdl2.service` | `--soapysdr driver=sdrplay` |
+  | `inmarsat-sniffer` | `-i sdrplay` (תומך `-i sdrplay-SERIAL`) |
+  | `scripts/airam-wait-sdrplay` | `--find="driver=sdrplay"` — "יש מכשיר כלשהו" |
+
+### 3.2 rtl_airband — שני מכשירים בתהליך אחד, ומיקסר סטריאו
+
+- `devices:` היא רשימה; דוגמה רשמית עם שני מקלטים לפי serial
+  (`config/two_dongles_multiple_outputs.conf`). ב-soapysdr ה-serial נכנס ל-`device_string`.
+- **מיקסר:** ערוצים משני מכשירים יכולים להיכנס ל-`mixers` אחד עם `balance` (‎-1…+1). כל
+  balance שאינו 0 ⇒ ‏`MM_STEREO` (`mixer.cpp:84`) ⇒ ‏LAME ב-`JOINT_STEREO` (`output.cpp:162`).
+  **מגדל באוזן שמאל, גישה בימין — בסטרים אחד.** זה חשוב בטלפון: `<audio>` אחד, ‏MediaSession
+  אחד, וממשיך לנגן ברקע (שני נגנים מקבילים ברקע ב-iOS זה מתכון לבעיות).
+- **מגבלות שמצאנו:**
+  - `split_on_transmission` **אסור במיקסר** (`config.cpp:129`) ⇒ ההקלטות חייבות להישאר
+    פלט `file` נפרד לכל ערוץ. זה דווקא טוב: יומן השידורים, התמלול ושחזור-הסשן כבר עובדים
+    ככה (התדר בשם הקובץ).
+  - `fft_size` הוא הגדרה **גלובלית** ⇒ מסנן הערוץ (`chan_filter`) משותף לשני המכשירים.
+  - **אתחול:** אם מכשיר אחד לא עולה תוך 5 שניות — **התהליך כולו נעצר**
+    (`rtl_airband.cpp:1025`, "device(s) failed to initialize - aborting"). כלומר RSP1A מנותק
+    = אין קול בכלל, לא "קול בערוץ אחד".
+  - **בזמן ריצה:** כשל ב-`readStream` רק נרשם ביומן ו-`continue` (`input-soapysdr.cpp:309`) —
+    המכשיר לא מסומן `INPUT_FAILED`. מכשיר שנעלם באמצע ⇒ הערוץ שלו שותק, התהליך **ממשיך**,
+    ו-`Restart=always` לא נכנס לפעולה. (זו בדיוק השאלה הפתוחה של `docs/resilience-test.md`, עכשיו
+    עם משמעות חדשה.)
+- **מדד חינמי:** קובץ ה-stats מוציא `buffer_overflow_count` לכל מכשיר — המדד הישיר
+  ל"ה-USB/CPU לא עומדים בקצב" (§7).
+
+### 3.3 acarsdec / dumpvdl2 — serial דרך אותה מחרוזת
+
+‏acarsdec מעביר את `-d` כמו שהוא ל-`SoapySDRDevice_makeStrArgs` (`soapy.c:81`) ⇒
+`-d driver=sdrplay,serial=XXXX` עובד בלי שינוי בכלי. ‏dumpvdl2 — אותו דבר דרך `--soapysdr`.
+
+---
+
+## 4. חשמל בספק 3A
+
+### 4.1 תקרת ה-USB — 600mA
+
+לפי נייר הלבן של Raspberry Pi על USB-PD ב-Pi 5 (בתקציר, לא קראנו את המסמך עצמו): **בלי ספק
+שמזוהה כ-5V/5A, הלוח מגביל את כל יציאות ה-USB יחד ל-600mA**. ‏`usb_max_current_enable=1`
+ב-`config.txt` (או `PSU_MAX_CURRENT=5000` ב-EEPROM) מעלה את התקרה ל-1.6A. ‏**זה לא מוסיף
+חשמל** — זה רק מבטל את ההגנה.
+
+| צרכן (נומינלי, לפי גיליון הנתונים) | mA | מצטבר | מתוך 600 |
+|------------------------------------|----|-------|-----------|
+| RSP1B ("Low current", בלי bias-T) | 185 | 185 | 31% |
+| RSP1A (אותו נתון בגיליון שלו) | 185 | 370 | 62% |
+| + bias-T של מכשיר אחד (עד 100mA מובטח) | 100 | 470 | 78% |
+| + bias-T בשניהם | 100 | 570 | **95%** |
+| + מקלט GPS ב-USB (מתוכנן ב-`long-term-stats-design.md`) | לא ידוע | — | — |
+
+⚠ חלק מהמקורות מציגים את ה-185mA כ"טיפוסי" וחלק כ"מקסימום". לא ראינו נתון לפי קצב
+דגימה. מד USB בין ה-Pi לכל SDR סוגר את השאלה הזו בעשר שניות (§7).
+
+**כללים שנגזרים מזה:**
+
+1. **אין bias-T במצב הכפול.** לא בקול ולא ב-ACARS (ממילא כבוי בהם היום). ‏SATCOM נשאר מצב
+   של SDR יחיד.
+2. **לא להפעיל `usb_max_current_enable=1` בספק 3A.** זה ממיר תקרה מבוקרת בנפילת מתח של כל הלוח.
+3. **רכזת USB מוזנת** (כבר ברשימת הפתרונות ב-README) מוציאה את שני ה-SDR מתקציב ה-Pi לגמרי.
+   ‏2.56Msps ב-CS16 זה ~10MB/s למכשיר, אז גם שניים על אותו קישור USB2 משאירים מרווח —
+   ו-`buffer_overflow_count` יגיד אם לא.
+
+### 4.2 ספק 3A — תקרת ה-USB היא לא הבעיה, השרשרת כולה כן
+
+אף מספר כאן לא נמדד על Pi 5 עם rtl_airband או acarsdec. מה שכן ידוע, מהשטח שלך (README,
+"נמדד בשטח"):
+
+- על ה-power bank של 5V/3A, **גם ב-standby מלא** `volts_in` היה 4.8–4.9V עם קפיצות
+  undervoltage חוזרות.
+- `inmarsat-sniffer` לבדו (‏100–270% CPU, בלי bias-T) כיבה את ה-Pi תוך 1–2 שניות, פעמיים.
+
+קול + קול או קול + ACARS צפויים להיות **הרבה יותר קלים** מ-SATCOM: מסננים צרים ב-2–2.56Msps,
+לא דמודולציה של 12 ערוצים. אבל "צפוי" זה בדיוק הניחוש ש-§12 אוסר להציג כעובדה. מה שמצטבר
+במצב הכפול:
+
+- שני זרמי USB דרך `sdrplay_apiService` (העלות שלו ב-ARM לא ידועה לנו).
+- שני מפענחים, ובקול כפול — LAME נוסף לכל פלט (ערוץ להקלטה + מיקסר).
+- **פי שניים הקלטות** ⇒ פי שניים עבודה ל-whisper כש"תמלל הכול" דלוק. זה כנראה העומס הכבד
+  ביותר בכל המערכת, ו-`nice` לא מוריד צריכת חשמל.
+- `airam-denoise` אם מופעל.
+
+**מסקנה:** על השרשרת **שכבר שולית**, שני SDR מגדילים את הסיכון לכיבוי. זה לא בהכרח פוסל —
+זה אומר שהמדידה ב-§7 היא תנאי כניסה, ושפתרון החומרה (ממיר buck מפורט 9V/12V של הבנק, או
+רכזת מוזנת) כנראה יידרש בשטח.
+
+---
+
+## 5. מה נשבר ב-AIR-AM
+
+העיקרון שעליו בנוי כל המתזמר הוא **"SDR אחד, בהחלפה"** (CLAUDE.md §2): ‏`Conflicts` בין כל
+הצרכנים, ‏`app_mode` יחיד, ‏`_live_mode()` מחזיר מצב אחד. מה זה פוגש:
+
+| רכיב | הבעיה במצב כפול | כיוון לתיקון |
+|------|------------------|---------------|
+| כל ה-`device_string` (§3.1) | מכשיר נבחר "במזל" | `serial=` מפורש בכל צרכן, מתוך מיפוי תפקידים שנשמר ב-state |
+| `scripts/airam-wait-sdrplay` | בודק "יש מכשיר כלשהו". ⚠ אם B חסר ו-A מחובר, אחרי 8 שניות הוא **מאתחל את `sdrplay.service`** ⇒ דרך `PartOf` מפיל גם את הצרכן שרץ על A | שער לפי serial; **בלי** "בעיטה" ל-sdrplay כשצרכן אחר פעיל |
+| `udev/99-airam.rules` | חיבור של **כל** SDR מאתחל את `sdrplay` ⇒ הצרכן על המכשיר השני נקטע לכמה שניות | מקובל ל-MVP; לתעד |
+| `Conflicts` ב-systemd | `airam-acars` מצהיר Conflicts מול `rtl_airband` ⇒ קול + ACARS חסום ברמת systemd | יחידה נפרדת לצרכן על המכשיר המשני (§6) |
+| rtl_airband עם שני מכשירים | מכשיר אחד חסר ⇒ התהליך נופל (§3.2) | `_enter_voice2` מזהה ונכנס לקול רגיל **עם שגיאה גלויה** ("RSP1A לא נמצא — ערוץ 2 כבוי"), לא נכשל בשקט |
+| `_sdr_present` / `_sdr_usb` / `/api/sdr` | `lsusb -d 1df7:` — שורה ראשונה בלבד; "ב-USB + find ריק = תפוס" מניח מכשיר אחד | פירוט לכל serial |
+| `_read_voice_metrics` | בוחר את התדר השמור מתוך ה-stats | כבר מתויג לפי `freq` ⇒ מרחיבים לרשימה |
+| `signal_baseline` / בדיקת אנטנה / ניסוי הכיול | הבסיס נמדד על מכשיר+אנטנה מסוימים | לפי serial; במצב כפול — 409 כמו SATCOM |
+| Icecast | `sources=4` (live, clean + 2) | live + live2/mixer + clean — נכנס; לוודא |
+| סינון רעשים | `udp_stream` אחד, מנוע אחד | MVP: מסננים רק את הסטרים הראשי/המיקסר |
+| סריקה | מניחה SDR יחיד | מחוץ ל-MVP, כמו SATCOM |
+
+---
+
+## 6. מודל מוצע: "מצבים מורכבים", לא שני מתזמרים
+
+הרעיון: **`app_mode` נשאר ערך יחיד**, ומתווספים שני מצבים חדשים שווי-מעמד. ‏`_boot_restore`,
+‏`_fail_to_off`, ‏`mode_ok` ו-`_mode_reconcile_loop` ממשיכים לחשוב על "מצב אחד שרץ" — רק שמצב
+אחד יכול להחזיק שני מכשירים.
+
+- **`voice2`** — תהליך rtl_airband **אחד** עם שני מכשירים (כל אחד עם serial, ערוץ אחד או
+  יותר בחלון שלו). ‏`MODE_SERVICE["voice2"] = "rtl_airband"` ⇒ **אותה יחידה, אותם Conflicts** —
+  מבחינת systemd זה עדיין "קול". פלטים: מיקסר סטריאו ל-`/live.mp3` (או mount נפרד לכל
+  ערוץ, לבחירה), ‏`file` לכל ערוץ.
+- **`voice_acars`** — rtl_airband על המכשיר הראשי + **`airam-acars2.service`** (acarsdec עם
+  `serial=` של המשני, אותו env, אותו פורט UDP 5556 ⇒ ה-listener וכל צנרת ה-ACARS לא משתנים).
+  ‏`airam-acars2` מצהיר Conflicts מול `airam-acars`/`airam-vdl2`/`airam-satcom` אבל **לא**
+  מול `rtl_airband`. ⚠ זה תקף רק אם rtl_airband במצב הזה **מקובע** למכשיר הראשי — אחרת שני
+  התהליכים עלולים לבחור הפוך.
+- **תפקידים:** `state["sdr_roles"] = {"primary": "<serial>", "secondary": "<serial>"}`, נקבע
+  פעם אחת מה-UI אחרי זיהוי (`SoapySDRUtil --find` מחזיר serial + דגם). בלי מיפוי ⇒ שני
+  המצבים החדשים לא זמינים, והמערכת ממשיכה בדיוק כמו היום עם מכשיר אחד.
+  **איזה מכשיר ראשי?** ה-RSP1B — עליו כבר נמדדו `signal_baseline` וניסוי הכיול, ואין סיבה
+  לפסול אותם.
+
+---
+
+## 7. שלב 0 — מדידה על ה-Pi (בלי לגעת בקוד)
+
+כל השלב רץ ידנית, עם AIR-AM ב-**standby** (🏠 ⇒ עצור), כדי שאף צרכן שלנו לא יחזיק מכשיר.
+
+**7.1 זיהוי ותשתית**
+
+```bash
+lsusb -d 1df7:
+```
+
+```bash
+lsusb -t
+```
+
+```bash
+SoapySDRUtil --find="driver=sdrplay"
+```
+
+```bash
+vcgencmd get_config usb_max_current_enable; vcgencmd get_throttled; vcgencmd pmic_read_adc EXT5V_V
+```
+
+מצופה: שתי שורות ב-lsusb, ‏**שני** serials ב-find (עם `RSP1A`/`RSP1B` בתווית), ו-`usb_max_current_enable=0`.
+
+**7.2 קול כפול** — קונפיג זמני ל-rtl_airband עם שני מכשירים (להחליף את ה-serials):
+
+```bash
+sudo tee /tmp/dual.conf >/dev/null <<'EOF'
+stats_filepath = "/tmp/dual_stats.txt";
+devices: (
+  { type = "soapysdr"; device_string = "driver=sdrplay,serial=RSP1B_SERIAL";
+    sample_rate = 2.56; mode = "multichannel"; centerfreq = 134.9;
+    channels: ( { freq = 134.600; modulation = "am";
+      outputs: ( { type = "icecast"; server = "127.0.0.1"; port = 8000; mountpoint = "dual1.mp3";
+                   username = "source"; password = "airam"; } ); } ); },
+  { type = "soapysdr"; device_string = "driver=sdrplay,serial=RSP1A_SERIAL";
+    sample_rate = 2.56; mode = "multichannel"; centerfreq = 121.0;
+    channels: ( { freq = 120.500; modulation = "am";
+      outputs: ( { type = "icecast"; server = "127.0.0.1"; port = 8000; mountpoint = "dual2.mp3";
+                   username = "source"; password = "airam"; } ); },
+              { freq = 121.400; modulation = "am";
+      outputs: ( { type = "icecast"; server = "127.0.0.1"; port = 8000; mountpoint = "dual3.mp3";
+                   username = "source"; password = "airam"; } ); } ); }
+);
+EOF
+```
+
+```bash
+sudo rtl_airband -f -c /tmp/dual.conf
+```
+
+בטרמינל שני, 10 דקות:
+
+```bash
+for i in $(seq 600); do echo "$(date +%T) $(vcgencmd pmic_read_adc EXT5V_V | grep -o '=[0-9.]*') $(vcgencmd get_throttled)"; sleep 1; done | tee /tmp/dual_power.log
+```
+
+```bash
+top -b -d 10 -n 60 | grep -E "rtl_airband|sdrplay_api|acarsdec" | tee /tmp/dual_cpu.log
+```
+
+```bash
+grep buffer_overflow /tmp/dual_stats.txt
+```
+
+האזנה: `http://<IP>:8000/dual1.mp3` (וגם 2 ו-3).
+
+**7.3 קול + ACARS** — אותו קונפיג בלי המכשיר השני (רק RSP1B), ובמקביל:
+
+```bash
+sudo acarsdec -g -10 -m 160 -o 1 -d driver=sdrplay,serial=RSP1A_SERIAL 130.450 131.425 131.525 131.550 131.725 131.825 131.850
+```
+
+אותן שלוש פקודות מדידה.
+
+**7.4 ניתוק** — בזמן ש-7.3 רץ: לנתק את ה-RSP1A ולחבר בחזרה. לרשום: האם ה-rtl_airband
+על ה-RSP1B ממשיך? (החיבור מחדש מאתחל את `sdrplay.service` דרך udev — מצופה שגם הוא ייקטע,
+ובהרצה ידנית בלי systemd אולי לא יתאושש לבד.)
+
+**7.5 רף להחלטה** — הספים הם של המכשירים עצמם, לא שלנו:
+
+- **עובר:** אין ביט undervoltage חדש ב-`get_throttled` לאורך 10 דקות בכל תרחיש;
+  `buffer_overflow_count` לא עולה; אודיו בכל ה-mounts; acarsdec מדפיס הודעות.
+- **נכשל ⇒ פתרון חומרה לפני קוד:** ביט undervoltage, כיבוי, או overflow מתמשך.
+- **לתעד בכל מקרה:** ‏CPU לכל תהליך, ‏EXT5V_V מינימלי מול ה-baseline ב-standby, ומה קרה
+  ב-7.4. זה נכנס לכאן כ-§7.6 לפני כל מימוש.
+
+---
+
+## 8. שלבי מימוש (אחרי ששלב 0 עבר)
+
+1. **כמה ערוצים בחלון של SDR אחד.** הרחבת `render_config` לרשימת ערוצים, ובחירה ב-UI
+   **רק** מתוך ערוצים שנכנסים לחלון (החישוב של §2 כפונקציה טהורה + בדיקות). מיקסר סטריאו.
+   **שימושי גם בלי ה-RSP1A**, בלי תוספת זרם, ומתרגל את כל שכבת ה-UI/מיקסר/מדדים שהשלב הבא צריך.
+2. **`voice2`.** מיפוי תפקידים לפי serial, ‏`serial=` ב-`render_config`, שער serial ב-`airam-wait-sdrplay`,
+   ‏`/api/sdr` לכל מכשיר, נפילה מבוקרת לקול רגיל עם שגיאה גלויה כשהמשני חסר.
+3. **`voice_acars`.** ‏`airam-acars2.service`, ‏Conflicts מעודכנים, ‏sudoers (start/stop ליחידה
+   החדשה בלבד), קיבוע ה-serial גם ב-`airam-acars`/`airam-vdl2` הרגילים.
+4. **לא ב-MVP:** ‏SATCOM כפול, סריקה כפולה, VDL2 כמצב משני (אותו מבנה כמו `voice_acars` —
+   כשיש ביקוש).
+
+כל שלב — `VERSION`/`CHANGELOG`/בדיקות כרגיל, ובדפדפן **מול נתונים אמיתיים** (CLAUDE.md §7).
+
+---
+
+## 9. מה נדחה
+
+- **SDR אחד ב-8.192Msps במקום שני מכשירים** — מכסה עד ~7.5MHz, כלומר עדיין לא מגדל + גישה
+  (14MHz), ומעלה CPU פי ~3 ו-USB ל-~33MB/s. גרוע יותר בכל פרמטר שחשוב בספק 3A.
+- **rtl_airband `mode = "scan"`** בין מגדל לגישה — זו לא "בו-זמנית": מפספס שידור בערוץ אחד
+  כשהשני פעיל.
+- **ממסר אנטנה / מפצל במקום SDR שני** — לא פותר: עדיין מקלט אחד.
+- **`usb_max_current_enable=1`** — ר' §4.1.
+
+## 10. פתוח
+
+- התנהגות `sdrplay_apiService` עם שני לקוחות — ‏§7.2/7.3 עונים.
+- האם ה-RSP1A וה-RSP1B "מפריעים" זה לזה כשהם קרובים (דליפת LO)? אין לזה מקור; האזנה
+  ב-7.2 עם וקטור אנטנות שונה תראה.
+- אנטנות: שתי אנטנות נפרדות, או אחת עם מפצל פסיבי (~3.5dB הפסד לכל ענף) — לפי מה שזמין
+  בשטח; זה לא משנה את התוכנה.
