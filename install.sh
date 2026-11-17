@@ -304,9 +304,19 @@ else
     cmake $DUMPVDL2_CMAKE_FLAGS .. && make -j"$(nproc)" && make install && ldconfig \
     || die "בניית dumpvdl2 נכשלה."
   command -v dumpvdl2 >/dev/null 2>&1 || die "בניית dumpvdl2 נכשלה (בדוק SoapySDR/libacars/glib2)."
-  # אזהרה מוקדמת (לא כישלון): הבינארי חייב לכלול את קלט ה-SoapySDR שה-unit משתמש בו
-  grep -qi soapysdr < <(dumpvdl2 --version 2>&1) \
+  # אזהרה מוקדמת (לא כישלון): הבינארי חייב לכלול את קלט ה-SoapySDR שה-unit משתמש בו.
+  # ⚠ רשימת הקלטים המקומפלים מופיעה רק ב-‎--help (usage). ‎--version מדפיס שורת גרסה
+  # בלבד ("dumpvdl2 X (libacars Y)") — הבדיקה הקודמת מולו הזהירה *תמיד*, גם כשתקין.
+  dumpvdl2_help="$(dumpvdl2 --help 2>&1 || true)"
+  grep -q -- '--soapysdr' <<<"$dumpvdl2_help" \
     || warn "dumpvdl2 נבנה בלי SoapySDR - מצב VDL2 לא יעבוד. ודא libsoapysdr-dev והרץ שוב."
+  # ‎--sdrplay3 (הדרייבר הנייטיבי) לא בשימוש ביחידה — רק לניסוי scripts/airam-vdl2-ifbw
+  # ול-fallback שבהערות airam-vdl2.service. מידע, לא אזהרה.
+  if grep -q -- '--sdrplay3' <<<"$dumpvdl2_help"; then
+    log "dumpvdl2: קלט sdrplay3 (נייטיבי) זמין."
+  else
+    log "dumpvdl2: נבנה בלי sdrplay3 (נייטיבי) — לא בשימוש כרגע; ר' docs/vdl2-if-filter-design.md."
+  fi
   mkdir -p "$(dirname "$AIRAM_VDL2_MARK")"
   printf '%s' "$DUMPVDL2_BUILD_SIG" > "$AIRAM_VDL2_MARK"
 fi

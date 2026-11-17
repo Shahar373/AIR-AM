@@ -401,6 +401,12 @@ MHz** (Common Signalling Channel). ה-Pi מפענח אותו עם **dumpvdl2** �
 אירופה* (136.725/775/825/875/975) נכנסת כולה בחלון דגימה אחד; בנק *CSC בלבד* (136.975)
 מקל על ה-CPU. חזרה לשמע — **🎧 האזן למגדל** או החלף חזרה ל-**📻 קול**.
 
+> **שאלה פתוחה — מסנן ה-IF:** בבנק ברירת המחדל ה-RSP1B מקבל מסנן של 200kHz (‏dumpvdl2 מבקש
+> 271kHz, והדרייבר מעגל למטה), ולכן 136.725 ו-136.975 (ה-CSC) יושבים ב-±125kHz, מחוץ למעבר
+> הנומינלי. אם זה עולה הודעות — טרם נמדד. לבדיקה (ב-standby, ‏`sudo`): `scripts/airam-vdl2-ifbw probe`
+> (כ-10 שניות), ואז `scripts/airam-vdl2-ifbw ab` (A/B של שעה מול הדרייבר הנייטיבי, 1.536MHz).
+> ר' [`docs/vdl2-if-filter-design.md`](docs/vdl2-if-filter-design.md).
+
 **שמירה וייצוא:** ההודעות נשמרות ל-`/var/lib/airam/vdl2.jsonl` (שורד restart), וניתן
 לייצא הכול מכפתורי **CSV/JSON** (CSV עם BOM ל-Excel, כולל עמודת `icao`).
 
@@ -811,7 +817,7 @@ AIR-AM בנוי לרוץ **לבד** לאורך זמן (שרידות reboot, סר
 | latency גבוה (עיכוב בשמיעה) | שני גורמים: (1) Icecast `burst-size=0` — `install.sh` מבטיח זאת גם אם התג חסר או נמצא בהערה בקובץ ברירת המחדל. (2) rtl_airband מקודד MP3 ב-VBR שצונח ל-~1KB/s בשקט => הדפדפן ממלא את ה-buffer ההתחלתי ~30 שניות; ההתקנה בונה מחדש עם **CBR 48kbps** (זרם קבוע 6KB/s) => הנגן מתחיל תוך שניות. **הרץ `sudo ./install.sh` (עדכון)** כדי ששני התיקונים יחולו. כפתור "סנכרן ל-live" בממשק מחזיר ל-live אם הנגן נסחף מאחור. רצפה מעשית בנגן דפדפן: ~2–5 שניות. |
 | ניתקתי וחיברתי את ה-SDR | השירותים מתאוששים לבד (`Restart=always`, ללא StartLimit) + כלל udev מפעיל מחדש בחיבור, **באותו מצב** שהיית בו (ACARS/VDL2 replug לא מחזיר לקול — הכלל ניטרלי-מצב). כך גם בסריקה, וגם כשהמערכת עלתה **בלי** SDR מחובר: המצב השמור נשמר, הממשק מראה תקלה, והמצב חוזר כשמחברים. התחזית היא עד ~דקה וחצי (טרם נמדד — ר' [`docs/resilience-test.md`](docs/resilience-test.md)). **חריג: SATCOM** — אחרי ניתוק ארוך מכמה דקות הוא נשאר כבוי בכוונה (בטיחות bias-T); היכנס אליו שוב מהממשק. לתמונת מצב מלאה: `sudo ~/AIR-AM/scripts/airam-resilience-check`. |
 | מצב ACARS לא עולה | `sudo journalctl -u airam-acars -f`. ודא ש-`acarsdec` נבנה (`command -v acarsdec`) ושה-SDR פנוי (rtl_airband נעצר). אפשר להריץ ידנית: `sudo systemctl restart airam-acars`. |
-| מצב VDL2 לא עולה | `sudo journalctl -u airam-vdl2 -f`. ודא ש-`dumpvdl2` נבנה **עם SoapySDR** (`dumpvdl2 --version` מציין soapysdr) ושה-SDR פנוי. ידנית: `sudo systemctl restart airam-vdl2`. אם מסלול ה-SoapySDR בעייתי על החומרה — יש שורת fallback לדרייבר הנייטיבי בהערה ב-`systemd/airam-vdl2.service`. |
+| מצב VDL2 לא עולה | `sudo journalctl -u airam-vdl2 -f`. ודא ש-`dumpvdl2` נבנה **עם SoapySDR** (`dumpvdl2 --help 2>&1 | grep -- --soapysdr`; ⚠ לא `--version`, שמדפיס רק את הגרסה) ושה-SDR פנוי. ידנית: `sudo systemctl restart airam-vdl2`. אם מסלול ה-SoapySDR בעייתי על החומרה — יש שורת fallback לדרייבר הנייטיבי בהערה ב-`systemd/airam-vdl2.service`. |
 | איפה נשמרות הודעות ה-VDL2 | ב-`/var/lib/airam/vdl2.jsonl` (JSONL, שורד אתחול, retention ~5000). ייצוא: כפתורי **CSV/JSON** בכרטיסיית VDL2 או `GET /api/vdl2/export?format=csv`. |
 | SATCOM לא נועל למרות ששרשרת ה-RF חיה | הרצפה בספקטרום מגיבה לניתוק ה-LNA (כלומר יש RF), אבל אין נעילה גם אחרי כיוון סבלני? **כבה את ה-AGC ונסה רווח ידני** (סליידר "רווח ידני" בתצוגת SATCOM, נסה ‎gRdB 25–35). ה-AGC מכוון לפי כל האנרגיה בחלון, וסלולר חזק ליד ה-L-band עלול לגרום לו להוריד רווח ולהחניק את הלוויין; ברווח ידני ה-LNA גם מקובע לרווח מקסימלי. |
 | מצב SATCOM לא עולה | `sudo journalctl -u airam-satcom -f`. ודא ש-`inmarsat-sniffer` נבנה **עם תמיכת SDRplay** (בלוג הבנייה של `install.sh`: `SDRplay: enabled`) ושה-SDR פנוי. ידנית: `sudo systemctl restart airam-satcom`. |

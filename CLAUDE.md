@@ -161,6 +161,10 @@ scripts/
                            # tests/test_listening_lab.py (RNNoise מזויף = השהיה טהורה).
   airam-gps-probe          # שלב 0 של docs/long-term-stats-design.md, קריאה בלבד: מקלט GPS ב-USB (fix, לוויינים,
                            # SNR, פיזור מיקום/מרחק מנתב"ג, פער שעון) + כמה ימים 5000 הודעות מכסות. לא מותקן.
+  airam-vdl2-ifbw          # ניסוי מסנן ה-IF של VDL2 (docs/vdl2-if-filter-design.md, Python): `probe` = readback
+                           # של getBandwidth + צורת רצפת הרעש 200k מול 1.536M; `ab` = בלוקים ABBA של ‎--soapysdr
+                           # (היום) מול ‎--sdrplay3, בקרה = הערוצים הפנימיים. דורש standby. לא מותקן. בדיקות:
+                           # tests/test_vdl2_ifbw.py (dumpvdl2 מזויף ב-UDP).
 
 udev/
   99-airam.rules           # חיבור RSP1B (Vendor 1df7) → restart אוטומטי לשירותי SDR.
@@ -171,6 +175,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_acars.py            # נרמול ACARS, כיוון מבני (block ID), latlon, labels, ATIS, OOOI, actype,
                            #   מעברי מצב; פערי קליטת 24.10.2026 (label 11/15/16, QP–QS, B3/B4, זנב פגום).
   test_vdl2.py             # נרמול VDL2 (מסלול A/B), env, מעברי מצב, ייצוא, health.
+  test_vdl2_ifbw.py        # ניסוי מסנן ה-IF (scripts/airam-vdl2-ifbw): המודל מהמקור (271k⇒200k), זרוע A =
+                           #   ExecStart, מיפוי רווח, ניתוח סינתטי עם תוצאה ידועה, A/B מקצה לקצה מול dumpvdl2 מזויף.
   test_satcom.py           # נרמול SATCOM (inmarsat-sniffer JSON, מאומת מהמקור), env, מעברי מצב, ייצוא,
                            #   שלושת מתגי ה-satcom (bias_tee/skip_c/spectrum), health/spectrum/log.
   test_boot.py             # _boot_restore: שחזור המצב באתחול (המתזמר) — כולל SATCOM.
@@ -243,6 +249,8 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   voice-channel-experiment/ # measure.py — המדידה (צריך בינארי rtl_airband). לא חלק מההתקנה/CI.
   adsb-crosscheck-design.md # ★ הצלבת ACARS↔ADS-B + BLOS (מומש, v2.27.0): בדיקת ספקים (מה אומת/לא),
                             #   שתי השאלות, קטגוריות מיקום, קריטריונים, ראיות, מה נדחה, בדיקת שלב 0 על ה-Pi.
+  vdl2-if-filter-design.md  # מסנן ה-IF במצב VDL2 (מהמקור: 271k מבוקש ⇒ 200k, הקצוות ב-±125k). ממתין למדידה —
+                            #   הניסוי, כלל ההחלטה שנקבע מראש, ומה בדיוק משנים אם המדידה תצדיק. היחידה לא שונתה.
 
 .github/workflows/ci.yml   # pytest + `bash -n`/shellcheck על install.sh והסקריפטים + systemd-analyze verify.
 ```
@@ -1402,6 +1410,12 @@ enabled, וגם לא `airam-denoise`, ובשדרוג `disable rtl_airband` אי�
 - **⚠ VDL2 env ב-Hz, state/UI ב-MHz:** dumpvdl2 מקבל תדרים ב-Hz. `write_vdl2_env` הוא
   **המקום היחיד** שממיר MHz→Hz; בכל שאר המקומות (state, `VDL2_BANKS`, UI, `_sanitize_freqs`)
   התדרים הם מחרוזות MHz — כמו ACARS. אל תערבב.
+- **⚠ מסנן ה-IF של VDL2 צר מהבנק — טרם נמדד אם זה מזיק** (`docs/vdl2-if-filter-design.md`).
+  dumpvdl2 מבקש `setBandwidth(span + 21kHz)` ו-SoapySDRPlay3 מעגל **למטה** (271k ⇒ 200k), כך
+  ש-136.725 ו-136.975 (ה-CSC) יושבים ב-±125kHz. אין דגל ב-dumpvdl2 ואין setting ב-Soapy; רק
+  ‎`--sdrplay3` (1.536MHz קבוע) עוקף. אל תחליף את הקלט לפני ש-`scripts/airam-vdl2-ifbw ab` הכריע
+  (§6 שם). שתי מלכודות קשורות: `--gr` שייך לדרייבר של API v2 בלבד (ב-v3: `--ifgr`/`--lna-state`),
+  ו-`dumpvdl2 --version` **לא** מפרט קלטים מקומפלים — רק `--help`.
 - **`config/airband.conf` · `config/acars.env` · `config/vdl2.env` נדרסים** ע"י `app.py`
   בזמן ריצה. לשנות ברירת מחדל קבועה — ערוך גם את הדיפולט בקוד (`ACARS_BANKS`/`VDL2_BANKS`/
   `ACARS_FREQS_DEFAULT`/`VDL2_FREQS_DEFAULT` וכו').
