@@ -559,6 +559,8 @@ SUDOERS_TMP="$(mktemp)"
 cat > "$SUDOERS_TMP" <<'EOF'
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart rtl_airband
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop rtl_airband
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart rtl_airband2
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop rtl_airband2
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-acars
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-acars
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-acars2
@@ -677,6 +679,7 @@ fi
 log "מתקין שירותי systemd ..."
 cp "$REPO_DIR/systemd/sdrplay.service"      /etc/systemd/system/
 cp "$REPO_DIR/systemd/rtl_airband.service"  /etc/systemd/system/
+cp "$REPO_DIR/systemd/rtl_airband2.service" /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-web.service"    /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-acars.service"  /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-acars2.service" /etc/systemd/system/

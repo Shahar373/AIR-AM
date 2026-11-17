@@ -308,6 +308,16 @@
     /* ---------- תצוגת הרדיו ---------- */
     /* פאנל הרדיו: התוכן ממורכז (מספר התדר, נגן) */
     .p-radio .panel-bd { text-align: center; padding-top: .9rem; }
+    /* קול כפול: הערוץ השני (המקלט המשני) — תיבה בתוך פאנל הרדיו, לא פאנל בגריד */
+    .v2-box { margin-top: var(--sp-3); padding: var(--sp-3); border: 1px solid var(--border);
+      border-radius: var(--r-ctrl); background: var(--panel-2); text-align: start; }
+    .v2-hd { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); flex-wrap: wrap; }
+    .v2-ttl { font-weight: 600; font-size: .9rem; }
+    .v2-freq { font-size: 1.35rem; font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate; }
+    .v2-row { display: flex; gap: var(--sp-2); margin-top: var(--sp-2); flex-wrap: wrap; align-items: center; }
+    .v2-row select, .v2-row input { flex: 1 1 8rem; min-width: 0; }
+    .v2-play { width: 44px; height: 44px; border-radius: 50%; font-size: 1.1rem; flex: 0 0 auto; }
+    .v2-rf { font-size: .8rem; color: var(--muted); margin-top: var(--sp-2); }
     .pill {
       display: inline-flex; align-items: center; gap: .45rem;
       font-size: .8rem; color: var(--dim);
@@ -1490,6 +1500,13 @@
           <p class="mc-sub" id="homeDualSub">—</p>
           <button type="button" class="primary" id="homeGoDual">▶ הפעל קול + ACARS</button>
         </div>
+        <div class="mode-card hidden" id="homeCardVoice2">
+          <div class="mc-title">📻📻 קול כפול
+            <span class="pill live hidden mc-live"><span class="dot"></span><span>פעיל</span></span></div>
+          <p class="mc-desc hint">שני תדרי קול יחד, מקלט לכל תדר. הערוץ השני עולה כמה שניות אחרי הראשון</p>
+          <p class="mc-sub" id="homeVoice2Sub">—</p>
+          <button type="button" class="primary" id="homeGoVoice2">▶ הפעל קול כפול</button>
+        </div>
         <div class="mode-card" id="homeCardAcars">
           <div class="mc-title">📡 ACARS
             <span class="pill live hidden mc-live"><span class="dot"></span><span>פעיל</span></span></div>
@@ -1824,6 +1841,26 @@
         <button type="button" data-v="speex" title="SpeexDSP קלאסי, הנחתה עד 15dB">Speex</button>
       </div>
     </div>
+    </div>
+
+    <!-- קול כפול (docs/dual-sdr-feasibility.md §8): ערוץ שני על המקלט המשני — rtl_airband נפרד,
+         סטרים נפרד (/live2.mp3). מוצג רק במצב voice2. ההקלטות שלו נכנסות לאותו יומן שידורים. -->
+    <div class="v2-box hidden" id="v2Box">
+      <div class="v2-hd">
+        <span class="v2-ttl">📻 ערוץ שני · מקלט משני</span>
+        <span class="v2-freq"><span id="v2Freq">—</span> <small>MHz</small></span>
+      </div>
+      <audio id="player2" preload="none"></audio>
+      <div class="v2-row">
+        <button type="button" class="primary v2-play" id="v2PlayBtn" aria-label="נגן / השהה את הערוץ השני">▶</button>
+        <select id="v2Preset" aria-label="תדר שמור לערוץ השני"></select>
+      </div>
+      <div class="v2-row">
+        <input id="v2FreqInput" type="number" inputmode="decimal" step="0.005" min="0.1" max="1999.5"
+               placeholder="או תדר חופשי" aria-label="תדר לערוץ השני" />
+        <button type="button" class="ghost" id="v2TuneBtn">כוונן ערוץ שני</button>
+      </div>
+      <p class="v2-rf" id="v2Rf">—</p>
     </div>
 
     <details class="err hidden" id="errBox">
@@ -2594,6 +2631,14 @@
     // כל מקום שגוזר את המצב החי מהדגלים חייב לבדוק את זה ראשון (ר' liveFromFlags).
     let dualMode = false;
     let dualReady = false;        // מוגדרים ראשי ומשני שונים (מ-/api/sdr) — רק אז מוצג הכרטיס
+    // מצב "קול כפול" (שני מקלטים, שני rtl_airband): הקול חי *וגם* ערוץ שני על המשני.
+    let voice2Mode = false;
+    let v2 = { freq: null, mod: "am" };   // הערוץ השני (מ-/api/state: voice2_freq/voice2_mod)
+    // מקור יחיד לדגלי המצבים המורכבים מתוך שם מצב (חי/שמור/תשובה)
+    function setComposite(m) { dualMode = (m === "voice_acars"); voice2Mode = (m === "voice2"); }
+    const isVoiceMode = (m) => m === "voice" || m === "voice_acars" || m === "voice2";
+    // התצוגה שמצב נוחת בה: מצבים מורכבים ⇒ קול; off/scan ⇒ בית
+    const viewFor = (m) => (m == null || m === "off" || m === "scan") ? "home" : isVoiceMode(m) ? "voice" : m;
     let scanStatus = { idx: -1, leg: null, next_switch_at: null };   // מ-/api/scan (רגל נוכחית)
     // ⚠ next_switch_at הוא זמן-*שרת*; Date.now() בלקוח. על Pi headless בלי
     // RTC/NTP (תרחיש שדה אמיתי) שני השעונים יכולים להיות תקינים כל אחד בפני
@@ -3224,6 +3269,89 @@
     // rtl_airband מרענן את הקובץ כל ~1 שנייה => פולינג כל שנייה למשוב כמעט-רציף
     // (לכיוון אנטנה בזמן אמת), רק כשהדף גלוי ובתצוגת קול (המדדים הם של rtl_airband)
     setInterval(() => { if (!document.hidden && appMode === "voice") pollMetrics(); }, 1000);
+
+    /* ---------- קול כפול: הערוץ השני (המקלט המשני) ---------- */
+    // נגן נפרד ל-/live2.mp3 — שני הערוצים יכולים להתנגן יחד. בלי סינון רעשים (שירות הסינון
+    // מאזין לערוץ הראשי בלבד) ובלי MediaSession (שייך לנגן הראשי).
+    const player2 = $("player2");
+    let want2 = false;
+    let v2InFlight = false;
+    const stream2URL = () => location.protocol === "https:"
+      ? `/stream?m=live2&t=${Date.now()}`
+      : `http://${location.hostname}:${cfg.port}/${cfg.mount2 || "live2.mp3"}?t=${Date.now()}`;
+    function stopV2Audio() {
+      want2 = false;
+      player2.pause();
+      player2.removeAttribute("src");
+      player2.load();
+    }
+    function renderVoice2() {
+      const show = voice2Mode && !sdrOff;
+      $("v2Box").classList.toggle("hidden", !show);
+      if (!show && want2) stopV2Audio();
+      $("v2Freq").textContent = v2.freq != null ? Number(v2.freq).toFixed(3) : "—";
+      $("v2PlayBtn").textContent = want2 ? "⏸" : "▶";
+      // רשימת הפריסטים — נבנית מחדש רק כשהיא השתנתה (לא לאפס בחירה באמצע)
+      const sel = $("v2Preset");
+      const sig = JSON.stringify((cfg.presets || []).map((p) => [p.name, p.freq]));
+      if (sel.dataset.sig !== sig) {
+        sel.dataset.sig = sig;
+        sel.textContent = "";
+        const o0 = document.createElement("option");
+        o0.value = ""; o0.textContent = "בחר תדר שמור…";
+        sel.appendChild(o0);
+        for (const p of cfg.presets || []) {
+          const o = document.createElement("option");
+          o.value = String(p.freq);
+          o.textContent = p.name + " · " + Number(p.freq).toFixed(3);
+          sel.appendChild(o);
+        }
+      }
+    }
+    function playV2() {
+      want2 = true;
+      player2.src = stream2URL();
+      player2.play().catch(() => { want2 = false; renderVoice2(); showToast("הנגינה של הערוץ השני נכשלה — נסה שוב"); });
+      renderVoice2();
+    }
+    $("v2PlayBtn").onclick = () => { if (want2) { stopV2Audio(); renderVoice2(); } else playV2(); };
+    async function tuneV2(freq) {
+      if (!Number.isFinite(freq) || freq <= 0) return;
+      const btn = $("v2TuneBtn");
+      btn.disabled = true;
+      $("v2Rf").textContent = "מכוונן את הערוץ השני…";
+      try {
+        const res = await apiSend("POST", "/api/tune2", { freq2: freq });
+        const d = await res.json();
+        if (d.ok) {
+          v2 = { freq: Number(d.voice2_freq), mod: d.voice2_mod || "am" };
+          $("v2FreqInput").value = "";
+          // rtl_airband2 אותחל ⇒ ה-mount נעלם ל-~10ש' (‏sleep מדורג ביחידה). מתחברים מחדש אחרי.
+          if (want2) setTimeout(() => { if (want2) playV2(); }, 12000);
+        } else {
+          showToast(d.error || "כיוונון הערוץ השני נכשל");
+        }
+      } catch (e) {
+        showToast("שגיאת רשת — בדוק חיבור ל-Pi");
+      } finally {
+        btn.disabled = false;
+        renderVoice2(); renderHome();
+      }
+    }
+    $("v2TuneBtn").onclick = () => tuneV2(Number($("v2FreqInput").value));
+    $("v2Preset").onchange = (e) => { const f = Number(e.target.value); e.target.value = ""; if (f) tuneV2(f); };
+    async function pollV2Metrics() {
+      if (v2InFlight || !voice2Mode) return;
+      v2InFlight = true;
+      try {
+        const m = await fetchJSON("/api/metrics?ch=2");
+        $("v2Rf").textContent = (m.ok && m.fresh && m.snr != null)
+          ? "SNR " + m.snr.toFixed(1) + " dB · אות " + (m.signal != null ? m.signal.toFixed(1) : "—") + " dBFS"
+          : "אין נתוני RF מהערוץ השני — ממתין למקלט…";
+      } catch (e) { /* החיווי הכללי מטפל בניתוק */ }
+      finally { v2InFlight = false; }
+    }
+    setInterval(() => { if (!document.hidden && appMode === "voice" && voice2Mode) pollV2Metrics(); }, 2000);
     // סינון רעשים: מהר יותר מ-pollGlobalState (10ש') רק כשדלוק ובתצוגת הקול
     setInterval(() => { if (!document.hidden && appMode === "voice" && denoise.enabled) pollDenoise(); }, 4000);
     pollMetrics();
@@ -4849,9 +4977,10 @@
                    : s["airam-vdl2"] === "active" ? "vdl2"
                    : s["airam-acars"] === "active" ? "acars"
                    : s["rtl_airband"] === "active"
-                     ? (s["airam-acars2"] === "active" ? "voice_acars" : "voice") : null;
+                     ? (s["airam-acars2"] === "active" ? "voice_acars"
+                        : s["rtl_airband2"] === "active" ? "voice2" : "voice") : null;
         sdrOff = !live;
-        dualMode = (live === "voice_acars");
+        setComposite(live);
         scanning = (h.app_mode === "scan");
         const acarsOn = live === "acars" || live === "voice_acars";
         if (acarsOn !== acars.active) acars.setActive(acarsOn);
@@ -4862,7 +4991,7 @@
           // כבוי (ר' ה-interval), אז מתניעים אותו כאן במקום לחכות לגילוי.
           if (live === "satcom" && appMode === "satcom") { pollSatcomHealth(); pollSatcomSpectrum(); }
         }
-        updateSdrPip(); renderPower();
+        updateSdrPip(); renderPower(); renderVoice2();
         applyDenoise(h.denoise);   // מתג גלובלי — אולי שונה מטלפון אחר
         if (scanning) {
           try {
@@ -4932,15 +5061,17 @@
       const leaving = sdrOff ? null : scanning ? "scan" : liveFromFlags();
       // מצב התצוגה לפני העדכון האופטימי — משוחזר כשהבקשה נדחית ב-_guard
       // (אימות), כלומר כשידוע בוודאות ששום דבר בשרת לא השתנה.
-      const prevView = appMode, prevSdrOff = sdrOff, prevScanning = scanning, prevDual = dualMode;
+      const prevView = appMode, prevSdrOff = sdrOff, prevScanning = scanning, prevComposite = leaving;
       // mode "off"/"scan" => נוחתים במסך הבית (אין תצוגה ייעודית לסריקה — היא "אפליקציית-על")
       sdrOff = (mode === "off");
       scanning = (mode === "scan");
-      dualMode = (mode === "voice_acars");
-      // קול + ACARS נוחת בתצוגת הקול (ה-ACARS זורם לתצוגת 📡 כרגיל)
-      showView(mode === "off" || mode === "scan" ? "home" : mode === "voice_acars" ? "voice" : mode);
-      if (mode !== "voice" && mode !== "voice_acars") { wantPlaying = false; player.pause(); }  // ה-SDR יוצא מקול
+      setComposite(mode);
+      // מצבים מורכבים נוחתים בתצוגת הקול (ה-ACARS זורם לתצוגת 📡 כרגיל)
+      showView(viewFor(mode));
+      if (!isVoiceMode(mode)) { wantPlaying = false; player.pause(); }  // ה-SDR יוצא מקול
+      renderVoice2();
       setStatus(mode === "voice_acars" ? "מפעיל קול, ואחריו ACARS על המקלט השני…"
+                : mode === "voice2" ? "מפעיל קול, ואחריו ערוץ שני על המקלט השני…"
                 : mode === "acars" ? "מפעיל ACARS…" : mode === "vdl2" ? "מפעיל VDL2…"
                 : mode === "satcom" ? "מפעיל SATCOM…" : mode === "scan" ? "מפעיל סריקה…"
                 : mode === "off" ? "מכבה מקלט…" : "מפעיל קול…", "busy");
@@ -4964,7 +5095,7 @@
           if (data.auth) {
             sdrOff = prevSdrOff;
             scanning = prevScanning;
-            dualMode = prevDual;
+            setComposite(prevComposite);
             showView(prevView);
             updateSdrPip();
             renderHome();
@@ -4974,11 +5105,12 @@
           const back = (data.state && data.state.app_mode) || "off";
           sdrOff = (back === "off");
           scanning = (back === "scan");
-          dualMode = (back === "voice_acars");
+          setComposite(back);
           acars.setActive(back === "acars" || back === "voice_acars");
           vdl2.setActive(back === "vdl2");
           satcom.setActive(back === "satcom");
-          showView(back === "off" || back === "scan" ? "home" : back === "voice_acars" ? "voice" : back);
+          showView(viewFor(back));
+          renderVoice2();
           if (back === "off") showHomeError(data.error, data.detail);
           renderPower(); renderHome();
           return false;
@@ -5016,10 +5148,27 @@
           acars.setActive(true);
           if (leaving === "satcom") showToast("🔌 החזר את אנטנת ה-airband ל-SDR");
           renderPower();
-          setStatus("מתחבר לסטרים… (ACARS פעיל על המקלט השני)", "busy");
-          clearTimeout(connectTimer);
-          connectTimer = setTimeout(() => reloadStream(), 1500);
+          if (data.secondary_only) {
+            // רק ACARS על המשני אותחל — הקול לא נקטע, אז לא מתחברים מחדש לסטרים
+            setStatus("תדרי ACARS הוחלפו — הקול ממשיך", "live");
+          } else {
+            setStatus("מתחבר לסטרים… (ACARS פעיל על המקלט השני)", "busy");
+            clearTimeout(connectTimer);
+            connectTimer = setTimeout(() => reloadStream(), 1500);
+          }
           acars.poll();
+        } else if (mode === "voice2") {
+          sdrOff = false;
+          acars.setActive(false); vdl2.setActive(false); satcom.setActive(false);
+          if (leaving === "satcom") showToast("🔌 החזר את אנטנת ה-airband ל-SDR");
+          if (data.voice2_freq != null) v2 = { freq: Number(data.voice2_freq), mod: data.voice2_mod || "am" };
+          renderPower(); renderVoice2();
+          if (!data.secondary_only) {
+            setStatus("מתחבר לסטרים… (ערוץ שני פעיל על המקלט השני)", "busy");
+            clearTimeout(connectTimer);
+            connectTimer = setTimeout(() => reloadStream(), 1500);
+          } else setStatus("הערוץ השני כוונן — הראשי ממשיך", "live");
+          pollV2Metrics();
         } else if (mode === "voice") {
           sdrOff = false;
           acars.setActive(false); vdl2.setActive(false); satcom.setActive(false);   // SDR יצא ממצב דאטה
@@ -5077,14 +5226,13 @@
         // אחרת התצוגה "משקרת" (למשל standby כשהרדיו עדיין משדר בפועל).
         sdrOff = (leaving === null);
         scanning = (leaving === "scan");
-        dualMode = (leaving === "voice_acars");
+        setComposite(leaving);
         acars.setActive(leaving === "acars" || leaving === "voice_acars");
         vdl2.setActive(leaving === "vdl2");
         satcom.setActive(leaving === "satcom");
-        showView(leaving === null || leaving === "scan" ? "home"
-                 : leaving === "voice_acars" ? "voice" : (leaving || "home"));
-        renderPower(); renderHome();
-        if (leaving === "voice" || leaving === "voice_acars") reloadStream();   // ה-player הושהה למעלה — לנסות לחזור לשידור
+        showView(viewFor(leaving));
+        renderPower(); renderHome(); renderVoice2();
+        if (isVoiceMode(leaving)) reloadStream();   // ה-player הושהה למעלה — לנסות לחזור לשידור
         setStatus("שגיאת רשת — בדוק חיבור ל-Pi", "err");
         return false;
       } finally {
@@ -5099,7 +5247,7 @@
       // ב-SDR בכלל, ואין סיבה לחסום למשתמש הצצה בפיד בזמן שההפעלה מתבשלת.
       ["acarsActivateBtn", "acarsStopBtn", "acarsTowerBtn", "voiceActivateBtn",
        "powerBtn", "standbyOnBtn",
-       "homeGoVoice", "homeGoAcars", "homeGoVdl2", "homeGoSatcom", "homeGoScan", "homeStopBtn", "homeGoDual",
+       "homeGoVoice", "homeGoAcars", "homeGoVdl2", "homeGoSatcom", "homeGoScan", "homeStopBtn", "homeGoDual", "homeGoVoice2",
        "vdl2ActivateBtn", "vdl2StopBtn", "vdl2TowerBtn",
        "satcomActivateBtn", "satcomStopBtn"].forEach(id => {
         const el = $(id); if (el) el.disabled = disabled;
@@ -5138,7 +5286,7 @@
     }
 
     function liveFromFlags() {
-      return sdrOff ? null : dualMode ? "voice_acars" : (satcom && satcom.active) ? "satcom"
+      return sdrOff ? null : dualMode ? "voice_acars" : voice2Mode ? "voice2" : (satcom && satcom.active) ? "satcom"
            : (vdl2 && vdl2.active) ? "vdl2" : acars.active ? "acars" : "voice";
     }
     function updateSdrPip() {
@@ -5147,7 +5295,8 @@
       const realMode = liveFromFlags();
       document.querySelectorAll("#modeSeg button").forEach(b => {
         b.classList.toggle("sdr-live", b.dataset.v === realMode
-          || (realMode === "voice_acars" && (b.dataset.v === "voice" || b.dataset.v === "acars")));
+          || (realMode === "voice_acars" && (b.dataset.v === "voice" || b.dataset.v === "acars"))
+          || (realMode === "voice2" && b.dataset.v === "voice"));
       });
       if (appMode === "home") renderHome();
     }
@@ -5208,6 +5357,10 @@
         // <bdi>: תדר לטיני באמצע משפט עברי — בלעדיו הכיוון מתבלגן (נבדק ב-360px)
         txt.innerHTML = "שני מקלטים: <b>📻 קול</b> <bdi>" + Number(current).toFixed(3)
           + " MHz</bdi> ועוד <b>📡 ACARS</b> על המשני";
+      else if (live === "voice2")
+        txt.innerHTML = "שני מקלטים: <b>📻 קול</b> <bdi>" + Number(current).toFixed(3)
+          + " MHz</bdi> ועוד <b>📻 ערוץ שני</b> <bdi>" + (v2.freq != null ? Number(v2.freq).toFixed(3) : "—")
+          + " MHz</bdi>";
       else if (live === "voice")
         txt.innerHTML = "המקלט במצב <b>📻 קול</b> — " + Number(current).toFixed(3) + " MHz";
       else if (live === "acars") txt.innerHTML = "המקלט במצב <b>📡 ACARS</b> — מאזין להודעות דאטה";
@@ -5229,8 +5382,11 @@
       $("homeDualSub").textContent = (acars.selFreqs && acars.selFreqs.length)
         ? Number(current).toFixed(3) + " MHz + " + acars.selFreqs.join(" · ") : "—";
       $("homeCardDual").classList.toggle("hidden", !dualReady && !dualMode);
+      $("homeVoice2Sub").textContent = Number(current).toFixed(3) + " + "
+        + (v2.freq != null ? Number(v2.freq).toFixed(3) : "—") + " MHz";
+      $("homeCardVoice2").classList.toggle("hidden", !dualReady && !voice2Mode);
       const cards = { voice: "homeCardVoice", acars: "homeCardAcars", vdl2: "homeCardVdl2",
-                      satcom: "homeCardSatcom", voice_acars: "homeCardDual" };
+                      satcom: "homeCardSatcom", voice_acars: "homeCardDual", voice2: "homeCardVoice2" };
       for (const [m, id] of Object.entries(cards)) {
         const card = $(id);
         const isLive = !scanning && m === live;
@@ -6578,7 +6734,10 @@
       function selectBank(bank) {
         selFreqs = bank.freqs.slice();
         renderFreqs(bank.freqs); renderBanks();
-        if (active) applyMode(opts.mode, { freqs: bank.freqs });   // חי => החלף חלון מיד
+        // חי => החלף חלון מיד. ⚠ במצב של שני מקלטים (ACARS על המשני) — שולחים את המצב המורכב,
+        // לא opts.mode: "acars" רגיל היה יוצא מהמצב הכפול ומכבה את הקול שעל הראשי. השרת מאתחל
+        // אז רק את המשני (ר' api_mode). opts.liveMode — hook אופציונלי, ברירת מחדל opts.mode.
+        if (active) applyMode(opts.liveMode ? opts.liveMode() : opts.mode, { freqs: bank.freqs });
       }
       function setActive(on) {
         active = on;
@@ -6827,6 +6986,7 @@
     // var: hoisted (לא TDZ) — מגן על הפניות מוקדמות ב-updateSdrPip/renderVoiceAcarsBanner/reloadStream
     var acars = createDataView({
       prefix: "acars", mode: "acars", label: "ACARS",
+      liveMode: () => (dualMode ? "voice_acars" : "acars"),
       onMessage: (m) => { if (m.label === "A9" && m.decoded) updateAtisPanel(m); notifyMessage("acars", m); },
       onReset: () => { $("acarsAtis").classList.add("hidden"); atisTimestamp = null; },
     });
@@ -7515,6 +7675,7 @@
     // כרטיסי ההפעלה במסך הבית — שלושת המצבים שווי-מעמד, נקודת הכניסה הראשית
     $("homeGoVoice").onclick = () => applyMode("voice");
     $("homeGoDual").onclick = () => applyMode("voice_acars", acars.selFreqs ? { freqs: acars.selFreqs } : undefined);
+    $("homeGoVoice2").onclick = () => applyMode("voice2");
     $("homeGoAcars").onclick = () => applyMode("acars", acars.selFreqs ? { freqs: acars.selFreqs } : undefined);
     $("homeGoVdl2").onclick = () => applyMode("vdl2", vdl2.selFreqs ? { freqs: vdl2.selFreqs } : undefined);
     $("homeGoSatcom").onclick = enterSatcom;
@@ -7603,6 +7764,7 @@
       else if (back === "vdl2") applyMode("vdl2", vdl2.selFreqs ? { freqs: vdl2.selFreqs } : undefined);
       else if (back === "voice") applyMode("voice");
       else if (back === "voice_acars") applyMode("voice_acars", acars.selFreqs ? { freqs: acars.selFreqs } : undefined);
+      else if (back === "voice2") applyMode("voice2");
       else if (back === "scan") applyMode("scan");   // הפלאן נשלף מהשרת (scan_plan שמור)
       else if (back === "satcom") enterSatcom();      // כולל אישור אנטנה — ר' confirmSatcomAntenna
       else showView("home");
@@ -7703,6 +7865,7 @@
     fetchJSON("/api/state").then((st) => {
       document.body.classList.remove("loading");   // הצלחה => מבטלים את שלד הטעינה
       cfg = st;
+      if (st.voice2_freq != null) v2 = { freq: Number(st.voice2_freq), mod: st.voice2_mod || "am" };
       // לפני כל streamURL(): הסטרים הראשון כבר צריך לבקש את ה-mount הנכון
       denoise = { ...denoise, enabled: !!st.denoise, available: !!st.denoise_available,
                   engine: st.denoise_engine || "rnmix",
@@ -7756,6 +7919,11 @@
         acars.setActive(true);
         updateSdrPip();
         showView("voice");
+      } else if (st.app_mode === "voice2" && st.mode_ok !== false) {
+        voice2Mode = true;
+        updateSdrPip();
+        showView("voice");
+        renderVoice2();
       } else if (st.app_mode === "acars" && st.mode_ok !== false) {
         acars.setActive(true);              // מאתחל pip + SDR bar + banner מיד בטעינה
         showView("acars");

@@ -141,6 +141,8 @@ systemd/
   airam-acars.service      # ACARS. Conflicts=rtl_airband. *לא* enabled. root.
   airam-vdl2.service       # VDL2 (dumpvdl2). Conflicts=rtl_airband+airam-acars. *לא* enabled. root.
   airam-satcom.service     # SATCOM (inmarsat-sniffer). Conflicts=שלושת האחרים. *לא* enabled. root.
+  rtl_airband2.service     # הערוץ השני של "קול כפול" (voice2) על המשני. Conflicts מול acars/vdl2/satcom/acars2,
+                           #   *לא* מול rtl_airband. ‏airam-wait-sdrplay secondary + sleep 10 (דירוג). *לא* enabled.
   airam-acars2.service     # ACARS על המקלט ה*משני* — מצב "קול + ACARS". Conflicts מול acars/vdl2/satcom
                            #   אבל *לא* מול rtl_airband (רץ לצדו). השער מחכה ל-SDR_SECONDARY. *לא* enabled.
                            #   אף צרכן SDR לא עולה באתחול — airam-web (המתזמר) משחזר את המצב השמור.
@@ -211,6 +213,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_sdr_roles.py        # קיבוע לפי serial: בלי בחירה = כמו קודם; עם ראשי — כל צרכן (קונפיג/env), serial זדוני
                            #   לא נכנס, ‎${X_SERIAL} ביחידות, /api/sdr/devices+roles (+_guard), והשער airam-wait-sdrplay
                            #   (מחכה ל-serial, לא בועט ב-sdrplay כשצרכן אחר רץ) מול כלים מזויפים.
+  test_voice2.py           # קול כפול: קונפיג המשני (serial/stats/mount, בלי udp), הדירוג, /api/tune2 (רק המשני,
+                           #   רולבק, 409 מחוץ למצב), /api/tune שומר, state/health חלקי=תקלה, reconcile, boot, metrics?ch=2.
   test_voice_acars.py      # קול + ACARS: env המשני, תנאי תפקידים, **הסדר** (stats של הקול לפני acars2), כשל ⇒ off,
                            #   state/health חלקי = תקלה, כיוונון שומר/מעבר מפורש עוזב, reconcile מרים רק את acars2, boot.
   test_sdr.py              # חיווי SDR (/api/sdr): פענוח lsusb/SoapySDRUtil, כל המצבים, צרכן שעלה באמצע
@@ -237,7 +241,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
 docs/                       # מסמכי תכנון/החלטות. מתעדים *למה* — ומה נדחה ועל סמך מה.
   field-station-roadmap.md  # מפת הדרכים שהובילה למד השדה, דוח הסשן ורוסטר המטוסים.
   satcom-feasibility.md     # היתכנות ואפיון מצב SATCOM (מומש).
-  dual-sdr-feasibility.md   # היתכנות שני SDR (RSP1A+RSP1B) — קול כפול / קול+ACARS, בספק 3A. טרם מומש:
+  dual-sdr-feasibility.md   # היתכנות שני SDR (RSP1A+RSP1B) — קול כפול / קול+ACARS, בספק 3A (מומשו v2.34/v2.35;
+                            #   §11: ACARS+VDL2+קול — לא עם שני מקלטים). ממצאי המקור:
                             #   בדיקת מקור (serial חובה בכל צרכן, rtl_airband נופל כשמכשיר חסר, השער
                             #   של airam-wait-sdrplay מפיל את הצרכן השני), תקציב 600mA, ומדידה (§7, airam-dual-sdr-probe).
   dual-sdr-home-test.md     # נוהל צעד-אחר-צעד להרצת airam-dual-sdr-probe בבית (לא בשטח — רק ספק הכוח של השטח):
@@ -285,6 +290,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
 | `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain (`--sdrplay-gain=N` או ריק=AGC), bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
+| `/etc/rtl_airband/airband2.conf`, `/run/rtl_airband2_stats.txt` | קונפיג + מדדי הערוץ השני (קול כפול) — serial של המשני, mount `/live2.mp3`, בלי `udp_stream` | app.py (`write_voice2_config`, לפני כל הפעלה) |
 | `/etc/airam/acars2.env` | תדרי ACARS + `ACARS_SERIAL=,serial=<משני>` למצב קול + ACARS | app.py (`write_acars2_env`, לפני כל הפעלה) |
 | `/etc/airam/sdr.env` | `SDR_PRIMARY=<serial>`/`SDR_SECONDARY=` — מה ש-`airam-wait-sdrplay` מחכה לו. נקרא ב-`sed` מעוגן, **לא** source | app.py (`write_sdr_env`, ב-POST `/api/sdr/roles` ובעלייה) |
 | `/usr/local/bin/airam-denoise`, `/usr/local/bin/airam-rnnoise`, `/usr/local/bin/airam-speexdn` | שרשרת סינון הרעשים + שני המנועים (נבדקים חי, פר-מנוע, ע"י `_denoise_missing`) | install.sh (שלבים 7, 4e, 4f) |
@@ -564,6 +570,20 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   reconcile: קול חי + acars2 מת ⇒ מרים **רק** את acars2. בדיקת אנטנה/ניסוי — 409 במצב הכפול. **לא
   scannable**, ו-`MODE_SERVICE` לא כולל אותו (מצב מורכב, לא שירות). UI: `dualMode`/`dualReady`,
   `liveFromFlags()` (מקור יחיד — כל גזירת "המצב החי" מהדגלים), כרטיס `#homeCardDual` רק כשנבחרו ראשי+משני.
+- **מצב "קול כפול" (`voice2`) — שני מקלטים, שני rtl_airband** (`docs/dual-sdr-feasibility.md` §8): הכללה של
+  `voice_acars` לרגיסטרי `COMPOSITE_SECONDARY` (מצב⇒שירות המשני; `SECONDARY_SERVICES`, `COMPOSITE_LABEL`).
+  `_enter_composite(mode, params, st)` = עצירת השאר ⇒ קול על הראשי ⇒ `_wait_voice_settled` ⇒ `_start_secondary`
+  (`_start_acars2`/`_start_voice2`); `_enter_voice_acars`/`_enter_voice2` עוטפים אותו. `write_voice2_config`:
+  `render_config(..., stats_path=STATS2_PATH, mount=MOUNT2, denoise_udp=False)` — ⚠ בלי UDP: `airam-denoise` מאזין
+  לפורט אחד, ושני שולחים היו מערבבים תדרים. squelch/מסנן/notch מהראשי, AGC. `voice2_freq`/`voice2_mod` ב-state;
+  `_parse_voice2` (זהה לראשי ⇒ 400 — גם שמות ההקלטות היו מתנגשים). `POST /api/tune2` — רק המשני, תחת `TUNE_LOCK`,
+  כשל ⇒ restart לתדר הקודם. `/api/metrics?ch=2`, `/stream?m=live2` (רשימה סגורה). `_voice_tune` במצב מורכב שומר
+  את המשני. UI: `voice2Mode`, `setComposite(m)`/`isVoiceMode`/`viewFor` (מקור יחיד לדגלים), `#homeCardVoice2`,
+  `#v2Box` (בתוך פאנל הרדיו — לא פאנל בגריד) עם `player2` נפרד, `pollV2Metrics` (2ש').
+  ⚠ **שינוי בצד המשני לא נוגע בראשי:** `/api/mode` למצב מורכב שכבר שמור ושהקול שלו חי
+  (`_composite_secondary_only`) מאתחל רק את המשני (`secondary_only:true`; כשל ⇒ 500, הקול ממשיך — לא off).
+  ב-UI: `createDataView` מקבל `opts.liveMode` — בנק ACARS במצב הכפול שולח `voice_acars`, לא `acars`
+  (שהיה יוצא מהמצב ומכבה את הקול). כיוונון הקול (`_voice_tune`) שומר את המשני — הסימטריה ההפוכה.
 - **חיווי SDR — מזוהה? פנוי?** (`GET /api/sdr`, ליד `api_health`): `_sdr_usb` (lsusb 1df7 —
   `None` כשאין lsusb, **בכוונה** שונה מ-`_sdr_present` שמניח True כהחלטת רולבק),
   `_sdr_probe_api` (`SoapySDRUtil --find=driver=sdrplay`, אותו probe כמו `airam-wait-sdrplay`;
@@ -1016,7 +1036,8 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `denoise`/`denoise_mount`/`denoise_available`, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `scan_plan`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`) |
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). כולל `chan_filter` (standard/narrow/narrow8k) ו-`fm_notch` — מפתח שלא נשלח ⇒ הערך השמור. דרך `_guard`. |
-| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב)/**voice_acars** (שני מקלטים — 400 בלי ראשי+משני; `freqs` = בנק ה-ACARS למשני). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית), `skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12), `spectrum` (bool אופציונלי — `false` לכיבוי האבחון, ר' §9/§12) ו-`gain` (‏`null`=AGC (ברירת מחדל) או מספר=gRdB ידני 20–59, נחתך; ר' §12). לכולם: ברירת מחדל = הבחירה השמורה. ⚠ ב-`gain` בלבד `null` הוא **ערך משמעותי** (AGC מפורש) ולא היעדר — הזיהוי הוא לפי נוכחות המפתח בגוף הבקשה. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
+| POST | `/api/tune2` | כיוונון הערוץ השני של "קול כפול" (`{freq2, mod2?}`) — מאתחל רק את `rtl_airband2`. 409 מחוץ ל-`voice2`, 400 על תדר זהה לראשי, כשל ⇒ חזרה לתדר השני הקודם. דרך `_guard` + `TUNE_LOCK` |
+| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב)/**voice_acars** (שני מקלטים — 400 בלי ראשי+משני; `freqs` = בנק ה-ACARS למשני)/**voice2** (קול כפול — `freq2`/`mod2` לערוץ השני). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית), `skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12), `spectrum` (bool אופציונלי — `false` לכיבוי האבחון, ר' §9/§12) ו-`gain` (‏`null`=AGC (ברירת מחדל) או מספר=gRdB ידני 20–59, נחתך; ר' §12). לכולם: ברירת מחדל = הבחירה השמורה. ⚠ ב-`gain` בלבד `null` הוא **ערך משמעותי** (AGC מפורש) ולא היעדר — הזיהוי הוא לפי נוכחות המפתח בגוף הבקשה. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
 | GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור), `wait` (כש-`leg=None`: ‏`"window"` = אף רגל לא בחלון, לא תקלה / `"sdr"` = ה-SDR לא ב-USB, תקלה) |
 | GET | `/api/acars` | (כל שלוש תצוגות הדאטה: גם `?xseq=` ⇒ `xcheck` {id: תקציר הצלבה} + `xcheck_cursor`) הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון; `?day=YYYY-MM-DD` ארכיון מהדיסק, snapshot סטטי) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט; לא ב-`?day=`). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM, עמודות `level`+`snr`) |
@@ -1140,7 +1161,7 @@ v0.2 **לא נבנה על Pi**: נתיב NEON כולל `os_support.h` שלא ק�
 מ-apt, חתימה = מקור ה-C + גרסת הספרייה, אותו warn-לא-die**). 5. `Icecast2`
 (מאזין בלי סיסמה; `<mount>` ל-`/clean.mp3` עם `fallback-mount` ל-`/live.mp3` — אידמפוטנטי,
 ‏`sources=4`). 6. קונפיג התחלתי + state (6b: יצירת משתמש `airam` + sudoers ממוקד —
-**13 פקודות systemctl**: restart/stop × rtl_airband/airam-acars/airam-acars2/airam-vdl2/
+**15 פקודות systemctl**: restart/stop × rtl_airband/rtl_airband2/airam-acars/airam-acars2/airam-vdl2/
 airam-satcom, `reset-failed` ל-airam-satcom בלבד (מנקה תקרת-הפעלות אחרי
 קריסה — ר' §12), ו-start/stop ל-airam-denoise; seeding של `acars.env`+`vdl2.env`+`satcom.env`). 7. שרת הווב
 (7b: תמלול whisper אופציונלי, `sudo INSTALL_WHISPER=1 ./install.sh` — ⚠ הסדר

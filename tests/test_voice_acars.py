@@ -159,6 +159,11 @@ def test_api_mode_success_and_failure_paths(env):
     st = app.load_state()
     assert st["app_mode"] == "voice_acars" and st["acars_freqs"] == ["131.550"]
     env.fail = {"airam-acars2"}
+    # כבר במצב ⇒ רק המשני מאותחל; כשלו לא מפיל את הקול (test_voice2: ‏secondary_only)
+    r = c.post("/api/mode", json={"mode": "voice_acars"}, headers=ORIGIN)
+    assert r.status_code == 500 and "rtl_airband" in env.active
+    # כניסה מלאה (ממצב אחר) שנכשלת ⇒ off
+    c.post("/api/mode", json={"mode": "off"}, headers=ORIGIN)
     r = c.post("/api/mode", json={"mode": "voice_acars"}, headers=ORIGIN)
     assert r.status_code == 500 and r.get_json()["app_mode"] == "off"   # לעולם לא fallback לקול
     assert not env.active

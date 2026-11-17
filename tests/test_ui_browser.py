@@ -1407,3 +1407,91 @@ def test_dual_card_needs_both_roles_and_enters_voice_acars(page):
     page.evaluate("pollGlobalState()")
     expect(page.locator("#homeStateTxt")).to_contain_text("ACARS על המשני")
     expect(page.locator("#homeCardDual .mc-live")).to_be_visible()
+
+
+def test_voice2_card_enters_and_second_channel_tunes(page):
+    """כרטיס "קול כפול" מוסתר עד שיש ראשי+משני; לחיצה ⇒ POST voice2 ⇒ תצוגת הקול עם תיבת
+    הערוץ השני (התדר מהתשובה); "כוונן ערוץ שני" ⇒ POST /api/tune2; נגן שני מבקש /live2.mp3."""
+    sdr = _sdr_two(primary=_B)
+    sdr["secondary"] = _A
+    posted, tuned = [], []
+
+    def sdr_h(route, url):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(sdr))
+
+    def mode_h(route, url):
+        posted.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "app_mode": "voice2", "voice2_freq": 121.4,
+                                       "voice2_mod": "am"}))
+
+    def tune2_h(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        tuned.append(body)
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "voice2_freq": body["freq2"], "voice2_mod": "am"}))
+
+    def health_h(route, url):
+        on = bool(posted)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "ok": True, "app_mode": "voice2" if on else "off", "mode_ok": True,
+            "services": {"rtl_airband": "active" if on else "inactive", "icecast2": "active",
+                         "sdrplay": "active", "airam-acars": "inactive", "airam-vdl2": "inactive",
+                         "airam-satcom": "inactive", "airam-acars2": "inactive",
+                         "rtl_airband2": "active" if on else "inactive"},
+            "stats_age": 1.0, "sdr_present": True}))
+
+    state = dict(_default_api()["/api/state"], app_mode="off", mode_ok=True, mount2="live2.mp3")
+    _mount(page, overrides={"/api/sdr": sdr_h, "/api/mode": mode_h, "/api/tune2": tune2_h,
+                            "/api/health": health_h, "/api/state": state})
+    page.click("#modeSeg button[data-v=home]")
+    expect(page.locator("#homeCardVoice2")).to_be_visible()
+    expect(page.locator("#v2Box")).to_be_hidden()
+    page.click("#homeGoVoice2")
+    expect(page.locator("#voiceView")).to_be_visible()
+    assert posted and posted[-1]["mode"] == "voice2"
+    expect(page.locator("#v2Box")).to_be_visible()
+    expect(page.locator("#v2Freq")).to_have_text("121.400")
+    page.fill("#v2FreqInput", "118.05")
+    page.click("#v2TuneBtn")
+    expect(page.locator("#v2Freq")).to_have_text("118.050")
+    assert tuned[-1] == {"freq2": 118.05}
+    page.click("#v2PlayBtn")
+    assert "live2.mp3" in page.evaluate("document.getElementById('player2').src")
+    page.click("#modeSeg button[data-v=home]")
+    page.evaluate("pollGlobalState()")
+    expect(page.locator("#homeStateTxt")).to_contain_text("ערוץ שני")
+    expect(page.locator("#homeCardVoice2 .mc-live")).to_be_visible()
+
+
+def test_acars_bank_switch_in_dual_mode_keeps_dual(page):
+    """במצב קול + ACARS, החלפת בנק ACARS שולחת voice_acars (השרת מאתחל רק את המשני) — לא
+    "acars", שהיה יוצא מהמצב הכפול ומכבה את הקול."""
+    posted = []
+
+    def mode_h(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        posted.append(body)
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "app_mode": "voice_acars",
+                                       "acars_freqs": body.get("freqs") or ["131.550"],
+                                       "secondary_only": True}))
+
+    def acars_h(route, url):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "active": True, "freqs": ["131.550"],
+                                       "cursor": 0, "messages": [], "adsb": {}}))
+
+    state = dict(_default_api()["/api/state"], app_mode="voice_acars", mode_ok=True,
+                 acars_freqs=["131.550"],
+                 acars_banks=[{"name": "ראשי", "freqs": ["131.550"]},
+                              {"name": "אירופה", "freqs": ["131.725", "131.825"]}])
+    _mount(page, overrides={"/api/mode": mode_h, "/api/acars": acars_h, "/api/state": state})
+    page.click("#modeSeg button[data-v=acars]")
+    banks = page.locator("#acarsBanks button")
+    expect(banks.first).to_be_visible()
+    banks.filter(has_text="אירופה").click()
+    expect(page.locator('#modeSeg button[data-v=acars]')).to_have_class(re.compile(r"\bsdr-live\b"))
+    expect(page.locator('#modeSeg button[data-v=voice]')).to_have_class(re.compile(r"\bsdr-live\b"))
+    assert posted and posted[-1]["mode"] == "voice_acars"
+    expect(page.locator("#status")).to_contain_text("הקול ממשיך")   # בלי חיבור-מחדש לסטרים

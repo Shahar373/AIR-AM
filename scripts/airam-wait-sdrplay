@@ -46,7 +46,7 @@ device_ready() {
 }
 # צרכן SDR *אחר* פעיל (מצב שני מקלטים)? אז restart ל-sdrplay היה מפיל גם אותו (PartOf).
 other_consumer_active() {
-  for u in rtl_airband.service airam-acars.service airam-vdl2.service airam-satcom.service \
+  for u in rtl_airband.service rtl_airband2.service airam-acars.service airam-vdl2.service airam-satcom.service \
            airam-acars2.service; do
     [ "$u" = "$CALLER" ] && continue
     systemctl is-active --quiet "$u" 2>/dev/null && return 0
