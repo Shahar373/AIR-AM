@@ -1495,3 +1495,183 @@ def test_acars_bank_switch_in_dual_mode_keeps_dual(page):
     expect(page.locator('#modeSeg button[data-v=voice]')).to_have_class(re.compile(r"\bsdr-live\b"))
     assert posted and posted[-1]["mode"] == "voice_acars"
     expect(page.locator("#status")).to_contain_text("הקול ממשיך")   # בלי חיבור-מחדש לסטרים
+
+
+# --- ביקורת 17.11.2026: מצבים כפולים בממשק (כל אחת נכשלה לפני התיקון) -------------
+
+def _dual_health(services_extra, app_mode):
+    s = {"rtl_airband": "active", "icecast2": "active", "sdrplay": "active",
+         "airam-acars": "inactive", "airam-vdl2": "inactive", "airam-satcom": "inactive",
+         "airam-acars2": "inactive", "rtl_airband2": "inactive"}
+    s.update(services_extra)
+    return {"ok": True, "app_mode": app_mode, "mode_ok": True, "services": s,
+            "stats_age": 1.0, "sdr_present": True}
+
+
+def _acars_on():
+    return {"ok": True, "active": True, "freqs": ["131.550"], "cursor": 0, "messages": [], "adsb": {}}
+
+
+def test_voice_acars_play_sets_stream_after_load(page):
+    """ב"קול + ACARS" ה-ACARS תמיד פעיל — reloadStream חסם את הסטרים לגמרי (▶ לא עשה כלום)."""
+    state = dict(_default_api()["/api/state"], app_mode="voice_acars", mode_ok=True)
+    _mount(page, overrides={"/api/state": state, "/api/acars": _acars_on(),
+                            "/api/health": _dual_health({"airam-acars2": "active"}, "voice_acars")})
+    expect(page.locator("#voiceView")).to_be_visible()
+    expect(page.locator("#status")).not_to_have_text(re.compile("טוען"))   # לא נתקע על "טוען…"
+    page.click("#playBtn")
+    page.wait_for_function("(document.getElementById('player').getAttribute('src') || '').includes('.mp3')")
+
+
+def test_voice_acars_entry_connects_stream(page):
+    sdr = _sdr_two(primary=_B)
+    sdr["secondary"] = _A
+
+    def mode_h(route, url):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "app_mode": "voice_acars", "acars_freqs": ["131.550"]}))
+    state = dict(_default_api()["/api/state"], app_mode="off", mode_ok=True)
+    _mount(page, overrides={"/api/sdr": sdr, "/api/mode": mode_h, "/api/state": state,
+                            "/api/acars": _acars_on(),
+                            "/api/health": _dual_health({"rtl_airband": "inactive"}, "off")})
+    page.click("#modeSeg button[data-v=home]")
+    page.click("#homeGoDual")
+    expect(page.locator("#voiceView")).to_be_visible()
+    page.wait_for_function("(document.getElementById('player').getAttribute('src') || '').includes('.mp3')",
+                           timeout=5000)
+
+
+def test_voice2_auth_rejection_keeps_second_channel(page):
+    state = dict(_default_api()["/api/state"], app_mode="voice2", mode_ok=True,
+                 voice2_freq=121.4, voice2_mod="am", mount2="live2.mp3")
+
+    def mode_h(route, url):
+        route.fulfill(status=401, content_type="application/json",
+                      body=json.dumps({"ok": False, "auth": True, "error": "PIN"}))
+    page.add_init_script("HTMLMediaElement.prototype.play = function(){ return Promise.resolve(); };")
+    _mount(page, overrides={"/api/state": state, "/api/mode": mode_h,
+                            "/api/health": _dual_health({"rtl_airband2": "active"}, "voice2")})
+    expect(page.locator("#v2Box")).to_be_visible()
+    page.click("#v2PlayBtn")
+    page.evaluate("applyMode('acars')")
+    page.wait_for_timeout(400)
+    expect(page.locator("#v2Box")).to_be_visible()
+    assert page.evaluate("want2") is True
+    assert "live2.mp3" in (page.evaluate("document.getElementById('player2').getAttribute('src')") or "")
+
+
+def test_voice2_own_tune2_survives_poll_and_reconnects(page):
+    """כיוונון הערוץ השני: המשני ב-activating ~13ש', ו-poll באמצע הסתיר את הערוץ וזנח את הנגינה."""
+    state = dict(_default_api()["/api/state"], app_mode="voice2", mode_ok=True,
+                 voice2_freq=121.4, voice2_mod="am", mount2="live2.mp3")
+    phase = {"v": "active"}
+    held = []
+
+    def health_h(route, url):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps(_dual_health({"rtl_airband2": phase["v"]}, "voice2")))
+    page.add_init_script("HTMLMediaElement.prototype.play = function(){ return Promise.resolve(); };")
+    _mount(page, overrides={"/api/state": state, "/api/health": health_h,
+                            "/api/tune2": lambda route, url: held.append(route)})
+    expect(page.locator("#v2Box")).to_be_visible()
+    page.click("#v2PlayBtn")
+    page.fill("#v2FreqInput", "118.05")
+    page.click("#v2TuneBtn")
+    page.wait_for_timeout(200)
+    assert held
+    expect(page.locator("#v2TuneBtn")).to_be_disabled()            # בזמן כיוונון
+    phase["v"] = "activating"
+    page.evaluate("pollGlobalState()")
+    page.wait_for_timeout(300)
+    expect(page.locator("#v2Box")).to_be_visible()
+    assert page.evaluate("want2") is True
+    phase["v"] = "active"
+    held[0].fulfill(status=200, content_type="application/json",
+                    body=json.dumps({"ok": True, "voice2_freq": 118.05, "voice2_mod": "am"}))
+    expect(page.locator("#v2Freq")).to_have_text("118.050")
+    assert page.evaluate("want2") is True
+    assert "live2.mp3" in (page.evaluate("document.getElementById('player2').getAttribute('src')") or "")
+
+
+def test_voice2_player_retries_after_stream_error(page):
+    state = dict(_default_api()["/api/state"], app_mode="voice2", mode_ok=True,
+                 voice2_freq=121.4, mount2="live2.mp3")
+    page.add_init_script("HTMLMediaElement.prototype.play = function(){ return Promise.resolve(); };")
+    _mount(page, overrides={"/api/state": state,
+                            "/api/health": _dual_health({"rtl_airband2": "active"}, "voice2")})
+    expect(page.locator("#v2Box")).to_be_visible()
+    page.click("#v2PlayBtn")
+    first = page.evaluate("document.getElementById('player2').getAttribute('src')")
+    page.evaluate("document.getElementById('player2').dispatchEvent(new Event('error'))")
+    page.wait_for_function(f"document.getElementById('player2').getAttribute('src') !== {json.dumps(first)}",
+                           timeout=4000)                          # ניסיון חוזר עם src חדש
+    assert page.evaluate("want2") is True
+
+
+def test_voice2_mode_change_elsewhere_stops_second_player(page):
+    state = dict(_default_api()["/api/state"], app_mode="voice2", mode_ok=True,
+                 voice2_freq=121.4, mount2="live2.mp3")
+    h = {"v": _dual_health({"rtl_airband2": "active"}, "voice2")}
+    page.add_init_script("HTMLMediaElement.prototype.play = function(){ return Promise.resolve(); };")
+    _mount(page, overrides={"/api/state": state, "/api/health": lambda route, url: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(h["v"]))})
+    page.click("#v2PlayBtn")
+    h["v"] = _dual_health({}, "voice")                               # טלפון אחר עבר לקול רגיל
+    page.evaluate("pollGlobalState()")
+    expect(page.locator("#v2Box")).to_be_hidden()
+    assert page.evaluate("want2") is False
+
+
+def test_voice_retune_in_voice_acars_keeps_acars_active(page):
+    state = dict(_default_api()["/api/state"], app_mode="voice_acars", mode_ok=True)
+    _mount(page, overrides={"/api/state": state, "/api/acars": _acars_on(),
+                            "/api/tune": {"ok": True, "freq": 120.5, "app_mode": "voice_acars"},
+                            "/api/health": _dual_health({"airam-acars2": "active"}, "voice_acars")})
+    expect(page.locator("#voiceView")).to_be_visible()
+    page.evaluate("tune(120.5)")
+    page.wait_for_timeout(300)
+    assert page.evaluate("acars.active") is True and page.evaluate("dualMode") is True
+
+
+def test_field_meter_works_in_composite_modes(page):
+    for mode, extra in (("voice2", {"rtl_airband2": "active"}), ("voice_acars", {"airam-acars2": "active"})):
+        state = dict(_default_api()["/api/state"], app_mode=mode, mode_ok=True, voice2_freq=121.4,
+                     mount2="live2.mp3")
+        sig = {"ok": True, "mode": mode, "kind": "continuous", "fresh": True, "snr": 20.0,
+               "noise": -50.0, "signal": -30.0, "verdict": "ok", "baseline": {"noise": -52.0, "t": 1}}
+        _mount(page, overrides={"/api/state": state, "/api/health": _dual_health(extra, mode),
+                                "/api/signal": sig, "/api/acars": _acars_on()})
+        expect(page.locator("#voiceView")).to_be_visible()
+        page.evaluate("voiceFm.poll()")
+        expect(page.locator("#voiceFmVerdict")).to_contain_text("תואם לבסיס")
+
+
+def test_acars_bank_in_dual_mode_stays_in_acars_view(page):
+    def mode_h(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "app_mode": "voice_acars",
+                                       "acars_freqs": body.get("freqs"), "secondary_only": True}))
+    state = dict(_default_api()["/api/state"], app_mode="voice_acars", mode_ok=True,
+                 acars_freqs=["131.550"],
+                 acars_banks=[{"name": "ראשי", "freqs": ["131.550"]},
+                              {"name": "אירופה", "freqs": ["131.725", "131.825"]}])
+    _mount(page, overrides={"/api/mode": mode_h, "/api/acars": _acars_on(), "/api/state": state,
+                            "/api/health": _dual_health({"airam-acars2": "active"}, "voice_acars")})
+    page.click("#modeSeg button[data-v=acars]")
+    page.locator("#acarsBanks button").filter(has_text="אירופה").click()
+    expect(page.locator("#status")).to_contain_text("הקול ממשיך")
+    expect(page.locator("#acarsView")).to_be_visible()
+    expect(page.locator("#voiceView")).to_be_hidden()
+
+
+def test_v2_rf_text_is_bidi_isolated(page):
+    state = dict(_default_api()["/api/state"], app_mode="voice2", mode_ok=True,
+                 voice2_freq=121.4, mount2="live2.mp3")
+    _mount(page, overrides={"/api/state": state,
+                            "/api/health": _dual_health({"rtl_airband2": "active"}, "voice2"),
+                            "/api/metrics": {"ok": True, "fresh": True, "snr": 12.3, "signal": -40.5,
+                                             "noise": -52.8, "overload": False}})
+    expect(page.locator("#v2Box")).to_be_visible()
+    page.evaluate("pollV2Metrics()")
+    expect(page.locator("#v2Rf")).to_contain_text("⁨-40.5 dBFS⁩")

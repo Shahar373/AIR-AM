@@ -2970,7 +2970,9 @@
       // ⚠ satcom חסר כאן היה מאפשר, למשל, ללחוץ ▶ במסך-הנעילה (MediaSession)
       // תוך כדי SATCOM ולנסות להתחבר ל-Icecast מת (sdrOff=false ב-SATCOM,
       // בניגוד ל-off, אז הבדיקה הישנה עברה בטעות).
-      if (sdrOff || acars.active || (vdl2 && vdl2.active) || (satcom && satcom.active)) return;
+      // ⚠ לפי המצב החי (liveFromFlags), לא לפי acars.active: ב"קול + ACARS" ה-ACARS תמיד פעיל
+      // והבדיקה הישנה חסמה את הסטרים לגמרי — ▶/סנכרון/החיבור אחרי הכניסה לא עשו כלום.
+      if (sdrOff || !isVoiceMode(liveFromFlags())) return;
       stopReplay();                 // חזרה ל-live עוצרת הקלטה מתנגנת (לא שני זרמים יחד)
       clearTimeout(retryTimer);
       player.onerror = null;
@@ -3121,7 +3123,11 @@
         // חזר מיד (sdrOff/active), הסטרים לא עלה והבאנר "בכיבוי" נשאר.
         if (satcom.active) showToast("🔌 החזר את אנטנת ה-airband ל-SDR");
         sdrOff = false; scanning = false;
-        acars.setActive(false); vdl2.setActive(false); satcom.setActive(false);
+        // ‏/api/tune שומר מצב כפול (השרת מחזיר את app_mode) — ACARS על המשני ממשיך
+        const am = data.app_mode || (dualMode ? "voice_acars" : voice2Mode ? "voice2" : "voice");
+        setComposite(am);
+        acars.setActive(am === "voice_acars"); vdl2.setActive(false); satcom.setActive(false);
+        renderVoice2();
         modeSwitchSeq++;            // poll שיצא בזמן הכיוונון ראה מצב-ביניים — מושלך
         // התדר מהשרת, לא מהלחיצה: כיוונון שני שקיבל 409 בזמן שהראשון רץ איפס את
         // התצוגה לתדר הישן, וההצלחה של הראשון לא תיקנה אותה (ה-retune הבא חזר אליו).
@@ -3276,21 +3282,32 @@
     const player2 = $("player2");
     let want2 = false;
     let v2InFlight = false;
+    let v2Busy = false;                 // כיוונון הערוץ השני באמצע — פקדים מנוטרלים
+    // ניסיונות חיבור חוזרים: אחרי כל restart של rtl_airband2 (כיוונון שלו, טלפון אחר, חיבור USB,
+    // reconcile) ה-mount נעלם ל-~10–20ש' (השער + sleep המדורג + עליית rtl_airband). ניסיון
+    // יחיד אחרי 12ש' (כמו קודם) נכשל בשקט כשהעלייה ארכה יותר, והכפתור הציג ⏸ על שקט.
+    const V2_RETRY_MS = 2000, V2_MAX_TRIES = 30;
+    let v2Tries = 0, v2RetryTimer = null;
     const stream2URL = () => location.protocol === "https:"
       ? `/stream?m=live2&t=${Date.now()}`
       : `http://${location.hostname}:${cfg.port}/${cfg.mount2 || "live2.mp3"}?t=${Date.now()}`;
     function stopV2Audio() {
       want2 = false;
+      clearTimeout(v2RetryTimer);
       player2.pause();
       player2.removeAttribute("src");
       player2.load();
+      if (typeof renderVoice2 === "function") renderVoice2();
     }
     function renderVoice2() {
+      // רק מציג — לא עוצר נגינה. עצירה היא החלטה מפורשת (יציאה מהמצב שאושרה), לא תוצאה של
+      // poll שראה את המשני רגע ב-activating.
       const show = voice2Mode && !sdrOff;
       $("v2Box").classList.toggle("hidden", !show);
-      if (!show && want2) stopV2Audio();
       $("v2Freq").textContent = v2.freq != null ? Number(v2.freq).toFixed(3) : "—";
       $("v2PlayBtn").textContent = want2 ? "⏸" : "▶";
+      $("v2TuneBtn").disabled = v2Busy || applyModeInFlight;
+      $("v2Preset").disabled = v2Busy || applyModeInFlight;
       // רשימת הפריסטים — נבנית מחדש רק כשהיא השתנתה (לא לאפס בחירה באמצע)
       const sel = $("v2Preset");
       const sig = JSON.stringify((cfg.presets || []).map((p) => [p.name, p.freq]));
@@ -3308,33 +3325,55 @@
         }
       }
     }
-    function playV2() {
+    function playV2(fresh = true) {
       want2 = true;
+      if (fresh) v2Tries = 0;
+      clearTimeout(v2RetryTimer);
       player2.src = stream2URL();
-      player2.play().catch(() => { want2 = false; renderVoice2(); showToast("הנגינה של הערוץ השני נכשלה — נסה שוב"); });
+      player2.play().catch((e) => {
+        // חסימת autoplay (iOS, ניסיון חוזר בלי מגע) — רק המשתמש יכול לשחרר אותה
+        if (e && e.name === "NotAllowedError") {
+          want2 = false; renderVoice2();
+          showToast("לחץ ▶ בערוץ השני כדי לחדש את השמע");
+        }
+        // שאר הכשלים (mount שעוד לא עלה) מגיעים גם כ-error ⇒ v2Retry
+      });
       renderVoice2();
     }
-    $("v2PlayBtn").onclick = () => { if (want2) { stopV2Audio(); renderVoice2(); } else playV2(); };
+    function v2Retry() {
+      if (!want2) return;
+      if (++v2Tries > V2_MAX_TRIES) {
+        want2 = false; renderVoice2();
+        showToast("הערוץ השני לא משדר — בדוק את המקלט המשני");
+        return;
+      }
+      clearTimeout(v2RetryTimer);
+      v2RetryTimer = setTimeout(() => { if (want2) playV2(false); }, V2_RETRY_MS);
+    }
+    player2.addEventListener("error", v2Retry);
+    player2.addEventListener("ended", v2Retry);       // הסטרים נסגר (restart של rtl_airband2)
+    player2.addEventListener("playing", () => { v2Tries = 0; });
+    $("v2PlayBtn").onclick = () => { if (want2) stopV2Audio(); else playV2(); };
     async function tuneV2(freq) {
-      if (!Number.isFinite(freq) || freq <= 0) return;
-      const btn = $("v2TuneBtn");
-      btn.disabled = true;
+      if (!Number.isFinite(freq) || freq <= 0 || v2Busy) return;
+      v2Busy = true;
+      renderVoice2();
       $("v2Rf").textContent = "מכוונן את הערוץ השני…";
       try {
-        const res = await apiSend("POST", "/api/tune2", { freq2: freq });
+        // השער + sleep מדורג + עלייה — יותר מ-45ש' במקרה הגרוע
+        const res = await apiSend("POST", "/api/tune2", { freq2: freq }, 90000);
         const d = await res.json();
         if (d.ok) {
           v2 = { freq: Number(d.voice2_freq), mod: d.voice2_mod || "am" };
           $("v2FreqInput").value = "";
-          // rtl_airband2 אותחל ⇒ ה-mount נעלם ל-~10ש' (‏sleep מדורג ביחידה). מתחברים מחדש אחרי.
-          if (want2) setTimeout(() => { if (want2) playV2(); }, 12000);
+          if (want2) playV2();     // ה-mount חוזר תוך ~10–20ש' — ניסיונות חוזרים עד שיעלה
         } else {
           showToast(d.error || "כיוונון הערוץ השני נכשל");
         }
       } catch (e) {
         showToast("שגיאת רשת — בדוק חיבור ל-Pi");
       } finally {
-        btn.disabled = false;
+        v2Busy = false;
         renderVoice2(); renderHome();
       }
     }
@@ -3345,8 +3384,10 @@
       v2InFlight = true;
       try {
         const m = await fetchJSON("/api/metrics?ch=2");
+        // bidi(): מספר שלילי + יחידה לטינית בתוך משפט עברי — בלי בידוד הסדר התהפך ב-360px
         $("v2Rf").textContent = (m.ok && m.fresh && m.snr != null)
-          ? "SNR " + m.snr.toFixed(1) + " dB · אות " + (m.signal != null ? m.signal.toFixed(1) : "—") + " dBFS"
+          ? "SNR " + bidi(m.snr.toFixed(1) + " dB") + " · אות "
+            + bidi((m.signal != null ? m.signal.toFixed(1) : "—") + " dBFS")
           : "אין נתוני RF מהערוץ השני — ממתין למקלט…";
       } catch (e) { /* החיווי הכללי מטפל בניתוק */ }
       finally { v2InFlight = false; }
@@ -3398,7 +3439,8 @@
         polling = true;
         try {
           const d = await fetchJSON("/api/signal");
-          if (d.ok && d.mode === mode) render(d);
+          // מצב כפול: הקול על הראשי הוא המדידה הרציפה (/api/signal מחזיר voice_acars/voice2)
+          if (d.ok && (d.mode === mode || (mode === "voice" && isVoiceMode(d.mode)))) render(d);
         } catch (e) { /* המחזור הבא ינסה שוב */ }
         finally { polling = false; }
       }
@@ -4111,7 +4153,8 @@
        "מזוהה" = ה-RSP ב-USB. "פנוי" = ה-SDRplay API מציע אותו עכשיו (API לא מחזיר
        מכשיר שתוכנה אחרת כבר בחרה). השרת בודק את ה-API רק כש-AIR-AM עצמו לא מחזיק
        במכשיר. §12: "לא נבדק" (unknown) מוצג ככזה — לא "פנוי" כברירת מחדל. */
-    const SDR_MODE_LABEL = { voice: "📻 קול", acars: "📡 ACARS", vdl2: "🛰️ VDL2", satcom: "📶 SATCOM" };
+    const SDR_MODE_LABEL = { voice: "📻 קול", acars: "📡 ACARS", vdl2: "🛰️ VDL2", satcom: "📶 SATCOM",
+                             voice_acars: "📻+📡 קול + ACARS", voice2: "📻📻 קול כפול" };
     let sdrInFlight = false, sdrDetail = "";
     // FSI…PDI: בידוד כיווני לטקסט לטיני בתוך משפט עברי (כמו <bdi>, אבל ב-textContent/toast)
     const bidi = (x) => "\u2068" + x + "\u2069";
@@ -4176,8 +4219,8 @@
         ? "⚠ מחוברים " + d.usb_count + " מקלטים ולא נבחר ראשי — AIR-AM עלול לפתוח את הלא-נכון "
           + "(זה שאין עליו את האנטנה שלך). לחץ \"זהה מקלטים\" ובחר."
         : "📟 מקלט ראשי: " + bidi(d.primary || "—") + ". כל המצבים פותחים רק אותו."
-          + (d.secondary ? " משני (לקול + ACARS): " + bidi(d.secondary) + "."
-             : (d.usb_count || 0) > 1 ? " בחר גם משני כדי להפעיל קול + ACARS." : "");
+          + (d.secondary ? " משני (קול + ACARS / קול כפול): " + bidi(d.secondary) + "."
+             : (d.usb_count || 0) > 1 ? " בחר גם משני כדי להפעיל קול + ACARS או קול כפול." : "");
     }
     async function loadSdrRoles() {
       const list = $("sdrRolesList");
@@ -4252,7 +4295,7 @@
         const r = await apiSend("POST", "/api/sdr/roles", { secondary: serial });
         const j = await r.json().catch(() => ({}));
         if (!r.ok || !j.ok) { showToast("⚠ " + (j.error || "השמירה נכשלה")); return; }
-        showToast("נשמר. במסך הבית מופיע עכשיו \"📻+📡 קול + ACARS\".");
+        showToast("נשמר. במסך הבית מופיעים עכשיו \"📻+📡 קול + ACARS\" ו-\"📻📻 קול כפול\".");
         await loadSdrRoles();
         pollSdr();
       } catch (e) { showToast("⚠ אין תשובה מהשרת"); }
@@ -4976,11 +5019,18 @@
         const live = s["airam-satcom"] === "active" ? "satcom"
                    : s["airam-vdl2"] === "active" ? "vdl2"
                    : s["airam-acars"] === "active" ? "acars"
-                   : s["rtl_airband"] === "active"
-                     ? (s["airam-acars2"] === "active" ? "voice_acars"
+                   // ‏activating של הקול במצב קולי (כיוונון/restart באמצע) הוא לא "כבוי"
+                   : (s["rtl_airband"] === "active" || (s["rtl_airband"] === "activating" && isVoiceMode(h.app_mode)))
+                     // ⚠ מצב כפול לפי הכוונה השמורה (h.app_mode) ולא לפי active של המשני: הוא
+                     // ב-activating ~10–20ש' אחרי כל restart שלו (השער + sleep מדורג), ובכל poll כזה
+                     // הערוץ השני הוסתר והנגן שלו נעצר — גם מיד אחרי כיוונון מוצלח של הערוץ השני
+                     ? (h.app_mode === "voice_acars" || h.app_mode === "voice2" ? h.app_mode
+                        : s["airam-acars2"] === "active" ? "voice_acars"
                         : s["rtl_airband2"] === "active" ? "voice2" : "voice") : null;
         sdrOff = !live;
+        const wasV2 = voice2Mode;
         setComposite(live);
+        if (wasV2 && !voice2Mode) stopV2Audio();   // המצב באמת השתנה (טלפון אחר / נפילה)
         scanning = (h.app_mode === "scan");
         const acarsOn = live === "acars" || live === "voice_acars";
         if (acarsOn !== acars.active) acars.setActive(acarsOn);
@@ -5006,8 +5056,14 @@
           // SDR שלא ב-USB הוא תקלה עם טיפול ברור — לא "בדוק את המערכת". קול/ACARS/
           // VDL2/סריקה חוזרים לבד כשהוא מחובר (_mode_reconcile_loop / thread הסריקה);
           // SATCOM לא (StartLimitBurst — בטיחות bias-T), ולכן ההוראה שונה.
-          setStatus(h.sdr_present !== false
-            ? "תקלה: המצב (" + m + ") לא רץ — בדוק את המערכת"
+          const s2 = h.services || {};
+          const composite = m === "voice_acars" || m === "voice2";
+          setStatus(composite && s2["rtl_airband"] === "active"
+            // מצב כפול חלקי: הקול עובד, רק המשני לא — זו לא "המערכת לא רצה"
+            ? "⚠ " + (SDR_MODE_LABEL[m] || m) + ": הקול פועל, המקלט המשני לא — בדוק שהוא מחובר. "
+              + "AIR-AM ינסה להרים אותו שוב לבד"
+            : h.sdr_present !== false
+            ? "תקלה: המצב (" + (SDR_MODE_LABEL[m] || m) + ") לא רץ — בדוק את המערכת"
             : m === "satcom"
               ? "תקלה: ה-SDR לא מזוהה ב-USB — חבר אותו והיכנס שוב ל-SATCOM"
               : "תקלה: ה-SDR לא מזוהה ב-USB — המצב (" + m + ") יחזור לבד כשיחובר", "err");
@@ -5052,7 +5108,8 @@
       if (mode === "satcom") { pollSatcomHealth(); pollSatcomSpectrum(); renderPowerAdvice(); }
     }
 
-    async function applyMode(mode, extra) {
+    async function applyMode(mode, extra, uiOpts) {
+      // uiOpts.keepView: בקשה מתוך תצוגה אחרת שלא אמורה לעבור (בנק ACARS במצב הכפול)
       if (applyModeInFlight) return false;    // מניעת לחיצות כפולות בזמן החלפת SDR
       applyModeInFlight = true;
       modeSwitchSeq++;
@@ -5067,7 +5124,7 @@
       scanning = (mode === "scan");
       setComposite(mode);
       // מצבים מורכבים נוחתים בתצוגת הקול (ה-ACARS זורם לתצוגת 📡 כרגיל)
-      showView(viewFor(mode));
+      if (!(uiOpts && uiOpts.keepView)) showView(viewFor(mode));
       if (!isVoiceMode(mode)) { wantPlaying = false; player.pause(); }  // ה-SDR יוצא מקול
       renderVoice2();
       setStatus(mode === "voice_acars" ? "מפעיל קול, ואחריו ACARS על המקלט השני…"
@@ -5076,7 +5133,10 @@
                 : mode === "satcom" ? "מפעיל SATCOM…" : mode === "scan" ? "מפעיל סריקה…"
                 : mode === "off" ? "מכבה מקלט…" : "מפעיל קול…", "busy");
       try {
-        const res = await apiSend("POST", "/api/mode", { mode, ...(extra || {}) });
+        // מצב כפול: קול ⇐ המתנה שיתייצב ⇐ המשני (השער + sleep מדורג) — יכול לעבור את ה-45ש'
+        // הרגילים; בלי זה הדפדפן הכריז "שגיאת רשת" בזמן שהשרת השלים את המעבר
+        const res = await apiSend("POST", "/api/mode", { mode, ...(extra || {}) },
+                                  (mode === "voice_acars" || mode === "voice2") ? 150000 : undefined);
         const data = await res.json();
         if (!data.ok) {
           setStatus("שגיאה: " + (data.error || "מעבר מצב נכשל"), "err");
@@ -5098,7 +5158,7 @@
             setComposite(prevComposite);
             showView(prevView);
             updateSdrPip();
-            renderHome();
+            renderHome(); renderVoice2();
             return false;
           }
           // כישלון כניסה למצב => השרת נופל ל-off (אין fallback לקול) — נוחתים בבית
@@ -5117,6 +5177,8 @@
         }
         showError(null);
         showHomeError(null);
+        // רק אחרי הצלחה: יציאה מקול כפול עוצרת את הנגן השני (כשל/דחייה משאירים אותו)
+        if (mode !== "voice2") stopV2Audio();
         if (mode === "off") {
           sdrOff = true;
           if (leaving) cfg.prev_mode = leaving;   // כפתור ההדלקה יחזיר את המצב הזה
@@ -6737,7 +6799,10 @@
         // חי => החלף חלון מיד. ⚠ במצב של שני מקלטים (ACARS על המשני) — שולחים את המצב המורכב,
         // לא opts.mode: "acars" רגיל היה יוצא מהמצב הכפול ומכבה את הקול שעל הראשי. השרת מאתחל
         // אז רק את המשני (ר' api_mode). opts.liveMode — hook אופציונלי, ברירת מחדל opts.mode.
-        if (active) applyMode(opts.liveMode ? opts.liveMode() : opts.mode, { freqs: bank.freqs });
+        if (active) {
+          const m = opts.liveMode ? opts.liveMode() : opts.mode;
+          applyMode(m, { freqs: bank.freqs }, { keepView: m !== opts.mode });
+        }
       }
       function setActive(on) {
         active = on;
@@ -6771,9 +6836,9 @@
           // "השמע ממשיך לרוץ" נכון *רק* כשה-SDR באמת בקול — לא ב-standby ולא
           // כשהוא תפוס במצב הדאטה האחר (acars/vdl2). מחשבים מהמצב החי בפועל,
           // לא מניחים "קול" כברירת מחדל.
-          const liveNow = sdrOff ? null : (satcom && satcom.active) ? "satcom"
-                        : (vdl2 && vdl2.active) ? "vdl2" : acars.active ? "acars" : "voice";
-          const liveLbl = { acars: "ACARS", vdl2: "VDL2", satcom: "SATCOM" };
+          const liveNow = liveFromFlags();
+          const liveLbl = { acars: "ACARS", vdl2: "VDL2", satcom: "SATCOM",
+                            voice_acars: "קול + ACARS", voice2: "קול כפול" };
           hint.textContent = liveNow === "voice"
             ? "מציג היסטוריה · השמע ממשיך לרוץ. לחץ כדי להעביר את ה-SDR ל-" + opts.label + " (השמע ייפסק)."
             : "מציג היסטוריה · " + (liveNow ? "המקלט כרגע במצב " + (liveLbl[liveNow] || liveNow) + "."
@@ -7753,7 +7818,8 @@
     renderScanEditor();
     // כפתורי בקרת SDR בסרגל ACARS
     $("acarsActivateBtn").onclick = () => applyMode(dualMode ? "voice_acars" : "acars",
-                                                    acars.selFreqs ? { freqs: acars.selFreqs } : undefined);
+                                                    acars.selFreqs ? { freqs: acars.selFreqs } : undefined,
+                                                    { keepView: dualMode });
     $("acarsStopBtn").onclick = () => applyMode("off");   // עצירה = standby, לא "חזרה לקול"
     // כיבוי/הפעלת המקלט (standby): פעיל => מכבה; כבוי => מחזיר את המצב האחרון
     // (prev_mode מהשרת/מקומי) — אין מצב ברירת-מחדל; באין עבר, ניווט למרכז לבחירה.
@@ -7919,11 +7985,17 @@
         acars.setActive(true);
         updateSdrPip();
         showView("voice");
+        setStatus("מוכן — לחץ ▶ · ACARS פעיל על המקלט השני");
+        player.src = streamURL();
+        pollActivity();
       } else if (st.app_mode === "voice2" && st.mode_ok !== false) {
         voice2Mode = true;
         updateSdrPip();
         showView("voice");
         renderVoice2();
+        setStatus("מוכן — לחץ ▶ · ערוץ שני פעיל על המקלט השני");
+        player.src = streamURL();
+        pollActivity();
       } else if (st.app_mode === "acars" && st.mode_ok !== false) {
         acars.setActive(true);              // מאתחל pip + SDR bar + banner מיד בטעינה
         showView("acars");
