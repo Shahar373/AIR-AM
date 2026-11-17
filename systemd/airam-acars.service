@@ -25,8 +25,10 @@ EnvironmentFile=-/etc/airam/acars.env
 ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
 # ‎$ACARS_FREQS *ללא* סוגריים => systemd מפצל אותו למספר ארגומנטים (רשימת התדרים).
 # ‎${ACARS_GAIN} וכו' *עם* סוגריים => ארגומנט יחיד. ‎-d אחרון לפני התדרים (כפי שב-README).
+# ‎${ACARS_SERIAL} *בתוך* המילה: ‎",serial=<serial>" או ריק (מקלט יחיד) — systemd מציב ערך
+# של ${VAR} גם באמצע מילה, וחסר = ריק ⇒ env ישן משדרוג עדיין עובד (docs/dual-sdr-feasibility.md).
 # ללא ‎-c: acarsdec בוחר center אוטומטית (chooseFc) שמכסה את הערוצים ונמנע מ-DC spike.
-ExecStart=/usr/local/bin/acarsdec -g ${ACARS_GAIN} -m ${ACARS_RATEMULT} -o 1 -j ${ACARS_UDP} -d driver=sdrplay $ACARS_FREQS
+ExecStart=/usr/local/bin/acarsdec -g ${ACARS_GAIN} -m ${ACARS_RATEMULT} -o 1 -j ${ACARS_UDP} -d driver=sdrplay${ACARS_SERIAL} $ACARS_FREQS
 # גישת חומרה (SDR) => כמו rtl_airband, רץ כ-root
 User=root
 Restart=always

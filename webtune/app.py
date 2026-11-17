@@ -145,7 +145,41 @@ _rflog_fsync = os.fsync
 # => רק צרכן אחד בכל רגע (Conflicts ב-unit מבטיח זאת). acarsdec שולח כל הודעה
 # מפוענחת כ-JSON ב-UDP ל-listener כאן, וה-UI מושך אותן מ-/api/acars.
 ACARS_SERVICE = "airam-acars"
+# מצב "קול + ACARS" (docs/dual-sdr-feasibility.md §6): acarsdec על המקלט ה*משני*, לצד
+# rtl_airband על הראשי. יחידה נפרדת (Conflicts מול airam-acars/vdl2/satcom — *לא* מול
+# rtl_airband), env משלה, אותו פורט UDP ⇒ ה-listener, הפיד והארכיון לא משתנים.
+ACARS2_SERVICE = "airam-acars2"
+ACARS2_ENV_PATH = Path("/etc/airam/acars2.env")
+# פתיחה מדורגת: ACARS עולה רק אחרי שהקול *סיים* לעלות. על ה-Pi (§7.8) rtl_airband צורך
+# ליבה שלמה ~9ש' בעלייה, ושני צרכנים שעולים יחד הפילו power bank של 5V/3A.
+VOICE_STARTUP_WAIT_SEC = 30   # עד מתי מחכים לכתיבת ה-stats הראשונה של rtl_airband
+# המרווח עצמו ביחידה (ExecStartPre=/bin/sleep 10 ב-airam-acars2.service) — כך הוא חל גם כש-
+# systemd מאתחל את שנינו יחד (PartOf=sdrplay), לא רק כשאנחנו מתזמנים. כאן רק מחכים ל-stats.
+ACARS2_STAGGER_SEC = 0
+# מצב "קול כפול" (docs/dual-sdr-feasibility.md §8): rtl_airband *שני* על המקלט המשני — תהליך לכל
+# מקלט (תהליך אחד עם שניים נכשל ב-sdrplay_api_Fail, §7.6). קונפיג, stats ו-mount משלו; ההקלטות
+# לאותה תיקייה (include_freq ⇒ שמות שונים), כך שיומן השידורים/★/תמלול חלים על שני הערוצים בחינם.
+VOICE2_SERVICE = "rtl_airband2"
+VOICE2_CONFIG_PATH = Path("/etc/rtl_airband/airband2.conf")
+STATS2_PATH = Path("/run/rtl_airband2_stats.txt")
+MOUNT2 = "live2.mp3"
+# מצב "קול + VDL2": dumpvdl2 על המשני, אותו פורט UDP ⇒ אותו listener/פיד/ארכיון של VDL2.
+VDL2B_SERVICE = "airam-vdl2-2"
+VDL2B_ENV_PATH = Path("/etc/airam/vdl2-2.env")
+# מצבים מורכבים: קול על הראשי + צרכן אחד על המשני. *לא* ב-MODE_SERVICE (מצב, לא שירות) ולא scannable.
+COMPOSITE_SECONDARY = {"voice_acars": ACARS2_SERVICE, "voice2": VOICE2_SERVICE,
+                       "voice_vdl2": VDL2B_SERVICE}
+SECONDARY_SERVICES = tuple(COMPOSITE_SECONDARY.values())
+COMPOSITE_LABEL = {"voice_acars": "קול + ACARS", "voice2": "קול כפול", "voice_vdl2": "קול + VDL2"}
+# מצב מורכב שהמשני שלו הוא מפענח דאטה: (מפתח התדרים ב-state, ברירת מחדל)
+COMPOSITE_DATA = {"voice_acars": ("acars_freqs", None), "voice_vdl2": ("vdl2_freqs", None)}
 ACARS_ENV_PATH = Path("/etc/airam/acars.env")
+# מיפוי תפקידי המקלטים (docs/dual-sdr-feasibility.md): SDR_PRIMARY=<serial>. נקרא ע"י
+# scripts/airam-wait-sdrplay ב-sed עם תבנית מעוגנת — *לא* source (§9).
+SDR_ENV_PATH = Path("/etc/airam/sdr.env")
+# serial של SDRplay: אותיות/ספרות בלבד (נצפה: 240404AF60, 230405A498). מעוגן — ערך שלא
+# עובר לא נכתב לשום env/קונפיג (נכנס ל-device_string של תהליך root).
+_SERIAL_RE = re.compile(r"^[0-9A-Za-z]{4,32}$")
 ACARS_UDP_HOST = "127.0.0.1"
 ACARS_UDP_PORT = 5556                 # חייב להתאים ל-ACARS_UDP ב-acars.env
 # בנקי תדרי ACARS: כל בנק נכנס בחלון דגימה *אחד* של acarsdec (≤ ACARS_WINDOW_MHZ).
@@ -386,6 +420,9 @@ SATCOM_LOG_KEEP = 5000                # retention על הדיסק (זנב נשמ
 # ~0.5ש' אחרי שהסקוולץ' נסגר). קובץ שהסתיים = אירוע ביומן השידורים.
 REC_DIR = Path("/var/lib/airam/recordings")
 REC_BASENAME = "airam"         # filename_template ב-config וגם עוגן הפרסור של השמות
+# הערוץ השני של קול כפול כותב airam2_… — אותה תיקייה, אותו יומן, ★/תמלול/סשנים בלי שינוי,
+# אבל היומן יודע מאיזה מקלט השידור (`ch`). גם שני תדרים זהים לא היו מתנגשים בשם.
+REC_BASENAME2 = REC_BASENAME + "2"
 REC_BYTES_PER_SEC = 6000       # CBR 48kbps (ה-patch ב-install.sh) => הערכת משך מגודל
 # retention (הקלטות *לא* מסומנות בלבד — ר' _sweep_recordings). ⚠ 500 ולא 200:
 # 200 שידורים ≈ 17 דק' אודיו בלבד בתדר עמוס — פחות מהחלון הרטרואקטיבי שכפתור
@@ -691,7 +728,16 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  "chan_filter": CHAN_FILTER_DEFAULT,
                  # מסנן notch לשידורי FM/MW ב-RSP1B (rfnotch_ctrl של SoapySDRPlay3).
                  # ⚠ ההנחתה שלו בתחום 118–137MHz לא נמדדה — מתג, לא ברירת מחדל.
-                 "fm_notch": False}
+                 "fm_notch": False,
+                 # serial של המקלט הראשי (docs/dual-sdr-feasibility.md §3.1). None = כמו תמיד:
+                 # "driver=sdrplay" בלי serial ⇒ המקלט הראשון שה-API מחזיר — נכון רק כשיש
+                 # מקלט אחד. עם שניים מחוברים בלי בחירה, איזה מהם נפתח נקבע במקרה.
+                 "sdr_primary": None,
+                 # המקלט המשני (קול + ACARS / קול כפול).
+                 "sdr_secondary": None,
+                 # הערוץ השני של "קול כפול" (על המשני). squelch/מסנן/notch — כמו הראשי; רווח — תמיד
+                 # AGC (מקלט אחר, ואין לו פקדי רווח משלו בממשק).
+                 "voice2_freq": 134.600, "voice2_mod": "am"}
 
 
 # --- שורת ה-squelch: מקור אמת יחיד -----------------------------------------
@@ -712,16 +758,22 @@ def _squelch_line(squelch_mode, squelch_snr):
 
 # --- בניית קובץ ההגדרות ל-rtl_airband ------------------------------------
 def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
-                  chan_filter=CHAN_FILTER_DEFAULT, fm_notch=False):
+                  chan_filter=CHAN_FILTER_DEFAULT, fm_notch=False, serial=None,
+                  stats_path=None, mount=None, denoise_udp=True, rec_template=None):
+    """קונפיג rtl_airband. ברירות המחדל = הערוץ הראשי. הערוץ השני (קול כפול) מעביר stats_path/mount
+    משלו ו-denoise_udp=False: הסינון מאזין לפורט אחד, ושני שולחים אליו היו מערבבים שני תדרים."""
+    stats_path = stats_path or STATS_PATH
+    mount = mount or MOUNT
+    rec_template = rec_template or REC_BASENAME
     f = float(freq)
     cf = CHAN_FILTERS.get(chan_filter, CHAN_FILTERS[CHAN_FILTER_DEFAULT])
     # rfnotch_ctrl: הגדרת SoapySDRPlay3 שעוברת דרך ה-device_string (נקראת ע"י writeSetting
     # בבנאי, *לפני* שהזרם עולה — ב-RSP1B היא rsp1aParams.rfNotchEnable). ערך קבוע, לא קלט.
-    dev = "driver=sdrplay" + (",rfnotch_ctrl=true" if fm_notch else "")
+    dev = "driver=sdrplay" + _serial_arg(serial) + (",rfnotch_ctrl=true" if fm_notch else "")
     lines = [
         "# נוצר אוטומטית ע\"י AIR-AM web tuner. שינויים ידניים נדרסים בכל כיוונון.",
         "localtime = true;   # חותמות הזמן בשמות קובצי ההקלטה בזמן מקומי",
-        f'stats_filepath = "{STATS_PATH}";   # מדדי RF (signal/noise) ל-/api/metrics',
+        f'stats_filepath = "{stats_path}";   # מדדי RF (signal/noise) ל-/api/metrics',
         f"fft_size = {cf['fft']};   # מסנן הערוץ: {chan_filter if chan_filter in CHAN_FILTERS else CHAN_FILTER_DEFAULT}",
         "devices:",
         "(",
@@ -755,11 +807,14 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
         '            type = "icecast";',
         '            server = "127.0.0.1";',
         f"            port = {ICECAST_PORT};",
-        f'            mountpoint = "{MOUNT}";',
+        f'            mountpoint = "{mount}";',
         f'            name = "AIR-AM {f:.3f}";',
         '            username = "source";',
         f'            password = "{SOURCE_PW}";',
-        "          },",
+        "          }" + ("," if (denoise_udp or record) else ""),
+    ]
+    if denoise_udp:
+        lines += [
         # עותק PCM לסינון הרעשים (airam-denoise) — *תמיד*, גם כשהמתג כבוי:
         # הדלקה/כיבוי לא מאתחלים את הרדיו ולא מפצלים הקלטה. sendto לא-חוסם
         # שמתעלם מכשל (udp_stream.cpp) => בלי מאזין זה ~64KB/s לשום מקום.
@@ -773,13 +828,13 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
         f"            dest_port = {DENOISE_UDP_PORT};",
         "            continuous = true;",
         "          }" + ("," if record else ""),
-    ]
+        ]
     if record:
         lines += [
             "          {",
             '            type = "file";',
             f'            directory = "{REC_DIR}";',
-            f'            filename_template = "{REC_BASENAME}";',
+            f'            filename_template = "{rec_template}";',
             "            split_on_transmission = true;   # קובץ MP3 נפרד לכל שידור",
             "            include_freq = true;            # התדר (Hz) בשם הקובץ",
             "          }",
@@ -856,7 +911,92 @@ def _cleanup_orphan_tmp(dirs=None):
 def write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
                  chan_filter=CHAN_FILTER_DEFAULT, fm_notch=False):
     _atomic_write(CONFIG_PATH, render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr,
-                                             chan_filter, fm_notch))
+                                             chan_filter, fm_notch, serial=_primary_serial()))
+
+
+def _voice2_params(st):
+    """(freq2, mod2) תקינים מה-state — ערך פגום ⇒ ברירת המחדל."""
+    try:
+        f2 = float(st.get("voice2_freq"))
+        if not (0.1 <= f2 <= 1999.5):
+            raise ValueError
+    except (TypeError, ValueError):
+        f2 = DEFAULT_STATE["voice2_freq"]
+    m2 = "nfm" if str(st.get("voice2_mod", "am")).lower() == "nfm" else "am"
+    return f2, m2
+
+
+def write_voice2_config(st=None):
+    """קונפיג הערוץ השני (קול כפול) על המקלט המשני. נכתב לפני כל הפעלה — כמו acars2.env.
+    squelch/מסנן/notch מהראשי, רווח AGC, בלי פלט UDP לסינון (ר' render_config)."""
+    st = st if st is not None else load_state()
+    f2, m2 = _voice2_params(st)
+    sq_mode = str(st.get("squelch_mode", "auto")).lower()
+    if sq_mode not in SQUELCH_MODES:
+        sq_mode = "auto"
+    try:
+        sq_snr = max(SNR_MIN, min(SNR_MAX, float(st.get("squelch_snr", SNR_DEFAULT))))
+    except (TypeError, ValueError):
+        sq_snr = SNR_DEFAULT
+    cf = st.get("chan_filter", CHAN_FILTER_DEFAULT)
+    if cf not in CHAN_FILTERS:
+        cf = CHAN_FILTER_DEFAULT
+    _atomic_write(VOICE2_CONFIG_PATH, render_config(
+        f2, m2, True, IF_GAIN_DEFAULT, RF_GAIN_DEFAULT, sq_mode, sq_snr, cf,
+        bool(st.get("fm_notch")), serial=_secondary_serial(),
+        stats_path=STATS2_PATH, mount=MOUNT2, denoise_udp=False, rec_template=REC_BASENAME2))
+
+
+# --- תפקידי המקלטים (docs/dual-sdr-feasibility.md §3.1) -----------------------
+def _sanitize_serial(v):
+    """serial תקין או None — לעולם לא "מנוקה" חלקית (נכנס ל-device_string של root)."""
+    if isinstance(v, str) and _SERIAL_RE.match(v.strip()):
+        return v.strip()
+    return None
+
+
+def _primary_serial():
+    """ה-serial של המקלט הראשי, או None ("כל מקלט" — ההתנהגות של מקלט יחיד)."""
+    try:
+        return _sanitize_serial(load_state().get("sdr_primary"))
+    except Exception:
+        return None
+
+
+def _secondary_serial():
+    """ה-serial של המקלט המשני (מצב קול + ACARS), או None."""
+    try:
+        return _sanitize_serial(load_state().get("sdr_secondary"))
+    except Exception:
+        return None
+
+
+def _roles_error(mode="voice_acars"):
+    """None כשמוגדרים ראשי ומשני שונים — תנאי לכל מצב של שני מקלטים. אחרת הודעה למשתמש."""
+    p, s2 = _primary_serial(), _secondary_serial()
+    if not p or not s2:
+        return (COMPOSITE_LABEL.get(mode, "המצב") +
+                " דורש שני מקלטים: בחר ראשי ומשני במסך הבית (🔍 זהה מקלטים)")
+    if p == s2:
+        return "הראשי והמשני הם אותו מקלט — בחר שניים שונים"
+    return None
+
+
+def _serial_arg(serial, sep=",serial="):
+    """החלק שמתווסף ל-"driver=sdrplay" (או ל-"sdrplay" של inmarsat-sniffer, sep="-")."""
+    s = _sanitize_serial(serial)
+    return f"{sep}{s}" if s else ""
+
+
+def write_sdr_env(primary, secondary):
+    """/etc/airam/sdr.env — מה ש-airam-wait-sdrplay מחכה לו (serial ספציפי, לא "כל מקלט")."""
+    text = "\n".join([
+        "# נכתב אוטומטית ע\"י AIR-AM (תפקידי המקלטים). שינויים ידניים נדרסים.",
+        "SDR_PRIMARY=" + (_sanitize_serial(primary) or ""),
+        "SDR_SECONDARY=" + (_sanitize_serial(secondary) or ""),
+        "",
+    ])
+    _atomic_write(SDR_ENV_PATH, text)
 
 
 _state_corrupt_warned = False   # חד-פעמי לאירוע פגימה, לא לכל קריאה — ר' load_state
@@ -936,6 +1076,37 @@ def _sdr_present():
         return True   # אין lsusb / ספק => מניחים שמחובר (עדיף רולבק מיותר מאף-פעם)
 
 
+def _serial_on_api(serial):
+    """True/False — ה-API מציע מקלט עם ה-serial הזה; None כשאין SoapySDRUtil / timeout.
+    ⚠ מקלט שתהליך כלשהו מחזיק *לא* מופיע (§5, "חיווי SDR") — לכן נשאל רק על תפקיד
+    שהצרכן שלו לא רץ כרגע (מסלולי כשל / reconcile)."""
+    try:
+        r = subprocess.run(["SoapySDRUtil", f"--find=driver=sdrplay,serial={serial}"],
+                           capture_output=True, text=True, timeout=12)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return any(d["serial"] == serial for d in _parse_sdr_find(r.stdout))
+
+
+def _role_present(role="primary"):
+    """האם המקלט של התפקיד (primary/secondary) מחובר. עם מקלט אחד או בלי קיבוע — בדיוק
+    _sdr_present (כמו תמיד). עם שני תפקידים קבועים ופחות משני מקלטים ב-USB, "יש SDRplay"
+    לא אומר *איזה* — אז שואלים את ה-API על ה-serial. בלעדי זה, ראשי שנותק בזמן שהמשני
+    מחובר נחשב "נוכח": כיוונון/אתחול/סריקה נפלו ל-off במקום לחכות לו, וה-reconcile
+    החזיק את TUNE_LOCK עד 45ש' בכל דקה בניסיון להרים אותו (ביקורת 17.11.2026)."""
+    if not _sdr_present():
+        return False
+    p, s2 = _primary_serial(), _secondary_serial()
+    serial = p if role == "primary" else s2
+    if not serial or not (p and s2):
+        return True
+    _present, _desc, count = _sdr_usb_full()
+    if count is None or count >= 2:
+        return True
+    found = _serial_on_api(serial)
+    return True if found is None else found
+
+
 def _journal_tail(service="rtl_airband", lines=8):
     """זנב יומן לאבחון כישלון. timeout קצר וחובה: נקראת מתוך _enter_*/
     _restart_and_verify/_enter_standby *בזמן* שהקורא מחזיק TUNE_LOCK — journalctl
@@ -962,7 +1133,7 @@ def _restart_and_verify():
     if r.returncode != 0:
         # המסלול הנפוץ כשה-SDR מנותק: airam-wait-sdrplay ממצה 30 ניסיונות
         # וה-restart נכשל עם rc!=0 (לא timeout) => מזהים לפי נוכחות ה-USB.
-        return (r.stderr or "restart failed").strip(), _journal_tail(), not _sdr_present()
+        return (r.stderr or "restart failed").strip(), _journal_tail(), not _role_present("primary")
     # restart מחזיר 0 כשהשירות עלה, אבל rtl_airband יכול לקרוס על config רע
     # גם ~2 שניות אחרי העלייה => פולינג (לא בדיקה בודדת שמפספסת קריסה מאוחרת).
     for _ in range(7):
@@ -2822,8 +2993,8 @@ def _satcom_listener():
 
 
 HEALTH_SERVICES = ("rtl_airband", "icecast2", "sdrplay",
-                   "airam-acars", "airam-vdl2", "airam-satcom",
-                   DENOISE_SERVICE)   # לחיווי בלבד — לא משפיע על ok (ר' api_health)
+                   "airam-acars", "airam-vdl2", "airam-satcom", "airam-acars2",
+                   VOICE2_SERVICE, VDL2B_SERVICE, DENOISE_SERVICE)   # לחיווי בלבד — לא משפיע על ok (ר' api_health)
 
 
 def _services_status(names):
@@ -2952,7 +3123,13 @@ def _satcom_window_error(freqs):
     return None
 
 
-def write_acars_env(freqs, gain=ACARS_GAIN_DEFAULT, ratemult=ACARS_RATEMULT_DEFAULT):
+def write_acars2_env(freqs, gain=ACARS_GAIN_DEFAULT, ratemult=ACARS_RATEMULT_DEFAULT):
+    """/etc/airam/acars2.env — אותו פורמט בדיוק, על המקלט המשני (מצב קול + ACARS)."""
+    write_acars_env(freqs, gain, ratemult, path=ACARS2_ENV_PATH, serial=_secondary_serial())
+
+
+def write_acars_env(freqs, gain=ACARS_GAIN_DEFAULT, ratemult=ACARS_RATEMULT_DEFAULT,
+                    path=None, serial=None):
     """כותב /etc/airam/acars.env בפורמט EnvironmentFile של systemd. הערך של
     ACARS_FREQS *לא* מצוטט: systemd לוקח את שארית השורה (כולל רווחים) כערך,
     וב-ExecStart ‎$ACARS_FREQS (ללא סוגריים) מתפצל בחזרה למספר ארגומנטים."""
@@ -2962,12 +3139,14 @@ def write_acars_env(freqs, gain=ACARS_GAIN_DEFAULT, ratemult=ACARS_RATEMULT_DEFA
         f"ACARS_GAIN={int(gain)}",
         f"ACARS_RATEMULT={int(ratemult)}",
         f"ACARS_UDP={ACARS_UDP_HOST}:{ACARS_UDP_PORT}",
+        # ‎-d driver=sdrplay${ACARS_SERIAL} ב-unit — ריק = כל מקלט (מקלט יחיד)
+        "ACARS_SERIAL=" + _serial_arg(serial if path else _primary_serial()),
         "",
     ])
-    _atomic_write(ACARS_ENV_PATH, text)
+    _atomic_write(path or ACARS_ENV_PATH, text)
 
 
-def write_vdl2_env(freqs, ifgr=None, rfgr=None):
+def write_vdl2_env(freqs, ifgr=None, rfgr=None, path=None, serial=None):
     """כותב /etc/airam/vdl2.env בפורמט EnvironmentFile של systemd. שים לב:
     ‏dumpvdl2 מקבל תדרים ב-*Hz* — ההמרה מ-MHz (הפורמט של state/UI) נעשית רק כאן.
     ‏VDL2_GAIN מכיל את הדגל *כולו* (או ריק): ‏$VDL2_GAIN לא-מצוטט ב-ExecStart נעלם
@@ -2984,9 +3163,10 @@ def write_vdl2_env(freqs, ifgr=None, rfgr=None):
         f"VDL2_FREQS={hz}",
         f"VDL2_GAIN={gain}",
         f"VDL2_MSG_FILTER={VDL2_MSG_FILTER}",
+        "VDL2_SERIAL=" + _serial_arg(serial if path else _primary_serial()),
         "",
     ])
-    _atomic_write(VDL2_ENV_PATH, text)
+    _atomic_write(path or VDL2_ENV_PATH, text)
 
 
 def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True, spectrum=True):
@@ -3022,6 +3202,8 @@ def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True, spectrum=True
         "SATCOM_SPECTRUM=" + ("--spectrum" if spectrum else ""),
         f"SATCOM_UDP={ACARS_UDP_HOST}:{SATCOM_UDP_PORT}",
         f"SATCOM_WEB_PORT={SATCOM_WEB_PORT}",
+        # ‎-i sdrplay${SATCOM_SERIAL} — הפורמט של inmarsat-sniffer הוא sdrplay-<serial>
+        "SATCOM_SERIAL=" + _serial_arg(_primary_serial(), sep="-"),
         "",
     ])
     _atomic_write(SATCOM_ENV_PATH, text)
@@ -3031,7 +3213,7 @@ def _enter_vdl2(freqs):
     """עוצר את שני צרכני ה-SDR האחרים ומריץ dumpvdl2. מחזיר (error, detail).
     Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות תחילה כדי לשחרר את
     ה-SDR לפני ש-dumpvdl2 פותח אותו (מונע מרוץ על המכשיר)."""
-    for svc in ("rtl_airband", ACARS_SERVICE, SATCOM_SERVICE):
+    for svc in ("rtl_airband", ACARS_SERVICE, *SECONDARY_SERVICES, SATCOM_SERVICE):
         try:
             _sysctl("stop", svc, timeout=30)
         except Exception:
@@ -3055,7 +3237,7 @@ def _enter_acars(freqs):
     """עוצר את שאר צרכני ה-SDR ומריץ acarsdec. מחזיר (error, detail).
     Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות תחילה כדי לשחרר את
     ה-SDR לפני ש-acarsdec פותח אותו (מונע מרוץ על המכשיר)."""
-    for svc in ("rtl_airband", VDL2_SERVICE, SATCOM_SERVICE):
+    for svc in ("rtl_airband", *SECONDARY_SERVICES, VDL2_SERVICE, SATCOM_SERVICE):
         try:
             _sysctl("stop", svc, timeout=30)
         except Exception:
@@ -3094,7 +3276,7 @@ def _enter_satcom(freqs, bias_tee=True, skip_c=True, spectrum=True, gain=None):
     ‏gain=None (ברירת מחדל) => AGC של הדרייבר; int 20..59 => gRdB ידני עם
     LNAstate מקובע ל-0 (רווח RF מקסימלי) — ר' SATCOM_GAIN_DEFAULT למה זה
     דווקא *עוזר* לאות לוויין חלש כשה-AGC נחנק מאנרגיה מחוץ לפס."""
-    for svc in ("rtl_airband", ACARS_SERVICE, VDL2_SERVICE):
+    for svc in ("rtl_airband", ACARS_SERVICE, *SECONDARY_SERVICES, VDL2_SERVICE):
         try:
             _sysctl("stop", svc, timeout=30)
         except Exception:
@@ -3130,7 +3312,7 @@ def _enter_standby():
     daemon הוא המתווך שמאפשר לאפליקציית SDRplay אחרת להתחבר מיד — וגם ה-sudoers
     ממילא אינו מתיר לעצור אותו. מחזיר (error, detail). serialized תחת TUNE_LOCK
     ע"י הקורא."""
-    consumers = (ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE, "rtl_airband")
+    consumers = (ACARS_SERVICE, *SECONDARY_SERVICES, VDL2_SERVICE, SATCOM_SERVICE, "rtl_airband")
     for svc in consumers:
         try:
             _sysctl("stop", svc, timeout=30)
@@ -3161,19 +3343,35 @@ def _live_mode():
     פעיל אין טעם לבדוק את השאר — חוסך קריאות systemctl במצב הנפוץ."""
     for m in ("voice", "vdl2", "acars", "satcom"):
         if _is_active(MODE_SERVICE[m]):
+            # קול + ACARS: rtl_airband על הראשי *וגם* acarsdec על המשני. רק אחד מהם ⇒
+            # "voice" (ACARS נפל) — api_state/health מסמנים את זה כתקלה מול המצב השמור.
+            if m == "voice":
+                for cm, svc in COMPOSITE_SECONDARY.items():
+                    if _is_active(svc):
+                        return cm
             return m
     return None
 
 
-def _enter_voice(params):
+def _enter_voice(params, keep_secondary=False):
     """כניסה סימטרית לקול (peer של _enter_acars/_enter_vdl2/_enter_satcom): עוצר
     את צרכני הדאטה, כותב את קונפיג rtl_airband ומרים עם אימות.
     מחזיר (error, detail, sdr_down) — כמו _restart_and_verify."""
     # אם acarsdec/dumpvdl2/inmarsat-sniffer רץ הוא מחזיק את ה-SDR => עוצרים
     # מפורשות לפני שמרימים את rtl_airband (Conflicts גיבוי, אבל זה משחרר את
     # המכשיר מיד).
+    # keep_secondary: כיוונון קול בתוך "קול + ACARS" — acarsdec על המקלט השני ממשיך.
     for svc in (ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE):
         if _is_active(svc):
+            try:
+                _sysctl("stop", svc, timeout=30)
+            except Exception:
+                pass
+    # ⚠ צרכני המשני נעצרים *בלי* תנאי is-active: אין להם Conflicts מול rtl_airband, אז זה
+    # המקום היחיד שעוצר אותם — ומשני ב-"activating" (השער / sleep 10 / RestartSec) היה
+    # שורד את היציאה מהמצב הכפול, עולה אחר כך, ומציג מצב כפול "תקין" שהמשתמש עזב.
+    if not keep_secondary:
+        for svc in SECONDARY_SERVICES:
             try:
                 _sysctl("stop", svc, timeout=30)
             except Exception:
@@ -3190,6 +3388,155 @@ def _enter_voice(params):
         # שחזור באתחול, reconcile ושחזור אחרי בדיקת אנטנה — כולם עוברים כאן.
         _denoise_after_voice()
     return res
+
+
+def _wait_voice_settled(since):
+    """פתיחה מדורגת: מחכה ש-rtl_airband יכתוב stats *אחרי* `since` (סיים לעלות), ועוד
+    ACARS2_STAGGER_SEC. לא נכשל — אחרי VOICE_STARTUP_WAIT_SEC ממשיכים בכל מקרה (ה-stats
+    הם סימן, לא תנאי; הקול כבר אומת ע"י _restart_and_verify)."""
+    end = time.monotonic() + VOICE_STARTUP_WAIT_SEC
+    while time.monotonic() < end:
+        try:
+            if STATS_PATH.stat().st_mtime >= since:
+                break
+        except OSError:
+            pass
+        time.sleep(0.5)
+    time.sleep(ACARS2_STAGGER_SEC)
+
+
+def _start_acars2(freqs):
+    """acarsdec על המקלט המשני. מחזיר (error, detail)."""
+    write_acars2_env(freqs)
+    try:
+        r = _sysctl("restart", ACARS2_SERVICE, timeout=45)
+    except subprocess.TimeoutExpired:
+        return "הפעלת ACARS על המקלט המשני נתקעה — בדוק שהוא מחובר", None
+    if r.returncode != 0:
+        return (r.stderr or "acarsdec failed").strip(), _journal_tail(ACARS2_SERVICE)
+    for _ in range(7):
+        time.sleep(0.5)
+        if not _is_active(ACARS2_SERVICE):
+            return ("ACARS על המקלט המשני נכשל לעלות — בדוק journalctl -u " + ACARS2_SERVICE,
+                    _journal_tail(ACARS2_SERVICE))
+    return None, None
+
+
+def _start_voice2(st=None):
+    """rtl_airband שני על המקלט המשני (קול כפול). מחזיר (error, detail)."""
+    write_voice2_config(st)
+    try:
+        r = _sysctl("restart", VOICE2_SERVICE, timeout=45)
+    except subprocess.TimeoutExpired:
+        return "הפעלת הערוץ השני נתקעה — בדוק שהמקלט המשני מחובר", None
+    if r.returncode != 0:
+        return (r.stderr or "rtl_airband2 failed").strip(), _journal_tail(VOICE2_SERVICE)
+    for _ in range(7):
+        time.sleep(0.5)
+        if not _is_active(VOICE2_SERVICE):
+            return ("הערוץ השני נכשל לעלות — בדוק תדר/חיבור, journalctl -u " + VOICE2_SERVICE,
+                    _journal_tail(VOICE2_SERVICE))
+    return None, None
+
+
+def _start_vdl2b(freqs):
+    """dumpvdl2 על המקלט המשני (קול + VDL2). מחזיר (error, detail)."""
+    write_vdl2_env(freqs, path=VDL2B_ENV_PATH, serial=_secondary_serial())
+    try:
+        r = _sysctl("restart", VDL2B_SERVICE, timeout=45)
+    except subprocess.TimeoutExpired:
+        return "הפעלת VDL2 על המקלט המשני נתקעה — בדוק שהוא מחובר", None
+    if r.returncode != 0:
+        return (r.stderr or "dumpvdl2 failed").strip(), _journal_tail(VDL2B_SERVICE)
+    for _ in range(7):
+        time.sleep(0.5)
+        if not _is_active(VDL2B_SERVICE):
+            return ("VDL2 על המקלט המשני נכשל לעלות — בדוק journalctl -u " + VDL2B_SERVICE,
+                    _journal_tail(VDL2B_SERVICE))
+    return None, None
+
+
+def _start_secondary(mode, st):
+    """מרים את צרכן המשני של מצב מורכב. מחזיר (error, detail). בלי ראשי+משני תקינים —
+    מסרב (env/קונפיג בלי serial = "כל מקלט" = עלול לפתוח את הראשי)."""
+    rerr = _roles_error(mode)
+    if rerr:
+        return rerr, None
+    if mode == "voice2":
+        return _start_voice2(st)
+    if mode == "voice_vdl2":
+        return _start_vdl2b(st.get("vdl2_freqs"))
+    return _start_acars2(st.get("acars_freqs"))
+
+
+def _enter_composite(mode, params, st):
+    """מצב של שני מקלטים: rtl_airband על הראשי, ואחריו — לא במקביל — הצרכן של המשני
+    (acarsdec ב-voice_acars, rtl_airband שני ב-voice2). מחזיר (error, detail, sdr_down).
+    ⚠ הסדר הוא הבטיחות החשמלית (§7.8): שני rtl_airband שעלו יחד הפילו power bank 5V/3A;
+    קודם הקול עולה ומתייצב (stats חדש), והיחידה של המשני מחכה עוד 10ש' בעצמה."""
+    rerr = _roles_error(mode)
+    if rerr:
+        return rerr, None, False
+    for svc in (ACARS_SERVICE, *SECONDARY_SERVICES, VDL2_SERVICE, SATCOM_SERVICE):
+        try:
+            _sysctl("stop", svc, timeout=30)
+        except Exception:
+            pass
+    since = time.time()
+    err, detail, sdr_down = _enter_voice(params, keep_secondary=True)
+    if err:
+        return err, detail, sdr_down
+    # ⚠ stats שהתהליך *הקודם* כתב רגע לפני שנהרג (מעבר מקול) הם "אחרי since" ⇒ הדירוג
+    # החשמלי היה מסתיים מיד. זמן ההפעלה של התהליך הנוכחי מ-systemd מבדיל ביניהם.
+    start = _rtl_airband_start_wall()
+    _wait_voice_settled(max(since, start) if start else since)
+    err, detail = _start_secondary(mode, st)
+    if err:
+        try:
+            _sysctl("stop", COMPOSITE_SECONDARY[mode], timeout=30)
+        except Exception:
+            pass
+        return err, detail, False
+    return None, None, False
+
+
+def _composite_secondary_only(mode, st):
+    """True כשהמצב המורכב השמור הוא `mode` והקול על הראשי חי — אז שינוי בצד המשני (בנק ACARS,
+    תדר שני) מאתחל *רק* את המשני. כניסה מלאה הייתה עוצרת ומרימה גם את הקול: שמע נקטע ל-~10ש'
+    בגלל החלפת תדרי דאטה. מצב אחר (כולל קול רגיל) ⇒ False — כניסה מלאה כרגיל."""
+    return st.get("app_mode") == mode and _is_active("rtl_airband")
+
+
+def _secondary_starting_or_up(mode):
+    """המשני של מצב מורכב פעיל *או בדרך* (activating: השער, ה-sleep המדורג, RestartSec).
+    systemd כבר מטפל בו ⇒ אין להרים אותו שוב (restart היה חוסם עד 45ש' תחת TUNE_LOCK ומפיל
+    את הקול לעוד מחזור פתיחה)."""
+    st = _services_status([COMPOSITE_SECONDARY[mode]]).get(COMPOSITE_SECONDARY[mode], "")
+    return st in ("active", "activating", "reloading")
+
+
+def _enter_voice_acars(params, freqs):
+    """מצב "קול + ACARS" (שני מקלטים) — ר' _enter_composite."""
+    return _enter_composite("voice_acars", params, {"acars_freqs": freqs})
+
+
+def _enter_voice2(params, st=None):
+    """מצב "קול כפול" (שני מקלטים) — ר' _enter_composite."""
+    return _enter_composite("voice2", params, st if st is not None else load_state())
+
+
+def _enter_voice_vdl2(params, freqs):
+    """מצב "קול + VDL2" (שני מקלטים) — ר' _enter_composite."""
+    return _enter_composite("voice_vdl2", params, {"vdl2_freqs": freqs})
+
+
+def _enter_composite_saved(mode, params, st):
+    """כניסה מלאה למצב מורכב לפי ה-state השמור (אתחול / reconcile)."""
+    if mode == "voice_acars":
+        return _enter_voice_acars(params, st.get("acars_freqs"))
+    if mode == "voice_vdl2":
+        return _enter_voice_vdl2(params, st.get("vdl2_freqs"))
+    return _enter_voice2(params, st)
 
 
 # --- סינון רעשים חי: airam-denoise (docs/denoise-design.md) -----------------
@@ -3594,7 +3941,7 @@ def _scan_loop_body(stop_evt, plan, start_idx, first_dwell, consumer_active=Fals
         if err:
             log.warning("scan: leg %d (%s) failed: %s", idx % len(plan), leg["mode"], err)
             consecutive_fail += 1
-            if consecutive_fail >= len(plan) and not _sdr_present():
+            if consecutive_fail >= len(plan) and not _role_present("primary"):
                 # ה-SDR נעלם *תוך כדי* הסבב: זה ניתוק USB, לא כשל של הלוח —
                 # הבדיקה בראש הלולאה תמתין לו (ר' שם). כשל אמיתי (SDR נוכח)
                 # עדיין נופל ל-off למטה.
@@ -3664,7 +4011,7 @@ def _scan_activate(plan, wait_for_sdr=False):
         thread.start()
         return None, None
     err, detail = _scan_enter_leg(plan[active_idx])
-    if err and wait_for_sdr and not _sdr_present():
+    if err and wait_for_sdr and not _role_present("primary"):
         # שחזור באתחול בלי SDR (wait_for_sdr — רק מ-_boot_restore; כניסה ידנית
         # מה-UI ממשיכה לקבל שגיאה מיידית): במקום ליפול ל-off, מתחילים את ה-thread
         # כשהוא ממתין — הוא ינסה שוב את אותה רגל אחרי SCAN_WINDOW_RECHECK_SEC,
@@ -3723,7 +4070,7 @@ def stream_proxy():
     # ?m=clean => הסטרים המסונן. רשימה סגורה (לא שם mount חופשי מהלקוח) — אין
     # דרך להפוך את ה-proxy לגישה לכל נתיב ב-Icecast המקומי. /clean.mp3 שאינו חי
     # מוגש ע"י Icecast מ-/live.mp3 (fallback-mount) => אין כאן מקרה קצה נוסף.
-    mount = DENOISE_MOUNT if request.args.get("m") == "clean" else MOUNT
+    mount = {"clean": DENOISE_MOUNT, "live2": MOUNT2}.get(request.args.get("m"), MOUNT)
     upstream = f"http://127.0.0.1:{ICECAST_PORT}/{mount}"
     try:
         up = urllib.request.urlopen(upstream, timeout=10)   # noqa: S310 (לוקאלהוסט בלבד)
@@ -3787,11 +4134,17 @@ def api_state():
         st["app_mode"] = "scan"
         # thread שמת (חריגה) = אף אחד לא מסובב את הרגלים — תקלה, גם אם צרכן עוד רץ
         st["mode_ok"] = _scan_thread_alive() and ((live is not None) or not any_due)
+    elif saved in COMPOSITE_SECONDARY and live in ("voice", saved, None):
+        # מצב של שני מקלטים: תקין רק כששני הצרכנים רצים. קול בלבד = הצרכן על המשני נפל.
+        st["app_mode"] = saved
+        st["mode_ok"] = live == saved
     else:
         st["app_mode"] = live or saved
         # mode_ok=False: המצב השמור אמור להריץ צרכן ואף אחד לא רץ (קריסה / עליית
         # מערכת / _boot_restore עוד בדרך). True גם ב-off — standby מכוון אינו תקלה.
         st["mode_ok"] = (live is not None) or (saved == "off")
+    st["roles_ready"] = _roles_error() is None
+    st["mount2"] = MOUNT2
     st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT, version=VERSION,
               denoise_mount=DENOISE_MOUNT, denoise_available=not _denoise_missing(),
               denoise_engine=_denoise_engine(st),
@@ -3829,8 +4182,9 @@ def api_presets():
 SDR_PROBE_TTL_SEC = 10.0
 SDR_PROBE_TIMEOUT_SEC = 12
 SDR_API_SERVICE = "sdrplay"
-SDR_CONSUMERS = ("rtl_airband", ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE)
-_SDR_CONSUMER_MODE = {svc: m for m, svc in MODE_SERVICE.items()}
+SDR_CONSUMERS = ("rtl_airband", ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE, *SECONDARY_SERVICES)
+_SDR_CONSUMER_MODE = {**{svc: m for m, svc in MODE_SERVICE.items()},
+                      **{svc: m for m, svc in COMPOSITE_SECONDARY.items()}}
 # מצבי systemd שבהם הצרכן שלנו מחזיק (או מנסה להחזיק) את המכשיר: "activating"
 # כולל לולאת auto-restart של Restart=always — ה-SDR לא פנוי לאחרים גם אז.
 _SDR_HOLDING_STATES = ("active", "activating", "reloading", "deactivating")
@@ -3849,15 +4203,45 @@ def _sdr_usb():
     """(present, desc): present=None כשאי אפשר לבדוק (אין lsusb) — לא ניחוש.
     ⚠ בכוונה שונה מ-_sdr_present שמניח True בכשל: שם זו החלטת רולבק, כאן זה
     חיווי למשתמש, ו"מזוהה" שלא נבדק הוא בדיוק ההמצאה ש-§12 אוסר."""
+    present, desc, _n = _sdr_usb_full()
+    return present, desc
+
+
+def _sdr_usb_full():
+    """(present, desc, count) — count = כמה מקלטי SDRplay ב-USB (None כשאין lsusb)."""
     try:
         r = subprocess.run(["lsusb", "-d", "1df7:"], capture_output=True, text=True, timeout=5)
     except Exception:
-        return None, None
+        return None, None, None
     if r.returncode != 0:
-        return False, None
-    line = (r.stdout.splitlines() or [""])[0]
+        return False, None, 0
+    lines = [l for l in r.stdout.splitlines() if l.strip()]
+    line = (lines or [""])[0]
     m = re.search(r"ID\s+([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\s*(.*)", line)
-    return True, ((m.group(2).strip() or m.group(1)) if m else line.strip() or None)
+    return True, ((m.group(2).strip() or m.group(1)) if m else line.strip() or None), len(lines) or 1
+
+
+def _parse_sdr_find(text):
+    """פלט SoapySDRUtil --find ⇒ [{serial, model, label}]. התווית של SoapySDRPlay3:
+    "SDRplay Dev<N> <model> <serial>" (Registration.cpp)."""
+    devs, cur = [], None
+    for line in (text or "").splitlines():
+        if line.startswith("Found device"):
+            cur = {}
+            devs.append(cur)
+            continue
+        m = re.match(r"\s+(\w+)\s*=\s*(.*?)\s*$", line)
+        if m and cur is not None:
+            cur[m.group(1)] = m.group(2)
+    out = []
+    for d in devs:
+        serial = _sanitize_serial(d.get("serial"))
+        if d.get("driver") != "sdrplay" or not serial:
+            continue
+        mm = re.match(r"SDRplay Dev\d+ (\S+) ", d.get("label", "") + " ")
+        out.append({"serial": serial, "model": mm.group(1) if mm else None,
+                    "label": d.get("label") or None})
+    return out
 
 
 def _sdr_probe_api():
@@ -3909,6 +4293,12 @@ def _sdr_suspects(proc="/proc"):
 
 def _sdr_holder(services):
     """הצרכן שלנו שמחזיק את ה-SDR כרגע: (mode, state) או (None, None)."""
+    # מצב כפול קודם: rtl_airband ראשון ב-SDR_CONSUMERS, ובלי זה החיווי אמר "קול" גם כששני
+    # המקלטים תפוסים (ACARS/ערוץ שני על המשני)
+    if services.get("rtl_airband") in _SDR_HOLDING_STATES:
+        for mode, svc in COMPOSITE_SECONDARY.items():
+            if services.get(svc) in _SDR_HOLDING_STATES:
+                return mode, services.get("rtl_airband")
     for svc in SDR_CONSUMERS:
         st = services.get(svc)
         if st in _SDR_HOLDING_STATES:
@@ -3924,10 +4314,14 @@ def _sdr_status():
     unavailable — ה-API לא מציע, ואין lsusb לדעת אם הוא בכלל מחובר ·
     checking — probe ראשון עוד רץ (בקשה מקבילה) ·
     unknown — אין כלי לבדוק "פנוי" (SoapySDRUtil חסר) — לא ממציאים תשובה."""
-    usb, desc = _sdr_usb()
+    usb, desc, count = _sdr_usb_full()
+    primary = _primary_serial()
     res = {"ok": True, "usb": usb, "usb_desc": desc, "state": None, "mode": None,
            "service_state": None, "api": None, "label": None, "detail": None,
-           "suspects": [], "checked_age": None}
+           "suspects": [], "checked_age": None,
+           # שני מקלטים בלי ראשי שנבחר ⇒ איזה מהם נפתח נקבע במקרה (§3.1 במסמך)
+           "usb_count": count, "primary": primary, "secondary": _secondary_serial(),
+           "roles_needed": bool(count and count > 1 and not primary)}
     if usb is False:
         res["state"] = "missing"
         return res
@@ -3986,6 +4380,74 @@ def api_sdr():
     return jsonify(_sdr_status())
 
 
+@app.route("/api/sdr/devices")
+def api_sdr_devices():
+    """המקלטים שה-API מציע עכשיו + התפקידים השמורים. ⚠ מקלט שצרכן (שלנו או זר)
+    מחזיק לא מופיע ב-find — לכן `held` מסמן שהרשימה חלקית, לא שהוא "לא קיים"."""
+    st = load_state()
+    held, _ = _sdr_holder(_services_status(SDR_CONSUMERS))
+    try:
+        r = subprocess.run(["SoapySDRUtil", "--find=driver=sdrplay"],
+                           capture_output=True, text=True, timeout=SDR_PROBE_TIMEOUT_SEC)
+        devices, err = _parse_sdr_find(r.stdout), None
+    except FileNotFoundError:
+        devices, err = [], "SoapySDRUtil לא מותקן"
+    except (subprocess.TimeoutExpired, OSError):
+        devices, err = [], "ה-API לא ענה"
+    _usb, _desc, count = _sdr_usb_full()
+    return jsonify({"ok": err is None, "error": err, "devices": devices, "usb_count": count,
+                    "held_by": held,
+                    "primary": _sanitize_serial(st.get("sdr_primary")),
+                    "secondary": _sanitize_serial(st.get("sdr_secondary"))})
+
+
+@app.route("/api/sdr/roles", methods=["POST"])
+def api_sdr_roles():
+    """{primary?, secondary?}: serial או null (=נקה). נכנס לתוקף בכניסה הבאה למצב —
+    לא מאתחל את מה שרץ (לא נוגעים ברדיו מתחת לרגליים של מאזין)."""
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or not ({"primary", "secondary"} & set(data)):
+        return jsonify({"ok": False, "error": "צריך primary ו/או secondary"}), 400
+    changes = {}
+    for key in ("primary", "secondary"):
+        if key not in data:
+            continue
+        v = data[key]
+        if v is None or v == "":
+            changes["sdr_" + key] = None
+            continue
+        sv = _sanitize_serial(v)
+        if not sv:
+            return jsonify({"ok": False, "error": f"serial לא תקין: {key}"}), 400
+        changes["sdr_" + key] = sv
+    # ⚠ תחת TUNE_LOCK: כיוונון/רולבק/reconcile/tune2 קוראים את ה-serial *מחדש* בכל כתיבת
+    # קונפיג. החלפת תפקידים באמצע מצב כפול הפנתה את הקונפיג של הראשי למקלט שה-acarsdec
+    # (המשני) מחזיק ⇒ הכיוונון הבא והרולבק שלו נכשלו ⇒ off. גם שתי בקשות מקבילות יכלו
+    # לשמור ראשי == משני (הבדיקה רצה על snapshot) — הנעילה מסדרת גם אותן.
+    if not TUNE_LOCK.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "פעולה אחרת מתבצעת — נסה שוב בעוד רגע"}), 409
+    try:
+        st = load_state()
+        if st.get("app_mode") in COMPOSITE_SECONDARY or any(_is_active(s2) for s2 in SECONDARY_SERVICES):
+            return jsonify({"ok": False, "error": "מצב של שני מקלטים פעיל — עבור לקול רגיל או לכיבוי "
+                            "לפני שינוי תפקידי המקלטים"}), 409
+        prim = changes.get("sdr_primary", st.get("sdr_primary"))
+        sec = changes.get("sdr_secondary", st.get("sdr_secondary"))
+        if prim and sec and prim == sec:
+            return jsonify({"ok": False, "error": "אותו מקלט לא יכול להיות גם ראשי וגם משני"}), 400
+        new = _merge_state(changes)
+        try:
+            write_sdr_env(new.get("sdr_primary"), new.get("sdr_secondary"))
+        except OSError as e:
+            log.warning("sdr.env write failed: %s", e)
+    finally:
+        TUNE_LOCK.release()
+    _sdr_probe_cache.update(t=0.0, result=None)
+    return jsonify({"ok": True, "primary": new.get("sdr_primary"),
+                    "secondary": new.get("sdr_secondary"),
+                    "applies": "במעבר המצב הבא"})
+
+
 @app.route("/api/health")
 def api_health():
     """סטטוס המערכת — מאפשר ל-UI להבדיל בין "אין שידור" ל"משהו נפל"."""
@@ -4001,6 +4463,9 @@ def api_health():
     acars_ok = services["airam-acars"] == "active"
     vdl2_ok = services["airam-vdl2"] == "active"
     satcom_ok = services["airam-satcom"] == "active"
+    acars2_on = services.get("airam-acars2") == "active"
+    voice2_on = services.get(VOICE2_SERVICE) == "active"
+    vdl2b_on = services.get(VDL2B_SERVICE) == "active"
     # standby מכוון: כל הצרכנים כבויים ו-state מסומן off => תקין, *לא* תקלה (אחרת
     # מצב הכיבוי שביקש המשתמש היה נראה כקריסה). sdrplay נשאר active במפה.
     saved_state = load_state()
@@ -4009,23 +4474,28 @@ def api_health():
               and services["rtl_airband"] != "active"
               and services["airam-acars"] != "active"
               and services["airam-vdl2"] != "active"
-              and services["airam-satcom"] != "active")
+              and services["airam-satcom"] != "active"
+              and not acars2_on and not voice2_on and not vdl2b_on)
     # המצב נגזר מהשירות הפעיל, ובאין פעיל — מהכוונה השמורה (אין ברירת-מחדל לקול).
     # ok = בריאות המצב הנגזר בלבד: מצב שמור שלא רץ => ok=False (תקלה מדווחת),
     # למשל אחרי קריסת שירות או בזמן ש-_boot_restore עוד מחזיר את המצב.
     active = ("vdl2" if services["airam-vdl2"] == "active"
               else "acars" if services["airam-acars"] == "active"
               else "satcom" if services["airam-satcom"] == "active"
-              else "voice" if services["rtl_airband"] == "active" else None)
+              else ("voice_acars" if acars2_on else "voice2" if voice2_on
+                    else "voice_vdl2" if vdl2b_on else "voice")
+              if services["rtl_airband"] == "active" else None)
     if saved == "scan":
         # סריקה: תקין כל עוד הרגל הנוכחית (איזשהו צרכן) פועלת, *או* שאף רגל לא
         # אמורה לרוץ כרגע (חלון שעות) — "ממתין" אינו תקלה.
         plan = saved_state.get("scan_plan") or []
         any_due = any(_leg_active_now(leg) for leg in plan) if plan else True
         mode, ok = "scan", _scan_thread_alive() and ((active is not None) or not any_due)
+    elif saved in COMPOSITE_SECONDARY and active in ("voice", saved, None):
+        mode, ok = saved, voice_ok and services.get(COMPOSITE_SECONDARY[saved]) == "active"
     else:
         mode = active or saved
-        ok = (voice_ok if mode == "voice" else acars_ok if mode == "acars"
+        ok = (voice_ok if mode in ("voice", *COMPOSITE_SECONDARY) else acars_ok if mode == "acars"
               else vdl2_ok if mode == "vdl2" else satcom_ok if mode == "satcom" else off_ok)
     # הסינון לא נכנס ל-ok בכוונה: כשל בו לא פוגע ברדיו (Icecast מגיש /live.mp3
     # למבקשי /clean.mp3), ו"תקלה" אדומה במסך הבית בגללו הייתה שולחת לבדוק SDR.
@@ -4102,7 +4572,7 @@ def parse_stats(text, want_freq):
 
 
 # --- יומן שידורים והקלטות ---------------------------------------------------
-_REC_NAME_RE = re.compile(rf"^{re.escape(REC_BASENAME)}_\d{{8}}_\d{{6}}_(\d+)\.mp3$")
+_REC_NAME_RE = re.compile(rf"^{re.escape(REC_BASENAME)}(?:2)?_\d{{8}}_\d{{6}}_(\d+)\.mp3$")
 
 
 def _rec_freq_mhz(name):
@@ -4164,7 +4634,8 @@ def _rec_event(p):
     גרסאות של אותה שורה שיכולות להיפרד."""
     st = p.stat()
     return {"ts": round(st.st_mtime, 1), "freq": _rec_freq_mhz(p.name),
-            "file": p.name, "dur": round(st.st_size / REC_BYTES_PER_SEC, 1)}
+            "file": p.name, "dur": round(st.st_size / REC_BYTES_PER_SEC, 1),
+            "ch": 2 if p.name.startswith(REC_BASENAME2 + "_") else 1}
 
 
 def _saved_usage():
@@ -5091,18 +5562,20 @@ def api_metar():
     return jsonify(ok=True, metar=text, age=age)
 
 
-def _read_voice_metrics():
+def _read_voice_metrics(ch=1):
     """מדדי RF רציפים לתדר הנוכחי מ-rtl_airband stats. מקור אמת יחיד לפענוח
     הקובץ — משותף ל-/api/metrics (תצוגת קול) ול-/api/signal (מד השדה המאוחד,
-    מצב voice). rtl_airband מרענן את הקובץ כל ~1 שנייה."""
+    מצב voice). rtl_airband מרענן את הקובץ כל ~1 שנייה. ch=2 — הערוץ השני (קול כפול)."""
+    path = STATS2_PATH if ch == 2 else STATS_PATH
     try:
-        age = time.time() - STATS_PATH.stat().st_mtime
-        text = STATS_PATH.read_text()
+        age = time.time() - path.stat().st_mtime
+        text = path.read_text()
     except OSError:
         return {"fresh": False, "age": None, "signal": None, "noise": None,
                 "snr": None, "overload": False, "squelch_opens": None}
 
-    want = f"{load_state()['freq']:.3f}"       # מדדים מתויגים freq=MHz ב-3 ספרות
+    st = load_state()
+    want = f"{(_voice2_params(st)[0] if ch == 2 else st['freq']):.3f}"   # מתויגים freq=MHz ב-3 ספרות
     vals = parse_stats(text, want)
 
     sig = vals.get("channel_dbfs_signal_level")
@@ -5117,8 +5590,9 @@ def _read_voice_metrics():
 
 @app.route("/api/metrics")
 def api_metrics():
-    """מדדי RF חיים לתדר הנוכחי. rtl_airband מרענן את הקובץ כל ~1 שנייה."""
-    return jsonify(ok=True, overload_dbfs=OVERLOAD_DBFS, **_read_voice_metrics())
+    """מדדי RF חיים לתדר הנוכחי. rtl_airband מרענן את הקובץ כל ~1 שנייה. ?ch=2 — הערוץ השני."""
+    ch = 2 if request.args.get("ch") == "2" else 1
+    return jsonify(ok=True, overload_dbfs=OVERLOAD_DBFS, ch=ch, **_read_voice_metrics(ch))
 
 
 def _signal_verdict(noise, baseline):
@@ -5150,7 +5624,7 @@ def api_signal():
     baseline = st.get("signal_baseline")
     payload = {"ok": True, "mode": mode or "off"}
 
-    if mode == "voice":
+    if mode == "voice" or mode in COMPOSITE_SECONDARY:
         m = _read_voice_metrics()
         agc_ok = bool(st.get("agc", True))   # gain ידני => לא בר-השוואה לבסיס (§12: לא משווים תפוחים לתפוזים)
         payload.update(kind="continuous", fresh=m["fresh"], age=m["age"],
@@ -5282,6 +5756,9 @@ def api_antenna_check():
         return jsonify(ok=False, error="פעולה אחרת מתבצעת כרגע — המתן שנייה ונסה שוב"), 409
     try:
         prev_live = _live_mode()
+        if prev_live in COMPOSITE_SECONDARY:
+            return jsonify(ok=False, error="לא זמין במצב " + COMPOSITE_LABEL[prev_live] +
+                           " — עבור לקול בלבד ונסה שוב"), 409
         if prev_live == "satcom":
             # כמו _experiment_start: עם אנטנת L-band מחוברת המדידה ב-VHF חסרת
             # משמעות (ו-calibrate היה שומר אותה כבסיס), והמעבר מכבה ומדליק bias-T.
@@ -5779,6 +6256,8 @@ def _experiment_start():
     if scanning:
         return {"ok": False, "error": "עצור את הסריקה לפני הניסוי"}, 409
     prev_live = _live_mode()
+    if prev_live in COMPOSITE_SECONDARY:
+        return {"ok": False, "error": "לא זמין במצב " + COMPOSITE_LABEL[prev_live] + " — עבור לקול בלבד"}, 409
     if prev_live == "satcom":
         return {"ok": False, "error": "SATCOM פעיל — עצור אותו וחבר את אנטנת ה-VHF לפני הניסוי"}, 409
     if not TUNE_LOCK.acquire(blocking=False):
@@ -6129,8 +6608,10 @@ def _parse_tune(data):
             "chan_filter": chan_filter, "fm_notch": fm_notch}, None
 
 
-def _voice_tune(params):
+def _voice_tune(params, keep_secondary=None):
     """מכוונן קול (rtl_airband). מבטיח יציאה ממצב ACARS/VDL2 תחילה (משחרר את ה-SDR).
+    keep_secondary: None = אוטומטי (‏/api/tune — במצב "קול + ACARS" ה-ACARS על המקלט
+    השני ממשיך); False = מעבר מפורש לקול בלבד (/api/mode voice).
     מחזיר (payload, http_status). serialized תחת TUNE_LOCK."""
     if not TUNE_LOCK.acquire(blocking=False):
         # state בתשובה => ה-UI מיישר את התצוגה האופטימית חזרה למציאות
@@ -6143,6 +6624,17 @@ def _voice_tune(params):
         # סבב תקין "בחינם" ומשאיר "scan זומבי" — צרכן רץ בלי thread שממשיך אותו.
         _scan_stop_thread()
         prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
+        pm = prev.get("app_mode")
+        if keep_secondary is None:
+            # ⚠ לפי הכוונה השמורה, לא לפי is-active של המשני: משני ב-"activating" (sleep המדורג,
+            # RestartSec) בדיוק ברגע הכיוונון הוציא בשקט מהמצב הכפול — וה-reconcile כבר לא החזיר.
+            keep_secondary = pm in COMPOSITE_SECONDARY
+        vmode = pm if (keep_secondary and pm in COMPOSITE_SECONDARY) else "voice"
+        if vmode == "voice2" and abs(params["freq"] - _voice2_params(prev)[0]) < 0.0005:
+            # כמו _parse_voice2 מהצד השני: שני מקלטים על ערוץ אחד, ושמות ההקלטות
+            # (<תאריך>_<Hz>) של שני התהליכים מתנגשים באותה שנייה
+            return {"ok": False, "error": "התדר הזה כבר על הערוץ השני — בחר תדר אחר",
+                    "state": prev}, 400
         # ⚠ השמירה ממזגת (_merge_state), לא דורסת: params מכיל רק שדות קול
         # (freq/mod/gain/squelch). דריסה מלאה הייתה מוחקת satcom_bias_tee/
         # satcom_gain/signal_baseline/scan_plan וכו' — עם satcom_bias_tee במיוחד,
@@ -6153,26 +6645,26 @@ def _voice_tune(params):
                  params["rf_gain"], params["squelch_mode"], params["squelch_snr"],
                  params["chan_filter"], params["fm_notch"], request.remote_addr)
 
-        err, detail, sdr_down = _enter_voice(params)
+        err, detail, sdr_down = _enter_voice(params, keep_secondary=keep_secondary)
         if err:
             log.warning("tune %.3f MHz failed: %s (sdr_down=%s)", params["freq"], err, sdr_down)
             if sdr_down:
                 # ה-SDR מנותק: רולבק ייתקע באותה המתנה בדיוק, אז מדלגים עליו.
                 # הקונפיג החדש נשאר על הדיסק וייקלט כשהמכשיר יחובר (udev מרים
                 # את השירותים) => שומרים state תואם לדיסק, לא את הקודם.
-                new_state = _merge_state({**params, "app_mode": "voice"})
+                new_state = _merge_state({**params, "app_mode": vmode})
                 return {"ok": False, "detail": detail, "state": new_state,
                         "error": err + " — התדר יוחל אוטומטית כשה-SDR יחובר"}, 500
             # config רע => מנסים את קונפיג הקול האחרון שעבד (retry בתוך קול, לא
             # עליונות-מצב). רק אם גם הוא לא עולה — נופלים ל-off לפי הדוקטרינה.
             if _rollback(prev):
                 return {"ok": False, "error": err + " (חזרתי לתדר הקודם)",
-                        "detail": detail, "state": {**prev, "app_mode": "voice"}}, 500
+                        "detail": detail, "state": {**prev, "app_mode": vmode}}, 500
             return _fail_to_off(prev, err + " — וגם החזרה לתדר הקודם נכשלה",
                                 detail, "voice tune")
 
         # נשמר רק אחרי שאומת שהשירות חי => state תמיד משקף הגדרות שעובדות
-        new_state = _merge_state({**params, "app_mode": "voice"})
+        new_state = _merge_state({**params, "app_mode": vmode})
         return {"ok": True, **new_state}, 200
     finally:
         TUNE_LOCK.release()
@@ -6188,6 +6680,60 @@ def api_tune():
         return jsonify(ok=False, error=err), 400
     payload, status = _voice_tune(params)
     return jsonify(payload), status
+
+
+def _parse_voice2(data, st):
+    """{voice2_freq, voice2_mod} מבקשה (freq2/mod2) או מה-state. מחזיר (changes, error).
+    אותו תדר כמו הראשי ⇒ שגיאה: שני מקלטים על ערוץ אחד הם בזבוז חשמל, ושמות ההקלטות
+    (<תאריך>_<Hz>) היו מתנגשים באותה שנייה."""
+    if "freq2" in data:
+        try:
+            f2 = float(data.get("freq2"))
+        except (TypeError, ValueError):
+            return None, "תדר שני לא תקין"
+        if not (0.1 <= f2 <= 1999.5):
+            return None, "תדר שני מחוץ לטווח (0.1–1999.5 MHz)"
+    else:
+        f2, _m = _voice2_params(st)
+    mod_src = data["mod2"] if "mod2" in data else st.get("voice2_mod", "am")
+    m2 = "nfm" if str(mod_src).lower() == "nfm" else "am"
+    try:
+        f1 = float(st.get("freq"))
+    except (TypeError, ValueError):
+        f1 = None
+    if f1 is not None and abs(f1 - f2) < 0.0005:
+        return None, "הערוץ השני זהה לראשי — בחר תדר אחר"
+    return {"voice2_freq": round(f2, 4), "voice2_mod": m2}, None
+
+
+@app.route("/api/tune2", methods=["POST"])
+def api_tune2():
+    """כיוונון הערוץ השני (קול כפול) — מאתחל רק את rtl_airband2, הראשי לא נוגע.
+    409 מחוץ למצב voice2 (אין מה לכוונן). כשל ⇒ חוזרים לתדר השני הקודם; גם זה נכשל ⇒
+    הראשי ממשיך, והמצב מדווח כתקלה (mode_ok=False) — ה-reconcile ינסה שוב."""
+    data = request.get_json(silent=True) or {}
+    if not TUNE_LOCK.acquire(blocking=False):
+        return jsonify(ok=False, error="כיוונון אחר מתבצע כרגע — המתן שנייה ונסה שוב",
+                       state=load_state()), 409
+    try:
+        st = load_state()
+        if st.get("app_mode") != "voice2":
+            return jsonify(ok=False, error="הערוץ השני פעיל רק במצב קול כפול", state=st), 409
+        v2, verr = _parse_voice2(data, st)
+        if verr:
+            return jsonify(ok=False, error=verr, state=st), 400
+        log.info("tune2 %.3f MHz mod=%s (from %s)", v2["voice2_freq"], v2["voice2_mod"],
+                 request.remote_addr)
+        err, detail = _start_voice2({**st, **v2})
+        if err:
+            log.warning("tune2 %.3f failed: %s — חוזר לתדר הקודם", v2["voice2_freq"], err)
+            back, _d = _start_voice2(st)
+            msg = err + (" (חזרתי לתדר הקודם)" if back is None else " — וגם החזרה לתדר הקודם נכשלה")
+            return jsonify(ok=False, error=msg, detail=detail, state=load_state()), 500
+        new = _merge_state(v2)
+        return jsonify(ok=True, voice2_freq=new["voice2_freq"], voice2_mod=new["voice2_mod"])
+    finally:
+        TUNE_LOCK.release()
 
 
 def _acars_adsb():
@@ -6226,7 +6772,7 @@ def api_acars():
         msgs = [dict(m) for m in _acars_msgs
                 if m["id"] > since and (m.get("t") or 0) >= floor]
         cursor = _acars_seq
-    return jsonify(ok=True, active=_is_active(ACARS_SERVICE),
+    return jsonify(ok=True, active=_is_active(ACARS_SERVICE) or _is_active(ACARS2_SERVICE),
                    freqs=load_state().get("acars_freqs", ACARS_FREQS_DEFAULT),
                    cursor=cursor, messages=msgs, adsb=_acars_adsb(),
                    **_xc_feed_payload("acars"))
@@ -6349,7 +6895,7 @@ def api_vdl2():
         msgs = [dict(m) for m in _vdl2_msgs
                 if m["id"] > since and (m.get("t") or 0) >= floor]
         cursor = _vdl2_seq
-    return jsonify(ok=True, active=_is_active(VDL2_SERVICE),
+    return jsonify(ok=True, active=_is_active(VDL2_SERVICE) or _is_active(VDL2B_SERVICE),
                    freqs=load_state().get("vdl2_freqs", VDL2_FREQS_DEFAULT),
                    cursor=cursor, messages=msgs, adsb=_vdl2_adsb(),
                    **_xc_feed_payload("vdl2"))
@@ -7437,8 +7983,9 @@ def api_mode():
     אופציונלי), כמו /api/tune."""
     data = request.get_json(silent=True) or {}
     mode = str(data.get("mode", "")).lower()
-    if mode not in ("voice", "acars", "vdl2", "satcom", "off", "scan"):
-        return jsonify(ok=False, error="mode לא תקין (voice/acars/vdl2/satcom/off/scan)"), 400
+    if mode not in ("voice", "acars", "vdl2", "satcom", "off", "scan", *COMPOSITE_SECONDARY):
+        return jsonify(ok=False, error="mode לא תקין (voice/acars/vdl2/satcom/off/scan/"
+                       + "/".join(COMPOSITE_SECONDARY) + ")"), 400
 
     # קודם ולידציה סטטית (לא תלוית-נעילה: פענוח פרמטרים/לוח/תדרים) — בקשה עם
     # פרמטרים לא-תקינים (400) לא נוגעת בסבב סריקה פעיל בכלל (אחרת סבב תקין
@@ -7460,8 +8007,102 @@ def api_mode():
         # _scan_stop_thread נקרא בתוך _voice_tune עצמו, אחרי שהוא תופס את
         # TUNE_LOCK — לא כאן (ר' ההערה בתוך _voice_tune; אותה סיבה בדיוק
         # שהמצבים האחרים למטה קוראים לו רק אחרי הנעילה).
-        payload, status = _voice_tune(params)
+        payload, status = _voice_tune(params, keep_secondary=False)
         return jsonify(payload), status
+
+    if mode in COMPOSITE_DATA:
+        # שני מקלטים: קול (ההגדרות השמורות) על הראשי + מפענח דאטה (ACARS/VDL2 — הבנק השמור או
+        # freqs) על המשני
+        key = COMPOSITE_DATA[mode][0]
+        is_vdl2 = mode == "voice_vdl2"
+        label = "VDL2" if is_vdl2 else "ACARS"
+        rerr = _roles_error(mode)
+        if rerr:
+            return jsonify(ok=False, error=rerr, state=st), 400
+        freqs = _sanitize_freqs(data.get("freqs") or st.get(key),
+                                VDL2_FREQS_DEFAULT if is_vdl2 else ACARS_FREQS_DEFAULT)
+        werr = _vdl2_window_error(freqs) if is_vdl2 else _acars_window_error(freqs)
+        if werr:
+            return jsonify(ok=False, error=werr, state=st), 400
+        start = _start_vdl2b if is_vdl2 else _start_acars2
+        params, perr = _parse_tune(st)
+        if perr:
+            params, _ = _parse_tune(DEFAULT_STATE)
+        if not TUNE_LOCK.acquire(timeout=0.5):
+            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב", state=load_state()), 409
+        try:
+            _scan_stop_thread()
+            st = load_state()
+            if _composite_secondary_only(mode, st):
+                # כבר במצב (או הקול חי והמשני נפל): החלפת תדרי הדאטה ⇒ רק המשני מאותחל, הקול לא נוגע
+                if freqs == st.get(key) and _secondary_starting_or_up(mode):
+                    # אותה בקשה בדיוק (לחיצה על הכרטיס החי) — אין מה לאתחל
+                    return jsonify(ok=True, app_mode=mode, **{key: freqs}, secondary_only=True)
+                log.info("mode -> %s: רק %s על המשני %s (from %s)", mode, label, freqs, request.remote_addr)
+                err, detail = start(freqs)
+                if err:
+                    # ⚠ ה-env החדש נשאר על הדיסק ו-Restart=always היה מרים *אותו* בעוד ה-state
+                    # מראה את הישן ⇒ מחזירים את הישן (כמו /api/tune2)
+                    back, _d = start(st.get(key))
+                    return jsonify(ok=False, error=err + (" — הקול על הראשי ממשיך" if back is None else
+                                                          " — וגם החזרה לבנק הקודם נכשלה; הקול ממשיך"),
+                                   detail=detail, state=load_state()), 500
+                _merge_state({key: freqs})
+                return jsonify(ok=True, app_mode=mode, **{key: freqs}, secondary_only=True)
+            log.info("mode -> %s freq=%.3f %s=%s (from %s)",
+                     mode, params["freq"], label, freqs, request.remote_addr)
+            err, detail, _sdr_down = (_enter_voice_vdl2 if is_vdl2 else _enter_voice_acars)(params, freqs)
+            if err:
+                payload, status = _fail_to_off(st, err, detail, "enter " + mode)
+                return jsonify(payload), status
+            _merge_state({"app_mode": mode, key: freqs})
+            return jsonify(ok=True, app_mode=mode, **{key: freqs})
+        finally:
+            TUNE_LOCK.release()
+
+    if mode == "voice2":
+        # שני מקלטים: קול (ההגדרות השמורות) על הראשי + ערוץ קול שני (freq2/mod2 או השמור) על המשני
+        rerr = _roles_error("voice2")
+        if rerr:
+            return jsonify(ok=False, error=rerr, state=st), 400
+        v2, verr = _parse_voice2(data, st)
+        if verr:
+            return jsonify(ok=False, error=verr, state=st), 400
+        params, perr = _parse_tune(st)
+        if perr:
+            params, _ = _parse_tune(DEFAULT_STATE)
+        if not TUNE_LOCK.acquire(timeout=0.5):
+            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב", state=load_state()), 409
+        try:
+            _scan_stop_thread()
+            st = {**load_state(), **v2}
+            if _composite_secondary_only("voice2", st):
+                # כבר בקול כפול: רק הערוץ השני מאותחל (כמו /api/tune2), הראשי לא נוגע
+                old = load_state()
+                if (_voice2_params(old) == (v2["voice2_freq"], v2["voice2_mod"])
+                        and _secondary_starting_or_up("voice2")):
+                    return jsonify(ok=True, app_mode="voice2", voice2_freq=v2["voice2_freq"],
+                                   voice2_mod=v2["voice2_mod"], secondary_only=True)
+                err, detail = _start_voice2(st)
+                if err:
+                    back, _d = _start_voice2(old)     # ר' voice_acars למעלה
+                    return jsonify(ok=False, error=err + (" — הערוץ הראשי ממשיך" if back is None else
+                                                          " — וגם החזרה לתדר הקודם נכשלה; הראשי ממשיך"),
+                                   detail=detail, state=load_state()), 500
+                new = _merge_state(v2)
+                return jsonify(ok=True, app_mode="voice2", voice2_freq=new["voice2_freq"],
+                               voice2_mod=new["voice2_mod"], secondary_only=True)
+            log.info("mode -> VOICE2 freq=%.3f freq2=%.3f (from %s)",
+                     params["freq"], v2["voice2_freq"], request.remote_addr)
+            err, detail, _sdr_down = _enter_voice2(params, st)
+            if err:
+                payload, status = _fail_to_off(st, err, detail, "enter voice2")
+                return jsonify(payload), status
+            new = _merge_state({"app_mode": "voice2", **v2})
+            return jsonify(ok=True, app_mode="voice2", voice2_freq=new["voice2_freq"],
+                           voice2_mod=new["voice2_mod"])
+        finally:
+            TUNE_LOCK.release()
 
     plan = freqs = key = enter = bias_tee = skip_c = spectrum = gain = None
     if mode == "scan":
@@ -7596,10 +8237,16 @@ def _boot_restore():
         # אפליקציה מעל שלושת השירותים, לא שירות בפני עצמו) => הקיצור הזה תמיד
         # מדלג עליו וסבב הסריקה תמיד מתחיל מחדש מרגל 0 אחרי restart של airam-web
         # (גם אם רגל מסוימת כבר רצה תקין) — פשטות מכוונת, לא באג.
-        if live == mode and not (mode == "voice" and _config_stale()):
-            if mode == "voice":
+        if live == mode and not (mode in ("voice", *COMPOSITE_SECONDARY) and _config_stale()):
+            if mode in ("voice", *COMPOSITE_SECONDARY):
                 _denoise_after_voice()   # הקול כבר רץ — אולי בלי הסינון (שדרוג/restart)
             return   # restart של airam-web באמצע סשן: הצרכן השמור כבר רץ
+        if (mode in COMPOSITE_SECONDARY and live == "voice" and not _config_stale()
+                and _secondary_starting_or_up(mode)):
+            # הקול חי והמשני בדרך (ה-sleep המדורג אחרי restart של sdrplay — install.sh מאתחל את
+            # sdrplay ואז את airam-web): כניסה מלאה הייתה קוטעת את הקול ומרימה את המשני פעמיים
+            _denoise_after_voice()
+            return
         if mode == "off":
             if live:   # אחרי reboot ממילא כלום לא רץ => no-op
                 _enter_standby()
@@ -7633,6 +8280,14 @@ def _boot_restore():
                     # udev ירים את sdrplay כשה-SDR יחובר; health מראה תקלה.
                     log.warning("boot restore: SDR לא נוכח — הקול יעלה כשיחובר")
                     return
+            elif mode in COMPOSITE_SECONDARY:
+                params, perr = _parse_tune(st)
+                if perr:
+                    params, _ = _parse_tune(DEFAULT_STATE)
+                err, _detail, sdr_down = _enter_composite_saved(mode, params, st)
+                if err and sdr_down:
+                    log.warning("boot restore: SDR לא נוכח — %s יעלה כשיחובר", mode)
+                    return
             elif mode == "acars":
                 err, _detail = _enter_acars(st.get("acars_freqs"))
             elif mode == "vdl2":
@@ -7653,7 +8308,13 @@ def _boot_restore():
                     err, _detail = "לוח סריקה שמור לא תקין", None
                 else:
                     err, _detail = _scan_activate(plan, wait_for_sdr=True)
-            if err and mode in ("acars", "vdl2") and not _sdr_present():
+            if err and mode in COMPOSITE_SECONDARY and _is_active("rtl_airband"):
+                # התחלה חלקית: הקול על הראשי עלה, רק המשני נכשל (לרוב — לא מחובר). באתחול אין
+                # מי שיחליט ⇒ לא הורסים קול עובד: הכוונה נשמרת, health מדווח תקלה, וה-reconcile
+                # מרים את המשני כשיופיע (מסלול "הקול חי, המשני נפל").
+                log.warning("boot restore: %s — הקול עלה, המשני לא (%s); ה-reconcile ינסה שוב", mode, err)
+                return
+            if err and mode in ("acars", "vdl2", *COMPOSITE_SECONDARY) and not _role_present("primary"):
                 # ⚠ כמו voice למעלה: SDR מנותק באתחול (או USB שמתעורר אחרי
                 # BOOT_SDR_WAIT_SEC) אינו כשל של המצב — הכוונה נשמרת, ו-
                 # _mode_reconcile_loop נכנס מחדש כשה-SDR מופיע (הוא כבר מטפל
@@ -7693,24 +8354,50 @@ def _mode_reconcile_once():
     כבר מתקן ידנית) — פשוט מנסה שוב במחזור הבא."""
     st = load_state()
     mode = st.get("app_mode", "off")
-    if mode not in ("voice", "acars", "vdl2"):
+    if mode not in ("voice", "acars", "vdl2", *COMPOSITE_SECONDARY):
         return                          # off/scan/satcom — לא בטיפול הפוליסה הזו
-    if _live_mode() is not None:
+    composite = mode in COMPOSITE_SECONDARY
+    live0 = _live_mode()
+    if live0 is not None and not (composite and live0 == "voice"):
         return                          # צרכן כלשהו רץ בפועל — אין תקלה לתקן
-    if not _sdr_present():
-        return                          # ה-SDR עצמו לא מחובר — udev יטפל כשיחזור
+    # ⚠ כל הבדיקות שלפני הנעילה זולות וקובעות *אם* בכלל לנסות: restart ליחידה שהמקלט שלה
+    # לא מחובר חוסם עד 45ש' (השער + sleep המדורג) תחת TUNE_LOCK, ובזמן הזה כל כיוונון/מעבר
+    # מצב — כולל היציאה של המשתמש מהמצב — מקבל 409 (ביקורת 17.11.2026, נמצא בבדיקה).
+    if composite and live0 == "voice":
+        if _secondary_starting_or_up(mode):
+            return                      # systemd כבר מרים אותו (activating) — לא מתערבים
+        if _roles_error(mode) or not _role_present("secondary"):
+            return                      # המשני לא מוגדר / לא מחובר — הקול ממשיך, health מדווח
+    elif not _role_present("primary"):
+        # ⚠ גם כשהמשני חי (מצב כפול, הראשי נותק): כניסה מלאה הייתה עוצרת את המשני העובד בכל
+        # דקה ואז נכשלת על הראשי — הורגת בדיוק את היתירות ששני מקלטים נותנים.
+        return                          # המקלט הראשי לא מחובר — יעלה כשיחזור
     if not TUNE_LOCK.acquire(blocking=False):
         return                          # פעולה אחרת כרגע — לא מתחרים, ננסה שוב במחזור הבא
     try:
         st2 = load_state()
-        if st2.get("app_mode") != mode or _live_mode() is not None:
+        live = _live_mode()
+        if st2.get("app_mode") != mode or (live is not None and not (composite and live == "voice")):
             return                      # השתנה בזמן שחיכינו לנעילה
+        if composite and live == "voice":
+            # הקול חי, רק הצרכן על המשני נפל ⇒ מרימים רק אותו (לא נוגעים בקול)
+            log.warning("mode reconcile: הצרכן על המקלט המשני (%s) לא פעיל — מנסה להרים אותו", mode)
+            err, _d = _start_secondary(mode, st2)
+            if err:
+                log.warning("mode reconcile: המשני (%s) נכשל: %s — ננסה שוב במחזור הבא", mode, err)
+            return
         log.warning("mode reconcile: %s אמור לרוץ אבל שום צרכן לא פעיל — מנסה כניסה מחדש", mode)
-        if mode == "voice":
+        if mode in ("voice", *COMPOSITE_SECONDARY):
             params, perr = _parse_tune(st2)
             if perr:
                 params, _ = _parse_tune(DEFAULT_STATE)
-            err, detail, _sdr_down = _enter_voice(params)
+            if mode == "voice":
+                err, detail, _sdr_down = _enter_voice(params)
+            elif _secondary_starting_or_up(mode):
+                # הראשי נפל והמשני חי ⇒ מרימים רק את הראשי
+                err, detail, _sdr_down = _enter_voice(params, keep_secondary=True)
+            else:
+                err, detail, _sdr_down = _enter_composite_saved(mode, params, st2)
         elif mode == "acars":
             err, detail = _enter_acars(st2.get("acars_freqs"))
         else:
@@ -7742,6 +8429,13 @@ if __name__ == "__main__":
     _orphans = _cleanup_orphan_tmp()
     if _orphans:
         log.warning("נוקו %d קובצי tmp יתומים (כתיבה שנקטעה — כיבוי פתאומי?)", _orphans)
+    # sdr.env מסונכרן ל-state (שער airam-wait-sdrplay מחכה ל-serial הזה). עטוף: עלייה היא חובה.
+    try:
+        _st0 = load_state()
+        if _st0.get("sdr_primary") or _st0.get("sdr_secondary") or SDR_ENV_PATH.exists():
+            write_sdr_env(_st0.get("sdr_primary"), _st0.get("sdr_secondary"))
+    except Exception as _e:
+        log.warning("sdr.env sync failed: %s", _e)
     # אין צרכן SDR enabled ב-systemd => שחזור המצב השמור (voice/acars/vdl2/
     # satcom/scan/off) נעשה כאן, ברקע (satcom חריג — לא משוחזר אוטומטית,
     # ר' _boot_restore/§12 ב-CLAUDE.md). מכסה גם שדרוג קונפיג

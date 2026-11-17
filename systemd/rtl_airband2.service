@@ -1,0 +1,30 @@
+[Unit]
+Description=AIR-AM - second voice channel on the secondary SDR (rtl_airband, dual voice mode)
+Documentation=https://github.com/rtl-airband/RTLSDR-Airband/wiki
+After=network-online.target icecast2.service sdrplay.service rtl_airband.service
+Wants=network-online.target
+# כמו rtl_airband: Requires/PartOf => נעצר/מאותחל יחד עם ה-API של SDRplay.
+Requires=sdrplay.service
+PartOf=sdrplay.service
+# מצב "קול כפול" (docs/dual-sdr-feasibility.md §8): rtl_airband *שני* על המקלט המשני, *לצד*
+# rtl_airband שעל הראשי — תהליך לכל מקלט (תהליך אחד עם שניים ⇒ sdrplay_api_Fail, §7.6). לכן
+# אין Conflicts מול rtl_airband. כן מול שאר הצרכנים, כולל airam-acars2 (שניהם על המשני).
+Conflicts=airam-acars.service airam-vdl2.service airam-satcom.service airam-acars2.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# השער מחכה ל-serial של ה*משני* (SDR_SECONDARY ב-/etc/airam/sdr.env), ולא בועט ב-sdrplay
+# כשהקול רץ על הראשי.
+ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n secondary
+# פתיחה מדורגת *גם* כש-systemd מאתחל את שנינו יחד (PartOf=sdrplay: חיבור USB, install.sh).
+# שני rtl_airband שעלו יחד (~9ש' ליבה שלמה כל אחד) הפילו power bank 5V/3A (§7.8).
+ExecStartPre=/bin/sleep 10
+# הקונפיג נכתב ע"י airam-web (write_voice2_config) לפני כל הפעלה: serial של המשני, stats ו-mount
+# משלו (/live2.mp3), בלי פלט UDP לסינון הרעשים.
+ExecStart=/usr/local/bin/rtl_airband -f -c /etc/rtl_airband/airband2.conf
+User=root
+Restart=always
+RestartSec=10
+
+# לא enabled — airam-web (המתזמר) מפעיל/עוצר ומשחזר באתחול, כמו כל צרכן SDR.

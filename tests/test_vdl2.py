@@ -660,3 +660,21 @@ def test_vdl2_api_serializes_copies(client, paths):
         app._vdl2_msgs[0]["retry_count"] = 7       # מוטציה אחרי הקריאה
     assert data["messages"][0]["retry_count"] == 1  # העותק לא הושפע
     _reset_buffer()
+
+
+def test_dumpvdl2_bandwidth_patch_wired_into_install():
+    """קלט ה-SoapySDR של dumpvdl2 v2.6.0 מבקש רוחב (פריסה + 21kHz) ו-SoapySDRPlay3 מעגל למטה:
+    לבנק ברירת המחדל (136.725–136.975, מרכז 136.85) — מסנן 200kHz, ו-136.975 (ה-CSC) מחוצה לו.
+    הטלאי מסיר את הקריאה; install.sh מחיל אותו על עץ נקי, והחתימה כוללת אותו (התקנה קיימת נבנית מחדש)."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    patch = (root / "tools/dumpvdl2-2.6.0-soapysdr-no-narrow-bw.patch").read_text()
+    assert patch.startswith("--- a/src/soapysdr.c\n+++ b/src/soapysdr.c\n")
+    removed = [l for l in patch.splitlines() if l.startswith("-") and not l.startswith("---")]
+    added = [l for l in patch.splitlines() if l.startswith("+") and not l.startswith("+++")]
+    assert any("SoapySDRDevice_setBandwidth" in l for l in removed)
+    assert not any("setBandwidth" in l and not l.lstrip("+").lstrip().startswith("//") for l in added)
+    inst = (root / "install.sh").read_text()
+    assert 'DUMPVDL2_PATCH="$REPO_DIR/tools/dumpvdl2-2.6.0-soapysdr-no-narrow-bw.patch"' in inst
+    assert '"$DUMPVDL2_PATCH" | sha256sum' in inst                    # בחתימת הבנייה
+    assert 'git -C dumpvdl2 checkout -- . && git -C dumpvdl2 apply "$DUMPVDL2_PATCH"' in inst

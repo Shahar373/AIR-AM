@@ -1,0 +1,31 @@
+[Unit]
+Description=AIR-AM - VDL2 on the secondary SDR (dumpvdl2, voice + VDL2 mode)
+Documentation=https://github.com/szpajder/dumpvdl2
+After=network-online.target sdrplay.service rtl_airband.service
+Wants=network-online.target
+# כמו airam-vdl2: Requires/PartOf => נעצר/מאותחל יחד עם ה-API של SDRplay.
+Requires=sdrplay.service
+PartOf=sdrplay.service
+# מצב "קול + VDL2" (docs/dual-sdr-feasibility.md §11.2 ג׳): dumpvdl2 על המקלט ה*משני*, *לצד*
+# rtl_airband שעל הראשי — לכן אין Conflicts מול rtl_airband. כן מול כל השאר, כולל צרכני המשני
+# האחרים (airam-acars2, rtl_airband2) ו-airam-vdl2 (שניהם שולחים לאותו פורט UDP).
+Conflicts=airam-acars.service airam-vdl2.service airam-satcom.service airam-acars2.service rtl_airband2.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# airam-web כותב אותו לפני כל הפעלה (write_vdl2_env עם path/serial של המשני). systemd מנתח
+# KEY=VALUE בבטחה (לא shell) — §9.
+EnvironmentFile=-/etc/airam/vdl2-2.env
+# השער מחכה ל-serial של ה*משני*, ולא בועט ב-sdrplay כשהקול רץ על הראשי.
+ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n secondary
+# פתיחה מדורגת גם כש-systemd מאתחל את שנינו יחד (PartOf=sdrplay) — ר' airam-acars2.service.
+ExecStartPre=/bin/sleep 10
+# אותו ExecStart כמו airam-vdl2 (אותו פורט 5557 ⇒ אותו listener/פיד/ארכיון), על המשני.
+# ⚠ ‎${VDL2_SERIAL} ריק ⇒ "כל מקלט" — airam-web מסרב להיכנס למצב בלי משני (_roles_error).
+ExecStart=/usr/local/bin/dumpvdl2 --soapysdr driver=sdrplay${VDL2_SERIAL} --oversample 20 $VDL2_GAIN --msg-filter ${VDL2_MSG_FILTER} --output decoded:json:udp:address=127.0.0.1,port=5557 $VDL2_FREQS
+User=root
+Restart=always
+RestartSec=10
+
+# לא enabled — airam-web (המתזמר) מפעיל/עוצר ומשחזר באתחול, כמו כל צרכן SDR.

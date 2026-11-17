@@ -1,0 +1,36 @@
+[Unit]
+Description=AIR-AM - ACARS on the secondary SDR (acarsdec, voice + ACARS mode)
+Documentation=https://github.com/TLeconte/acarsdec
+After=network-online.target sdrplay.service rtl_airband.service
+Wants=network-online.target
+# כמו airam-acars: Requires/PartOf => נעצר/מאותחל יחד עם ה-API של SDRplay.
+Requires=sdrplay.service
+PartOf=sdrplay.service
+# מצב "קול + ACARS" (docs/dual-sdr-feasibility.md §6): רץ על המקלט ה*משני*, *לצד*
+# rtl_airband שעל הראשי — לכן אין Conflicts מול rtl_airband. כן מול שאר הצרכנים: כל
+# מצב אחר תופס את הראשי ולא מגדיר את המצב הכפול, אז ACARS כאן נעצר איתם.
+# airam-acars מול airam-acars2: לא באותו זמן (שני acarsdec על אותו פורט UDP — הפיד היה
+# מערבב שני מצבים).
+Conflicts=airam-acars.service airam-vdl2.service airam-satcom.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# airam-web כותב אותו לפני כל הפעלה (write_acars2_env): תדרים + ACARS_SERIAL=,serial=<משני>.
+# systemd מנתח KEY=VALUE בבטחה (לא shell) — §9.
+EnvironmentFile=-/etc/airam/acars2.env
+# השער מחכה ל-serial של ה*משני* (SDR_SECONDARY ב-/etc/airam/sdr.env), ולא בועט ב-sdrplay
+# כשהקול רץ על הראשי — זה היה מפיל אותו.
+ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n secondary
+# פתיחה מדורגת *גם* כש-systemd מאתחל את שנינו יחד (restart של sdrplay ⇒ PartOf: חיבור USB
+# דרך udev, install.sh) — שם airam-web לא מתזמן. rtl_airband צורך ליבה שלמה ~9ש' בעלייה, ושני
+# צרכנים שעלו יחד הפילו power bank 5V/3A (docs/dual-sdr-feasibility.md §7.8).
+ExecStartPre=/bin/sleep 10
+# ‎${ACARS_SERIAL} בתוך המילה. ⚠ ריק (env חסר) ⇒ "כל מקלט" — ולכן airam-web *מסרב* להיכנס
+# למצב בלי משני מוגדר (_roles_error), כדי שזה לא יפתח בטעות את הראשי של הקול.
+ExecStart=/usr/local/bin/acarsdec -g ${ACARS_GAIN} -m ${ACARS_RATEMULT} -o 1 -j ${ACARS_UDP} -d driver=sdrplay${ACARS_SERIAL} $ACARS_FREQS
+User=root
+Restart=always
+RestartSec=10
+
+# לא enabled — airam-web (המתזמר) מפעיל/עוצר ומשחזר באתחול, כמו כל צרכן SDR.
