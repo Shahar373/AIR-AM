@@ -65,6 +65,10 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "_restart_and_verify", restart_voice)
     monkeypatch.setattr(app, "_journal_tail", lambda *a, **k: "")
     monkeypatch.setattr(app, "_sdr_present", lambda: True)
+    # מקלטים ב-USB / מה ה-API מציע (‏_role_present) ו-systemctl show — דטרמיניסטי, בלי lsusb/Soapy אמיתיים
+    monkeypatch.setattr(app, "_sdr_usb_full", lambda: (True, "SDRplay", 2))
+    monkeypatch.setattr(app, "_serial_on_api", lambda serial: None)
+    monkeypatch.setattr(app, "_rtl_airband_start_wall", lambda: None)
     monkeypatch.setattr(app, "_denoise_after_voice", lambda: None)
     monkeypatch.setattr(app, "ACARS2_STAGGER_SEC", 0)
     monkeypatch.setattr(app, "VOICE_STARTUP_WAIT_SEC", 2)
@@ -159,8 +163,8 @@ def test_api_mode_success_and_failure_paths(env):
     st = app.load_state()
     assert st["app_mode"] == "voice_acars" and st["acars_freqs"] == ["131.550"]
     env.fail = {"airam-acars2"}
-    # כבר במצב ⇒ רק המשני מאותחל; כשלו לא מפיל את הקול (test_voice2: ‏secondary_only)
-    r = c.post("/api/mode", json={"mode": "voice_acars"}, headers=ORIGIN)
+    # כבר במצב ⇒ רק המשני מאותחל (בנק אחר); כשלו לא מפיל את הקול (test_voice2: ‏secondary_only)
+    r = c.post("/api/mode", json={"mode": "voice_acars", "freqs": ["131.725"]}, headers=ORIGIN)
     assert r.status_code == 500 and "rtl_airband" in env.active
     # כניסה מלאה (ממצב אחר) שנכשלת ⇒ off
     c.post("/api/mode", json={"mode": "off"}, headers=ORIGIN)
