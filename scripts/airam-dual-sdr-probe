@@ -68,6 +68,13 @@ ICECAST_PORT = 8000
 ICECAST_PW = "airam"      # SOURCE_PW ב-app.py / install.sh
 MOUNT = "airam-probe.mp3"
 
+# תרחיש wide-rate (docs/dual-sdr-feasibility.md §11.3): המשני דוגם בקצב של המפצל (ACARS+VDL2 על
+# מקלט אחד) בזמן שהקול רץ על הראשי. 6.3Msps = כפולה של 420kHz (12000 של acarsdec 4.x × 105000 של
+# dumpvdl2). בלי DSP — מודד את המחיר של הקצב עצמו: USB, sdrplay_apiService, חשמל.
+WIDE_RATE_DEFAULT = 6.3e6
+STAGGER_SEC = 10          # כמו ExecStartPre=/bin/sleep 10 ביחידות המשני — הדירוג של המוצר
+STAGGER_ALIVE_SEC = 8     # אחרי הפתיחה המדורגת: האם השני עדיין חי (קצב לא נתמך ⇒ יוצא מיד)
+_RATE_LINE = re.compile(r"([\d.]+(?:e[+-]?\d+)?) Msps\t([\d.]+(?:e[+-]?\d+)?) MBps(?:\tOverflows (\d+))?")
 DEVICE_WAIT_SEC = 20            # לפני כל תרחיש: עד מתי מחכים שה-API יחזיר את שני המקלטים
 DEVICE_WAIT_AFTER_RESTART_SEC = 30
 STARTUP_SEC = 25          # rtl_airband מוותר אחרי 5ש' למכשיר; ה-API עצמו יכול להיות איטי
@@ -323,7 +330,7 @@ def _stats_vals(samples, key):
 
 def summarize(samples, *, died=None, aborted=None, acars=None, icecast=None,
               baseline=None, expect_freqs=(), live_window=LIVE_WINDOW_SEC, kernel_uv=False,
-              startup_failed=False):
+              startup_failed=False, rate=None, rate_req=None):
     """סיכום תרחיש + פסק דין. כל "נכשל" נשען על עובדה מדידה (דגל של ה-Pi, מונה,
     תהליך שמת, מדד שקפא) — לא על סף מספרי שלנו."""
     res = {"samples": len(samples), "fail": [], "notes": []}
@@ -408,6 +415,16 @@ def summarize(samples, *, died=None, aborted=None, acars=None, icecast=None,
             if age is not None and age > STALE_STATS_SEC:
                 res["fail"].append(f"קובץ ה-stats לא התעדכן {age:.0f}ש'")
 
+    if rate_req:
+        if not rate:
+            res["fail"].append("בדיקת הקצב לא דיווחה (אין שורת Msps) — ר' הלוג של rate-test")
+        elif rate.get("error"):
+            res["fail"].append(f"המקלט המשני דחה את הקצב {rate_req / 1e6:g}Msps: {rate['error']}")
+        else:
+            res["rate_test"] = {**rate, "requested_msps": round(rate_req / 1e6, 3)}
+            if rate["overflows"]:
+                res["fail"].append(f"overflow בזרם של המשני ({rate['overflows']}) — USB/CPU לא עמדו "
+                                   f"ב-{rate_req / 1e6:g}Msps")
     if kernel_uv is None:
         res["notes"].append("יומן הקרנל לא נבדק (אין journalctl) — נפילת מתח בין דגימות לא הייתה נתפסת")
     elif kernel_uv:
@@ -524,6 +541,20 @@ def wait_devices(serials, wait=None, after_restart=None):
     return poll(after_restart), True
 
 
+def parse_rate_log(text):
+    """פלט `SoapySDRUtil --rate` ⇒ {msps, mbps, overflows, lines} מהשורה האחרונה (כל 5ש'), או None.
+    המונה מצטבר מתחילת הזרם (SoapyRateTest.cpp), אז השורה האחרונה היא הסיכום. "Error in rate test"
+    = ה-API/הדרייבר דחו את הקצב."""
+    text = text or ""
+    rows = _RATE_LINE.findall(text)
+    if not rows:
+        err = re.search(r"Error in rate test: (.*)", text)
+        return {"error": err.group(1).strip()} if err else None
+    msps, mbps, ovf = rows[-1]
+    return {"msps": round(float(msps), 3), "mbps": round(float(mbps), 2),
+            "overflows": int(ovf or 0), "lines": len(rows)}
+
+
 _UV_LINE = re.compile(r"^(\d+(?:\.\d+)?)\s.*Undervoltage detected", re.M)
 
 
@@ -634,8 +665,11 @@ def _as_list(x):
 
 
 class Child:
-    def __init__(self, name, argv, log_path):
+    def __init__(self, name, argv, log_path, stop_sig=signal.SIGTERM):
         self.name, self.argv, self.log_path = name, argv, log_path
+        # SoapySDRUtil --rate יוצא נקי (deactivate + סיכום) רק ב-SIGINT; SIGTERM הורג אותו בלי
+        # לשחרר את הזרם, והמקלט נשאר תפוס ב-API עוד כמה שניות
+        self.stop_sig = stop_sig
         self.log = open(log_path, "wb")
         self.p = subprocess.Popen(argv, stdout=self.log, stderr=subprocess.STDOUT,
                                   stdin=subprocess.DEVNULL, start_new_session=True)
@@ -652,7 +686,7 @@ class Child:
             # SIGTERM קודם: rtl_airband/acarsdec משחררים את המכשיר ב-API. SIGKILL עוקף
             # את ה-destructors של SoapySDRPlay3 — ולכן רק כמוצא אחרון.
             try:
-                os.killpg(self.p.pid, signal.SIGTERM)
+                os.killpg(self.p.pid, self.stop_sig)
             except OSError:
                 pass
             try:
@@ -740,9 +774,12 @@ class Probe:
 
     def scenario(self, name, children_spec, steps, *, stats_path=None, expect_freqs=(),
                  acars_port=None, break_on_death=True, baseline=None, mounts=(MOUNT,),
-                 wall_before=0):
-        """wall_before: כמה שניות לפני התרחיש לכלול בבדיקת יומן הקרנל (ההמתנה למקלטים)."""
-        """children_spec=[(name, argv)], steps=[("run", secs, phase) | ("prompt", text, phase)]."""
+                 wall_before=0, stagger=None, rate_child=None, rate_req=None):
+        """children_spec=[(name, argv) | (name, argv, stop_sig)],
+        steps=[("run", secs, phase) | ("prompt", text, phase)].
+        wall_before: כמה שניות לפני התרחיש לכלול בבדיקת יומן הקרנל (ההמתנה למקלטים).
+        stagger: שניות — רק הילד הראשון עולה, ואחרי שכתב stats (סיים לעלות) + stagger עולים השאר
+        (הדירוג של המוצר). rate_child: שם הילד שהלוג שלו הוא פלט SoapySDRUtil --rate."""
         print(f"\n=== {name}")
         acars = None
         if acars_port:
@@ -787,9 +824,14 @@ class Probe:
                 print(f"  [{phase} {s['t_rel']:.0f}ש'] 5V={vin} throttled={thr} {cpu}", flush=True)
             return s
 
+        def spawn(spec):
+            cname, argv = spec[0], spec[1]
+            sig = spec[2] if len(spec) > 2 else signal.SIGTERM
+            children.append(Child(cname, argv, self.out / f"{cname}-{name}.log", stop_sig=sig))
+
         try:
-            for cname, argv in children_spec:
-                children.append(Child(cname, argv, self.out / f"{cname}-{name}.log"))
+            for spec in (children_spec[:1] if stagger else children_spec):
+                spawn(spec)
             # עלייה: כל התהליכים חיים, ו-rtl_airband כתב stats *שלו*.
             deadline = time.monotonic() + STARTUP_SEC
             start_wall = time.time()
@@ -820,6 +862,24 @@ class Probe:
             else:
                 if children and stats_path:
                     died = died or f"rtl_airband לא כתב stats תוך {STARTUP_SEC}ש'"
+            if stagger and not died and not aborted:
+                # פתיחה מדורגת: השאר עולים רק אחרי שהראשון סיים לעלות, ועוד stagger שניות
+                phase = "stagger"
+                end = time.monotonic() + stagger
+                while time.monotonic() < end and not aborted:
+                    take()
+                    time.sleep(self.a.interval)
+                for spec in children_spec[1:]:
+                    spawn(spec)
+                phase = "startup-2"
+                end = time.monotonic() + STAGGER_ALIVE_SEC
+                while time.monotonic() < end and not aborted:
+                    take()
+                    gone = [c for c in children if not c.alive()]
+                    if gone:
+                        died = ", ".join(c.name for c in gone)
+                        break
+                    time.sleep(self.a.interval)
             if died:
                 startup_failed = True
                 print(f"  ✗ נכשל בעלייה: {died}")
@@ -860,10 +920,17 @@ class Probe:
                 c.stop()
             acars_res = acars.result() if acars else None
 
+        rate = None
+        if rate_child:
+            try:
+                rate = parse_rate_log((self.out / f"{rate_child}-{name}.log").read_text(errors="replace"))
+            except OSError:
+                rate = None
         res = summarize(samples, died=died, aborted=aborted, acars=acars_res,
                         icecast=icecast if stats_path else None, baseline=baseline,
                         expect_freqs=expect_freqs if children else (), startup_failed=startup_failed,
-                        kernel_uv=kernel_uv_events(wall0 - (wall_before or 0), time.time()))
+                        kernel_uv=kernel_uv_events(wall0 - (wall_before or 0), time.time()),
+                        rate=rate, rate_req=rate_req)
         if len(steps) > 1:
             res["phases"] = phase_timeline(samples, phase_marks, expect_freqs)
         if died and not samples:
@@ -1010,8 +1077,11 @@ def main(argv=None):
     ap.add_argument("--secs", type=float, default=600, help="משך כל תרחיש (ברירת מחדל 600)")
     ap.add_argument("--baseline-secs", type=float, default=60, help="משך מדידת ה-standby")
     ap.add_argument("--only", default="baseline,dual-voice-2p,voice-acars",
-                    help="תרחישים: baseline,dual-voice-2p,voice-acars,dual-voice "
-                         "(dual-voice = שני מקלטים בתהליך rtl_airband אחד)")
+                    help="תרחישים: baseline,dual-voice-2p,voice-acars,dual-voice,wide-rate "
+                         "(dual-voice = שני מקלטים בתהליך rtl_airband אחד; wide-rate = קול על הראשי + "
+                         "המשני דוגם בקצב של מפצל ACARS+VDL2, §11.3)")
+    ap.add_argument("--wide-rate", type=float, default=WIDE_RATE_DEFAULT,
+                    help=f"קצב המשני בתרחיש wide-rate (ברירת מחדל {WIDE_RATE_DEFAULT:g})")
     ap.add_argument("--unplug", action="store_true", help="+ ניתוק/חיבור המקלט המשני (אינטראקטיבי)")
     ap.add_argument("--a", default=",".join(VOICE_A_DEFAULT), help="תדרי קול למקלט הראשי (MHz, פסיק)")
     ap.add_argument("--b", default=",".join(VOICE_B_DEFAULT), help="תדרי קול למקלט המשני")
@@ -1024,7 +1094,8 @@ def main(argv=None):
     ap.add_argument("--out", help=f"תיקיית פלט (ברירת מחדל {OUT_ROOT}/<זמן>)")
     args = ap.parse_args(argv)
     args.only = [s.strip() for s in args.only.split(",") if s.strip()]
-    bad = [s for s in args.only if s not in ("baseline", "dual-voice", "dual-voice-2p", "voice-acars")]
+    bad = [s for s in args.only if s not in ("baseline", "dual-voice", "dual-voice-2p", "voice-acars",
+                                             "wide-rate")]
     if bad:
         ap.error("תרחיש לא מוכר: " + ", ".join(bad))
     if args.unplug and "voice-acars" not in args.only:
@@ -1152,6 +1223,21 @@ def main(argv=None):
                 r = run_sdr("unplug", spec, steps, stats_path=stats, expect_freqs=fa,
                             acars_port=ACARS_UDP_PORT, break_on_death=False, baseline=baseline)
                 r["verdict"] = "observation"   # תצפית, לא מבחן (§7.4 במסמך)
+        if "wide-rate" in args.only:
+            # קול על הראשי (כמו voice-acars), והמשני דוגם בקצב של המפצל — בלי DSP ובלי מפענחים.
+            # עונה על: האם ה-API מקבל את הקצב, overflow, ה-CPU של sdrplay_apiService, ונפילות מתח.
+            # הדירוג כמו במוצר: המשני עולה רק אחרי שהקול סיים לעלות + STAGGER_SEC.
+            conf = out / "airband-wide-rate.conf"
+            conf.write_text(render_conf([{"serial": prim["serial"], "freqs": fa, "balance": 0.0}], stats, rec))
+            rate_argv = ["SoapySDRUtil", f"--args={device_string(sec['serial'])}",
+                         f"--rate={args.wide_rate:g}", "--direction=RX"]
+            if shutil.which("stdbuf"):
+                rate_argv = ["stdbuf", "-oL"] + rate_argv     # שורת Msps ללוג כל 5ש', לא רק ביציאה
+            spec = [("rtl_airband", ["rtl_airband", "-F", "-e", "-c", str(conf)]),
+                    ("rate-test", rate_argv, signal.SIGINT)]
+            run_sdr("wide-rate", spec, [("run", args.secs, "run")], stats_path=stats,
+                    expect_freqs=fa, baseline=baseline, stagger=STAGGER_SEC,
+                    rate_child="rate-test", rate_req=args.wide_rate)
     except KeyboardInterrupt:
         interrupted = True
         print("\n✗ הופסק — שומר את מה שנמדד עד עכשיו")

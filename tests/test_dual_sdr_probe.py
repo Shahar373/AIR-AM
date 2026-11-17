@@ -244,7 +244,26 @@ def test_summarize_zero_acars_is_note_not_fail():
 
 FAKES = {
     "SoapySDRUtil": f"""\
-import os, sys
+import os, signal, sys, time
+if any(a.startswith("--rate=") for a in sys.argv):
+    # בדיקת קצב (SoapyRateTest.cpp): שורת סיכום מצטברת כל "5ש'", יציאה נקייה רק ב-SIGINT
+    rate = float(next(a for a in sys.argv if a.startswith("--rate=")).split("=", 1)[1])
+    assert any(a.startswith("--args=driver=sdrplay,serial=") for a in sys.argv)
+    if os.environ.get("FAKE_RATE_REJECT"):
+        print("Error in rate test: setSampleRate failed")
+        sys.exit(1)
+    open(os.environ.get("FAKE_RATE_ARGV", os.devnull), "w").write(" ".join(sys.argv))
+    done = []
+    signal.signal(signal.SIGINT, lambda *a: done.append(1))
+    print("Begin RX rate test at %g Msps" % (rate / 1e6), flush=True)
+    ovf = 0
+    while not done:
+        time.sleep(0.2)
+        if os.environ.get("FAKE_RATE_OVF"):
+            ovf += 1
+        print("%g Msps\t%g MBps" % (rate / 1e6, rate * 4 / 1e6) + ("\tOverflows %d" % ovf if ovf else ""), flush=True)
+    open(os.environ.get("FAKE_RATE_STOPPED", os.devnull), "w").write("SIGINT")
+    sys.exit(0)
 gate = os.environ.get("FAKE_FIND_GATE")
 text = {FIND_TWO!r}
 if gate and os.path.exists(gate + ".armed") and not os.path.exists(gate):
@@ -359,7 +378,7 @@ def _run(fakes, *args, extra_env=None):
     code = (f"import importlib.machinery,importlib.util,sys;"
             f"l=importlib.machinery.SourceFileLoader('p',{str(SCRIPT)!r});"
             f"s=importlib.util.spec_from_loader('p',l);m=importlib.util.module_from_spec(s);l.exec_module(m);"
-            f"m.ACARS_UDP_PORT={port};m.STARTUP_SEC=10;m.STOP_GRACE_SEC=3;"
+            f"m.ACARS_UDP_PORT={port};m.STARTUP_SEC=10;m.STOP_GRACE_SEC=3;m.STAGGER_SEC=0.6;m.STAGGER_ALIVE_SEC=0.6;"
             f"sys.exit(m.main(sys.argv[1:]))")
     r = subprocess.run([sys.executable, "-c", code, "--out", str(out), "--interval", "0.2", *args],
                        env=env, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
@@ -551,3 +570,43 @@ def test_undervoltage_during_startup_is_caught(fakes):
     d = summary["scenarios"]["dual-voice-2p"]
     assert d["verdict"] == "fail", d
     assert any("undervoltage עכשיו" in f for f in d["fail"])
+
+
+# --- wide-rate: המשני בקצב של מפצל ACARS+VDL2 (§11.3) -------------------------
+
+def test_parse_rate_log():
+    text = ("Begin RX rate test at 6.3 Msps\n|6.29871 Msps\t25.1948 MBps\n "
+            "\b6.30002 Msps\t25.2001 MBps\tOverflows 3\n ")
+    r = probe.parse_rate_log(text)
+    assert r == {"msps": 6.3, "mbps": 25.2, "overflows": 3, "lines": 2}
+    assert probe.parse_rate_log("Error in rate test: setSampleRate failed") == {"error": "setSampleRate failed"}
+    assert probe.parse_rate_log("") is None
+
+
+def test_wide_rate_staggered_pass_and_sigint(fakes):
+    stopped = fakes["tmp"] / "rate-stopped"
+    argv_f = fakes["tmp"] / "rate-argv"
+    r, summary, out = _run(fakes, "--only", "wide-rate", "--secs", "2",
+                           extra_env={"FAKE_RATE_STOPPED": str(stopped), "FAKE_RATE_ARGV": str(argv_f)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    w = summary["scenarios"]["wide-rate"]
+    assert w["verdict"] == "pass", json.dumps(w, ensure_ascii=False)
+    assert w["rate_test"]["msps"] == 6.3 and w["rate_test"]["overflows"] == 0
+    assert stopped.read_text() == "SIGINT"                   # יציאה נקייה — המקלט משתחרר ב-API
+    assert "serial=1234567890" in argv_f.read_text()         # המשני, לא הראשי
+    phases = [json.loads(l)["phase"] for l in (out / "samples.jsonl").read_text().splitlines()]
+    assert phases.index("stagger") < phases.index("startup-2") < phases.index("run")   # מדורג
+
+
+def test_wide_rate_overflow_fails(fakes):
+    r, summary, _ = _run(fakes, "--only", "wide-rate", "--secs", "2", extra_env={"FAKE_RATE_OVF": "1"})
+    w = summary["scenarios"]["wide-rate"]
+    assert w["verdict"] == "fail" and any("overflow" in f for f in w["fail"])
+
+
+def test_wide_rate_rejected_rate_fails_with_reason(fakes):
+    r, summary, _ = _run(fakes, "--only", "wide-rate", "--secs", "2", extra_env={"FAKE_RATE_REJECT": "1"})
+    w = summary["scenarios"]["wide-rate"]
+    assert w["verdict"] == "fail"
+    assert any("נכשל בעלייה" in f and "rate-test" in f for f in w["fail"]), w["fail"]
+    assert any("דחה את הקצב" in f for f in w["fail"]), w["fail"]
