@@ -141,6 +141,8 @@ systemd/
   airam-acars.service      # ACARS. Conflicts=rtl_airband. *לא* enabled. root.
   airam-vdl2.service       # VDL2 (dumpvdl2). Conflicts=rtl_airband+airam-acars. *לא* enabled. root.
   airam-satcom.service     # SATCOM (inmarsat-sniffer). Conflicts=שלושת האחרים. *לא* enabled. root.
+  airam-acars2.service     # ACARS על המקלט ה*משני* — מצב "קול + ACARS". Conflicts מול acars/vdl2/satcom
+                           #   אבל *לא* מול rtl_airband (רץ לצדו). השער מחכה ל-SDR_SECONDARY. *לא* enabled.
                            #   אף צרכן SDR לא עולה באתחול — airam-web (המתזמר) משחזר את המצב השמור.
   airam-web.service        # שרת הווב + המתזמר. enabled. User=airam (לא-root). Restart=always.
   airam-denoise.service    # סינון רעשים חי (*לא* צרכן SDR — בלי Conflicts). PartOf=rtl_airband,
@@ -209,6 +211,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_sdr_roles.py        # קיבוע לפי serial: בלי בחירה = כמו קודם; עם ראשי — כל צרכן (קונפיג/env), serial זדוני
                            #   לא נכנס, ‎${X_SERIAL} ביחידות, /api/sdr/devices+roles (+_guard), והשער airam-wait-sdrplay
                            #   (מחכה ל-serial, לא בועט ב-sdrplay כשצרכן אחר רץ) מול כלים מזויפים.
+  test_voice_acars.py      # קול + ACARS: env המשני, תנאי תפקידים, **הסדר** (stats של הקול לפני acars2), כשל ⇒ off,
+                           #   state/health חלקי = תקלה, כיוונון שומר/מעבר מפורש עוזב, reconcile מרים רק את acars2, boot.
   test_sdr.py              # חיווי SDR (/api/sdr): פענוח lsusb/SoapySDRUtil, כל המצבים, צרכן שעלה באמצע
                            #   ה-probe (=שלנו, לא זר), cache, ובקשה מקבילה שלא ממתינה ל-probe תקוע.
   test_session.py          # דוח סשן: _interest_score, /api/session, /api/session/ack, adsb.session_series.
@@ -281,6 +285,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
 | `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain (`--sdrplay-gain=N` או ריק=AGC), bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
+| `/etc/airam/acars2.env` | תדרי ACARS + `ACARS_SERIAL=,serial=<משני>` למצב קול + ACARS | app.py (`write_acars2_env`, לפני כל הפעלה) |
 | `/etc/airam/sdr.env` | `SDR_PRIMARY=<serial>`/`SDR_SECONDARY=` — מה ש-`airam-wait-sdrplay` מחכה לו. נקרא ב-`sed` מעוגן, **לא** source | app.py (`write_sdr_env`, ב-POST `/api/sdr/roles` ובעלייה) |
 | `/usr/local/bin/airam-denoise`, `/usr/local/bin/airam-rnnoise`, `/usr/local/bin/airam-speexdn` | שרשרת סינון הרעשים + שני המנועים (נבדקים חי, פר-מנוע, ע"י `_denoise_missing`) | install.sh (שלבים 7, 4e, 4f) |
 | `/etc/airam/denoise.env` | `AIRAM_DENOISE_ENGINE=rnmix\|speex` — EnvironmentFile של `airam-denoise` (systemd, לא shell) | app.py (`write_denoise_env`, ממש לפני כל start) |
@@ -546,6 +551,19 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   `usb_count`/`primary`/`roles_needed` (`_sdr_usb_full`). ⚠ `airam-wait-sdrplay` מחכה ל-serial
   הספציפי (`$2`=role, ברירת מחדל primary) ו**לא בועט ב-sdrplay כשצרכן SDR אחר פעיל** — אחרת
   הבעיטה (PartOf) מפילה את המקלט השני.
+- **מצב "קול + ACARS" (`voice_acars`) — שני מקלטים** (`docs/dual-sdr-feasibility.md` §6/§7.8):
+  rtl_airband על הראשי + `airam-acars2` (acarsdec) על המשני, **תהליך לכל מקלט** (תהליך אחד עם
+  שניים נכשל ב-`sdrplay_api_Fail` על ה-Pi). `_enter_voice_acars`: `_roles_error` (ראשי+משני שונים —
+  אחרת acars2 "כל מקלט" היה פותח את הראשי) ⇒ עצירת שאר הצרכנים ⇒ `_enter_voice(keep_secondary=True)` ⇒
+  `_wait_voice_settled` (stats *חדש*) ⇒ `_start_acars2` — והיחידה עצמה מחכה עוד 10ש' (`ExecStartPre=/bin/sleep`),
+  כדי שהדירוג יחול גם כש-systemd מאתחל את שניהם יחד (PartOf=sdrplay: חיבור USB/udev, install.sh). ⚠ **הסדר הוא הבטיחות
+  החשמלית**: שני צרכנים שעלו יחד הפילו power bank 5V/3A (rtl_airband ~9ש' ב-101% CPU בעלייה).
+  `_live_mode` ⇒ `voice_acars` רק כששניהם פעילים; `api_state`/`api_health`: קול בלבד במצב השמור =
+  `mode_ok/ok=False`. `_voice_tune(keep_secondary=None)`: ‏`/api/tune` במצב הכפול **שומר** את ה-ACARS,
+  `/api/mode voice` (‏False) יוצא ממנו. כל `_enter_*` ו-`_enter_standby` עוצרים את `airam-acars2`.
+  reconcile: קול חי + acars2 מת ⇒ מרים **רק** את acars2. בדיקת אנטנה/ניסוי — 409 במצב הכפול. **לא
+  scannable**, ו-`MODE_SERVICE` לא כולל אותו (מצב מורכב, לא שירות). UI: `dualMode`/`dualReady`,
+  `liveFromFlags()` (מקור יחיד — כל גזירת "המצב החי" מהדגלים), כרטיס `#homeCardDual` רק כשנבחרו ראשי+משני.
 - **חיווי SDR — מזוהה? פנוי?** (`GET /api/sdr`, ליד `api_health`): `_sdr_usb` (lsusb 1df7 —
   `None` כשאין lsusb, **בכוונה** שונה מ-`_sdr_present` שמניח True כהחלטת רולבק),
   `_sdr_probe_api` (`SoapySDRUtil --find=driver=sdrplay`, אותו probe כמו `airam-wait-sdrplay`;
@@ -998,7 +1016,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/state` | המצב הנוכחי (תדר, mod, gain, squelch, app_mode, `denoise`/`denoise_mount`/`denoise_available`, `mode_ok` — המצב השמור באמת רץ?, `prev_mode`, `scan_plan`, `acars_banks`, `vdl2_banks`, `vdl2_freqs`) |
 | GET/PUT | `/api/presets` | קריאה/עדכון פריסטים |
 | POST | `/api/tune` | **כיוונון תדר** (קול). כולל `chan_filter` (standard/narrow/narrow8k) ו-`fm_notch` — מפתח שלא נשלח ⇒ הערך השמור. דרך `_guard`. |
-| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית), `skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12), `spectrum` (bool אופציונלי — `false` לכיבוי האבחון, ר' §9/§12) ו-`gain` (‏`null`=AGC (ברירת מחדל) או מספר=gRdB ידני 20–59, נחתך; ר' §12). לכולם: ברירת מחדל = הבחירה השמורה. ⚠ ב-`gain` בלבד `null` הוא **ערך משמעותי** (AGC מפורש) ולא היעדר — הזיהוי הוא לפי נוכחות המפתח בגוף הבקשה. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
+| POST | `/api/mode` | **מעבר מצב** voice/acars/vdl2/satcom/off (standby)/**scan** (סבב)/**voice_acars** (שני מקלטים — 400 בלי ראשי+משני; `freqs` = בנק ה-ACARS למשני). דרך `_guard`. `mode:"scan"` מקבל גם `plan` (רשימת רגלים; ברירת מחדל — הלוח השמור). `mode:"satcom"` מקבל `freqs` כרשימה בת-איבר-יחיד עם דגל הלוויין (למשל `["AF1"]`, ברירת מחדל — geostationary, לא בנק ערוצים), `bias_tee` (bool אופציונלי — `false` להזנת LNA חיצונית), `skip_c` (bool אופציונלי — `false` לפענוח כל 12 הערוצים; ברירת המחדל `true` חוסכת ~50% CPU, ר' §12), `spectrum` (bool אופציונלי — `false` לכיבוי האבחון, ר' §9/§12) ו-`gain` (‏`null`=AGC (ברירת מחדל) או מספר=gRdB ידני 20–59, נחתך; ר' §12). לכולם: ברירת מחדל = הבחירה השמורה. ⚠ ב-`gain` בלבד `null` הוא **ערך משמעותי** (AGC מפורש) ולא היעדר — הזיהוי הוא לפי נוכחות המפתח בגוף הבקשה. כישלון ⇒ נפילה ל-off: `{ok:false, error, detail, app_mode:"off", state}` + 500 |
 | GET | `/api/scan` | סטטוס סבב הסריקה החי: `active`, `idx`, `leg`, `next_switch_at`, `plan` (ל-UI — רגל נוכחית + ספירה לאחור), `wait` (כש-`leg=None`: ‏`"window"` = אף רגל לא בחלון, לא תקלה / `"sdr"` = ה-SDR לא ב-USB, תקלה) |
 | GET | `/api/acars` | (כל שלוש תצוגות הדאטה: גם `?xseq=` ⇒ `xcheck` {id: תקציר הצלבה} + `xcheck_cursor`) הודעות ACARS אחרונות (**היום בלבד**; `?all=1` לכל מה שבזיכרון; `?day=YYYY-MM-DD` ארכיון מהדיסק, snapshot סטטי) + שדה `adsb` (העשרת ADS-B לזנבות שבפיד; `{}` בלי אינטרנט; לא ב-`?day=`). כל הודעה כוללת `level` (dBFS) ו-`snr` (None ב-ACARS — ראו §12) |
 | GET | `/api/acars/export?format=csv\|json` | ייצוא (CSV עם BOM, עמודות `level`+`snr`) |
@@ -1122,7 +1140,7 @@ v0.2 **לא נבנה על Pi**: נתיב NEON כולל `os_support.h` שלא ק�
 מ-apt, חתימה = מקור ה-C + גרסת הספרייה, אותו warn-לא-die**). 5. `Icecast2`
 (מאזין בלי סיסמה; `<mount>` ל-`/clean.mp3` עם `fallback-mount` ל-`/live.mp3` — אידמפוטנטי,
 ‏`sources=4`). 6. קונפיג התחלתי + state (6b: יצירת משתמש `airam` + sudoers ממוקד —
-**11 פקודות systemctl**: restart/stop × rtl_airband/airam-acars/airam-vdl2/
+**13 פקודות systemctl**: restart/stop × rtl_airband/airam-acars/airam-acars2/airam-vdl2/
 airam-satcom, `reset-failed` ל-airam-satcom בלבד (מנקה תקרת-הפעלות אחרי
 קריסה — ר' §12), ו-start/stop ל-airam-denoise; seeding של `acars.env`+`vdl2.env`+`satcom.env`). 7. שרת הווב
 (7b: תמלול whisper אופציונלי, `sudo INSTALL_WHISPER=1 ./install.sh` — ⚠ הסדר

@@ -1355,3 +1355,55 @@ def test_sdr_roles_pick_primary_with_two_receivers(page):
     rows.filter(has_text="RSP1A").get_by_role("button", name="קבע כראשי").click()
     expect(page.locator("#toastMsg")).to_contain_text("נשמר")
     assert posted[-1] == {"primary": _A, "secondary": None}
+
+
+def test_dual_card_needs_both_roles_and_enters_voice_acars(page):
+    """כרטיס "קול + ACARS" מוסתר עד שיש ראשי+משני; לחיצה ⇒ POST voice_acars,
+    תצוגת הקול (בלי באנר "המקלט במצב ACARS — אין שמע"), ונקודה על שתי הכרטיסיות."""
+    sdr = _sdr_two(primary=_B)
+    sdr["secondary"] = None
+    posted = []
+
+    def sdr_h(route, url):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(sdr))
+
+    def mode_h(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        posted.append(body)
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "app_mode": "voice_acars", "acars_freqs": ["131.550"]}))
+
+    def acars_h(route, url):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "active": bool(posted), "freqs": ["131.550"],
+                                       "cursor": 0, "messages": [], "adsb": {}}))
+
+    def health_h(route, url):
+        on = bool(posted)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "ok": True, "app_mode": "voice_acars" if on else "off", "mode_ok": True,
+            "services": {"rtl_airband": "active" if on else "inactive", "icecast2": "active",
+                         "sdrplay": "active", "airam-acars": "inactive", "airam-vdl2": "inactive",
+                         "airam-satcom": "inactive", "airam-acars2": "active" if on else "inactive"},
+            "stats_age": 1.0, "sdr_present": True}))
+
+    state = dict(_default_api()["/api/state"], app_mode="off", mode_ok=True)
+    _mount(page, overrides={"/api/sdr": sdr_h, "/api/mode": mode_h, "/api/acars": acars_h,
+                            "/api/health": health_h, "/api/state": state})
+    page.click("#modeSeg button[data-v=home]")
+    expect(page.locator("#homeSdrTxt")).to_be_visible()
+    expect(page.locator("#homeCardDual")).to_be_hidden()          # רק ראשי — אין משני
+    sdr["secondary"] = _A
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    expect(page.locator("#homeCardDual")).to_be_visible()
+    page.click("#homeGoDual")
+    expect(page.locator("#voiceView")).to_be_visible()
+    assert posted and posted[-1]["mode"] == "voice_acars"
+    expect(page.locator("#voiceAcarsBanner")).to_be_hidden()       # יש שמע — זה לא "ACARS במקום קול"
+    expect(page.locator('#modeSeg button[data-v=voice]')).to_have_class(re.compile(r"\bsdr-live\b"))
+    expect(page.locator('#modeSeg button[data-v=acars]')).to_have_class(re.compile(r"\bsdr-live\b"))
+    # הסטטוס במסך הבית אחרי יישור מול /api/health
+    page.click("#modeSeg button[data-v=home]")
+    page.evaluate("pollGlobalState()")
+    expect(page.locator("#homeStateTxt")).to_contain_text("ACARS על המשני")
+    expect(page.locator("#homeCardDual .mc-live")).to_be_visible()
