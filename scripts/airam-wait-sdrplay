@@ -23,11 +23,35 @@
 #  SATCOM מסרב לעלות עד reset-failed ידני — למרות שה-SDR באמת התעורר בסוף.
 # ============================================================================
 CALLER="${1:-}"
+ROLE="${2:-primary}"
+# המקלט הספציפי שהיחידה הזו צריכה (docs/dual-sdr-feasibility.md §3.1). sdr.env נכתב ע"י
+# airam-web (משתמש airam) ⇒ *לא* source (§9): sed עם תבנית מעוגנת, אותיות/ספרות בלבד.
+# ריק/חסר = כל מקלט — בדיוק ההתנהגות של מקלט יחיד.
+SDR_ENV="${AIRAM_SDR_ENV:-/etc/airam/sdr.env}"
+SERIAL=""
+case "$ROLE" in
+  primary)   SERIAL="$(sed -n 's/^SDR_PRIMARY=\([0-9A-Za-z]\{4,32\}\)$/\1/p' "$SDR_ENV" 2>/dev/null | head -n1)" ;;
+  secondary) SERIAL="$(sed -n 's/^SDR_SECONDARY=\([0-9A-Za-z]\{4,32\}\)$/\1/p' "$SDR_ENV" 2>/dev/null | head -n1)" ;;
+esac
 
 # --find קל מ---probe (לא פותח/מגדיר את המכשיר) ועושה בדיוק את handshake ה-
 # ApiVersion שנכשל כשה-daemon תקוע. grep מוודא שמכשיר *באמת* נמצא, לא רק שה-API ענה.
 device_ready() {
-  SoapySDRUtil --find="driver=sdrplay" 2>/dev/null | grep -q "driver = sdrplay"
+  if [ -n "$SERIAL" ]; then
+    # עם שני מקלטים "יש מקלט כלשהו" לא אומר שה*שלנו* פנוי
+    SoapySDRUtil --find="driver=sdrplay,serial=$SERIAL" 2>/dev/null | grep -q "serial = $SERIAL\$"
+  else
+    SoapySDRUtil --find="driver=sdrplay" 2>/dev/null | grep -q "driver = sdrplay"
+  fi
+}
+# צרכן SDR *אחר* פעיל (מצב שני מקלטים)? אז restart ל-sdrplay היה מפיל גם אותו (PartOf).
+other_consumer_active() {
+  for u in rtl_airband.service airam-acars.service airam-vdl2.service airam-satcom.service \
+           airam-acars2.service; do
+    [ "$u" = "$CALLER" ] && continue
+    systemctl is-active --quiet "$u" 2>/dev/null && return 0
+  done
+  return 1
 }
 
 for attempt in $(seq 1 30); do
@@ -44,7 +68,8 @@ for attempt in $(seq 1 30); do
   # מפעילה מחדש (Requires/PartOf) גם את הצרכן שממתין כאן, השער מתחיל מחדש,
   # וחוזר חלילה — restart ל-sdrplay כל ~15ש' לנצח (רעש ביומן וכתיבות ל-SD).
   # בלי lsusb => מתנהגים כמו קודם (בועטים).
-  if [ "$attempt" -eq 8 ] && [ "$CALLER" != "airam-satcom.service" ]; then
+  # וגם לא כשצרכן אחר רץ על המקלט השני — הבעיטה הייתה מפילה אותו (שני מקלטים).
+  if [ "$attempt" -eq 8 ] && [ "$CALLER" != "airam-satcom.service" ] && ! other_consumer_active; then
     if ! command -v lsusb >/dev/null 2>&1 || lsusb -d 1df7: >/dev/null 2>&1; then
       systemctl restart --no-block sdrplay.service 2>/dev/null || true
     fi

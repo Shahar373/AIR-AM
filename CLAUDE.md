@@ -206,6 +206,9 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_experiment.py       # ניסוי כיול אוטומטי מקצה לקצה עם SDR מדומה (כולל שתי הפעולות הפיזיות),
                            #   ביטול/timeout ושחזור מצב, תנאי-פתיחה (SATCOM/סריקה/נעילה), וניתוח
                            #   (_experiment_summary) — כולל זיהוי קריאה של התהליך הקודם מול proc_start.
+  test_sdr_roles.py        # קיבוע לפי serial: בלי בחירה = כמו קודם; עם ראשי — כל צרכן (קונפיג/env), serial זדוני
+                           #   לא נכנס, ‎${X_SERIAL} ביחידות, /api/sdr/devices+roles (+_guard), והשער airam-wait-sdrplay
+                           #   (מחכה ל-serial, לא בועט ב-sdrplay כשצרכן אחר רץ) מול כלים מזויפים.
   test_sdr.py              # חיווי SDR (/api/sdr): פענוח lsusb/SoapySDRUtil, כל המצבים, צרכן שעלה באמצע
                            #   ה-probe (=שלנו, לא זר), cache, ובקשה מקבילה שלא ממתינה ל-probe תקוע.
   test_session.py          # דוח סשן: _interest_score, /api/session, /api/session/ack, adsb.session_series.
@@ -278,10 +281,11 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | `/etc/airam/vdl2.env` | תדרי VDL2 חיים (**ב-Hz**), gain, msg-filter | app.py בכל מעבר ל-VDL2 |
 | `/etc/airam/satcom.env` | לוויין נבחר (`AF1`=Alphasat וכו'), gain (`--sdrplay-gain=N` או ריק=AGC), bias-tee (`-B`), דילוג C-channels (`--skip-c-channel`), ספקטרום אבחוני (`--spectrum`), פורט אבחון (`SATCOM_WEB_PORT`) | app.py בכל מעבר ל-SATCOM |
 | `/etc/airam/airam.env` | env אופציונלי (PIN, whisper) — `EnvironmentFile=-` | install.sh / ידני |
+| `/etc/airam/sdr.env` | `SDR_PRIMARY=<serial>`/`SDR_SECONDARY=` — מה ש-`airam-wait-sdrplay` מחכה לו. נקרא ב-`sed` מעוגן, **לא** source | app.py (`write_sdr_env`, ב-POST `/api/sdr/roles` ובעלייה) |
 | `/usr/local/bin/airam-denoise`, `/usr/local/bin/airam-rnnoise`, `/usr/local/bin/airam-speexdn` | שרשרת סינון הרעשים + שני המנועים (נבדקים חי, פר-מנוע, ע"י `_denoise_missing`) | install.sh (שלבים 7, 4e, 4f) |
 | `/etc/airam/denoise.env` | `AIRAM_DENOISE_ENGINE=rnmix\|speex` — EnvironmentFile של `airam-denoise` (systemd, לא shell) | app.py (`write_denoise_env`, ממש לפני כל start) |
 | `/etc/icecast2/icecast.xml` | `<mount>` ל-`/clean.mp3` עם `fallback-mount` ל-`/live.mp3`, ‏`sources=4` | install.sh שלב 5 |
-| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`, `denoise` — מתג סינון הרעשים (bool, ברירת מחדל False), `denoise_engine` (`rnmix`/`speex`, ברירת מחדל `rnmix`), `chan_filter` (standard/narrow/narrow8k), `fm_notch` (bool), `station` — תחנת הקליטה `{lat,lon,alt_m,name,source,set_at}` או None, **בלי ברירת מחדל**) | app.py |
+| `/var/lib/airam/state.json` | מצב אחרון (תדר, mod, gain, squelch, app_mode: voice/acars/vdl2/satcom/off, acars_freqs, vdl2_freqs, satcom_freqs, `satcom_bias_tee`, `satcom_skip_c`, `satcom_spectrum`, `satcom_gain`, `signal_baseline`, `last_session_view_at`, `transcribe_auto`, `transcribe_lang`, `denoise` — מתג סינון הרעשים (bool, ברירת מחדל False), `denoise_engine` (`rnmix`/`speex`, ברירת מחדל `rnmix`), `chan_filter` (standard/narrow/narrow8k), `fm_notch` (bool), `station` — תחנת הקליטה `{lat,lon,alt_m,name,source,set_at}` או None, **בלי ברירת מחדל**), `sdr_primary`/`sdr_secondary` — serial או None (None = "כל מקלט", התנהגות מקלט יחיד) | app.py |
 | `/var/lib/airam/presets.json` | פריסטים (נערכים מה-UI) | app.py |
 | `/var/lib/airam/acars.jsonl` | היסטוריית ACARS (שורדת restart, retention 5000) | _acars_listener |
 | `/var/lib/airam/vdl2.jsonl` | היסטוריית VDL2 (שורדת restart, retention 5000) | _vdl2_listener |
@@ -530,6 +534,18 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   מבחין בין כתיבות התהליך הנוכחי ל-flush של הקודם — ⚠ השוואת `stats_mtime` ל-`conf_mtime`
   **לא** יכולה, כי ה-flush נכתב אחרי הקונפיג), `_experiment_summary` (פונקציה טהורה — חציונים,
   ירידה, "מזהה?" = הסף של המוצר עצמו; `None` כשחסר), `_read_rflog_run`.
+- **תפקידי המקלטים — קיבוע לפי serial** (`docs/dual-sdr-feasibility.md` §3.1): עם שני מקלטי
+  SDRplay, ‏`driver=sdrplay` בלי serial פותח את הראשון שה-API מחזיר — איזה מקלט נקבע במקרה.
+  `_SERIAL_RE` (אותיות/ספרות 4–32, מעוגן) + `_sanitize_serial` — ערך לא תקין לא נכתב לשום
+  קונפיג (device_string של root); `_primary_serial()` (מה-state; None ⇒ בדיוק כמו קודם);
+  `_serial_arg` ⇒ ‎`,serial=X` ב-`render_config`/‎`ACARS_SERIAL`/‎`VDL2_SERIAL`, ו-‎`-X`
+  ב-`SATCOM_SERIAL` (‏inmarsat-sniffer: ‎`-i sdrplay-<serial>`, `options.c`). היחידות מציבות
+  `${X_SERIAL}` **בתוך** המילה ⇒ env ישן בלי המפתח (שדרוג) = ריק = עובד. `write_sdr_env`,
+  `GET /api/sdr/devices` (`_parse_sdr_find`; `held_by` — מקלט מוחזק לא מופיע ב-find),
+  `POST /api/sdr/roles` (נכנס לתוקף במעבר הבא — לא מאתחל רדיו חי), ו-`/api/sdr` מוסיף
+  `usb_count`/`primary`/`roles_needed` (`_sdr_usb_full`). ⚠ `airam-wait-sdrplay` מחכה ל-serial
+  הספציפי (`$2`=role, ברירת מחדל primary) ו**לא בועט ב-sdrplay כשצרכן SDR אחר פעיל** — אחרת
+  הבעיטה (PartOf) מפילה את המקלט השני.
 - **חיווי SDR — מזוהה? פנוי?** (`GET /api/sdr`, ליד `api_health`): `_sdr_usb` (lsusb 1df7 —
   `None` כשאין lsusb, **בכוונה** שונה מ-`_sdr_present` שמניח True כהחלטת רולבק),
   `_sdr_probe_api` (`SoapySDRUtil --find=driver=sdrplay`, אותו probe כמו `airam-wait-sdrplay`;
@@ -1024,6 +1040,8 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET/DELETE | `/api/xcheck/events/<id>` | אירוע מלא / מחיקה (כתיבה-מחדש אטומית). DELETE דרך `_guard` |
 | GET | `/api/xcheck/events/<id>/export?format=json\|csv` | ייצוא אירוע בודד |
 | GET | `/api/sdr` | חיווי SDR: `state` (`missing`/`ours`/`switching`/`checking`/`api_down`/`api_error`/`free`/`busy`/`unavailable`/`unknown`), `usb`/`usb_desc`, `mode`+`service_state` כש-`ours`, `label` כש-`free`, `suspects` (לפי שם תהליך — רמז) כש-`busy`, `checked_age`. "פנוי" = ה-SDRplay API מציע אותו (`SoapySDRUtil --find`), נבדק רק כש-AIR-AM לא מחזיק בו |
+| GET | `/api/sdr/devices` | המקלטים שה-API מציע עכשיו (`serial`/`model`/`label`) + `primary`/`secondary` השמורים, `usb_count`, `held_by` (מצב שמחזיק מקלט ⇒ הרשימה חלקית) |
+| POST | `/api/sdr/roles` | `{primary?, secondary?}` — serial או `null` (נקה). 400 על serial לא תקין / ראשי==משני. כותב state + `/etc/airam/sdr.env`; נכנס לתוקף במעבר המצב הבא. דרך `_guard` |
 | GET | `/api/power` | מתח/טמפ' ה-Pi (`vcgencmd`), מוגש מ-cache בן ~2 שניות (`_POWER_TTL`) |
 | GET | `/api/metar` | METAR נתב"ג (LLBG) |
 | GET | `/api/health` | בריאות השירותים. כולל `denoise` (כמו `/api/denoise`) — **לא** משפיע על `ok` |

@@ -9,6 +9,18 @@
 
 ## [Unreleased]
 
+### נוסף
+- **קיבוע המקלט הראשי לפי מספר סידורי** (שלב 1 של שני מקלטים, `docs/dual-sdr-feasibility.md`).
+  עם שני מקלטי SDRplay מחוברים, AIR-AM פתח את הראשון שה-API החזיר — על ה-Pi בבדיקה זה היה
+  ה-RSP1A (`Dev0`), לא ה-RSP1B שעליו האנטנה. עכשיו: תיבה במסך הבית (רק כשיותר ממקלט אחד ב-USB)
+  ⇐ "🔍 זהה מקלטים" ⇐ "קבע כראשי", ומאז קול/ACARS/VDL2/SATCOM פותחים רק אותו. בלי בחירה —
+  בדיוק כמו קודם. `GET /api/sdr/devices`, `POST /api/sdr/roles`, ‏`/etc/airam/sdr.env`, ושדות
+  `usb_count`/`primary`/`roles_needed` ב-`/api/sdr`.
+- `airam-wait-sdrplay` מחכה למקלט הספציפי (לא "מקלט כלשהו"), ולא מאתחל את `sdrplay` כשצרכן SDR
+  אחר רץ — אחרת זה היה מפיל את המקלט השני.
+- **הרצה שלישית (§7.8):** קול + ACARS נקי על power bank 5V/3A; קול כפול נפל פעמיים בעלייה —
+  שני rtl_airband ב-101% CPU במקביל. ⇐ פתיחה מדורגת בשלב הבא.
+
 ### נוסף (תכנון)
 - **`docs/dual-sdr-feasibility.md` (חדש, טרם מומש):** היתכנות לשני SDR (RSP1A + RSP1B) בספק 3A —
   קול בכמה ערוצים בו-זמנית, וקול + ACARS. ממצאים מהמקור: SoapySDRPlay3 ו-rtl_airband תומכים

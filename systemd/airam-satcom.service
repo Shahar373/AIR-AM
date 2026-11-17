@@ -62,7 +62,7 @@ ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
 # הרציפה אפס: web_get_spectrum_by_channel קורא את מצב הדמודולטור הקיים, בלי
 # ring buffer ובלי FFT מתמשך (אומת ב-web.c/main.c). ⚠ הדגל מוסיף גם
 # GET /api/tune?ch=N&hz=X (משנה-מצב) לפורט הלא-מאומת הזה — ר' §9 ב-CLAUDE.md.
-ExecStart=/usr/local/bin/inmarsat-sniffer -i sdrplay --satellite=${SATCOM_SATELLITE} --mode=aero $SATCOM_GAIN $SATCOM_BIAS_TEE $SATCOM_SKIP_C $SATCOM_SPECTRUM --udp=${SATCOM_UDP} --web=${SATCOM_WEB_PORT} --station-id=airam
+ExecStart=/usr/local/bin/inmarsat-sniffer -i sdrplay${SATCOM_SERIAL} --satellite=${SATCOM_SATELLITE} --mode=aero $SATCOM_GAIN $SATCOM_BIAS_TEE $SATCOM_SKIP_C $SATCOM_SPECTRUM --udp=${SATCOM_UDP} --web=${SATCOM_WEB_PORT} --station-id=airam
 # גישת חומרה (SDR) => כמו rtl_airband, רץ כ-root
 User=root
 Restart=always

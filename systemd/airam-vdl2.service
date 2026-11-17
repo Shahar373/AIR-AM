@@ -32,7 +32,7 @@ ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
 # ולהיכשל מיד (ExitFailure מהיר, נראה כ"נכשל לעלות"). oversample=20 => 2.1MS/s.
 # fallback שטח אם מסלול ה-SoapySDR מתנהג רע על החומרה: החלף את הקלט ב-
 #   --sdrplay3 0 --gr 40   (הדרייבר הנייטיבי; RSP1B נתמך מ-dumpvdl2 v2.6.0)
-ExecStart=/usr/local/bin/dumpvdl2 --soapysdr driver=sdrplay --oversample 20 $VDL2_GAIN --msg-filter ${VDL2_MSG_FILTER} --output decoded:json:udp:address=127.0.0.1,port=5557 $VDL2_FREQS
+ExecStart=/usr/local/bin/dumpvdl2 --soapysdr driver=sdrplay${VDL2_SERIAL} --oversample 20 $VDL2_GAIN --msg-filter ${VDL2_MSG_FILTER} --output decoded:json:udp:address=127.0.0.1,port=5557 $VDL2_FREQS
 # גישת חומרה (SDR) => כמו rtl_airband, רץ כ-root
 User=root
 Restart=always

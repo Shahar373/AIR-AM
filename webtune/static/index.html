@@ -329,6 +329,15 @@
     button.pill { font-size: .8rem; font-weight: 500; line-height: inherit; border-radius: 999px;
                   padding: .3rem .8rem; min-height: 1.4rem; }
     .home-sdr { font-size: .85rem; margin: calc(-1 * var(--sp-2)) 0 var(--sp-3); color: var(--dim); }
+    .sdr-roles { border: 1px solid var(--border); border-radius: var(--r-ctrl); padding: var(--sp-3);
+                 margin: 0 0 var(--sp-3); font-size: .9rem; }
+    .sdr-roles.warn { border-color: var(--amber); background: rgba(var(--amber-rgb), .08); }
+    .sdr-roles-msg { margin: 0 0 var(--sp-2); }
+    .sdr-role-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2);
+                    padding: var(--sp-2) 0; border-top: 1px solid var(--border); }
+    .sdr-role-row:first-child { border-top: 0; }
+    .sdr-role-row .name { flex: 1 1 12rem; }
+    .sdr-role-row button { min-height: 40px; }
     @keyframes pulse {
       0% { box-shadow: 0 0 0 0 rgba(var(--green-rgb),.45); }
       100% { box-shadow: 0 0 0 .55rem rgba(var(--green-rgb),0); }
@@ -1454,6 +1463,13 @@
     <div class="panel-bd">
       <p class="home-state" id="homeStateTxt">טוען…</p>
       <p class="home-sdr hidden" id="homeSdrTxt"></p>
+      <!-- תפקידי המקלטים (docs/dual-sdr-feasibility.md §3.1): מוצג רק כשיותר ממקלט
+           אחד ב-USB או שכבר נבחר ראשי — מקלט יחיד לא רואה כאן כלום. -->
+      <div class="sdr-roles hidden" id="sdrRolesBox">
+        <p class="sdr-roles-msg" id="sdrRolesMsg"></p>
+        <button type="button" class="ghost" id="sdrRolesFind">🔍 זהה מקלטים</button>
+        <div id="sdrRolesList"></div>
+      </div>
       <details class="err hidden" id="homeErrBox">
         <summary>פרטי שגיאה</summary>
         <pre id="homeErrDetail"></pre>
@@ -4004,7 +4020,81 @@
       // textContent בלבד: שמות התהליכים מגיעים מ-/proc — לא HTML
       $("homeSdrTxt").textContent = "📟 " + sdrDetail;
       $("homeSdrTxt").classList.remove("hidden");
+      renderSdrRoles(d);
     }
+    // --- תפקידי המקלטים: איזה מקלט AIR-AM פותח (לפי serial) ---
+    let sdrRolesBusy = false, sdrRolesLast = null;
+    function renderSdrRoles(d) {
+      const box = $("sdrRolesBox");
+      const show = (d.usb_count || 0) > 1 || !!d.primary;
+      box.classList.toggle("hidden", !show);
+      box.classList.toggle("warn", !!d.roles_needed);
+      if (!show) return;
+      $("sdrRolesMsg").textContent = d.roles_needed
+        ? "⚠ מחוברים " + d.usb_count + " מקלטים ולא נבחר ראשי — AIR-AM עלול לפתוח את הלא-נכון "
+          + "(זה שאין עליו את האנטנה שלך). לחץ \"זהה מקלטים\" ובחר."
+        : "📟 מקלט ראשי: " + bidi(d.primary || "—") + ". כל המצבים פותחים רק אותו.";
+    }
+    async function loadSdrRoles() {
+      const list = $("sdrRolesList");
+      list.textContent = "בודק…";
+      let d;
+      try { d = await fetchJSON("/api/sdr/devices"); }
+      catch (e) { list.textContent = "אין תשובה מהשרת."; return; }
+      list.textContent = "";
+      sdrRolesLast = d;
+      if (!d.ok) { list.textContent = "⚠ " + (d.error || "שגיאה"); return; }
+      if (d.held_by) {
+        const p = document.createElement("p");
+        p.textContent = "המקלט שבשימוש עכשיו (" + (SDR_MODE_LABEL[d.held_by] || d.held_by)
+          + ") לא מופיע ברשימה. לרשימה מלאה: ⏻ עצור מקלט ואז זהה שוב.";
+        list.appendChild(p);
+      }
+      if (!d.devices.length && !d.held_by) list.textContent = "ה-API לא מציע אף מקלט.";
+      for (const dev of d.devices) {
+        const row = document.createElement("div");
+        row.className = "sdr-role-row";
+        const name = document.createElement("span");
+        name.className = "name";
+        const isP = dev.serial === d.primary;
+        name.textContent = (isP ? "⭐ " : "") + bidi((dev.model || "SDRplay") + " · " + dev.serial)
+          + (isP ? " — ראשי" : dev.serial === d.secondary ? " — משני" : "");
+        row.appendChild(name);
+        if (!isP) {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = "קבע כראשי";
+          b.onclick = () => setSdrPrimary(dev.serial);
+          row.appendChild(b);
+        }
+        list.appendChild(row);
+      }
+      if (d.primary) {
+        const c = document.createElement("button");
+        c.type = "button"; c.className = "ghost";
+        c.textContent = "בטל בחירה (כל מקלט)";
+        c.onclick = () => setSdrPrimary(null);
+        list.appendChild(c);
+      }
+    }
+    async function setSdrPrimary(serial) {
+      if (sdrRolesBusy) return;
+      sdrRolesBusy = true;
+      try {
+        // המשני לא יכול להיות גם ראשי — מנקים אותו כשבוחרים אותו כראשי
+        const body = { primary: serial };
+        if (serial && sdrRolesLast && sdrRolesLast.secondary === serial) body.secondary = null;
+        const r = await apiSend("POST", "/api/sdr/roles", body);
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) { showToast("⚠ " + (j.error || "השמירה נכשלה")); return; }
+        showToast(serial ? "נשמר. ייכנס לתוקף במעבר המצב הבא (או ⏻ ואז הפעלה מחדש)."
+                         : "בוטל — AIR-AM יפתח כל מקלט שה-API מציע.");
+        await loadSdrRoles();
+        pollSdr();
+      } catch (e) { showToast("⚠ אין תשובה מהשרת"); }
+      finally { sdrRolesBusy = false; }
+    }
+    $("sdrRolesFind").onclick = loadSdrRoles;
     async function pollSdr() {
       if (sdrInFlight) return;
       sdrInFlight = true;

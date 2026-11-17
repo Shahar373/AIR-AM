@@ -146,6 +146,12 @@ _rflog_fsync = os.fsync
 # מפוענחת כ-JSON ב-UDP ל-listener כאן, וה-UI מושך אותן מ-/api/acars.
 ACARS_SERVICE = "airam-acars"
 ACARS_ENV_PATH = Path("/etc/airam/acars.env")
+# מיפוי תפקידי המקלטים (docs/dual-sdr-feasibility.md): SDR_PRIMARY=<serial>. נקרא ע"י
+# scripts/airam-wait-sdrplay ב-sed עם תבנית מעוגנת — *לא* source (§9).
+SDR_ENV_PATH = Path("/etc/airam/sdr.env")
+# serial של SDRplay: אותיות/ספרות בלבד (נצפה: 240404AF60, 230405A498). מעוגן — ערך שלא
+# עובר לא נכתב לשום env/קונפיג (נכנס ל-device_string של תהליך root).
+_SERIAL_RE = re.compile(r"^[0-9A-Za-z]{4,32}$")
 ACARS_UDP_HOST = "127.0.0.1"
 ACARS_UDP_PORT = 5556                 # חייב להתאים ל-ACARS_UDP ב-acars.env
 # בנקי תדרי ACARS: כל בנק נכנס בחלון דגימה *אחד* של acarsdec (≤ ACARS_WINDOW_MHZ).
@@ -691,7 +697,13 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  "chan_filter": CHAN_FILTER_DEFAULT,
                  # מסנן notch לשידורי FM/MW ב-RSP1B (rfnotch_ctrl של SoapySDRPlay3).
                  # ⚠ ההנחתה שלו בתחום 118–137MHz לא נמדדה — מתג, לא ברירת מחדל.
-                 "fm_notch": False}
+                 "fm_notch": False,
+                 # serial של המקלט הראשי (docs/dual-sdr-feasibility.md §3.1). None = כמו תמיד:
+                 # "driver=sdrplay" בלי serial ⇒ המקלט הראשון שה-API מחזיר — נכון רק כשיש
+                 # מקלט אחד. עם שניים מחוברים בלי בחירה, איזה מהם נפתח נקבע במקרה.
+                 "sdr_primary": None,
+                 # המקלט המשני (שלב הבא — קול + ACARS). כאן רק נשמר.
+                 "sdr_secondary": None}
 
 
 # --- שורת ה-squelch: מקור אמת יחיד -----------------------------------------
@@ -712,12 +724,12 @@ def _squelch_line(squelch_mode, squelch_snr):
 
 # --- בניית קובץ ההגדרות ל-rtl_airband ------------------------------------
 def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
-                  chan_filter=CHAN_FILTER_DEFAULT, fm_notch=False):
+                  chan_filter=CHAN_FILTER_DEFAULT, fm_notch=False, serial=None):
     f = float(freq)
     cf = CHAN_FILTERS.get(chan_filter, CHAN_FILTERS[CHAN_FILTER_DEFAULT])
     # rfnotch_ctrl: הגדרת SoapySDRPlay3 שעוברת דרך ה-device_string (נקראת ע"י writeSetting
     # בבנאי, *לפני* שהזרם עולה — ב-RSP1B היא rsp1aParams.rfNotchEnable). ערך קבוע, לא קלט.
-    dev = "driver=sdrplay" + (",rfnotch_ctrl=true" if fm_notch else "")
+    dev = "driver=sdrplay" + _serial_arg(serial) + (",rfnotch_ctrl=true" if fm_notch else "")
     lines = [
         "# נוצר אוטומטית ע\"י AIR-AM web tuner. שינויים ידניים נדרסים בכל כיוונון.",
         "localtime = true;   # חותמות הזמן בשמות קובצי ההקלטה בזמן מקומי",
@@ -856,7 +868,40 @@ def _cleanup_orphan_tmp(dirs=None):
 def write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
                  chan_filter=CHAN_FILTER_DEFAULT, fm_notch=False):
     _atomic_write(CONFIG_PATH, render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr,
-                                             chan_filter, fm_notch))
+                                             chan_filter, fm_notch, serial=_primary_serial()))
+
+
+# --- תפקידי המקלטים (docs/dual-sdr-feasibility.md §3.1) -----------------------
+def _sanitize_serial(v):
+    """serial תקין או None — לעולם לא "מנוקה" חלקית (נכנס ל-device_string של root)."""
+    if isinstance(v, str) and _SERIAL_RE.match(v.strip()):
+        return v.strip()
+    return None
+
+
+def _primary_serial():
+    """ה-serial של המקלט הראשי, או None ("כל מקלט" — ההתנהגות של מקלט יחיד)."""
+    try:
+        return _sanitize_serial(load_state().get("sdr_primary"))
+    except Exception:
+        return None
+
+
+def _serial_arg(serial, sep=",serial="):
+    """החלק שמתווסף ל-"driver=sdrplay" (או ל-"sdrplay" של inmarsat-sniffer, sep="-")."""
+    s = _sanitize_serial(serial)
+    return f"{sep}{s}" if s else ""
+
+
+def write_sdr_env(primary, secondary):
+    """/etc/airam/sdr.env — מה ש-airam-wait-sdrplay מחכה לו (serial ספציפי, לא "כל מקלט")."""
+    text = "\n".join([
+        "# נכתב אוטומטית ע\"י AIR-AM (תפקידי המקלטים). שינויים ידניים נדרסים.",
+        "SDR_PRIMARY=" + (_sanitize_serial(primary) or ""),
+        "SDR_SECONDARY=" + (_sanitize_serial(secondary) or ""),
+        "",
+    ])
+    _atomic_write(SDR_ENV_PATH, text)
 
 
 _state_corrupt_warned = False   # חד-פעמי לאירוע פגימה, לא לכל קריאה — ר' load_state
@@ -2962,6 +3007,8 @@ def write_acars_env(freqs, gain=ACARS_GAIN_DEFAULT, ratemult=ACARS_RATEMULT_DEFA
         f"ACARS_GAIN={int(gain)}",
         f"ACARS_RATEMULT={int(ratemult)}",
         f"ACARS_UDP={ACARS_UDP_HOST}:{ACARS_UDP_PORT}",
+        # ‎-d driver=sdrplay${ACARS_SERIAL} ב-unit — ריק = כל מקלט (מקלט יחיד)
+        "ACARS_SERIAL=" + _serial_arg(_primary_serial()),
         "",
     ])
     _atomic_write(ACARS_ENV_PATH, text)
@@ -2984,6 +3031,7 @@ def write_vdl2_env(freqs, ifgr=None, rfgr=None):
         f"VDL2_FREQS={hz}",
         f"VDL2_GAIN={gain}",
         f"VDL2_MSG_FILTER={VDL2_MSG_FILTER}",
+        "VDL2_SERIAL=" + _serial_arg(_primary_serial()),
         "",
     ])
     _atomic_write(VDL2_ENV_PATH, text)
@@ -3022,6 +3070,8 @@ def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True, spectrum=True
         "SATCOM_SPECTRUM=" + ("--spectrum" if spectrum else ""),
         f"SATCOM_UDP={ACARS_UDP_HOST}:{SATCOM_UDP_PORT}",
         f"SATCOM_WEB_PORT={SATCOM_WEB_PORT}",
+        # ‎-i sdrplay${SATCOM_SERIAL} — הפורמט של inmarsat-sniffer הוא sdrplay-<serial>
+        "SATCOM_SERIAL=" + _serial_arg(_primary_serial(), sep="-"),
         "",
     ])
     _atomic_write(SATCOM_ENV_PATH, text)
@@ -3849,15 +3899,45 @@ def _sdr_usb():
     """(present, desc): present=None כשאי אפשר לבדוק (אין lsusb) — לא ניחוש.
     ⚠ בכוונה שונה מ-_sdr_present שמניח True בכשל: שם זו החלטת רולבק, כאן זה
     חיווי למשתמש, ו"מזוהה" שלא נבדק הוא בדיוק ההמצאה ש-§12 אוסר."""
+    present, desc, _n = _sdr_usb_full()
+    return present, desc
+
+
+def _sdr_usb_full():
+    """(present, desc, count) — count = כמה מקלטי SDRplay ב-USB (None כשאין lsusb)."""
     try:
         r = subprocess.run(["lsusb", "-d", "1df7:"], capture_output=True, text=True, timeout=5)
     except Exception:
-        return None, None
+        return None, None, None
     if r.returncode != 0:
-        return False, None
-    line = (r.stdout.splitlines() or [""])[0]
+        return False, None, 0
+    lines = [l for l in r.stdout.splitlines() if l.strip()]
+    line = (lines or [""])[0]
     m = re.search(r"ID\s+([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\s*(.*)", line)
-    return True, ((m.group(2).strip() or m.group(1)) if m else line.strip() or None)
+    return True, ((m.group(2).strip() or m.group(1)) if m else line.strip() or None), len(lines) or 1
+
+
+def _parse_sdr_find(text):
+    """פלט SoapySDRUtil --find ⇒ [{serial, model, label}]. התווית של SoapySDRPlay3:
+    "SDRplay Dev<N> <model> <serial>" (Registration.cpp)."""
+    devs, cur = [], None
+    for line in (text or "").splitlines():
+        if line.startswith("Found device"):
+            cur = {}
+            devs.append(cur)
+            continue
+        m = re.match(r"\s+(\w+)\s*=\s*(.*?)\s*$", line)
+        if m and cur is not None:
+            cur[m.group(1)] = m.group(2)
+    out = []
+    for d in devs:
+        serial = _sanitize_serial(d.get("serial"))
+        if d.get("driver") != "sdrplay" or not serial:
+            continue
+        mm = re.match(r"SDRplay Dev\d+ (\S+) ", d.get("label", "") + " ")
+        out.append({"serial": serial, "model": mm.group(1) if mm else None,
+                    "label": d.get("label") or None})
+    return out
 
 
 def _sdr_probe_api():
@@ -3924,10 +4004,14 @@ def _sdr_status():
     unavailable — ה-API לא מציע, ואין lsusb לדעת אם הוא בכלל מחובר ·
     checking — probe ראשון עוד רץ (בקשה מקבילה) ·
     unknown — אין כלי לבדוק "פנוי" (SoapySDRUtil חסר) — לא ממציאים תשובה."""
-    usb, desc = _sdr_usb()
+    usb, desc, count = _sdr_usb_full()
+    primary = _primary_serial()
     res = {"ok": True, "usb": usb, "usb_desc": desc, "state": None, "mode": None,
            "service_state": None, "api": None, "label": None, "detail": None,
-           "suspects": [], "checked_age": None}
+           "suspects": [], "checked_age": None,
+           # שני מקלטים בלי ראשי שנבחר ⇒ איזה מהם נפתח נקבע במקרה (§3.1 במסמך)
+           "usb_count": count, "primary": primary,
+           "roles_needed": bool(count and count > 1 and not primary)}
     if usb is False:
         res["state"] = "missing"
         return res
@@ -3984,6 +4068,62 @@ def _sdr_status():
 def api_sdr():
     """חיווי SDR: מזוהה ב-USB? פנוי (ה-API מציע אותו)? ומי מחזיק בו אם לא."""
     return jsonify(_sdr_status())
+
+
+@app.route("/api/sdr/devices")
+def api_sdr_devices():
+    """המקלטים שה-API מציע עכשיו + התפקידים השמורים. ⚠ מקלט שצרכן (שלנו או זר)
+    מחזיק לא מופיע ב-find — לכן `held` מסמן שהרשימה חלקית, לא שהוא "לא קיים"."""
+    st = load_state()
+    held, _ = _sdr_holder(_services_status(SDR_CONSUMERS))
+    try:
+        r = subprocess.run(["SoapySDRUtil", "--find=driver=sdrplay"],
+                           capture_output=True, text=True, timeout=SDR_PROBE_TIMEOUT_SEC)
+        devices, err = _parse_sdr_find(r.stdout), None
+    except FileNotFoundError:
+        devices, err = [], "SoapySDRUtil לא מותקן"
+    except (subprocess.TimeoutExpired, OSError):
+        devices, err = [], "ה-API לא ענה"
+    _usb, _desc, count = _sdr_usb_full()
+    return jsonify({"ok": err is None, "error": err, "devices": devices, "usb_count": count,
+                    "held_by": held,
+                    "primary": _sanitize_serial(st.get("sdr_primary")),
+                    "secondary": _sanitize_serial(st.get("sdr_secondary"))})
+
+
+@app.route("/api/sdr/roles", methods=["POST"])
+def api_sdr_roles():
+    """{primary?, secondary?}: serial או null (=נקה). נכנס לתוקף בכניסה הבאה למצב —
+    לא מאתחל את מה שרץ (לא נוגעים ברדיו מתחת לרגליים של מאזין)."""
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or not ({"primary", "secondary"} & set(data)):
+        return jsonify({"ok": False, "error": "צריך primary ו/או secondary"}), 400
+    changes = {}
+    for key in ("primary", "secondary"):
+        if key not in data:
+            continue
+        v = data[key]
+        if v is None or v == "":
+            changes["sdr_" + key] = None
+            continue
+        sv = _sanitize_serial(v)
+        if not sv:
+            return jsonify({"ok": False, "error": f"serial לא תקין: {key}"}), 400
+        changes["sdr_" + key] = sv
+    st = load_state()
+    prim = changes.get("sdr_primary", st.get("sdr_primary"))
+    sec = changes.get("sdr_secondary", st.get("sdr_secondary"))
+    if prim and sec and prim == sec:
+        return jsonify({"ok": False, "error": "אותו מקלט לא יכול להיות גם ראשי וגם משני"}), 400
+    new = _merge_state(changes)
+    try:
+        write_sdr_env(new.get("sdr_primary"), new.get("sdr_secondary"))
+    except OSError as e:
+        log.warning("sdr.env write failed: %s", e)
+    _sdr_probe_cache.update(t=0.0, result=None)
+    return jsonify({"ok": True, "primary": new.get("sdr_primary"),
+                    "secondary": new.get("sdr_secondary"),
+                    "applies": "במעבר המצב הבא"})
 
 
 @app.route("/api/health")
@@ -7742,6 +7882,13 @@ if __name__ == "__main__":
     _orphans = _cleanup_orphan_tmp()
     if _orphans:
         log.warning("נוקו %d קובצי tmp יתומים (כתיבה שנקטעה — כיבוי פתאומי?)", _orphans)
+    # sdr.env מסונכרן ל-state (שער airam-wait-sdrplay מחכה ל-serial הזה). עטוף: עלייה היא חובה.
+    try:
+        _st0 = load_state()
+        if _st0.get("sdr_primary") or _st0.get("sdr_secondary") or SDR_ENV_PATH.exists():
+            write_sdr_env(_st0.get("sdr_primary"), _st0.get("sdr_secondary"))
+    except Exception as _e:
+        log.warning("sdr.env sync failed: %s", _e)
     # אין צרכן SDR enabled ב-systemd => שחזור המצב השמור (voice/acars/vdl2/
     # satcom/scan/off) נעשה כאן, ברקע (satcom חריג — לא משוחזר אוטומטית,
     # ר' _boot_restore/§12 ב-CLAUDE.md). מכסה גם שדרוג קונפיג

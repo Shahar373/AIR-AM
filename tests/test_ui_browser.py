@@ -1289,3 +1289,69 @@ def test_channel_filter_and_fm_notch_load_from_state_and_are_sent(page):
     expect(page.locator("#chanSeg button.on")).to_have_attribute("data-v", "narrow8k")
     body = json.loads(req.value.post_data)
     assert body["chan_filter"] == "narrow8k" and body["fm_notch"] is True
+
+
+# --- תפקידי המקלטים (docs/dual-sdr-feasibility.md §3.1) ------------------------
+
+_B, _A = "240404AF60", "230405A498"
+
+
+def _sdr_two(primary=None, count=2):
+    return {"ok": True, "state": "free", "mode": None, "service_state": None, "usb": True,
+            "usb_desc": "SDRplay", "api": "active", "label": None, "detail": None,
+            "suspects": [], "checked_age": None, "usb_count": count, "primary": primary,
+            "roles_needed": count > 1 and not primary}
+
+
+def test_sdr_roles_hidden_with_single_receiver(page):
+    _mount(page, overrides={"/api/sdr": _sdr_two(count=1)})
+    page.click("#modeSeg button[data-v=home]")
+    expect(page.locator("#homeSdrTxt")).to_be_visible()
+    expect(page.locator("#sdrRolesBox")).to_be_hidden()
+
+
+def test_sdr_roles_pick_primary_with_two_receivers(page):
+    """שני מקלטים בלי ראשי ⇒ אזהרה; זיהוי ⇒ רשימה; "קבע כראשי" ⇒ POST עם ה-serial,
+    ובחירת המשני כראשי מנקה אותו (אחרת השרת מחזיר 400)."""
+    sdr = _sdr_two()
+    devices = {"ok": True, "error": None, "usb_count": 2, "held_by": None,
+               "primary": None, "secondary": _A,
+               "devices": [{"serial": _A, "model": "RSP1A", "label": "SDRplay Dev0 RSP1A " + _A},
+                           {"serial": _B, "model": "RSP1B", "label": "SDRplay Dev1 RSP1B " + _B}]}
+    posted = []
+
+    def sdr_h(route, url):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(sdr))
+
+    def dev_h(route, url):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(devices))
+
+    def roles_h(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        posted.append(body)
+        devices["primary"] = body.get("primary")
+        if "secondary" in body:
+            devices["secondary"] = body["secondary"]
+        sdr.update(primary=body.get("primary"), roles_needed=not body.get("primary"))
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "primary": body.get("primary")}))
+
+    _mount(page, overrides={"/api/sdr": sdr_h, "/api/sdr/devices": dev_h,
+                            "/api/sdr/roles": roles_h})
+    page.click("#modeSeg button[data-v=home]")
+    box = page.locator("#sdrRolesBox")
+    expect(box).to_be_visible()
+    expect(box).to_have_class(re.compile(r"\bwarn\b"))
+    expect(page.locator("#sdrRolesMsg")).to_contain_text("לא נבחר ראשי")
+    page.click("#sdrRolesFind")
+    rows = page.locator(".sdr-role-row")
+    expect(rows).to_have_count(2)
+    rows.filter(has_text="RSP1B").get_by_role("button", name="קבע כראשי").click()
+    expect(page.locator("#toastMsg")).to_contain_text("נשמר")
+    assert posted[-1] == {"primary": _B}
+    expect(box).not_to_have_class(re.compile(r"\bwarn\b"))
+    expect(page.locator("#sdrRolesMsg")).to_contain_text(_B)
+    # המשני (RSP1A) כראשי ⇒ אותה בקשה מנקה את המשני
+    rows.filter(has_text="RSP1A").get_by_role("button", name="קבע כראשי").click()
+    expect(page.locator("#toastMsg")).to_contain_text("נשמר")
+    assert posted[-1] == {"primary": _A, "secondary": None}
