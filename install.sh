@@ -575,6 +575,8 @@ airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-acars2
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-acars2
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-vdl2
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-vdl2
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-vdl2-2
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-vdl2-2
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-satcom
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-satcom
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed airam-satcom
@@ -692,6 +694,7 @@ cp "$REPO_DIR/systemd/airam-web.service"    /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-acars.service"  /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-acars2.service" /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-vdl2.service"   /etc/systemd/system/
+cp "$REPO_DIR/systemd/airam-vdl2-2.service" /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-satcom.service" /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-denoise.service" /etc/systemd/system/
 systemctl daemon-reload

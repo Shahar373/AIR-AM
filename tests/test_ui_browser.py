@@ -1714,3 +1714,51 @@ def test_activity_marks_second_channel_recordings(page):
                             "/api/health": _dual_health({"rtl_airband2": "active"}, "voice2")})
     expect(page.locator(".ch-badge.ch2")).to_have_text("ערוץ 2")
     expect(page.locator(".ch-badge:not(.ch2)")).to_have_text("ערוץ 1")   # במצב כפול גם ערוץ 1
+
+
+def test_voice_vdl2_card_enters_and_keeps_audio(page):
+    """קול + VDL2: כרטיס במסך הבית (רק עם ראשי+משני) ⇒ POST voice_vdl2 ⇒ תצוגת הקול עם סטרים
+    (בלי באנר "המקלט ב-VDL2 — אין שמע"), נקודות על קול ועל VDL2; בנק VDL2 שולח voice_vdl2."""
+    sdr = _sdr_two(primary=_B)
+    sdr["secondary"] = _A
+    posted = []
+
+    def mode_h(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        posted.append(body)
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "app_mode": "voice_vdl2",
+                                       "vdl2_freqs": body.get("freqs") or ["136.975"],
+                                       **({"secondary_only": True} if len(posted) > 1 else {})}))
+
+    def health_h(route, url):
+        on = bool(posted)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(
+            _dual_health({"airam-vdl2-2": "active" if on else "inactive",
+                          "rtl_airband": "active" if on else "inactive"}, "voice_vdl2" if on else "off")))
+    state = dict(_default_api()["/api/state"], app_mode="off", mode_ok=True,
+                 vdl2_banks=[{"name": "CSC", "freqs": ["136.975"]},
+                             {"name": "אירופה", "freqs": ["136.725", "136.975"]}])
+    _mount(page, overrides={"/api/sdr": sdr, "/api/mode": mode_h, "/api/state": state,
+                            "/api/health": health_h,
+                            "/api/vdl2": {"ok": True, "active": True, "freqs": ["136.975"],
+                                          "cursor": 0, "messages": [], "adsb": {}}})
+    page.click("#modeSeg button[data-v=home]")
+    expect(page.locator("#homeCardDualVdl2")).to_be_visible()
+    page.click("#homeGoDualVdl2")
+    expect(page.locator("#voiceView")).to_be_visible()
+    assert posted[-1]["mode"] == "voice_vdl2"
+    expect(page.locator("#voiceAcarsBanner")).to_be_hidden()
+    page.wait_for_function("(document.getElementById('player').getAttribute('src') || '').includes('.mp3')",
+                           timeout=5000)
+    expect(page.locator('#modeSeg button[data-v=voice]')).to_have_class(re.compile(r"\bsdr-live\b"))
+    expect(page.locator('#modeSeg button[data-v=vdl2]')).to_have_class(re.compile(r"\bsdr-live\b"))
+    page.click("#modeSeg button[data-v=vdl2]")
+    page.locator("#vdl2Banks button").filter(has_text="אירופה").click()
+    expect(page.locator("#status")).to_contain_text("הקול ממשיך")
+    assert posted[-1] == {"mode": "voice_vdl2", "freqs": ["136.725", "136.975"]}
+    expect(page.locator("#vdl2View")).to_be_visible()
+    page.click("#modeSeg button[data-v=home]")
+    page.evaluate("pollGlobalState()")
+    expect(page.locator("#homeStateTxt")).to_contain_text("VDL2")
+    expect(page.locator("#homeCardDualVdl2 .mc-live")).to_be_visible()
