@@ -265,3 +265,12 @@ def test_voice_acars_from_plain_voice_is_full_entry(env2):
     env2.active |= {"rtl_airband"}
     r = app.app.test_client().post("/api/mode", json={"mode": "voice_acars"}, headers=ORIGIN)
     assert r.status_code == 200 and "secondary_only" not in r.get_json()
+
+
+def test_voice2_config_uses_airam2_recording_prefix(env2):
+    _roles()
+    app._merge_state({"squelch_mode": "auto"})              # "open" (ATIS) לא מקליט בכלל
+    app.write_voice2_config()
+    assert 'filename_template = "airam2";' in app.VOICE2_CONFIG_PATH.read_text()
+    app.write_config(132.5, "am", True, 40, 4, "auto")
+    assert 'filename_template = "airam";' in app.CONFIG_PATH.read_text()

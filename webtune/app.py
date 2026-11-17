@@ -414,6 +414,9 @@ SATCOM_LOG_KEEP = 5000                # retention על הדיסק (זנב נשמ
 # ~0.5ש' אחרי שהסקוולץ' נסגר). קובץ שהסתיים = אירוע ביומן השידורים.
 REC_DIR = Path("/var/lib/airam/recordings")
 REC_BASENAME = "airam"         # filename_template ב-config וגם עוגן הפרסור של השמות
+# הערוץ השני של קול כפול כותב airam2_… — אותה תיקייה, אותו יומן, ★/תמלול/סשנים בלי שינוי,
+# אבל היומן יודע מאיזה מקלט השידור (`ch`). גם שני תדרים זהים לא היו מתנגשים בשם.
+REC_BASENAME2 = REC_BASENAME + "2"
 REC_BYTES_PER_SEC = 6000       # CBR 48kbps (ה-patch ב-install.sh) => הערכת משך מגודל
 # retention (הקלטות *לא* מסומנות בלבד — ר' _sweep_recordings). ⚠ 500 ולא 200:
 # 200 שידורים ≈ 17 דק' אודיו בלבד בתדר עמוס — פחות מהחלון הרטרואקטיבי שכפתור
@@ -750,11 +753,12 @@ def _squelch_line(squelch_mode, squelch_snr):
 # --- בניית קובץ ההגדרות ל-rtl_airband ------------------------------------
 def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
                   chan_filter=CHAN_FILTER_DEFAULT, fm_notch=False, serial=None,
-                  stats_path=None, mount=None, denoise_udp=True):
+                  stats_path=None, mount=None, denoise_udp=True, rec_template=None):
     """קונפיג rtl_airband. ברירות המחדל = הערוץ הראשי. הערוץ השני (קול כפול) מעביר stats_path/mount
     משלו ו-denoise_udp=False: הסינון מאזין לפורט אחד, ושני שולחים אליו היו מערבבים שני תדרים."""
     stats_path = stats_path or STATS_PATH
     mount = mount or MOUNT
+    rec_template = rec_template or REC_BASENAME
     f = float(freq)
     cf = CHAN_FILTERS.get(chan_filter, CHAN_FILTERS[CHAN_FILTER_DEFAULT])
     # rfnotch_ctrl: הגדרת SoapySDRPlay3 שעוברת דרך ה-device_string (נקראת ע"י writeSetting
@@ -824,7 +828,7 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
             "          {",
             '            type = "file";',
             f'            directory = "{REC_DIR}";',
-            f'            filename_template = "{REC_BASENAME}";',
+            f'            filename_template = "{rec_template}";',
             "            split_on_transmission = true;   # קובץ MP3 נפרד לכל שידור",
             "            include_freq = true;            # התדר (Hz) בשם הקובץ",
             "          }",
@@ -934,7 +938,7 @@ def write_voice2_config(st=None):
     _atomic_write(VOICE2_CONFIG_PATH, render_config(
         f2, m2, True, IF_GAIN_DEFAULT, RF_GAIN_DEFAULT, sq_mode, sq_snr, cf,
         bool(st.get("fm_notch")), serial=_secondary_serial(),
-        stats_path=STATS2_PATH, mount=MOUNT2, denoise_udp=False))
+        stats_path=STATS2_PATH, mount=MOUNT2, denoise_udp=False, rec_template=REC_BASENAME2))
 
 
 # --- תפקידי המקלטים (docs/dual-sdr-feasibility.md §3.1) -----------------------
@@ -4527,7 +4531,7 @@ def parse_stats(text, want_freq):
 
 
 # --- יומן שידורים והקלטות ---------------------------------------------------
-_REC_NAME_RE = re.compile(rf"^{re.escape(REC_BASENAME)}_\d{{8}}_\d{{6}}_(\d+)\.mp3$")
+_REC_NAME_RE = re.compile(rf"^{re.escape(REC_BASENAME)}(?:2)?_\d{{8}}_\d{{6}}_(\d+)\.mp3$")
 
 
 def _rec_freq_mhz(name):
@@ -4589,7 +4593,8 @@ def _rec_event(p):
     גרסאות של אותה שורה שיכולות להיפרד."""
     st = p.stat()
     return {"ts": round(st.st_mtime, 1), "freq": _rec_freq_mhz(p.name),
-            "file": p.name, "dur": round(st.st_size / REC_BYTES_PER_SEC, 1)}
+            "file": p.name, "dur": round(st.st_size / REC_BYTES_PER_SEC, 1),
+            "ch": 2 if p.name.startswith(REC_BASENAME2 + "_") else 1}
 
 
 def _saved_usage():

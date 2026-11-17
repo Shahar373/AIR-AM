@@ -1455,7 +1455,7 @@ def test_voice2_card_enters_and_second_channel_tunes(page):
     page.fill("#v2FreqInput", "118.05")
     page.click("#v2TuneBtn")
     expect(page.locator("#v2Freq")).to_have_text("118.050")
-    assert tuned[-1] == {"freq2": 118.05}
+    assert tuned[-1] == {"freq2": 118.05, "mod2": "am"}
     page.click("#v2PlayBtn")
     assert "live2.mp3" in page.evaluate("document.getElementById('player2').src")
     page.click("#modeSeg button[data-v=home]")
@@ -1675,3 +1675,42 @@ def test_v2_rf_text_is_bidi_isolated(page):
     expect(page.locator("#v2Box")).to_be_visible()
     page.evaluate("pollV2Metrics()")
     expect(page.locator("#v2Rf")).to_contain_text("⁨-40.5 dBFS⁩")
+
+
+def test_voice2_ear_split_pans_and_uses_same_origin_streams(page):
+    """אוזניות: ערוץ לכל אוזן — הראשי שמאלה, השני ימינה, דרך ה-proxy (same-origin, אחרת
+    MediaElementSource של Icecast בפורט אחר משמיע שקט); יציאה מקול כפול מחזירה את ה-pan ל-0."""
+    state = dict(_default_api()["/api/state"], app_mode="voice2", mode_ok=True,
+                 voice2_freq=121.4, mount2="live2.mp3")
+    h = {"v": _dual_health({"rtl_airband2": "active"}, "voice2")}
+    page.add_init_script("HTMLMediaElement.prototype.play = function(){ return Promise.resolve(); };")
+    _mount(page, overrides={"/api/state": state, "/api/health": lambda route, url: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(h["v"]))})
+    expect(page.locator("#v2Box")).to_be_visible()
+    page.click("#v2PlayBtn")
+    page.check("#v2Ears")
+    assert page.evaluate("earGraph !== null")
+    assert page.evaluate("[earGraph.p1.pan.value, earGraph.p2.pan.value]") == [-1, 1]
+    assert "/stream?m=live2" in page.evaluate("document.getElementById('player2').getAttribute('src')")
+    expect(page.locator("#v2EarsHint")).to_be_visible()
+    page.fill("#v2Vol", "0.3")
+    page.dispatch_event("#v2Vol", "input")
+    assert abs(page.evaluate("earGraph.g2.gain.value") - 0.3) < 1e-6
+    assert page.evaluate("localStorage.getItem('airam_ears')") == "1"
+    h["v"] = _dual_health({}, "voice")                                 # יצאנו לקול רגיל
+    page.evaluate("pollGlobalState()")
+    page.wait_for_function("earGraph.p1.pan.value === 0")
+    assert page.evaluate("earGraph.p2.pan.value") == 0
+
+
+def test_activity_marks_second_channel_recordings(page):
+    events = [{"ts": 1790000000, "freq": 121.4, "file": "airam2_20260911_120000_121400000.mp3",
+               "dur": 3.0, "ch": 2, "exists": True, "starred": False, "tx": {"state": "none"}},
+              {"ts": 1790000001, "freq": 132.5, "file": "airam_20260911_120001_132500000.mp3",
+               "dur": 2.0, "ch": 1, "exists": True, "starred": False, "tx": {"state": "none"}}]
+    state = dict(_default_api()["/api/state"], app_mode="voice2", mode_ok=True,
+                 voice2_freq=121.4, mount2="live2.mp3")
+    _mount(page, overrides={"/api/state": state, "/api/activity": {"ok": True, "events": events},
+                            "/api/health": _dual_health({"rtl_airband2": "active"}, "voice2")})
+    expect(page.locator(".ch-badge.ch2")).to_have_text("ערוץ 2")
+    expect(page.locator(".ch-badge:not(.ch2)")).to_have_text("ערוץ 1")   # במצב כפול גם ערוץ 1

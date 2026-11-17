@@ -318,6 +318,11 @@
     .v2-row select, .v2-row input { flex: 1 1 8rem; min-width: 0; }
     .v2-play { width: 44px; height: 44px; border-radius: 50%; font-size: 1.1rem; flex: 0 0 auto; }
     .v2-rf { font-size: .8rem; color: var(--muted); margin-top: var(--sp-2); }
+    .v2-vol span { flex: none; }
+    .v2-vol input { flex: 1 1 auto; }
+    .v2-ears { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2);
+      font-size: .85rem; min-height: 40px; cursor: pointer; }
+    .v2-ears input { width: 22px; height: 22px; flex: none; }
     .pill {
       display: inline-flex; align-items: center; gap: .45rem;
       font-size: .8rem; color: var(--dim);
@@ -876,6 +881,9 @@
       text-underline-offset: 3px; padding: .35rem 0; }
     .act-row .n { color: var(--dim); flex: 1 1 4em; min-width: 3.5em;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .act-row .ch-badge { flex: none; font-size: .68rem; padding: 0 .4rem; border-radius: var(--r-sm);
+      border: 1px solid var(--border); color: var(--dim); }
+    .act-row .ch-badge.ch2 { color: var(--accent-2); border-color: rgba(var(--accent-rgb), .35); }
     .act-row .dur { color: var(--dim); font-size: .74rem; flex: none;
       direction: ltr; font-variant-numeric: tabular-nums; }
     .act-row button.play { flex: none; padding: .3rem .75rem; font-size: .8rem;
@@ -1858,8 +1866,21 @@
       <div class="v2-row">
         <input id="v2FreqInput" type="number" inputmode="decimal" step="0.005" min="0.1" max="1999.5"
                placeholder="או תדר חופשי" aria-label="תדר לערוץ השני" />
+        <select id="v2Mod" aria-label="אפנון הערוץ השני" style="flex:0 0 auto">
+          <option value="am">AM</option><option value="nfm">NFM</option>
+        </select>
         <button type="button" class="ghost" id="v2TuneBtn">כוונן ערוץ שני</button>
       </div>
+      <div class="v2-row v2-vol" title="עוצמת הערוץ השני">
+        <span>🔉</span>
+        <input type="range" id="v2Vol" min="0" max="1" step="0.05" value="1" aria-label="עוצמת הערוץ השני" />
+        <span>🔊</span>
+      </div>
+      <label class="v2-ears" id="v2EarsRow">
+        <input type="checkbox" id="v2Ears" />
+        <span>🎧 ערוץ לכל אוזן — הראשי משמאל, השני מימין</span>
+      </label>
+      <p class="v2-rf" id="v2EarsHint" hidden></p>
       <p class="v2-rf" id="v2Rf">—</p>
     </div>
 
@@ -2733,7 +2754,9 @@
     // כאן לוגיקת החלפה בכשל. מה שנשמע בפועל מוצג בכנות ב-renderDenoise.
     const streamURL = () => {
       const clean = denoise.enabled && denoise.available;
-      return location.protocol === "https:"
+      // ערוץ לכל אוזן (Web Audio): הסטרים חייב להיות same-origin, אחרת MediaElementSource של
+      // סטרים מ-Icecast (פורט אחר = origin אחר) משמיע שקט (הגבלת CORS) ⇒ דרך ה-proxy של airam-web
+      return (location.protocol === "https:" || earGraph)
         ? `/stream?${clean ? "m=clean&" : ""}t=${Date.now()}`
         : `http://${location.hostname}:${cfg.port}/${clean ? (cfg.denoise_mount || "clean.mp3") : cfg.mount}?t=${Date.now()}`;
     };
@@ -3288,7 +3311,7 @@
     // יחיד אחרי 12ש' (כמו קודם) נכשל בשקט כשהעלייה ארכה יותר, והכפתור הציג ⏸ על שקט.
     const V2_RETRY_MS = 2000, V2_MAX_TRIES = 30;
     let v2Tries = 0, v2RetryTimer = null;
-    const stream2URL = () => location.protocol === "https:"
+    const stream2URL = () => (location.protocol === "https:" || earGraph)
       ? `/stream?m=live2&t=${Date.now()}`
       : `http://${location.hostname}:${cfg.port}/${cfg.mount2 || "live2.mp3"}?t=${Date.now()}`;
     function stopV2Audio() {
@@ -3304,10 +3327,12 @@
       // poll שראה את המשני רגע ב-activating.
       const show = voice2Mode && !sdrOff;
       $("v2Box").classList.toggle("hidden", !show);
-      $("v2Freq").textContent = v2.freq != null ? Number(v2.freq).toFixed(3) : "—";
+      $("v2Freq").textContent = v2.freq != null ? Number(v2.freq).toFixed(3) + (v2.mod === "nfm" ? " NFM" : "") : "—";
+      if (!v2Busy) $("v2Mod").value = v2.mod === "nfm" ? "nfm" : "am";
       $("v2PlayBtn").textContent = want2 ? "⏸" : "▶";
       $("v2TuneBtn").disabled = v2Busy || applyModeInFlight;
       $("v2Preset").disabled = v2Busy || applyModeInFlight;
+      if (typeof applyEars === "function") applyEars();
       // רשימת הפריסטים — נבנית מחדש רק כשהיא השתנתה (לא לאפס בחירה באמצע)
       const sel = $("v2Preset");
       const sig = JSON.stringify((cfg.presets || []).map((p) => [p.name, p.freq]));
@@ -3353,7 +3378,12 @@
     player2.addEventListener("error", v2Retry);
     player2.addEventListener("ended", v2Retry);       // הסטרים נסגר (restart של rtl_airband2)
     player2.addEventListener("playing", () => { v2Tries = 0; });
-    $("v2PlayBtn").onclick = () => { if (want2) stopV2Audio(); else playV2(); };
+    $("v2PlayBtn").onclick = () => {
+      if (want2) { stopV2Audio(); return; }
+      // ערוץ לכל אוזן שנשמר מביקור קודם: ה-AudioContext נוצר רק ממגע — כאן
+      if (earSplit && voice2Mode && !earGraph) ensureEarGraph();
+      playV2();
+    };
     async function tuneV2(freq) {
       if (!Number.isFinite(freq) || freq <= 0 || v2Busy) return;
       v2Busy = true;
@@ -3361,7 +3391,7 @@
       $("v2Rf").textContent = "מכוונן את הערוץ השני…";
       try {
         // השער + sleep מדורג + עלייה — יותר מ-45ש' במקרה הגרוע
-        const res = await apiSend("POST", "/api/tune2", { freq2: freq }, 90000);
+        const res = await apiSend("POST", "/api/tune2", { freq2: freq, mod2: $("v2Mod").value }, 90000);
         const d = await res.json();
         if (d.ok) {
           v2 = { freq: Number(d.voice2_freq), mod: d.voice2_mod || "am" };
@@ -3377,6 +3407,69 @@
         renderVoice2(); renderHome();
       }
     }
+    /* ערוץ לכל אוזן (אוזניות): שני הנגנים דרך Web Audio — StereoPanner ראשי ⇐ שמאל, שני ⇐ ימין,
+       ו-Gain לכל ערוץ (‏audio.volume לקריאה בלבד ב-iOS). ⚠ MediaElementSource לא ניתק אחרי שנוצר:
+       מאז, השמע של שני הנגנים עובר רק דרך ה-AudioContext — לכן נוצר רק בהדלקה הראשונה (מלחיצה —
+       AudioContext דורש מגע), וכיבוי רק מחזיר את ה-pan ל-0. ⚠ ב-iPhone, AudioContext עלול להיעצר
+       כשהמסך כבוי — מצוין ברמז. */
+    // var (לא let): streamURL מוגדר מוקדם יותר בקובץ וקורא את earGraph — בלי TDZ
+    var earGraph = null;                // {ctx, p1, p2, g1, g2}
+    var earSplit = false;
+    try { earSplit = localStorage.getItem("airam_ears") === "1"; } catch (e) { /* פרטי */ }
+    const earSupported = !!(window.AudioContext || window.webkitAudioContext)
+      && typeof (window.StereoPannerNode) === "function";
+    function ensureEarGraph() {
+      if (earGraph || !earSupported) return earGraph;
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new Ctx();
+      const mk = (el) => {
+        const src = ctx.createMediaElementSource(el);
+        const g = ctx.createGain(), p = new StereoPannerNode(ctx, { pan: 0 });
+        src.connect(g); g.connect(p); p.connect(ctx.destination);
+        return [g, p];
+      };
+      const [g1, p1] = mk(player), [g2, p2] = mk(player2);
+      earGraph = { ctx, g1, g2, p1, p2 };
+      // מכאן העוצמה רק ב-Gain: אחרת volume של האלמנט (בדפדפנים שמחילים אותו) כפול ה-Gain = ריבוע
+      player.volume = 1; player2.volume = 1;
+      // הסטרים עובר עכשיו ל-proxy (same-origin) — מחברים מחדש מה שמתנגן
+      if (wantPlaying) reloadStream();
+      if (want2) playV2();
+      return earGraph;
+    }
+    function applyEars() {
+      const on = earSplit && voice2Mode && !sdrOff;
+      if (earGraph) {
+        earGraph.p1.pan.value = on ? -1 : 0;
+        earGraph.p2.pan.value = on ? 1 : 0;
+        earGraph.g1.gain.value = +$("vol").value;
+        earGraph.g2.gain.value = +$("v2Vol").value;
+        if (earGraph.ctx.state === "suspended") earGraph.ctx.resume().catch(() => {});
+      }
+      $("v2Ears").checked = earSplit;
+      $("v2EarsRow").hidden = !earSupported;
+      const hint = $("v2EarsHint");
+      hint.hidden = !earSplit;
+      if (earSplit) hint.textContent = /iPhone|iPad/i.test(navigator.userAgent)
+        ? "⚠ ב-iPhone השמע עלול להיעצר כשהמסך כבוי במצב הזה — השאר את המסך דולק"
+        : "השמע עובר דרך ה-Pi (proxy) כדי שהדפדפן יוכל לפצל אותו לאוזניים";
+    }
+    $("v2Ears").onchange = (e) => {
+      earSplit = e.target.checked;
+      try { localStorage.setItem("airam_ears", earSplit ? "1" : "0"); } catch (err) { /* פרטי */ }
+      if (earSplit) ensureEarGraph();     // מלחיצה — AudioContext מותר
+      applyEars();
+    };
+    let savedVol2 = NaN;
+    try { savedVol2 = parseFloat(localStorage.getItem("airam_vol2")); } catch (e) { /* פרטי */ }
+    if (Number.isFinite(savedVol2)) $("v2Vol").value = savedVol2;
+    player2.volume = +$("v2Vol").value;
+    $("v2Vol").oninput = () => {
+      const v = +$("v2Vol").value;
+      if (earGraph) earGraph.g2.gain.value = v;
+      else player2.volume = v;             // בלי Web Audio (מחוץ ל-iOS, שם volume לקריאה בלבד)
+      try { localStorage.setItem("airam_vol2", String(v)); } catch (e) { /* פרטי */ }
+    };
     $("v2TuneBtn").onclick = () => tuneV2(Number($("v2FreqInput").value));
     $("v2Preset").onchange = (e) => { const f = Number(e.target.value); e.target.value = ""; if (f) tuneV2(f); };
     async function pollV2Metrics() {
@@ -4877,7 +4970,11 @@
           f.setAttribute("role", "button");
           f.tabIndex = 0;
           f.title = "כוונן ל-" + ev.freq.toFixed(3);
-          f.onclick = () => { showToast("מכוונן ל-" + ev.freq.toFixed(3) + " MHz"); tune(ev.freq); };
+          // הקלטה של הערוץ השני בזמן קול כפול ⇒ מכווננים את הערוץ השני, לא את הראשי
+          f.onclick = () => {
+            showToast("מכוונן ל-" + ev.freq.toFixed(3) + " MHz");
+            if (ev.ch === 2 && voice2Mode) tuneV2(ev.freq); else tune(ev.freq);
+          };
           f.onkeydown = (e) => { if (e.key === "Enter") f.onclick(); };
         }
         const n = document.createElement("span");
@@ -4887,6 +4984,13 @@
         const dur = document.createElement("span");
         dur.className = "dur"; dur.textContent = ev.dur ? fmtDur(ev.dur) : "";
         row.append(t, f, n, dur);
+        // קול כפול: מאיזה מקלט השידור (airam2_… = הערוץ השני). ערוץ 1 מסומן רק כשיש שניים.
+        if (ev.ch === 2 || (voice2Mode && ev.ch === 1)) {
+          const chb = document.createElement("span");
+          chb.className = "ch-badge" + (ev.ch === 2 ? " ch2" : "");
+          chb.textContent = ev.ch === 2 ? "ערוץ 2" : "ערוץ 1";
+          row.insertBefore(chb, n);
+        }
         if (ev.file) {
           const star = document.createElement("button");
           star.type = "button";
@@ -7905,7 +8009,12 @@
 
     /* ---------- פקדי הנגן המותאם (ה-<audio> בלי controls) ---------- */
     // לחיצה על ▶ תמיד מסנכרנת ל-live (reloadStream) — ברדיו חי אין "המשך מהמקום שעצרת"
-    $("playBtn").onclick = () => { if (player.paused) reloadStream(); else player.pause(); };
+    $("playBtn").onclick = () => {
+      if (!player.paused) { player.pause(); return; }
+      if (earSplit && voice2Mode && !earGraph) ensureEarGraph();   // ר' v2PlayBtn
+      if (earGraph && earGraph.ctx.state === "suspended") earGraph.ctx.resume().catch(() => {});
+      reloadStream();
+    };
     function renderPlayBtn() {
       const b = $("playBtn");
       b.textContent = player.paused ? "▶" : "⏸";
@@ -7916,7 +8025,11 @@
     const volEl = $("vol");
     const savedVol = parseFloat(localStorage.getItem("airam_vol"));
     if (Number.isFinite(savedVol)) { volEl.value = savedVol; player.volume = savedVol; }
-    volEl.oninput = () => { player.volume = +volEl.value; localStorage.setItem("airam_vol", volEl.value); };
+    volEl.oninput = () => {
+      if (earGraph) earGraph.g1.gain.value = +volEl.value;   // ערוץ לכל אוזן — ר' ensureEarGraph
+      else player.volume = +volEl.value;
+      localStorage.setItem("airam_vol", volEl.value);
+    };
     // iOS מתעלם מ-volume תוכנתי (רק כפתורי חומרה) => מסתירים את הסליידר שם
     if (/iPhone|iPad|iPod/i.test(navigator.userAgent)) $("volRow").classList.add("hidden");
     let hiddenAt = 0;
