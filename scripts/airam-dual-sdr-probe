@@ -322,10 +322,15 @@ def _stats_vals(samples, key):
 
 
 def summarize(samples, *, died=None, aborted=None, acars=None, icecast=None,
-              baseline=None, expect_freqs=(), live_window=LIVE_WINDOW_SEC):
+              baseline=None, expect_freqs=(), live_window=LIVE_WINDOW_SEC, kernel_uv=False,
+              startup_failed=False):
     """סיכום תרחיש + פסק דין. כל "נכשל" נשען על עובדה מדידה (דגל של ה-Pi, מונה,
     תהליך שמת, מדד שקפא) — לא על סף מספרי שלנו."""
     res = {"samples": len(samples), "fail": [], "notes": []}
+    if startup_failed:
+        # לא הגיע לריצה ⇒ אין מה לבדוק ב-stats; הסיבה האמיתית קודמת לכל השאר
+        res["fail"].append(f"נכשל בעלייה: {died}")
+        died, expect_freqs = None, ()
     if not samples:
         res["fail"].append(f"נכשל בעלייה: {died}" if died else "אין דגימות")
         if aborted:
@@ -403,6 +408,12 @@ def summarize(samples, *, died=None, aborted=None, acars=None, icecast=None,
             if age is not None and age > STALE_STATS_SEC:
                 res["fail"].append(f"קובץ ה-stats לא התעדכן {age:.0f}ש'")
 
+    if kernel_uv is None:
+        res["notes"].append("יומן הקרנל לא נבדק (אין journalctl) — נפילת מתח בין דגימות לא הייתה נתפסת")
+    elif kernel_uv:
+        res["kernel_uv"] = [time.strftime("%H:%M:%S", time.localtime(t)) for t in kernel_uv]
+        res["fail"].append(f"הקרנל רשם undervoltage {len(kernel_uv)} פעמים בזמן התרחיש: "
+                           + ", ".join(res["kernel_uv"]))
     if died:
         res["fail"].append(f"תהליך יצא באמצע: {died}")
     if aborted:
@@ -511,6 +522,27 @@ def wait_devices(serials, wait=None, after_restart=None):
         return True, False
     run(["systemctl", "restart", "sdrplay"], timeout=60)
     return poll(after_restart), True
+
+
+_UV_LINE = re.compile(r"^(\d+(?:\.\d+)?)\s.*Undervoltage detected", re.M)
+
+
+def parse_kernel_uv(text, since, until):
+    """`journalctl -k -o short-unix` ⇒ זמני "Undervoltage detected!" בחלון. זה היומן של
+    הקרנל עצמו — תופס גם נפילה שקרתה בין שתי דגימות של get_throttled."""
+    return [float(m.group(1)) for m in _UV_LINE.finditer(text or "")
+            if since <= float(m.group(1)) <= until]
+
+
+def kernel_uv_events(since, until):
+    """None כשאין journalctl / אין הרשאה — "לא נבדק", לא "אין"."""
+    if not shutil.which("journalctl"):
+        return None
+    rc, out = run(["journalctl", "-k", "--no-pager", "-o", "short-unix",
+                   "--since", f"@{int(since) - 1}", "--until", f"@{int(until) + 2}"], timeout=15)
+    if rc != 0:
+        return None
+    return parse_kernel_uv(out, since - 1, until + 2)
 
 
 def unit_active(unit):
@@ -707,7 +739,9 @@ class Probe:
             sample_cb()
 
     def scenario(self, name, children_spec, steps, *, stats_path=None, expect_freqs=(),
-                 acars_port=None, break_on_death=True, baseline=None, mounts=(MOUNT,)):
+                 acars_port=None, break_on_death=True, baseline=None, mounts=(MOUNT,),
+                 wall_before=0):
+        """wall_before: כמה שניות לפני התרחיש לכלול בבדיקת יומן הקרנל (ההמתנה למקלטים)."""
         """children_spec=[(name, argv)], steps=[("run", secs, phase) | ("prompt", text, phase)]."""
         print(f"\n=== {name}")
         acars = None
@@ -718,6 +752,8 @@ class Probe:
             except OSError as e:
                 print(f"  ⚠ לא ניתן להאזין ל-UDP {acars_port} ({e}) — הודעות ACARS לא ייספרו")
         children, died, aborted, icecast = [], None, None, None
+        startup_failed = False
+        wall0 = time.time()
         phase_marks = []
         samples = []
         sampler = Sampler()
@@ -757,7 +793,16 @@ class Probe:
             # עלייה: כל התהליכים חיים, ו-rtl_airband כתב stats *שלו*.
             deadline = time.monotonic() + STARTUP_SEC
             start_wall = time.time()
+            # דוגמים גם בעלייה: על ה-Pi (17.11.2026) נפילת מתח של 10ש' קרתה בדיוק כששני
+            # המקלטים נפתחו — לפני הדגימה הראשונה — והתרחיש "עבר".
+            phase = "startup"
+            next_take = time.monotonic()
             while children and time.monotonic() < deadline:
+                if time.monotonic() >= next_take:
+                    take()
+                    next_take += self.a.interval
+                    if aborted:
+                        break
                 gone = [c for c in children if not c.alive()]
                 if gone:
                     died = ", ".join(c.name for c in gone)
@@ -776,6 +821,7 @@ class Probe:
                 if children and stats_path:
                     died = died or f"rtl_airband לא כתב stats תוך {STARTUP_SEC}ש'"
             if died:
+                startup_failed = True
                 print(f"  ✗ נכשל בעלייה: {died}")
                 for c in children:
                     if c.tail():
@@ -816,7 +862,8 @@ class Probe:
 
         res = summarize(samples, died=died, aborted=aborted, acars=acars_res,
                         icecast=icecast if stats_path else None, baseline=baseline,
-                        expect_freqs=expect_freqs if children else ())
+                        expect_freqs=expect_freqs if children else (), startup_failed=startup_failed,
+                        kernel_uv=kernel_uv_events(wall0 - (wall_before or 0), time.time()))
         if len(steps) > 1:
             res["phases"] = phase_timeline(samples, phase_marks, expect_freqs)
         if died and not samples:
@@ -1031,6 +1078,7 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, stop_sig)
     signal.signal(signal.SIGHUP, stop_sig)
 
+    run_wall0 = time.time()
     probe = Probe(args, out)
     baseline = None
     stats = str(out / "stats.txt")
@@ -1048,7 +1096,9 @@ def main(argv=None):
         return note
 
     def run_sdr(name, *a, **kw):
+        w0 = time.time()
         note = devices_ready(name)
+        kw["wall_before"] = time.time() - w0
         for sp in _as_list(kw.get("stats_path")):
             try:
                 os.unlink(sp)
@@ -1108,6 +1158,7 @@ def main(argv=None):
     finally:
         probe.samples_f.close()
         summary = {"info": info, "primary": prim, "secondary": sec, "freqs": {"a": fa, "b": fb, "acars": fac},
+                   "run_start": round(run_wall0, 1),
                    "interrupted": interrupted, "scenarios": probe.results}
         (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1))
         if not args.keep_rec:
@@ -1116,7 +1167,11 @@ def main(argv=None):
     # המקלטים חזרו ל-API? (SIGKILL / קריסה באמצע יכולים להשאיר נעילה ב-sdrplay_apiService)
     after, _ = find_devices()
     missing = {prim["serial"], sec["serial"]} - {d["serial"] for d in after}
+    all_uv = kernel_uv_events(run_wall0, time.time())
     print("\n=== סיכום")
+    if all_uv:
+        print("  ⚠ הקרנל רשם undervoltage בזמן ההרצה: "
+              + ", ".join(time.strftime("%H:%M:%S", time.localtime(t)) for t in all_uv))
     for name, r in probe.results.items():
         print(f"  {name}: {'✓ עבר' if r['verdict'] == 'pass' else ('· תצפית' if r['verdict'] == 'observation' else '✗ נכשל')}")
     if missing:

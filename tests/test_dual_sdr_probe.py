@@ -274,11 +274,24 @@ if "restart" in sys.argv and os.environ.get("FAKE_FIND_GATE"):
 import os, sys
 a = sys.argv[1:]
 if a[:1] == ["get_throttled"]:
-    print("throttled=" + os.environ.get("FAKE_THROTTLED", "0x0"))
+    val = os.environ.get("FAKE_THROTTLED", "0x0")
+    cnt = os.environ.get("FAKE_UV_CALL")          # "N": רק הקריאה ה-N מחזירה undervoltage עכשיו
+    if cnt:
+        path = os.environ["FAKE_UV_COUNTER"]
+        n = (int(open(path).read()) if os.path.exists(path) else 0) + 1
+        open(path, "w").write(str(n))
+        val = "0x50005" if n == int(cnt) else "0x50000"
+    print("throttled=" + val)
 elif a[:1] == ["pmic_read_adc"]:
     sys.stdout.write({PMIC!r})
 elif a[:1] == ["get_config"]:
     print("usb_max_current_enable=0")
+""",
+    "journalctl": """\
+import os, sys, time
+if os.environ.get("FAKE_UV_JOURNAL"):
+    print(f"{time.time() - 1:.6f} oldsdr kernel: hwmon hwmon3: Undervoltage detected!")
+    print(f"{time.time():.6f} oldsdr kernel: hwmon hwmon3: Voltage normalised")
 """,
     "rtl_airband": """\
 import os, random, re, signal, sys, time
@@ -509,3 +522,32 @@ def test_stuck_device_before_scenario_is_recovered_and_noted(fakes):
     assert not any("sdrplay" in n for n in sc["dual-voice-2p"]["notes"])
     assert sc["voice-acars"]["verdict"] == "pass", sc["voice-acars"]
     assert any("sdrplay אותחל" in n for n in sc["voice-acars"]["notes"])
+
+
+def test_parse_kernel_uv_window_only():
+    text = ("1763401085.100000 oldsdr kernel: hwmon hwmon3: Undervoltage detected!\n"
+            "1763401095.200000 oldsdr kernel: hwmon hwmon3: Voltage normalised\n"
+            "1763409999.000000 oldsdr kernel: hwmon hwmon3: Undervoltage detected!\n")
+    assert probe.parse_kernel_uv(text, 1763401000, 1763401200) == [1763401085.1]
+    assert probe.parse_kernel_uv("", 0, 1e12) == []
+
+
+def test_kernel_log_undervoltage_fails_scenario(fakes):
+    # מה שקרה על ה-Pi: נפילה של 10ש' שהקרנל רשם, וה-get_throttled לא תפס בדגימה
+    r, summary, _ = _run(fakes, "--secs", "2", "--only", "dual-voice-2p",
+                         extra_env={"FAKE_UV_JOURNAL": "1", "FAKE_THROTTLED": "0x50000"})
+    d = summary["scenarios"]["dual-voice-2p"]
+    assert d["verdict"] == "fail"
+    assert any("הקרנל רשם undervoltage" in f for f in d["fail"])
+    assert "הקרנל רשם undervoltage בזמן ההרצה" in r.stdout
+
+
+def test_undervoltage_during_startup_is_caught(fakes):
+    # קריאה 1 = --info; קריאה 2 = הדגימה הראשונה — בעלייה. לפני התיקון היא הייתה
+    # דגימת-בסיס ל-CPU שלא נרשמת, והתרחיש "עבר".
+    r, summary, _ = _run(fakes, "--secs", "2", "--only", "dual-voice-2p",
+                         extra_env={"FAKE_UV_CALL": "2",
+                                    "FAKE_UV_COUNTER": str(fakes["tmp"] / "uvcount")})
+    d = summary["scenarios"]["dual-voice-2p"]
+    assert d["verdict"] == "fail", d
+    assert any("undervoltage עכשיו" in f for f in d["fail"])
