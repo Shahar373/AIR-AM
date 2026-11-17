@@ -166,6 +166,8 @@ scripts/
                            # get_throttled/EXT5V_V/CPU/stats, fsync ל-/var/tmp/airam-dual-probe/. "נכשל" רק מדגלי ה-Pi,
                            # overflow, מדד שקפא או תהליך שמת — בלי ספים שלנו. --unplug לתצפית ניתוק. לא מותקן.
                            # ⚠ SIGHUP (SSH שנפל) = ניקוי מלא: התהליכים שלו ב-session משלהם ובלעדיו היו נשארים.
+                           # ⚠ ב-Pi: rtl_airband *אחד* עם שני מקלטים ⇒ sdrplay_api_Fail; ברירת המחדל היא dual-voice-2p
+                           # (תהליך לכל מקלט). לפני כל תרחיש מחכה ששני ה-serials חזרו ל-API (+ restart ל-sdrplay).
 
 udev/
   99-airam.rules           # חיבור RSP1B (Vendor 1df7) → restart אוטומטי לשירותי SDR.

@@ -68,6 +68,8 @@ ICECAST_PORT = 8000
 ICECAST_PW = "airam"      # SOURCE_PW ב-app.py / install.sh
 MOUNT = "airam-probe.mp3"
 
+DEVICE_WAIT_SEC = 20            # לפני כל תרחיש: עד מתי מחכים שה-API יחזיר את שני המקלטים
+DEVICE_WAIT_AFTER_RESTART_SEC = 30
 STARTUP_SEC = 25          # rtl_airband מוותר אחרי 5ש' למכשיר; ה-API עצמו יכול להיות איטי
 STOP_GRACE_SEC = 10
 STALE_STATS_SEC = 20      # מעל 15ש' של upstream, למקרה שהטלאי ל-1ש' לא נכנס
@@ -413,7 +415,7 @@ def summarize(samples, *, died=None, aborted=None, acars=None, icecast=None,
     if icecast is not None:
         res["icecast_live"] = icecast
         if icecast is False:
-            res["notes"].append(f"/{MOUNT} לא חי ב-Icecast — לא נכשל בגלל זה, אבל לא שמעת אודיו")
+            res["notes"].append("הסטרים לא חי ב-Icecast — לא נכשל בגלל זה, אבל לא שמעת אודיו")
     res["verdict"] = "fail" if res["fail"] else "pass"
     return res
 
@@ -487,6 +489,30 @@ def find_pid(prefix):
     return None
 
 
+def wait_devices(serials, wait=None, after_restart=None):
+    """(ready, restarted). מקלט שתהליך קודם החזיק נשאר "תפוס" ב-sdrplay_apiService עוד
+    כמה שניות אחרי שהתהליך יצא — נצפה על ה-Pi 17.11.2026: rtl_airband שנכשל בעלייה,
+    והתרחיש הבא קיבל "no sdrplay device matches" על המקלט שהוא כן פתח. מחכים שה-API
+    יחזיר את שניהם; לא חזרו ⇒ restart אחד ל-sdrplay (AIR-AM ב-standby, אז בטוח)."""
+    wait = DEVICE_WAIT_SEC if wait is None else wait
+    after_restart = DEVICE_WAIT_AFTER_RESTART_SEC if after_restart is None else after_restart
+    want = set(serials)
+
+    def poll(sec):
+        end = time.monotonic() + sec
+        while True:
+            if want <= {d["serial"] for d in find_devices()[0]}:
+                return True
+            if time.monotonic() >= end:
+                return False
+            time.sleep(1)
+
+    if poll(wait):
+        return True, False
+    run(["systemctl", "restart", "sdrplay"], timeout=60)
+    return poll(after_restart), True
+
+
 def unit_active(unit):
     rc, out = run(["systemctl", "is-active", unit], timeout=5)
     return out.strip() if out else "unknown"
@@ -543,15 +569,36 @@ class Sampler:
                 cpu[name] = round(100.0 * (t - prev) / self.clk / dt, 1)   # % מליבה אחת
             self.prev_proc[(name, pid)] = t
         s["cpu"] = cpu
-        if stats_path:
-            try:
-                st = Path(stats_path).stat()
-                s["stats_age"] = round(time.time() - st.st_mtime, 1)
-                s["stats"] = parse_stats(Path(stats_path).read_text(errors="replace"))
-            except OSError:
+        paths = _as_list(stats_path)
+        if paths:
+            merged, ages = {"noise": {}, "signal": {}, "overflow": {}, "overrun": {}}, []
+            for i, sp in enumerate(paths):
+                try:
+                    st = Path(sp).stat()
+                    one = parse_stats(Path(sp).read_text(errors="replace"))
+                except OSError:
+                    ages.append(None)
+                    continue
+                ages.append(round(time.time() - st.st_mtime, 1))
+                pre = f"{chr(ord('a') + i)}:" if len(paths) > 1 else ""   # תהליך a/b
+                merged["noise"].update(one["noise"])
+                merged["signal"].update(one["signal"])
+                merged["overflow"].update({pre + k: v for k, v in one["overflow"].items()})
+                merged["overrun"].update({pre + k: v for k, v in one["overrun"].items()})
+            if all(a is None for a in ages):
                 s["stats"] = None
+            else:
+                s["stats"] = merged
+                # קובץ שחסר אחרי שכבר נכתב = תהליך שהפסיק לכתוב ⇒ "ישן מאוד"
+                s["stats_age"] = max(a if a is not None else 1e9 for a in ages)
         self.prev_t = now
         return s
+
+
+def _as_list(x):
+    if not x:
+        return []
+    return [x] if isinstance(x, (str, Path)) else list(x)
 
 
 class Child:
@@ -660,7 +707,7 @@ class Probe:
             sample_cb()
 
     def scenario(self, name, children_spec, steps, *, stats_path=None, expect_freqs=(),
-                 acars_port=None, break_on_death=True, baseline=None):
+                 acars_port=None, break_on_death=True, baseline=None, mounts=(MOUNT,)):
         """children_spec=[(name, argv)], steps=[("run", secs, phase) | ("prompt", text, phase)]."""
         print(f"\n=== {name}")
         acars = None
@@ -720,7 +767,7 @@ class Probe:
                         break
                 else:
                     try:
-                        if Path(stats_path).stat().st_mtime >= start_wall:
+                        if all(Path(sp).stat().st_mtime >= start_wall for sp in _as_list(stats_path)):
                             break
                     except OSError:
                         pass
@@ -735,7 +782,8 @@ class Probe:
                         print(f"  --- {c.name} (סוף הלוג):\n" + "\n".join("    " + l for l in c.tail().splitlines()))
             else:
                 if children:
-                    print("  עלה. האזנה: http://<IP>:8000/" + MOUNT if stats_path else "  עלה.")
+                    print("  עלה. האזנה: " + " · ".join(f"http://<IP>:8000/{m}" for m in mounts)
+                          if stats_path else "  עלה.")
                 sampler.sample(pids(), stats_path)   # בסיס ל-delta של ה-CPU
                 for kind, val, ph in steps:
                     phase = ph
@@ -753,7 +801,8 @@ class Probe:
                         if (died and break_on_death) or aborted:
                             break
                         if stats_path and not mid_checked and time.monotonic() > end - val / 2:
-                            icecast = icecast_mount_live()
+                            live = [icecast_mount_live(m) for m in mounts]
+                            icecast = None if None in live else all(live)
                             mid_checked = True
                         time.sleep(max(0.0, nxt - time.monotonic()))
                     if (died and break_on_death) or aborted:
@@ -913,8 +962,9 @@ def main(argv=None):
     ap.add_argument("--info", action="store_true", help="רק זיהוי ומצב חשמל (קריאה בלבד)")
     ap.add_argument("--secs", type=float, default=600, help="משך כל תרחיש (ברירת מחדל 600)")
     ap.add_argument("--baseline-secs", type=float, default=60, help="משך מדידת ה-standby")
-    ap.add_argument("--only", default="baseline,dual-voice,voice-acars",
-                    help="תרחישים: baseline,dual-voice,voice-acars")
+    ap.add_argument("--only", default="baseline,dual-voice-2p,voice-acars",
+                    help="תרחישים: baseline,dual-voice-2p,voice-acars,dual-voice "
+                         "(dual-voice = שני מקלטים בתהליך rtl_airband אחד)")
     ap.add_argument("--unplug", action="store_true", help="+ ניתוק/חיבור המקלט המשני (אינטראקטיבי)")
     ap.add_argument("--a", default=",".join(VOICE_A_DEFAULT), help="תדרי קול למקלט הראשי (MHz, פסיק)")
     ap.add_argument("--b", default=",".join(VOICE_B_DEFAULT), help="תדרי קול למקלט המשני")
@@ -927,7 +977,7 @@ def main(argv=None):
     ap.add_argument("--out", help=f"תיקיית פלט (ברירת מחדל {OUT_ROOT}/<זמן>)")
     args = ap.parse_args(argv)
     args.only = [s.strip() for s in args.only.split(",") if s.strip()]
-    bad = [s for s in args.only if s not in ("baseline", "dual-voice", "voice-acars")]
+    bad = [s for s in args.only if s not in ("baseline", "dual-voice", "dual-voice-2p", "voice-acars")]
     if bad:
         ap.error("תרחיש לא מוכר: " + ", ".join(bad))
     if args.unplug and "voice-acars" not in args.only:
@@ -985,6 +1035,30 @@ def main(argv=None):
     baseline = None
     stats = str(out / "stats.txt")
     interrupted = False
+    def devices_ready(name):
+        """לפני כל תרחיש עם מקלטים. מחזיר הערה לסיכום, או None."""
+        ok, restarted = wait_devices([prim["serial"], sec["serial"]])
+        note = None
+        if not ok:
+            note = "לפני התרחיש ה-API לא החזיר את שני המקלטים, גם אחרי restart ל-sdrplay"
+        elif restarted:
+            note = "לפני התרחיש ה-API לא החזיר את שני המקלטים — sdrplay אותחל, ואז חזרו"
+        if note:
+            print(f"\n  ⚠ {name}: {note}")
+        return note
+
+    def run_sdr(name, *a, **kw):
+        note = devices_ready(name)
+        for sp in _as_list(kw.get("stats_path")):
+            try:
+                os.unlink(sp)
+            except OSError:
+                pass
+        r = probe.scenario(name, *a, **kw)
+        if note:
+            r["notes"].append(note)
+        return r
+
     try:
         if "baseline" in args.only:
             baseline = probe.scenario("baseline", [], [("run", args.baseline_secs, "standby")])
@@ -993,9 +1067,23 @@ def main(argv=None):
             conf.write_text(render_conf([{"serial": prim["serial"], "freqs": fa, "balance": -1.0},
                                          {"serial": sec["serial"], "freqs": fb, "balance": 1.0}],
                                         stats, rec))
-            probe.scenario("dual-voice", [("rtl_airband", ["rtl_airband", "-F", "-e", "-c", str(conf)])],
-                           [("run", args.secs, "run")], stats_path=stats,
-                           expect_freqs=fa + fb, baseline=baseline)
+            run_sdr("dual-voice", [("rtl_airband", ["rtl_airband", "-F", "-e", "-c", str(conf)])],
+                    [("run", args.secs, "run")], stats_path=stats,
+                    expect_freqs=fa + fb, baseline=baseline)
+        if "dual-voice-2p" in args.only:
+            # תהליך rtl_airband לכל מקלט. ב-Pi (17.11.2026) תהליך *אחד* עם שני מקלטים
+            # נכשל ב-SelectDevice של השני (sdrplay_api_Fail), בעוד acarsdec בתהליך נפרד
+            # פתח את אותו מקלט — ר' docs/dual-sdr-feasibility.md §7.6.
+            ma, mb = "airam-probe-a.mp3", "airam-probe-b.mp3"
+            sa, sb = str(out / "stats-a.txt"), str(out / "stats-b.txt")
+            ca, cb = out / "airband-dual-2p-a.conf", out / "airband-dual-2p-b.conf"
+            ca.write_text(render_conf([{"serial": prim["serial"], "freqs": fa, "balance": 0.0}], sa, rec, mount=ma))
+            cb.write_text(render_conf([{"serial": sec["serial"], "freqs": fb, "balance": 0.0}], sb, rec, mount=mb))
+            run_sdr("dual-voice-2p",
+                    [("rtl_airband-a", ["rtl_airband", "-F", "-e", "-c", str(ca)]),
+                     ("rtl_airband-b", ["rtl_airband", "-F", "-e", "-c", str(cb)])],
+                    [("run", args.secs, "run")], stats_path=[sa, sb],
+                    expect_freqs=fa + fb, baseline=baseline, mounts=(ma, mb))
         if "voice-acars" in args.only:
             conf = out / "airband-voice-acars.conf"
             conf.write_text(render_conf([{"serial": prim["serial"], "freqs": fa, "balance": 0.0}], stats, rec))
@@ -1003,24 +1091,16 @@ def main(argv=None):
                     ("acarsdec", ["acarsdec", "-g", "-10", "-m", "160", "-o", "0",
                                   "-j", f"127.0.0.1:{ACARS_UDP_PORT}",
                                   "-d", device_string(sec["serial"]), *fac])]
-            try:
-                os.unlink(stats)
-            except OSError:
-                pass
-            probe.scenario("voice-acars", spec, [("run", args.secs, "run")], stats_path=stats,
-                           expect_freqs=fa, acars_port=ACARS_UDP_PORT, baseline=baseline)
+            run_sdr("voice-acars", spec, [("run", args.secs, "run")], stats_path=stats,
+                    expect_freqs=fa, acars_port=ACARS_UDP_PORT, baseline=baseline)
             if args.unplug:
-                try:
-                    os.unlink(stats)
-                except OSError:
-                    pass
                 steps = [("run", 30, "לפני"),
                          ("prompt", f"נתק עכשיו את המקלט המשני ({sec['label']}) ולחץ Enter", "ממתין לניתוק"),
                          ("run", 30, "מנותק"),
                          ("prompt", "חבר אותו בחזרה ולחץ Enter", "ממתין לחיבור"),
                          ("run", 60, "חובר")]
-                r = probe.scenario("unplug", spec, steps, stats_path=stats, expect_freqs=fa,
-                                   acars_port=ACARS_UDP_PORT, break_on_death=False, baseline=baseline)
+                r = run_sdr("unplug", spec, steps, stats_path=stats, expect_freqs=fa,
+                            acars_port=ACARS_UDP_PORT, break_on_death=False, baseline=baseline)
                 r["verdict"] = "observation"   # תצפית, לא מבחן (§7.4 במסמך)
     except KeyboardInterrupt:
         interrupted = True

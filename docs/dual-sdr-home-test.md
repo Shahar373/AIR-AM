@@ -148,13 +148,14 @@ sudo ~/airam-dual-sdr-probe
    ודא שה-RSP1B הוא הראשי. אם הפוך — `Ctrl+C`, ושלח לי את פלט שלב 4 (נריץ עם
    `--serial-a`/`--serial-b`).
 2. **`=== baseline`** (דקה) — כלום לא רץ. מודד את ה-Pi במנוחה, לבסיס השוואה.
-3. **`=== dual-voice`** (10 דקות) — שני המקלטים בקול: מגדל על ה-RSP1B, גישה + Control על ה-RSP1A.
+3. **`=== dual-voice-2p`** (10 דקות) — שני המקלטים בקול, תהליך לכל מקלט: מגדל על ה-RSP1B,
+   גישה + Control על ה-RSP1A.
    כל 10 שניות תופיע שורה כמו:
    ```
    [run 120ש'] 5V=5.02V throttled=0x0 rtl_airband 18% sdrplay_api 9%
    ```
-   - **רוצה לשמוע?** פתח בטלפון `http://<IP>:8000/airam-probe.mp3` — מגדל באוזן שמאל,
-     גישה בימין. לא חובה.
+   - **רוצה לשמוע?** `http://<IP>:8000/airam-probe-a.mp3` (מגדל) או `airam-probe-b.mp3` (גישה).
+     לא חובה.
 4. **`=== voice-acars`** (10 דקות) — קול על ה-RSP1B, ACARS על ה-RSP1A.
 5. **`=== סיכום`** — שורה לכל תרחיש: `✓ עבר` או `✗ נכשל`, עם הסיבה.
 
@@ -218,7 +219,7 @@ scp -r pi@192.168.1.50:/var/tmp/airam-dual-probe ./airam-dual-probe
 tail -n 40 "$(ls -td /var/tmp/airam-dual-probe/*/ | head -1)samples.jsonl"
 ```
 
-שלח לי את הפלט, ותגיד באיזה תרחיש זה קרה (`dual-voice` / `voice-acars`) ואחרי כמה זמן.
+שלח לי את הפלט, ותגיד באיזה תרחיש זה קרה (`dual-voice-2p` / `voice-acars`) ואחרי כמה זמן.
 
 ---
 

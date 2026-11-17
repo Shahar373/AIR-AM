@@ -244,8 +244,12 @@ def test_summarize_zero_acars_is_note_not_fail():
 
 FAKES = {
     "SoapySDRUtil": f"""\
-import sys
-sys.stdout.write({FIND_TWO!r})
+import os, sys
+gate = os.environ.get("FAKE_FIND_GATE")
+text = {FIND_TWO!r}
+if gate and os.path.exists(gate + ".armed") and not os.path.exists(gate):
+    text = text.split("Found device 1")[0]      # אחרי שתהליך יצא: RSP1B "תפוס" עד restart
+sys.stdout.write(text)
 """,
     "lsusb": """\
 import sys
@@ -263,6 +267,8 @@ if "is-active" in sys.argv:
     sys.exit(0 if sys.argv[-1] == active else 3)
 if "show" in sys.argv:
     print("12345")
+if "restart" in sys.argv and os.environ.get("FAKE_FIND_GATE"):
+    open(os.environ["FAKE_FIND_GATE"], "w").close()
 """,
     "vcgencmd": f"""\
 import os, sys
@@ -280,6 +286,11 @@ conf = open(sys.argv[sys.argv.index("-c") + 1]).read()
 stats = re.search(r'stats_filepath = "([^"]+)"', conf).group(1)
 freqs = re.findall(r"^\\s*freq = ([0-9.]+);", conf, re.M)
 ndev = conf.count('type = "soapysdr"')
+if os.environ.get("FAKE_FIND_GATE"):
+    open(os.environ["FAKE_FIND_GATE"] + ".armed", "w").close()
+if ndev > 1 and os.environ.get("FAKE_ONEPROC_FAIL"):
+    print("[ERROR] SelectDevice Error: sdrplay_api_Fail")
+    sys.exit(1)
 signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
 ovf = 0
 while True:
@@ -347,13 +358,17 @@ def test_end_to_end_both_scenarios_pass(fakes):
     r, summary, out = _run(fakes, "--secs", "2", "--baseline-secs", "1")
     assert r.returncode == 0, r.stdout + r.stderr
     sc = summary["scenarios"]
-    assert set(sc) == {"baseline", "dual-voice", "voice-acars"}
+    assert set(sc) == {"baseline", "dual-voice-2p", "voice-acars"}
     assert all(v["verdict"] == "pass" for v in sc.values()), json.dumps(sc, ensure_ascii=False)
-    assert sc["dual-voice"]["live_freqs"] == {"134.600": True, "120.500": True, "121.400": True}
+    assert sc["dual-voice-2p"]["live_freqs"] == {"134.600": True, "120.500": True, "121.400": True}
+    assert set(sc["dual-voice-2p"]["overflow_delta"]) == {"a:0", "b:0"}    # מקלט לכל תהליך
     assert sc["voice-acars"]["acars"]["count"] > 0
     assert summary["primary"]["model"] == "RSP1B"
-    conf = (out / "airband-dual-voice.conf").read_text()
-    assert "serial=2305ABCDEF" in conf and "serial=1234567890" in conf
+    ca = (out / "airband-dual-2p-a.conf").read_text()
+    cb = (out / "airband-dual-2p-b.conf").read_text()
+    assert "serial=2305ABCDEF" in ca and "serial=1234567890" not in ca
+    assert "serial=1234567890" in cb and "serial=2305ABCDEF" not in cb
+    assert "airam-probe-a.mp3" in ca and "airam-probe-b.mp3" in cb
     lines = (out / "samples.jsonl").read_text().splitlines()
     assert lines and all(json.loads(l)["scenario"] for l in lines)
     assert not (out / "rec").exists()                       # ההקלטות של הבדיקה נמחקו
@@ -455,3 +470,42 @@ def test_hangup_mid_run_stops_children_and_keeps_summary(fakes, sig):
     assert _procs_with(str(conf)) == []                       # לא נשאר תהליך שמחזיק מקלט
     summary = json.loads((out / "summary.json").read_text())
     assert summary["interrupted"] is True
+
+
+def test_pi_finding_one_process_fails_two_processes_pass(fakes):
+    # מה שקרה על ה-Pi ב-17.11.2026: rtl_airband אחד עם שני מקלטים ⇒ sdrplay_api_Fail.
+    # שני התרחישים זה לצד זה: האחד נכשל בעלייה, השני (תהליך לכל מקלט) עובר.
+    r, summary, _ = _run(fakes, "--secs", "2", "--only", "dual-voice,dual-voice-2p",
+                         extra_env={"FAKE_ONEPROC_FAIL": "1"})
+    sc = summary["scenarios"]
+    assert sc["dual-voice"]["verdict"] == "fail"
+    assert "נכשל בעלייה" in sc["dual-voice"]["fail"][0]
+    assert sc["dual-voice-2p"]["verdict"] == "pass", sc["dual-voice-2p"]
+    assert r.returncode == 1
+
+
+def test_wait_devices_restarts_sdrplay_when_one_stays_claimed(fakes, monkeypatch):
+    # התרחיש הבא קיבל "no sdrplay device matches" — המקלט עוד היה תפוס מהקודם
+    gate = fakes["tmp"] / "restarted"
+    (fakes["tmp"] / "restarted.armed").touch()
+    for k, v in fakes["env"].items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("FAKE_FIND_GATE", str(gate))
+    ok, restarted = probe.wait_devices(["1234567890", "2305ABCDEF"], wait=1, after_restart=5)
+    assert ok and restarted and gate.exists()
+
+
+def test_wait_devices_no_restart_when_both_present(fakes, monkeypatch):
+    for k, v in fakes["env"].items():
+        monkeypatch.setenv(k, v)
+    assert probe.wait_devices(["1234567890", "2305ABCDEF"], wait=1, after_restart=1) == (True, False)
+
+
+def test_stuck_device_before_scenario_is_recovered_and_noted(fakes):
+    # בדיוק הרצף מה-Pi: תרחיש ראשון משאיר את RSP1B תפוס, והשני היה נכשל בעלייה
+    r, summary, _ = _run(fakes, "--secs", "2", "--only", "dual-voice-2p,voice-acars",
+                         extra_env={"FAKE_FIND_GATE": str(fakes["tmp"] / "gate")})
+    sc = summary["scenarios"]
+    assert not any("sdrplay" in n for n in sc["dual-voice-2p"]["notes"])
+    assert sc["voice-acars"]["verdict"] == "pass", sc["voice-acars"]
+    assert any("sdrplay אותחל" in n for n in sc["voice-acars"]["notes"])
