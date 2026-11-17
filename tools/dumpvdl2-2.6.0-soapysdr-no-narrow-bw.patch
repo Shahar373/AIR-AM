@@ -1,0 +1,18 @@
+--- a/src/soapysdr.c
++++ b/src/soapysdr.c
+@@ -62,8 +62,13 @@
+ 		fprintf(stderr, "setFrequencyCorrection failed: %s\n", SoapySDRDevice_lastError());
+ 		_exit(1);
+ 	}
+-	if(SoapySDRDevice_setBandwidth(sdr, SOAPY_SDR_RX, 0, bw) == 0)
+-		fprintf(stderr, "Bandwidth set to %d Hz\n", bw);	// ignore error
++	// AIR-AM: no explicit IF bandwidth. SoapySDRPlay3 rounds the request (channel span +
++	// 2 x 10.5 kHz) *down* to its next filter: 271 kHz -> 200 kHz, i.e. +-100 kHz around a
++	// center between 136.725 and 136.975, cutting off both edge channels (136.975 = CSC).
++	// Keep the driver's filter for the sample rate (1.536 MHz at 2.1 Msps), as SoapySDR
++	// acarsdec and dumpvdl2's own --sdrplay3 input do.
++	UNUSED(bw);
++	fprintf(stderr, "Bandwidth: driver default for the sample rate (AIR-AM patch)\n");
+ 	if(SoapySDRDevice_hasDCOffsetMode(sdr, SOAPY_SDR_RX, 0)) {
+ 		if(SoapySDRDevice_setDCOffsetMode(sdr, SOAPY_SDR_RX, 0, true) != 0) {
+ 			fprintf(stderr, "setDCOffsetMode failed: %s\n", SoapySDRDevice_lastError());
