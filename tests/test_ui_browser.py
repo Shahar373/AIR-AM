@@ -1289,3 +1289,476 @@ def test_channel_filter_and_fm_notch_load_from_state_and_are_sent(page):
     expect(page.locator("#chanSeg button.on")).to_have_attribute("data-v", "narrow8k")
     body = json.loads(req.value.post_data)
     assert body["chan_filter"] == "narrow8k" and body["fm_notch"] is True
+
+
+# --- תפקידי המקלטים (docs/dual-sdr-feasibility.md §3.1) ------------------------
+
+_B, _A = "240404AF60", "230405A498"
+
+
+def _sdr_two(primary=None, count=2):
+    return {"ok": True, "state": "free", "mode": None, "service_state": None, "usb": True,
+            "usb_desc": "SDRplay", "api": "active", "label": None, "detail": None,
+            "suspects": [], "checked_age": None, "usb_count": count, "primary": primary,
+            "roles_needed": count > 1 and not primary}
+
+
+def test_sdr_roles_hidden_with_single_receiver(page):
+    _mount(page, overrides={"/api/sdr": _sdr_two(count=1)})
+    page.click("#modeSeg button[data-v=home]")
+    expect(page.locator("#homeSdrTxt")).to_be_visible()
+    expect(page.locator("#sdrRolesBox")).to_be_hidden()
+
+
+def test_sdr_roles_pick_primary_with_two_receivers(page):
+    """שני מקלטים בלי ראשי ⇒ אזהרה; זיהוי ⇒ רשימה; "קבע כראשי" ⇒ POST עם ה-serial,
+    ובחירת המשני כראשי מנקה אותו (אחרת השרת מחזיר 400)."""
+    sdr = _sdr_two()
+    devices = {"ok": True, "error": None, "usb_count": 2, "held_by": None,
+               "primary": None, "secondary": _A,
+               "devices": [{"serial": _A, "model": "RSP1A", "label": "SDRplay Dev0 RSP1A " + _A},
+                           {"serial": _B, "model": "RSP1B", "label": "SDRplay Dev1 RSP1B " + _B}]}
+    posted = []
+
+    def sdr_h(route, url):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(sdr))
+
+    def dev_h(route, url):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(devices))
+
+    def roles_h(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        posted.append(body)
+        devices["primary"] = body.get("primary")
+        if "secondary" in body:
+            devices["secondary"] = body["secondary"]
+        sdr.update(primary=body.get("primary"), roles_needed=not body.get("primary"))
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "primary": body.get("primary")}))
+
+    _mount(page, overrides={"/api/sdr": sdr_h, "/api/sdr/devices": dev_h,
+                            "/api/sdr/roles": roles_h})
+    page.click("#modeSeg button[data-v=home]")
+    box = page.locator("#sdrRolesBox")
+    expect(box).to_be_visible()
+    expect(box).to_have_class(re.compile(r"\bwarn\b"))
+    expect(page.locator("#sdrRolesMsg")).to_contain_text("לא נבחר ראשי")
+    page.click("#sdrRolesFind")
+    rows = page.locator(".sdr-role-row")
+    expect(rows).to_have_count(2)
+    rows.filter(has_text="RSP1B").get_by_role("button", name="קבע כראשי").click()
+    expect(page.locator("#toastMsg")).to_contain_text("נשמר")
+    assert posted[-1] == {"primary": _B}
+    expect(box).not_to_have_class(re.compile(r"\bwarn\b"))
+    expect(page.locator("#sdrRolesMsg")).to_contain_text(_B)
+    # המשני (RSP1A) כראשי ⇒ אותה בקשה מנקה את המשני
+    rows.filter(has_text="RSP1A").get_by_role("button", name="קבע כראשי").click()
+    expect(page.locator("#toastMsg")).to_contain_text("נשמר")
+    assert posted[-1] == {"primary": _A, "secondary": None}
+
+
+def test_dual_card_needs_both_roles_and_enters_voice_acars(page):
+    """כרטיס "קול + ACARS" מוסתר עד שיש ראשי+משני; לחיצה ⇒ POST voice_acars,
+    תצוגת הקול (בלי באנר "המקלט במצב ACARS — אין שמע"), ונקודה על שתי הכרטיסיות."""
+    sdr = _sdr_two(primary=_B)
+    sdr["secondary"] = None
+    posted = []
+
+    def sdr_h(route, url):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(sdr))
+
+    def mode_h(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        posted.append(body)
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "app_mode": "voice_acars", "acars_freqs": ["131.550"]}))
+
+    def acars_h(route, url):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "active": bool(posted), "freqs": ["131.550"],
+                                       "cursor": 0, "messages": [], "adsb": {}}))
+
+    def health_h(route, url):
+        on = bool(posted)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "ok": True, "app_mode": "voice_acars" if on else "off", "mode_ok": True,
+            "services": {"rtl_airband": "active" if on else "inactive", "icecast2": "active",
+                         "sdrplay": "active", "airam-acars": "inactive", "airam-vdl2": "inactive",
+                         "airam-satcom": "inactive", "airam-acars2": "active" if on else "inactive"},
+            "stats_age": 1.0, "sdr_present": True}))
+
+    state = dict(_default_api()["/api/state"], app_mode="off", mode_ok=True)
+    _mount(page, overrides={"/api/sdr": sdr_h, "/api/mode": mode_h, "/api/acars": acars_h,
+                            "/api/health": health_h, "/api/state": state})
+    page.click("#modeSeg button[data-v=home]")
+    expect(page.locator("#homeSdrTxt")).to_be_visible()
+    expect(page.locator("#homeCardDual")).to_be_hidden()          # רק ראשי — אין משני
+    sdr["secondary"] = _A
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    expect(page.locator("#homeCardDual")).to_be_visible()
+    page.click("#homeGoDual")
+    expect(page.locator("#voiceView")).to_be_visible()
+    assert posted and posted[-1]["mode"] == "voice_acars"
+    expect(page.locator("#voiceAcarsBanner")).to_be_hidden()       # יש שמע — זה לא "ACARS במקום קול"
+    expect(page.locator('#modeSeg button[data-v=voice]')).to_have_class(re.compile(r"\bsdr-live\b"))
+    expect(page.locator('#modeSeg button[data-v=acars]')).to_have_class(re.compile(r"\bsdr-live\b"))
+    # הסטטוס במסך הבית אחרי יישור מול /api/health
+    page.click("#modeSeg button[data-v=home]")
+    page.evaluate("pollGlobalState()")
+    expect(page.locator("#homeStateTxt")).to_contain_text("ACARS על המשני")
+    expect(page.locator("#homeCardDual .mc-live")).to_be_visible()
+
+
+def test_voice2_card_enters_and_second_channel_tunes(page):
+    """כרטיס "קול כפול" מוסתר עד שיש ראשי+משני; לחיצה ⇒ POST voice2 ⇒ תצוגת הקול עם תיבת
+    הערוץ השני (התדר מהתשובה); "כוונן ערוץ שני" ⇒ POST /api/tune2; נגן שני מבקש /live2.mp3."""
+    sdr = _sdr_two(primary=_B)
+    sdr["secondary"] = _A
+    posted, tuned = [], []
+
+    def sdr_h(route, url):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(sdr))
+
+    def mode_h(route, url):
+        posted.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "app_mode": "voice2", "voice2_freq": 121.4,
+                                       "voice2_mod": "am"}))
+
+    def tune2_h(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        tuned.append(body)
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "voice2_freq": body["freq2"], "voice2_mod": "am"}))
+
+    def health_h(route, url):
+        on = bool(posted)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "ok": True, "app_mode": "voice2" if on else "off", "mode_ok": True,
+            "services": {"rtl_airband": "active" if on else "inactive", "icecast2": "active",
+                         "sdrplay": "active", "airam-acars": "inactive", "airam-vdl2": "inactive",
+                         "airam-satcom": "inactive", "airam-acars2": "inactive",
+                         "rtl_airband2": "active" if on else "inactive"},
+            "stats_age": 1.0, "sdr_present": True}))
+
+    state = dict(_default_api()["/api/state"], app_mode="off", mode_ok=True, mount2="live2.mp3")
+    _mount(page, overrides={"/api/sdr": sdr_h, "/api/mode": mode_h, "/api/tune2": tune2_h,
+                            "/api/health": health_h, "/api/state": state})
+    page.click("#modeSeg button[data-v=home]")
+    expect(page.locator("#homeCardVoice2")).to_be_visible()
+    expect(page.locator("#v2Box")).to_be_hidden()
+    page.click("#homeGoVoice2")
+    expect(page.locator("#voiceView")).to_be_visible()
+    assert posted and posted[-1]["mode"] == "voice2"
+    expect(page.locator("#v2Box")).to_be_visible()
+    expect(page.locator("#v2Freq")).to_have_text("121.400")
+    page.fill("#v2FreqInput", "118.05")
+    page.click("#v2TuneBtn")
+    expect(page.locator("#v2Freq")).to_have_text("118.050")
+    assert tuned[-1] == {"freq2": 118.05, "mod2": "am"}
+    page.click("#v2PlayBtn")
+    assert "live2.mp3" in page.evaluate("document.getElementById('player2').src")
+    page.click("#modeSeg button[data-v=home]")
+    page.evaluate("pollGlobalState()")
+    expect(page.locator("#homeStateTxt")).to_contain_text("ערוץ שני")
+    expect(page.locator("#homeCardVoice2 .mc-live")).to_be_visible()
+
+
+def test_acars_bank_switch_in_dual_mode_keeps_dual(page):
+    """במצב קול + ACARS, החלפת בנק ACARS שולחת voice_acars (השרת מאתחל רק את המשני) — לא
+    "acars", שהיה יוצא מהמצב הכפול ומכבה את הקול."""
+    posted = []
+
+    def mode_h(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        posted.append(body)
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "app_mode": "voice_acars",
+                                       "acars_freqs": body.get("freqs") or ["131.550"],
+                                       "secondary_only": True}))
+
+    def acars_h(route, url):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "active": True, "freqs": ["131.550"],
+                                       "cursor": 0, "messages": [], "adsb": {}}))
+
+    state = dict(_default_api()["/api/state"], app_mode="voice_acars", mode_ok=True,
+                 acars_freqs=["131.550"],
+                 acars_banks=[{"name": "ראשי", "freqs": ["131.550"]},
+                              {"name": "אירופה", "freqs": ["131.725", "131.825"]}])
+    _mount(page, overrides={"/api/mode": mode_h, "/api/acars": acars_h, "/api/state": state})
+    page.click("#modeSeg button[data-v=acars]")
+    banks = page.locator("#acarsBanks button")
+    expect(banks.first).to_be_visible()
+    banks.filter(has_text="אירופה").click()
+    expect(page.locator('#modeSeg button[data-v=acars]')).to_have_class(re.compile(r"\bsdr-live\b"))
+    expect(page.locator('#modeSeg button[data-v=voice]')).to_have_class(re.compile(r"\bsdr-live\b"))
+    assert posted and posted[-1]["mode"] == "voice_acars"
+    expect(page.locator("#status")).to_contain_text("הקול ממשיך")   # בלי חיבור-מחדש לסטרים
+
+
+# --- ביקורת 17.11.2026: מצבים כפולים בממשק (כל אחת נכשלה לפני התיקון) -------------
+
+def _dual_health(services_extra, app_mode):
+    s = {"rtl_airband": "active", "icecast2": "active", "sdrplay": "active",
+         "airam-acars": "inactive", "airam-vdl2": "inactive", "airam-satcom": "inactive",
+         "airam-acars2": "inactive", "rtl_airband2": "inactive"}
+    s.update(services_extra)
+    return {"ok": True, "app_mode": app_mode, "mode_ok": True, "services": s,
+            "stats_age": 1.0, "sdr_present": True}
+
+
+def _acars_on():
+    return {"ok": True, "active": True, "freqs": ["131.550"], "cursor": 0, "messages": [], "adsb": {}}
+
+
+def test_voice_acars_play_sets_stream_after_load(page):
+    """ב"קול + ACARS" ה-ACARS תמיד פעיל — reloadStream חסם את הסטרים לגמרי (▶ לא עשה כלום)."""
+    state = dict(_default_api()["/api/state"], app_mode="voice_acars", mode_ok=True)
+    _mount(page, overrides={"/api/state": state, "/api/acars": _acars_on(),
+                            "/api/health": _dual_health({"airam-acars2": "active"}, "voice_acars")})
+    expect(page.locator("#voiceView")).to_be_visible()
+    expect(page.locator("#status")).not_to_have_text(re.compile("טוען"))   # לא נתקע על "טוען…"
+    page.click("#playBtn")
+    page.wait_for_function("(document.getElementById('player').getAttribute('src') || '').includes('.mp3')")
+
+
+def test_voice_acars_entry_connects_stream(page):
+    sdr = _sdr_two(primary=_B)
+    sdr["secondary"] = _A
+
+    def mode_h(route, url):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "app_mode": "voice_acars", "acars_freqs": ["131.550"]}))
+    state = dict(_default_api()["/api/state"], app_mode="off", mode_ok=True)
+    _mount(page, overrides={"/api/sdr": sdr, "/api/mode": mode_h, "/api/state": state,
+                            "/api/acars": _acars_on(),
+                            "/api/health": _dual_health({"rtl_airband": "inactive"}, "off")})
+    page.click("#modeSeg button[data-v=home]")
+    page.click("#homeGoDual")
+    expect(page.locator("#voiceView")).to_be_visible()
+    page.wait_for_function("(document.getElementById('player').getAttribute('src') || '').includes('.mp3')",
+                           timeout=5000)
+
+
+def test_voice2_auth_rejection_keeps_second_channel(page):
+    state = dict(_default_api()["/api/state"], app_mode="voice2", mode_ok=True,
+                 voice2_freq=121.4, voice2_mod="am", mount2="live2.mp3")
+
+    def mode_h(route, url):
+        route.fulfill(status=401, content_type="application/json",
+                      body=json.dumps({"ok": False, "auth": True, "error": "PIN"}))
+    page.add_init_script("HTMLMediaElement.prototype.play = function(){ return Promise.resolve(); };")
+    _mount(page, overrides={"/api/state": state, "/api/mode": mode_h,
+                            "/api/health": _dual_health({"rtl_airband2": "active"}, "voice2")})
+    expect(page.locator("#v2Box")).to_be_visible()
+    page.click("#v2PlayBtn")
+    page.evaluate("applyMode('acars')")
+    page.wait_for_timeout(400)
+    expect(page.locator("#v2Box")).to_be_visible()
+    assert page.evaluate("want2") is True
+    assert "live2.mp3" in (page.evaluate("document.getElementById('player2').getAttribute('src')") or "")
+
+
+def test_voice2_own_tune2_survives_poll_and_reconnects(page):
+    """כיוונון הערוץ השני: המשני ב-activating ~13ש', ו-poll באמצע הסתיר את הערוץ וזנח את הנגינה."""
+    state = dict(_default_api()["/api/state"], app_mode="voice2", mode_ok=True,
+                 voice2_freq=121.4, voice2_mod="am", mount2="live2.mp3")
+    phase = {"v": "active"}
+    held = []
+
+    def health_h(route, url):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps(_dual_health({"rtl_airband2": phase["v"]}, "voice2")))
+    page.add_init_script("HTMLMediaElement.prototype.play = function(){ return Promise.resolve(); };")
+    _mount(page, overrides={"/api/state": state, "/api/health": health_h,
+                            "/api/tune2": lambda route, url: held.append(route)})
+    expect(page.locator("#v2Box")).to_be_visible()
+    page.click("#v2PlayBtn")
+    page.fill("#v2FreqInput", "118.05")
+    page.click("#v2TuneBtn")
+    page.wait_for_timeout(200)
+    assert held
+    expect(page.locator("#v2TuneBtn")).to_be_disabled()            # בזמן כיוונון
+    phase["v"] = "activating"
+    page.evaluate("pollGlobalState()")
+    page.wait_for_timeout(300)
+    expect(page.locator("#v2Box")).to_be_visible()
+    assert page.evaluate("want2") is True
+    phase["v"] = "active"
+    held[0].fulfill(status=200, content_type="application/json",
+                    body=json.dumps({"ok": True, "voice2_freq": 118.05, "voice2_mod": "am"}))
+    expect(page.locator("#v2Freq")).to_have_text("118.050")
+    assert page.evaluate("want2") is True
+    assert "live2.mp3" in (page.evaluate("document.getElementById('player2').getAttribute('src')") or "")
+
+
+def test_voice2_player_retries_after_stream_error(page):
+    state = dict(_default_api()["/api/state"], app_mode="voice2", mode_ok=True,
+                 voice2_freq=121.4, mount2="live2.mp3")
+    page.add_init_script("HTMLMediaElement.prototype.play = function(){ return Promise.resolve(); };")
+    _mount(page, overrides={"/api/state": state,
+                            "/api/health": _dual_health({"rtl_airband2": "active"}, "voice2")})
+    expect(page.locator("#v2Box")).to_be_visible()
+    page.click("#v2PlayBtn")
+    first = page.evaluate("document.getElementById('player2').getAttribute('src')")
+    page.evaluate("document.getElementById('player2').dispatchEvent(new Event('error'))")
+    page.wait_for_function(f"document.getElementById('player2').getAttribute('src') !== {json.dumps(first)}",
+                           timeout=4000)                          # ניסיון חוזר עם src חדש
+    assert page.evaluate("want2") is True
+
+
+def test_voice2_mode_change_elsewhere_stops_second_player(page):
+    state = dict(_default_api()["/api/state"], app_mode="voice2", mode_ok=True,
+                 voice2_freq=121.4, mount2="live2.mp3")
+    h = {"v": _dual_health({"rtl_airband2": "active"}, "voice2")}
+    page.add_init_script("HTMLMediaElement.prototype.play = function(){ return Promise.resolve(); };")
+    _mount(page, overrides={"/api/state": state, "/api/health": lambda route, url: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(h["v"]))})
+    page.click("#v2PlayBtn")
+    h["v"] = _dual_health({}, "voice")                               # טלפון אחר עבר לקול רגיל
+    page.evaluate("pollGlobalState()")
+    expect(page.locator("#v2Box")).to_be_hidden()
+    assert page.evaluate("want2") is False
+
+
+def test_voice_retune_in_voice_acars_keeps_acars_active(page):
+    state = dict(_default_api()["/api/state"], app_mode="voice_acars", mode_ok=True)
+    _mount(page, overrides={"/api/state": state, "/api/acars": _acars_on(),
+                            "/api/tune": {"ok": True, "freq": 120.5, "app_mode": "voice_acars"},
+                            "/api/health": _dual_health({"airam-acars2": "active"}, "voice_acars")})
+    expect(page.locator("#voiceView")).to_be_visible()
+    page.evaluate("tune(120.5)")
+    page.wait_for_timeout(300)
+    assert page.evaluate("acars.active") is True and page.evaluate("dualMode") is True
+
+
+def test_field_meter_works_in_composite_modes(page):
+    for mode, extra in (("voice2", {"rtl_airband2": "active"}), ("voice_acars", {"airam-acars2": "active"})):
+        state = dict(_default_api()["/api/state"], app_mode=mode, mode_ok=True, voice2_freq=121.4,
+                     mount2="live2.mp3")
+        sig = {"ok": True, "mode": mode, "kind": "continuous", "fresh": True, "snr": 20.0,
+               "noise": -50.0, "signal": -30.0, "verdict": "ok", "baseline": {"noise": -52.0, "t": 1}}
+        _mount(page, overrides={"/api/state": state, "/api/health": _dual_health(extra, mode),
+                                "/api/signal": sig, "/api/acars": _acars_on()})
+        expect(page.locator("#voiceView")).to_be_visible()
+        page.evaluate("voiceFm.poll()")
+        expect(page.locator("#voiceFmVerdict")).to_contain_text("תואם לבסיס")
+
+
+def test_acars_bank_in_dual_mode_stays_in_acars_view(page):
+    def mode_h(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "app_mode": "voice_acars",
+                                       "acars_freqs": body.get("freqs"), "secondary_only": True}))
+    state = dict(_default_api()["/api/state"], app_mode="voice_acars", mode_ok=True,
+                 acars_freqs=["131.550"],
+                 acars_banks=[{"name": "ראשי", "freqs": ["131.550"]},
+                              {"name": "אירופה", "freqs": ["131.725", "131.825"]}])
+    _mount(page, overrides={"/api/mode": mode_h, "/api/acars": _acars_on(), "/api/state": state,
+                            "/api/health": _dual_health({"airam-acars2": "active"}, "voice_acars")})
+    page.click("#modeSeg button[data-v=acars]")
+    page.locator("#acarsBanks button").filter(has_text="אירופה").click()
+    expect(page.locator("#status")).to_contain_text("הקול ממשיך")
+    expect(page.locator("#acarsView")).to_be_visible()
+    expect(page.locator("#voiceView")).to_be_hidden()
+
+
+def test_v2_rf_text_is_bidi_isolated(page):
+    state = dict(_default_api()["/api/state"], app_mode="voice2", mode_ok=True,
+                 voice2_freq=121.4, mount2="live2.mp3")
+    _mount(page, overrides={"/api/state": state,
+                            "/api/health": _dual_health({"rtl_airband2": "active"}, "voice2"),
+                            "/api/metrics": {"ok": True, "fresh": True, "snr": 12.3, "signal": -40.5,
+                                             "noise": -52.8, "overload": False}})
+    expect(page.locator("#v2Box")).to_be_visible()
+    page.evaluate("pollV2Metrics()")
+    expect(page.locator("#v2Rf")).to_contain_text("⁨-40.5 dBFS⁩")
+
+
+def test_voice2_ear_split_pans_and_uses_same_origin_streams(page):
+    """אוזניות: ערוץ לכל אוזן — הראשי שמאלה, השני ימינה, דרך ה-proxy (same-origin, אחרת
+    MediaElementSource של Icecast בפורט אחר משמיע שקט); יציאה מקול כפול מחזירה את ה-pan ל-0."""
+    state = dict(_default_api()["/api/state"], app_mode="voice2", mode_ok=True,
+                 voice2_freq=121.4, mount2="live2.mp3")
+    h = {"v": _dual_health({"rtl_airband2": "active"}, "voice2")}
+    page.add_init_script("HTMLMediaElement.prototype.play = function(){ return Promise.resolve(); };")
+    _mount(page, overrides={"/api/state": state, "/api/health": lambda route, url: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(h["v"]))})
+    expect(page.locator("#v2Box")).to_be_visible()
+    page.click("#v2PlayBtn")
+    page.check("#v2Ears")
+    assert page.evaluate("earGraph !== null")
+    assert page.evaluate("[earGraph.p1.pan.value, earGraph.p2.pan.value]") == [-1, 1]
+    assert "/stream?m=live2" in page.evaluate("document.getElementById('player2').getAttribute('src')")
+    expect(page.locator("#v2EarsHint")).to_be_visible()
+    page.fill("#v2Vol", "0.3")
+    page.dispatch_event("#v2Vol", "input")
+    assert abs(page.evaluate("earGraph.g2.gain.value") - 0.3) < 1e-6
+    assert page.evaluate("localStorage.getItem('airam_ears')") == "1"
+    h["v"] = _dual_health({}, "voice")                                 # יצאנו לקול רגיל
+    page.evaluate("pollGlobalState()")
+    page.wait_for_function("earGraph.p1.pan.value === 0")
+    assert page.evaluate("earGraph.p2.pan.value") == 0
+
+
+def test_activity_marks_second_channel_recordings(page):
+    events = [{"ts": 1790000000, "freq": 121.4, "file": "airam2_20260911_120000_121400000.mp3",
+               "dur": 3.0, "ch": 2, "exists": True, "starred": False, "tx": {"state": "none"}},
+              {"ts": 1790000001, "freq": 132.5, "file": "airam_20260911_120001_132500000.mp3",
+               "dur": 2.0, "ch": 1, "exists": True, "starred": False, "tx": {"state": "none"}}]
+    state = dict(_default_api()["/api/state"], app_mode="voice2", mode_ok=True,
+                 voice2_freq=121.4, mount2="live2.mp3")
+    _mount(page, overrides={"/api/state": state, "/api/activity": {"ok": True, "events": events},
+                            "/api/health": _dual_health({"rtl_airband2": "active"}, "voice2")})
+    expect(page.locator(".ch-badge.ch2")).to_have_text("ערוץ 2")
+    expect(page.locator(".ch-badge:not(.ch2)")).to_have_text("ערוץ 1")   # במצב כפול גם ערוץ 1
+
+
+def test_voice_vdl2_card_enters_and_keeps_audio(page):
+    """קול + VDL2: כרטיס במסך הבית (רק עם ראשי+משני) ⇒ POST voice_vdl2 ⇒ תצוגת הקול עם סטרים
+    (בלי באנר "המקלט ב-VDL2 — אין שמע"), נקודות על קול ועל VDL2; בנק VDL2 שולח voice_vdl2."""
+    sdr = _sdr_two(primary=_B)
+    sdr["secondary"] = _A
+    posted = []
+
+    def mode_h(route, url):
+        body = json.loads(route.request.post_data or "{}")
+        posted.append(body)
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "app_mode": "voice_vdl2",
+                                       "vdl2_freqs": body.get("freqs") or ["136.975"],
+                                       **({"secondary_only": True} if len(posted) > 1 else {})}))
+
+    def health_h(route, url):
+        on = bool(posted)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(
+            _dual_health({"airam-vdl2-2": "active" if on else "inactive",
+                          "rtl_airband": "active" if on else "inactive"}, "voice_vdl2" if on else "off")))
+    state = dict(_default_api()["/api/state"], app_mode="off", mode_ok=True,
+                 vdl2_banks=[{"name": "CSC", "freqs": ["136.975"]},
+                             {"name": "אירופה", "freqs": ["136.725", "136.975"]}])
+    _mount(page, overrides={"/api/sdr": sdr, "/api/mode": mode_h, "/api/state": state,
+                            "/api/health": health_h,
+                            "/api/vdl2": {"ok": True, "active": True, "freqs": ["136.975"],
+                                          "cursor": 0, "messages": [], "adsb": {}}})
+    page.click("#modeSeg button[data-v=home]")
+    expect(page.locator("#homeCardDualVdl2")).to_be_visible()
+    page.click("#homeGoDualVdl2")
+    expect(page.locator("#voiceView")).to_be_visible()
+    assert posted[-1]["mode"] == "voice_vdl2"
+    expect(page.locator("#voiceAcarsBanner")).to_be_hidden()
+    page.wait_for_function("(document.getElementById('player').getAttribute('src') || '').includes('.mp3')",
+                           timeout=5000)
+    expect(page.locator('#modeSeg button[data-v=voice]')).to_have_class(re.compile(r"\bsdr-live\b"))
+    expect(page.locator('#modeSeg button[data-v=vdl2]')).to_have_class(re.compile(r"\bsdr-live\b"))
+    page.click("#modeSeg button[data-v=vdl2]")
+    page.locator("#vdl2Banks button").filter(has_text="אירופה").click()
+    expect(page.locator("#status")).to_contain_text("הקול ממשיך")
+    assert posted[-1] == {"mode": "voice_vdl2", "freqs": ["136.725", "136.975"]}
+    expect(page.locator("#vdl2View")).to_be_visible()
+    page.click("#modeSeg button[data-v=home]")
+    page.evaluate("pollGlobalState()")
+    expect(page.locator("#homeStateTxt")).to_contain_text("VDL2")
+    expect(page.locator("#homeCardDualVdl2 .mc-live")).to_be_visible()

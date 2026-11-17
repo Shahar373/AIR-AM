@@ -34,6 +34,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import socket
@@ -49,7 +50,9 @@ VDL2_ENV = Path("/etc/airam/vdl2.env")
 STATE_PATH = Path("/var/lib/airam/state.json")
 OUT_ROOT = Path("/tmp/airam-vdl2-ifbw")
 DUMPVDL2 = "/usr/local/bin/dumpvdl2"
-SDR_CONSUMERS = ("rtl_airband", "airam-acars", "airam-vdl2", "airam-satcom")
+# כולל צרכני המקלט המשני (מצבי שני מקלטים) — גם הם מחזיקים SDR
+SDR_CONSUMERS = ("rtl_airband", "airam-acars", "airam-vdl2", "airam-satcom",
+                 "rtl_airband2", "airam-acars2", "airam-vdl2-2")
 UDP_PORT = 5567               # ⚠ לא 5557 — airam-web מאזין שם תמיד (VDL2_UDP_PORT)
 
 # בנק ברירת המחדל — זהה ל-VDL2_FREQS_DEFAULT ב-webtune/app.py (נבדק ב-tests).
@@ -86,6 +89,30 @@ def soapy_sdrplay_bw(requested_hz):
         if requested_hz < limit:
             return bw
     return 8000000
+
+
+SERIAL_RE = re.compile(r"^[A-Za-z0-9]{4,32}$")   # כמו _SERIAL_RE ב-app.py; נכנס ל-argv של root
+
+# המחרוזת שהטלאי של install.sh (tools/dumpvdl2-2.6.0-soapysdr-no-narrow-bw.patch) מדפיס.
+# בינארי עם הטלאי לא קורא ל-setBandwidth ⇒ גם זרוע A מקבלת 1.536MHz ⇒ ab חסר משמעות.
+PATCH_MARK = b"AIR-AM patch"
+
+
+def dumpvdl2_patched(dumpvdl2=DUMPVDL2):
+    """True כשהבינארי נבנה עם הטלאי, None כשאי אפשר לקרוא אותו."""
+    try:
+        return PATCH_MARK in Path(dumpvdl2).read_bytes()
+    except OSError:
+        return None
+
+
+def serial_from_env(env):
+    """VDL2_SERIAL שכותב airam-web (‎",serial=XXX" או ריק) ⇒ XXX או None."""
+    v = (env.get("VDL2_SERIAL") or "").strip()
+    if "serial=" not in v:
+        return None
+    s = v.split("serial=", 1)[1].strip()
+    return s if SERIAL_RE.match(s) else None
 
 
 def mhz_to_hz(values):
@@ -152,18 +179,20 @@ def parse_gain_arg(value):
     return int(a), int(b)
 
 
-def build_cmd(arm, freqs_hz, gain, port=UDP_PORT, dumpvdl2=DUMPVDL2, device="0"):
+def build_cmd(arm, freqs_hz, gain, port=UDP_PORT, dumpvdl2=DUMPVDL2, serial=None):
     """ה-argv של כל זרוע. A = ה-ExecStart של airam-vdl2.service (קלט SoapySDR);
     B = הדרייבר הנייטיבי. מיפוי הרווח מדויק: ב-SoapySDRPlay3 ‏IFGR=gRdB ו-RFGR=LNAstate
     (setGain ב-Settings.cpp) ⇒ ב-sdrplay3 ‏‎--ifgr/--lna-state. בלי רווח — AGC בשניהם
-    (⚠ לא אותו AGC: Soapy ‏AGC_CTRL_EN, נייטיבי AGC_5HZ; שניהם ‎-30dBFS)."""
+    (⚠ לא אותו AGC: Soapy ‏AGC_CTRL_EN, נייטיבי AGC_5HZ; שניהם ‎-30dBFS).
+    ‏serial — אותו מקלט בשתי הזרועות (עם שני מקלטים, אינדקס 0 לא בהכרח הראשי)."""
     out = f"decoded:json:udp:address=127.0.0.1,port={port}"
     if arm == "A":
-        cmd = [dumpvdl2, "--soapysdr", "driver=sdrplay", "--oversample", str(OVERSAMPLE)]
+        dev = "driver=sdrplay" + (f",serial={serial}" if serial else "")
+        cmd = [dumpvdl2, "--soapysdr", dev, "--oversample", str(OVERSAMPLE)]
         if gain:
             cmd += ["--soapy-gain", "IFGR=%d,RFGR=%d" % gain]
     elif arm == "B":
-        cmd = [dumpvdl2, "--sdrplay3", str(device), "--oversample", str(OVERSAMPLE)]
+        cmd = [dumpvdl2, "--sdrplay3", serial or "0", "--oversample", str(OVERSAMPLE)]
         if gain:
             cmd += ["--ifgr", str(gain[0]), "--lna-state", str(gain[1])]
     else:
@@ -294,12 +323,13 @@ def preflight(need_root=True):
     return problems
 
 
-def sdr_ready(timeout=30):
+def sdr_ready(timeout=30, serial=None):
     """אותו probe כמו airam-wait-sdrplay: ה-API עונה *ואף לקוח לא מחזיק במכשיר*
     (מכשיר תפוס לא מוחזר מ-GetDevices). בלי לבעוט ב-sdrplay — הכלי לא משנה שירותים."""
     end = time.time() + timeout
     while True:
-        r = _run(["SoapySDRUtil", "--find=driver=sdrplay"], timeout=15)
+        args = "driver=sdrplay" + (f",serial={serial}" if serial else "")
+        r = _run(["SoapySDRUtil", "--find=" + args], timeout=15)
         if r and "driver = sdrplay" in r.stdout:
             return True
         if time.time() >= end:
@@ -391,7 +421,8 @@ def cmd_probe(args):
     center, bw_req = dumpvdl2_center(freqs), dumpvdl2_bandwidth(freqs)
     rx = SoapySDR.SOAPY_SDR_RX
     try:
-        dev = SoapySDR.Device("driver=sdrplay")
+        serial = args.serial or serial_from_env(read_env(VDL2_ENV))
+        dev = SoapySDR.Device("driver=sdrplay" + (f",serial={serial}" if serial else ""))
     except (RuntimeError, ValueError) as e:
         print(f"✗ פתיחת ה-SDR נכשלה ({e}) — תפוס ע\"י תוכנה אחרת? ר' חיווי ה-SDR בממשק")
         return 2
@@ -481,17 +512,22 @@ def _interrupt(signum, frame):
     raise KeyboardInterrupt
 
 
-def run_ab(args, freqs, gain, run_dir, dumpvdl2=DUMPVDL2, check=preflight, ready=sdr_ready):
+def run_ab(args, freqs, gain, run_dir, dumpvdl2=DUMPVDL2, check=preflight, ready=None):
     """הלולאה עצמה (בלי בדיקות פתיחה) — נקראת גם מהבדיקות עם dumpvdl2 מזויף."""
     n_blocks = max(2, int(round(args.minutes / args.block)))
     n_blocks += n_blocks % 2
     sched = schedule(n_blocks)
+    serial = getattr(args, "serial", None)
+    if ready is None:
+        def ready():
+            return sdr_ready(serial=serial)
     block_sec = args.block * 60
     meta = {"freqs_hz": freqs, "groups": {str(f): g for f, (o, g) in classify(freqs).items()},
             "offsets_hz": {str(f): o for f, (o, g) in classify(freqs).items()},
             "gain": list(gain) if gain else "agc", "block_sec": block_sec,
             "settle_sec": args.settle, "schedule": sched, "port": args.port,
-            "cmd": {a: build_cmd(a, freqs, gain, args.port, dumpvdl2, args.device) for a in "AB"},
+            "serial": serial,
+            "cmd": {a: build_cmd(a, freqs, gain, args.port, dumpvdl2, serial) for a in "AB"},
             "requested_bw_hz": dumpvdl2_bandwidth(freqs),
             "bw_hz": {"A": soapy_sdrplay_bw(dumpvdl2_bandwidth(freqs)), "B": NATIVE_BW},
             "started": datetime.now().isoformat(timespec="seconds")}
@@ -573,6 +609,9 @@ def cmd_ab(args):
             if k not in have:
                 problems.append(f"dumpvdl2 נבנה בלי {k} — זרוע {'A' if k == '--soapysdr' else 'B'} "
                                 "לא אפשרית (ב-cmake: ‏sdrplay v3 / soapysdr enabled?)")
+        if dumpvdl2_patched(args.dumpvdl2):
+            problems.append("dumpvdl2 נבנה עם הטלאי של install.sh (בלי setBandwidth) — גם זרוע A מקבלת "
+                            "1.536MHz, וההשוואה חסרת משמעות. ‏probe עדיין מראה את צורת המסנן.")
     if problems:
         print("\n".join("✗ " + p for p in problems))
         return 2
@@ -584,9 +623,11 @@ def cmd_ab(args):
         except ValueError as e:
             print(f"✗ {e} — העבר ‎--gain agc או ‎--gain IFGR,LNA")
             return 2
+    if args.serial is None:
+        args.serial = serial_from_env(read_env(VDL2_ENV))
     run_dir = OUT_ROOT / datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
-    print(f"ריצה: {run_dir}\nרווח: {'AGC (כמו ב-AIR-AM כברירת מחדל)' if not gain else gain}  ·  "
+    print(f"ריצה: {run_dir}\nמקלט: {args.serial or 'הראשון שנמצא (אין serial ב-vdl2.env — חבר מקלט אחד בלבד)'}\nרווח: {'AGC (כמו ב-AIR-AM כברירת מחדל)' if not gain else gain}  ·  "
           f"{args.minutes:g} דק' בבלוקים של {args.block:g}  ·  התייצבות {args.settle:g}ש' מושלכת")
     try:
         run_ab(args, freqs, gain, run_dir, dumpvdl2=args.dumpvdl2)
@@ -838,6 +879,8 @@ def main(argv=None):
                         help="MHz, מופרדים בפסיק (ברירת מחדל: בנק עולמי+אירופה)")
     common.add_argument("--gain", default=None,
                         help="'agc' או 'IFGR,LNA' (למשל 40,0). ברירת מחדל ב-ab: כמו vdl2.env; ב-probe: 40,0")
+    common.add_argument("--serial", default=None,
+                        help="מספר סידורי של המקלט (ברירת מחדל: VDL2_SERIAL מ-vdl2.env)")
     common.add_argument("--no-root-check", action="store_true", help=argparse.SUPPRESS)
 
     p = sub.add_parser("probe", parents=[common], help="readback של getBandwidth + צורת המסנן")
@@ -850,7 +893,6 @@ def main(argv=None):
     p.add_argument("--settle", type=float, default=20.0, help="שניות מושלכות בתחילת כל בלוק")
     p.add_argument("--gap", type=float, default=3.0, help="שניות בין בלוקים")
     p.add_argument("--port", type=int, default=UDP_PORT)
-    p.add_argument("--device", default="0", help="‎--sdrplay3: אינדקס או מספר סידורי (ברירת מחדל 0)")
     p.add_argument("--dumpvdl2", default=DUMPVDL2)
 
     p = sub.add_parser("analyze", help="ניתוח מחדש של ריצה שמורה")
@@ -858,6 +900,8 @@ def main(argv=None):
 
     args = ap.parse_args(argv)
     if args.cmd in ("probe", "ab"):
+        if args.serial is not None and not SERIAL_RE.match(args.serial):
+            ap.error("‎--serial: אותיות וספרות בלבד")
         args.freqs = [x.strip() for x in args.freqs.split(",") if x.strip()]
         args.gain_tuple = None
         if args.gain:

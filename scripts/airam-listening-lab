@@ -50,7 +50,7 @@ OUT_DIR = Path("/tmp/airam-lab")
 RNNOISE_BIN = "/usr/local/bin/airam-rnnoise"
 PORT = 8090
 
-REC_NAME_RE = re.compile(r"^airam_\d{8}_\d{6}_(\d+)\.mp3$")   # כמו _REC_NAME_RE ב-app.py
+REC_NAME_RE = re.compile(r"^airam(?:2)?_\d{8}_\d{6}_(\d+)\.mp3$")   # כמו _REC_NAME_RE ב-app.py
 REC_BYTES_PER_SEC = 6000      # CBR 48kbps — כמו ב-app.py
 MIN_SEC = 3.0                 # קצר מזה = אין מספיק דיבור לשפוט
 MAX_SEC = 20.0                # הקלטה ארוכה נחתכת (7 גרסאות × N הקלטות זה הרבה האזנה)

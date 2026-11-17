@@ -68,9 +68,11 @@ def test_unit_arm_a_is_the_production_command():
     """זרוע A חייבת להיות *בדיוק* קלט היחידה — אחרת לא משווים מול מה שרץ בשטח."""
     text = UNIT.read_text(encoding="utf-8")
     exec_line = next(l for l in text.splitlines() if l.startswith("ExecStart="))
-    assert "--soapysdr driver=sdrplay --oversample %d " % lab.OVERSAMPLE in exec_line
+    assert "--soapysdr driver=sdrplay${VDL2_SERIAL} --oversample %d " % lab.OVERSAMPLE in exec_line
     cmd = lab.build_cmd("A", DEFAULT_HZ, None, port=5999, dumpvdl2="/x/dumpvdl2")
     assert cmd[:5] == ["/x/dumpvdl2", "--soapysdr", "driver=sdrplay", "--oversample", "20"]
+    # עם serial — בדיוק מה ש-${VDL2_SERIAL} נותן (",serial=XXX", ר' _serial_arg ב-app.py)
+    assert lab.build_cmd("A", DEFAULT_HZ, None, serial="2305ABC")[2] == "driver=sdrplay" + app._serial_arg("2305ABC")
     assert cmd[-5:] == [str(f) for f in DEFAULT_HZ]
     assert "decoded:json:udp:address=127.0.0.1,port=5999" in cmd
     assert "--soapy-gain" not in cmd                    # AGC = בלי דגל, כמו VDL2_GAIN ריק
@@ -79,7 +81,7 @@ def test_unit_arm_a_is_the_production_command():
 def test_build_cmd_gain_mapping_is_exact():
     """IFGR=gRdB ו-RFGR=LNAstate ב-SoapySDRPlay3 ⇒ ‎--ifgr/--lna-state בנייטיבי."""
     a = lab.build_cmd("A", DEFAULT_HZ, (40, 2))
-    b = lab.build_cmd("B", DEFAULT_HZ, (40, 2), device="SN123")
+    b = lab.build_cmd("B", DEFAULT_HZ, (40, 2), serial="SN123")
     assert a[a.index("--soapy-gain") + 1] == "IFGR=40,RFGR=2"
     assert b[1:3] == ["--sdrplay3", "SN123"]
     assert b[b.index("--ifgr") + 1] == "40" and b[b.index("--lna-state") + 1] == "2"
@@ -95,7 +97,7 @@ def test_unit_fallback_comment_uses_flags_that_exist():
     option' ⇒ usage ⇒ היחידה לא עולה. הרווח הנייטיבי הוא ‎--ifgr/--lna-state."""
     text = UNIT.read_text(encoding="utf-8")
     assert not re.search(r"--gr\s+\d", text)          # מוזכר רק כאזהרה, לא כהוראה
-    assert "--sdrplay3 0" in text and "--ifgr 40 --lna-state 0" in text
+    assert "--sdrplay3 <serial>" in text and "--ifgr 40 --lna-state 0" in text
 
 
 def test_install_checks_dumpvdl2_inputs_via_help_not_version():
@@ -122,6 +124,28 @@ def test_parse_gain_refuses_to_guess():
             lab.parse_gain(bad)
     assert lab.parse_gain_arg("AGC") is None
     assert lab.parse_gain_arg("40,0") == (40, 0)
+
+
+def test_serial_from_env_matches_write_vdl2_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(app, "VDL2_ENV_PATH", tmp_path / "vdl2.env")
+    app.write_vdl2_env(app.VDL2_FREQS_DEFAULT, serial="2305ABC", path=app.VDL2_ENV_PATH)
+    assert lab.serial_from_env(lab.read_env(tmp_path / "vdl2.env")) == "2305ABC"
+    assert lab.serial_from_env({}) is None
+    assert lab.serial_from_env({"VDL2_SERIAL": ""}) is None
+    assert lab.serial_from_env({"VDL2_SERIAL": ",serial=a;rm -rf"}) is None   # נכנס ל-argv של root
+
+
+def test_patched_dumpvdl2_is_detected(tmp_path):
+    """הטלאי של install.sh מדפיס את הסימן הזה ⇒ ab מסרב (שתי הזרועות כבר 1.536MHz)."""
+    patch = (ROOT / "tools" / "dumpvdl2-2.6.0-soapysdr-no-narrow-bw.patch").read_text()
+    assert lab.PATCH_MARK.decode() in patch
+    b = tmp_path / "patched"
+    b.write_bytes(b"\x7fELF..." + lab.PATCH_MARK + b"...")
+    plain = tmp_path / "plain"
+    plain.write_bytes(b"\x7fELF...Bandwidth set to %d Hz...")
+    assert lab.dumpvdl2_patched(str(b)) is True
+    assert lab.dumpvdl2_patched(str(plain)) is False
+    assert lab.dumpvdl2_patched(str(tmp_path / "missing")) is None
 
 
 def test_schedule_is_abba():
@@ -342,7 +366,7 @@ def test_dumpvdl2_inputs_from_help(tmp_path):
 def test_run_ab_end_to_end_with_fake_dumpvdl2(tmp_path):
     fake = _fake_dumpvdl2(tmp_path)
     args = argparse.Namespace(minutes=4 * 0.6 / 60, block=0.6 / 60, settle=0.15, gap=0.0,
-                              port=_free_port(), device="0")
+                              port=_free_port(), serial=None)
     run = tmp_path / "run"
     run.mkdir()
     blocks = lab.run_ab(args, DEFAULT_HZ, None, run, dumpvdl2=fake,
@@ -365,7 +389,7 @@ def test_run_ab_stops_when_dumpvdl2_dies(tmp_path):
     bad.write_text(f"#!{sys.executable}\nimport sys\nsys.stderr.write('Unable to select device\\n')\nsys.exit(1)\n")
     bad.chmod(bad.stat().st_mode | stat.S_IXUSR)
     args = argparse.Namespace(minutes=0.04, block=0.01, settle=0.1, gap=0.0,
-                              port=_free_port(), device="0")
+                              port=_free_port(), serial=None)
     run = tmp_path / "run"
     run.mkdir()
     blocks = lab.run_ab(args, DEFAULT_HZ, None, run, dumpvdl2=str(bad),
@@ -382,7 +406,7 @@ def test_run_ab_aborts_when_someone_takes_the_sdr(tmp_path):
         return [] if len(calls) < 2 else ["צרכן SDR פעיל: rtl_airband (active)"]
 
     args = argparse.Namespace(minutes=4 * 0.4 / 60, block=0.4 / 60, settle=0.1, gap=0.0,
-                              port=_free_port(), device="0")
+                              port=_free_port(), serial=None)
     run = tmp_path / "run"
     run.mkdir()
     blocks = lab.run_ab(args, DEFAULT_HZ, None, run, dumpvdl2=fake, check=check, ready=lambda: True)
@@ -396,3 +420,12 @@ def test_cmd_ab_refusals(tmp_path, monkeypatch, capsys):
     assert lab.main(["ab", "--freqs", "136.975"]) == 2              # CSC בלבד: אין חיצוני
     assert lab.main(["ab", "--dumpvdl2", _fake_dumpvdl2(tmp_path, with_sdrplay3=False)]) == 2
     assert "--sdrplay3" in capsys.readouterr().out
+    patched = tmp_path / "p"
+    patched.mkdir()
+    fake = _fake_dumpvdl2(patched)
+    with open(fake, "a") as fh:
+        fh.write("# AIR-AM patch\n")
+    assert lab.main(["ab", "--dumpvdl2", fake]) == 2
+    assert "הטלאי" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        lab.main(["ab", "--serial", "a;b"])

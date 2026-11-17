@@ -163,7 +163,22 @@ def test_star_events_share_event_builder(paths):
     p = _mk_rec(paths, NAME)
     ev = app._rec_event(p)
     assert ev == {"ts": round(p.stat().st_mtime, 1), "freq": 134.6,
-                  "file": NAME, "dur": round(4096 / app.REC_BYTES_PER_SEC, 1)}
+                  "file": NAME, "dur": round(4096 / app.REC_BYTES_PER_SEC, 1), "ch": 1}
+
+
+def test_second_channel_recording_name_is_ch2_and_fully_supported(paths):
+    """קול כפול: rtl_airband2 כותב airam2_… ⇒ אותו יומן/★/תמלול (אותו regex), ו-ch=2."""
+    name2 = "airam2_20260611_120001_121400000.mp3"
+    p = _mk_rec(paths, name2)
+    ev = app._rec_event(p)
+    assert ev["ch"] == 2 and ev["freq"] == 121.4 and ev["file"] == name2
+    assert app._REC_NAME_RE.match(name2)                     # ★/תמלול/סשנים מאמתים מולו
+    assert not app._REC_NAME_RE.match("airam3_20260611_120001_121400000.mp3")
+    assert not app._REC_NAME_RE.match("../airam2_20260611_120001_121400000.mp3")
+    c = app.app.test_client()
+    r = c.post("/api/recordings/star", json={"file": name2, "starred": True},
+               headers={"Origin": "http://localhost"})
+    assert r.status_code == 200 and r.get_json()["ok"]
 
 
 # --- מרוצים (הכשלים שהוכחו בביקורת) ------------------------------------------

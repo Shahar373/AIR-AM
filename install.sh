@@ -283,7 +283,12 @@ fi
 # אוטומטית ע"י cmake (בלי דגלים); glib2 הותקן בשלב 1.
 DUMPVDL2_VER="v2.6.0"
 DUMPVDL2_CMAKE_FLAGS=""
-DUMPVDL2_BUILD_SIG="$(printf '%s' "$DUMPVDL2_VER $DUMPVDL2_CMAKE_FLAGS" | sha256sum | awk '{print $1}')"
+# טלאי: קלט ה-SoapySDR של dumpvdl2 מבקש רוחב IF של (פריסת הערוצים + 21kHz) ו-SoapySDRPlay3
+# מעגל *למטה* — לבנק ברירת המחדל (136.725–136.975) זה מסנן של 200kHz סביב 136.85, ושני
+# ערוצי הקצה (כולל 136.975, ה-CSC העמוס) נשארים מחוצה לו. הטלאי משאיר את המסנן של הדרייבר
+# לקצב הדגימה (1.536MHz ב-2.1Msps) — ר' docs/dual-sdr-feasibility.md §11 והטלאי עצמו.
+DUMPVDL2_PATCH="$REPO_DIR/tools/dumpvdl2-2.6.0-soapysdr-no-narrow-bw.patch"
+DUMPVDL2_BUILD_SIG="$(cat <(printf '%s' "$DUMPVDL2_VER $DUMPVDL2_CMAKE_FLAGS") "$DUMPVDL2_PATCH" | sha256sum | awk '{print $1}')"
 AIRAM_VDL2_MARK="/usr/local/share/airam/dumpvdl2.build-sig"
 if command -v dumpvdl2 >/dev/null 2>&1 && [[ "$(cat "$AIRAM_VDL2_MARK" 2>/dev/null)" == "$DUMPVDL2_BUILD_SIG" ]]; then
   log "dumpvdl2 ${DUMPVDL2_VER} כבר מותקן - מדלג."
@@ -296,6 +301,9 @@ else
     rm -rf dumpvdl2
   fi
   [[ -d dumpvdl2 ]] || git clone --depth 1 --branch "$DUMPVDL2_VER" https://github.com/szpajder/dumpvdl2.git
+  # עץ נקי ואז הטלאי — אידמפוטנטי גם כשהעץ נשאר מהרצה קודמת (עם או בלי הטלאי)
+  git -C dumpvdl2 checkout -- . && git -C dumpvdl2 apply "$DUMPVDL2_PATCH" \
+    || die "החלת הטלאי על dumpvdl2 נכשלה ($DUMPVDL2_PATCH)."
   cd dumpvdl2 && rm -rf build && mkdir build && cd build
   # PKG_CONFIG_PATH => כדי ש-cmake ימצא את libacars-2 שהותקן ל-/usr/local
   # ⚠ "|| die" על שרשרת הבנייה עצמה — כמו acarsdec, command -v לבד למטה לא
@@ -569,10 +577,16 @@ SUDOERS_TMP="$(mktemp)"
 cat > "$SUDOERS_TMP" <<'EOF'
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart rtl_airband
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop rtl_airband
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart rtl_airband2
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop rtl_airband2
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-acars
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-acars
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-acars2
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-acars2
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-vdl2
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-vdl2
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-vdl2-2
+airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-vdl2-2
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl restart airam-satcom
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl stop airam-satcom
 airam ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed airam-satcom
@@ -685,9 +699,12 @@ fi
 log "מתקין שירותי systemd ..."
 cp "$REPO_DIR/systemd/sdrplay.service"      /etc/systemd/system/
 cp "$REPO_DIR/systemd/rtl_airband.service"  /etc/systemd/system/
+cp "$REPO_DIR/systemd/rtl_airband2.service" /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-web.service"    /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-acars.service"  /etc/systemd/system/
+cp "$REPO_DIR/systemd/airam-acars2.service" /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-vdl2.service"   /etc/systemd/system/
+cp "$REPO_DIR/systemd/airam-vdl2-2.service" /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-satcom.service" /etc/systemd/system/
 cp "$REPO_DIR/systemd/airam-denoise.service" /etc/systemd/system/
 systemctl daemon-reload

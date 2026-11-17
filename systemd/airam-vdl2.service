@@ -30,16 +30,16 @@ ExecStartPre=/usr/local/bin/airam-wait-sdrplay %n
 # ⚠ ל-dumpvdl2 *אין* דגל ‎--sample-rate — קצב הדגימה נגזר מ-‎--oversample
 # (sample_rate = 105000 * oversample). דגל לא-קיים גורם ל-dumpvdl2 להדפיס usage
 # ולהיכשל מיד (ExitFailure מהיר, נראה כ"נכשל לעלות"). oversample=20 => 2.1MS/s.
-# ⚠ מסנן ה-IF: dumpvdl2 מבקש מ-SoapySDR רוחב = פיזור התדרים + 21kHz (271kHz בבנק
-# ברירת המחדל) ו-SoapySDRPlay3 מעגל *למטה* ל-200kHz ⇒ 136.725/136.975 ב-±125kHz,
-# מחוץ למעבר הנומינלי. אם זה עולה פריימים — טרם נמדד (docs/vdl2-if-filter-design.md,
-# scripts/airam-vdl2-ifbw). אין לזה דגל ב-dumpvdl2 ואין setting ב-SoapySDRPlay3.
-# fallback שטח אם מסלול ה-SoapySDR מתנהג רע על החומרה (מסנן 1.536MHz קבוע): החלף את
-# הקלט ב-‎--sdrplay3 0 (הדרייבר הנייטיבי, AGC; RSP1B נתמך מ-dumpvdl2 v2.6.0), ולרווח
-# ידני הוסף ‎--ifgr 40 --lna-state 0. ⚠ לא ‎--gr: הוא של הדרייבר הישן (API v2) בלבד,
-# ובבינארי שלנו הוא "unrecognized option" ⇒ usage ⇒ היחידה לא עולה. ‎--soapy-gain
-# שב-VDL2_GAIN לא חל על sdrplay3 (נבלע בשקט) — רוקן אותו.
-ExecStart=/usr/local/bin/dumpvdl2 --soapysdr driver=sdrplay --oversample 20 $VDL2_GAIN --msg-filter ${VDL2_MSG_FILTER} --output decoded:json:udp:address=127.0.0.1,port=5557 $VDL2_FREQS
+# ⚠ מסנן ה-IF: dumpvdl2 v2.6.0 מבקש מ-SoapySDR רוחב = פיזור התדרים + 21kHz (271kHz
+# בבנק ברירת המחדל) ו-SoapySDRPlay3 מעגל *למטה* ל-200kHz ⇒ 136.725/136.975 ב-±125kHz.
+# install.sh מחיל טלאי (tools/dumpvdl2-2.6.0-soapysdr-no-narrow-bw.patch) שמבטל את הבקשה
+# ⇒ המסנן נשאר 1.536MHz, כמו ב-acarsdec. ⚠ השינוי לא נמדד על RF — docs/vdl2-if-filter-design.md.
+# fallback שטח אם מסלול ה-SoapySDR מתנהג רע על החומרה: החלף את הקלט ב-‎--sdrplay3 <serial>
+# (הדרייבר הנייטיבי, AGC, מסנן 1.536MHz קבוע; RSP1B נתמך מ-v2.6.0; בלי serial — אינדקס 0,
+# ⚠ עם שני מקלטים זה לא בהכרח הראשי), ולרווח ידני הוסף ‎--ifgr 40 --lna-state 0. ⚠ לא ‎--gr:
+# הוא של הדרייבר הישן (API v2) בלבד, ובבינארי שלנו הוא "unrecognized option" ⇒ usage ⇒
+# היחידה לא עולה. ‎--soapy-gain שב-VDL2_GAIN לא חל על sdrplay3 (נבלע בשקט) — רוקן אותו.
+ExecStart=/usr/local/bin/dumpvdl2 --soapysdr driver=sdrplay${VDL2_SERIAL} --oversample 20 $VDL2_GAIN --msg-filter ${VDL2_MSG_FILTER} --output decoded:json:udp:address=127.0.0.1,port=5557 $VDL2_FREQS
 # גישת חומרה (SDR) => כמו rtl_airband, רץ כ-root
 User=root
 Restart=always
