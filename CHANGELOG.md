@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [2.36.1] - 2026-11-17
+
 ### נוסף
 - **📻+🛰️ מצב "קול + VDL2" — שני מקלטים** (`docs/dual-sdr-feasibility.md` §11.2 ג׳). אותו מבנה כמו
   "קול + ACARS": ‏dumpvdl2 על המשני (`airam-vdl2-2.service` חדש, `/etc/airam/vdl2-2.env`), אותו פורט UDP
