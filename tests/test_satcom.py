@@ -17,6 +17,7 @@ import types
 import pytest
 
 import app
+import acars_parse
 from helpers import ok_proc as _ok
 
 
@@ -66,7 +67,7 @@ def test_normalize_satcom_label15_position():
         "mode": "2", "ack": "!", "blk_id": "8", "label": "15", "reg": ".4X-EKF",
         "flight": "LY0315", "msg_text": "(2N32016E034538ELY315",
     }, t_sec=t0)
-    n = app._normalize_satcom(m)
+    n = acars_parse._normalize_satcom(m)
     assert n is not None
     assert abs(n["t"] - (t0 + 0.25)) < 1e-6        # t.sec + t.usec/1e6
     assert (n["tail"], n["flight"], n["label"]) == (".4X-EKF", "LY0315", "15")
@@ -81,7 +82,7 @@ def test_normalize_satcom_never_fabricates_level_or_snr():
     לא חושף level/noise ברמת ההודעה ב---feed/--udp (אומת מהמקור, ר' feed.c) —
     לכן level/snr חייבים להישאר None תמיד, כמו ACARS רגיל (לא כמו VDL2 שכן
     מספק noise אמיתי)."""
-    n = app._normalize_satcom(_satcom({
+    n = acars_parse._normalize_satcom(_satcom({
         "mode": "2", "label": "H1", "reg": ".4X-EKF", "msg_text": "hello",
     }))
     assert n["level"] is None and n["snr"] is None
@@ -97,7 +98,7 @@ def test_normalize_satcom_arinc622_adsc_nested():
     לפי הנחת המימוש — כדי לתפוס רגרסיה בפירוק המעטפת: בלי _VDL2_ACARS_FIELDS
     (ר' _normalize_satcom), decoded היה מציג את msg_text המשוכפל מתוך המעטפת
     כאילו הוא תוכן מפוענח."""
-    n = app._normalize_satcom(_satcom({
+    n = acars_parse._normalize_satcom(_satcom({
         "mode": "2", "label": "H1", "blk_id": "3", "ack": "!",
         "reg": ".4X-EDA", "flight": "LY0027", "msg_text": "#DFB...",
         "arinc622": {"acars": {                      # מעטפת ACARS כפולה (אמיתית)
@@ -120,7 +121,7 @@ def test_normalize_satcom_arinc622_unwrap_falls_back_on_unexpected_shape():
     """הגנתי לשינויי סכמה (כמו _scan_latlon/_libacars_decode): אם arinc622 אי-פעם
     *לא* עטוף ב-"acars" (למשל גרסה עתידית של inmarsat-sniffer, או --jaero-format
     שונה) — לא קורסים, פשוט נופלים חזרה להתייחסות ל-arinc622 כמות שהוא."""
-    n = app._normalize_satcom(_satcom({
+    n = acars_parse._normalize_satcom(_satcom({
         "mode": "2", "label": "H1", "reg": ".4X-EDA", "flight": "LY0027",
         "msg_text": "#DFB...",
         "arinc622": {"msg_type": "adsc_msg", "adsc": {
@@ -135,7 +136,7 @@ def test_normalize_satcom_error_unknown_without_arinc622():
     """אין isu.acars.arinc622 (הודעת טקסט רגילה, רוב תעבורת ה-SATCOM) => אין
     שום איתות CRC בשום שכבה (אומת מהמקור: feed_aero_message לא פולט err/
     crc_ok ברמה החיצונית) — error נשאר 0 (לא מומצא, פשוט לא ידוע), כמו היום."""
-    n = app._normalize_satcom(_satcom({
+    n = acars_parse._normalize_satcom(_satcom({
         "mode": "2", "label": "H1", "reg": ".4X-EKF", "msg_text": "hello",
     }))
     assert n["error"] == 0
@@ -145,7 +146,7 @@ def test_normalize_satcom_error_reflects_real_crc_when_arinc622_present():
     """כשיש יישום ARINC-622/ADS-C מקונן, המעטפת הפנימית הכפולה (ר' באג עטיפה
     כפולה) כן נושאת err/crc_ok אמיתיים (הסריאליזציה הגנרית של libacars) —
     error חייב לשקף אותם, לא תמיד 0."""
-    n_bad = app._normalize_satcom(_satcom({
+    n_bad = acars_parse._normalize_satcom(_satcom({
         "mode": "2", "label": "H1", "reg": ".4X-EDA", "flight": "LY0027",
         "msg_text": "#DFB...",
         "arinc622": {"acars": {
@@ -158,7 +159,7 @@ def test_normalize_satcom_error_reflects_real_crc_when_arinc622_present():
     }))
     assert n_bad["error"] == 1
 
-    n_ok = app._normalize_satcom(_satcom({
+    n_ok = acars_parse._normalize_satcom(_satcom({
         "mode": "2", "label": "H1", "reg": ".4X-EDA", "flight": "LY0027",
         "msg_text": "#DFB...",
         "arinc622": {"acars": {
@@ -175,7 +176,7 @@ def test_normalize_satcom_error_reflects_real_crc_when_arinc622_present():
 def test_normalize_satcom_uplink_structural():
     """dst=Aircraft Earth Station => uplink (קרקע->מטוס), עובדה מבנית של הכלי —
     לא heuristic, דורסת את _acars_direction (כמו VDL2)."""
-    n = app._normalize_satcom(_satcom(
+    n = acars_parse._normalize_satcom(_satcom(
         {"mode": "2", "label": "A9", "reg": ".4X-EKF", "msg_text": "ATIS INFO"},
         src_type="Ground Earth Station", dst_type="Aircraft Earth Station"))
     assert n["dir"] == "uplink"
@@ -183,7 +184,7 @@ def test_normalize_satcom_uplink_structural():
 
 def test_normalize_satcom_empty_ack_tolerated():
     """ACK ריק (בלי טקסט) — נסבל בלי קריסה, כמו ב-acarsdec/VDL2."""
-    n = app._normalize_satcom(_satcom({
+    n = acars_parse._normalize_satcom(_satcom({
         "mode": "2", "label": "_d", "ack": "^", "reg": ".4X-EKF", "msg_text": "",
     }))
     assert n is not None
@@ -193,9 +194,9 @@ def test_normalize_satcom_empty_ack_tolerated():
 def test_normalize_satcom_missing_isu_acars_returns_none():
     """הודעה בלי isu.acars (STD-C/EGC, לא מופעל כרגע — --mode=aero בלבד) =>
     None (לא בת-הצגה), כמו _normalize_vdl2 עם פריים בלי avlc."""
-    assert app._normalize_satcom({"isu": {}}) is None
-    assert app._normalize_satcom({"foo": 1}) is None
-    assert app._normalize_satcom({"isu": "not-a-dict"}) is None
+    assert acars_parse._normalize_satcom({"isu": {}}) is None
+    assert acars_parse._normalize_satcom({"foo": 1}) is None
+    assert acars_parse._normalize_satcom({"isu": "not-a-dict"}) is None
 
 
 # --- write_satcom_env (פורמט EnvironmentFile) --------------------------------
@@ -985,14 +986,14 @@ def test_api_state_exposes_satcom_gain(client, paths, monkeypatch):
 
 def test_acars_labels_covers_real_p_channel_traffic():
     for lbl in ("A0", "1B", "4P", "2F"):
-        assert lbl in app.ACARS_LABELS, "label %s נצפה בקליטה אמיתית וצריך מיפוי" % lbl
-        desc, group = app.ACARS_LABELS[lbl]
+        assert lbl in acars_parse.ACARS_LABELS, "label %s נצפה בקליטה אמיתית וצריך מיפוי" % lbl
+        desc, group = acars_parse.ACARS_LABELS[lbl]
         assert desc and group
 
 
 def test_normalize_satcom_afn_label_a0_gets_real_description():
     """A0 (AFN logon) — ראה תוכן אמיתי: '/SMACAYA.AFN/FMHKLM706,.PH-BKD,...'."""
-    n = app._normalize_satcom(_satcom({
+    n = acars_parse._normalize_satcom(_satcom({
         "mode": "2", "label": "A0", "reg": ".PH-BKD",
         "msg_text": "/SMACAYA.AFN/FMHKLM706,.PH-BKD,485B44,092914/FCAPIKCPYA,0FE53",
     }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station"))
@@ -1009,11 +1010,11 @@ def test_normalize_satcom_uplink_only_reception_is_a_real_pattern_not_a_bug():
     אינדיקציה אמיתית לאיזה ערוצים נעולים בפועל — לא רק Eb/No.** הבדיקה הזו
     מוודאת שההבחנה dir=uplink/downlink נשארת עקבית ל-src/dst.type המבני
     (לא נסחפת ל-heuristic), כי היא הבסיס לתצוגת ⬆/⬇ ב-UI (satcomStUp/Down)."""
-    ground_to_air = app._normalize_satcom(_satcom({
+    ground_to_air = acars_parse._normalize_satcom(_satcom({
         "mode": "2", "label": "_d", "reg": "30599A",
     }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station"))
     assert ground_to_air["dir"] == "uplink"
-    air_to_ground = app._normalize_satcom(_satcom({
+    air_to_ground = acars_parse._normalize_satcom(_satcom({
         "mode": "2", "label": "15", "reg": ".4X-EKF", "msg_text": "(2N32016E034538ELY315",
     }))   # ברירת המחדל של הפיקסצ'ר: downlink (AES->GES)
     assert air_to_ground["dir"] == "downlink"
@@ -1032,7 +1033,7 @@ def test_normalize_satcom_ground_station_fpn_gets_no_false_position():
                     "..SENTI,N37103E012330..LOPKO,N37400E012108..GERMO,N39150E011214"
                     "..ATNET,N40459E010081:A:ATNE2R903B",
     }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
-    n = app._normalize_satcom(m)
+    n = acars_parse._normalize_satcom(m)
     assert n["dir"] == "uplink"                    # מבני, תואם לקליטה האמיתית
     assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
     assert n["group"] != "position"
@@ -1059,7 +1060,7 @@ def test_normalize_satcom_real_cpdlc_capture_decode_failed():
                         "cpdlc": {"err": True}},
         }},
     }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
-    n = app._normalize_satcom(m)
+    n = acars_parse._normalize_satcom(m)
     assert n["error"] == 0                          # מעטפת ה-ACARS תקינה (crc_ok=true)
     assert n["category"] == "CPDLC" and n["group"] == "clearance"
     assert n["decoded"] and "לא פוענח" in n["decoded"]  # לא "—" סתמי, לא ניחוש תוכן
@@ -1086,7 +1087,7 @@ def test_normalize_satcom_uplink_adsc_never_yields_position_even_without_err():
                         "adsc": {"basic_report": {"lat": 18.34167, "lon": 2.11006}}},
         }},
     }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")   # uplink
-    n = app._normalize_satcom(m)
+    n = acars_parse._normalize_satcom(m)
     assert n["dir"] == "uplink"
     assert n["category"] == "ADS-C"
     assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
@@ -1111,7 +1112,7 @@ def test_normalize_satcom_downlink_adsc_yields_position():
                         "adsc": {"basic_report": {"lat": 18.34167, "lon": 2.11006}}},
         }},
     }, src_type="Aircraft Earth Station", dst_type="Ground Earth Station")   # downlink
-    n = app._normalize_satcom(m)
+    n = acars_parse._normalize_satcom(m)
     assert n["dir"] == "downlink"
     assert n["category"] == "ADS-C" and n["group"] == "position"
     assert n["pos_src"] == "adsc"
@@ -1137,7 +1138,7 @@ def test_normalize_satcom_adsc_decode_failed_never_yields_position():
                         "adsc": {"err": True, "lat": 5.69, "lon": 2.11}},
         }},
     }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
-    n = app._normalize_satcom(m)
+    n = acars_parse._normalize_satcom(m)
     assert n["category"] == "ADS-C"
     assert n["decoded"] and "לא פוענח" in n["decoded"]
     assert n["lat"] is None and n["lon"] is None and n["pos_src"] is None
@@ -1164,10 +1165,10 @@ def test_normalize_satcom_adsc_decode_failed_never_yields_position():
 def _reset_libacars_state():
     """מונע דליפת memo-cache/דגל-לוג בין בדיקות (מפתח הוא (label,dir,text) —
     בדיקות שונות שחוזרות על אותו טקסט היו מקבלות תוצאה ממוקפת מבדיקה קודמת)."""
-    app._libacars_cache.clear()
-    app._libacars_missing_logged[0] = False
+    acars_parse._libacars_cache.clear()
+    acars_parse._libacars_missing_logged[0] = False
     yield
-    app._libacars_cache.clear()
+    acars_parse._libacars_cache.clear()
 
 
 def _libacars_fake(vectors, calls=None):
@@ -1206,7 +1207,7 @@ def test_decode_libacars_app_uplink_uses_gnd2air_flag(monkeypatch):
     vectors = {text: {"json": {"arinc622": {"cpdlc": {"err": False}}},
                        "text": "CONFIRM ASSIGNED ROUTE"}}
     monkeypatch.setattr(app.subprocess, "run", _libacars_fake(vectors, calls))
-    j, t = app._decode_libacars_app("AA", text, "uplink")
+    j, t = acars_parse._decode_libacars_app("AA", text, "uplink")
     assert calls and all(c[0] == "u" for c in calls)
     assert any(c[2] is True for c in calls)    # קריאת ה-JSON כוללת LA_JSON=1
     assert any(c[2] is False for c in calls)   # וקריאת הטקסט לא
@@ -1222,7 +1223,7 @@ def test_decode_libacars_app_downlink_uses_air2gnd_flag_not_hardcoded(monkeypatc
     vectors = {text: {"json": {"arinc622": {"adsc": {"err": False}}},
                        "text": "Basic report"}}
     monkeypatch.setattr(app.subprocess, "run", _libacars_fake(vectors, calls))
-    j, t = app._decode_libacars_app("A6", text, "downlink")
+    j, t = acars_parse._decode_libacars_app("A6", text, "downlink")
     assert calls and all(c[0] == "d" for c in calls)
     assert j is not None and t == "Basic report"
 
@@ -1231,7 +1232,7 @@ def test_decode_libacars_app_unknown_direction_never_guesses(monkeypatch):
     """structural_dir=None => לא מריצים subprocess בכלל — לא מנחשים כיוון ASN.1."""
     calls = []
     monkeypatch.setattr(app.subprocess, "run", _libacars_fake({}, calls))
-    j, t = app._decode_libacars_app("AA", "/PIKCPYA.AT1.C-GEGP21359DE2407AA1", None)
+    j, t = acars_parse._decode_libacars_app("AA", "/PIKCPYA.AT1.C-GEGP21359DE2407AA1", None)
     assert (j, t) == (None, None)
     assert calls == []
 
@@ -1240,7 +1241,7 @@ def test_decode_libacars_app_skips_labels_outside_aa_a6(monkeypatch):
     """label שאינו AA/A6 (למשל 15, דיווח מיקום רגיל) => אין re-decode בכלל."""
     calls = []
     monkeypatch.setattr(app.subprocess, "run", _libacars_fake({}, calls))
-    j, t = app._decode_libacars_app("15", "/PIKCPYA.AT1.C-GEGP21359DE2407AA1", "uplink")
+    j, t = acars_parse._decode_libacars_app("15", "/PIKCPYA.AT1.C-GEGP21359DE2407AA1", "uplink")
     assert (j, t) == (None, None)
     assert calls == []
 
@@ -1250,7 +1251,7 @@ def test_decode_libacars_app_skips_when_no_recognized_imi(monkeypatch):
     re-decode — _arinc622_kind הוא שער-כניסה, לא ניחוש."""
     calls = []
     monkeypatch.setattr(app.subprocess, "run", _libacars_fake({}, calls))
-    j, t = app._decode_libacars_app("AA", "PLAIN ACARS TEXT WITHOUT ANY IMI", "uplink")
+    j, t = acars_parse._decode_libacars_app("AA", "PLAIN ACARS TEXT WITHOUT ANY IMI", "uplink")
     assert (j, t) == (None, None)
     assert calls == []
 
@@ -1269,7 +1270,7 @@ def test_normalize_satcom_cpdlc_uplink_redecode_shows_human_text(monkeypatch):
     monkeypatch.setattr(app.subprocess, "run", _libacars_fake(vectors, calls))
     m = _satcom({"mode": "2", "label": "AA", "reg": "C-GEGP", "msg_text": text},
                 src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
-    n = app._normalize_satcom(m)
+    n = acars_parse._normalize_satcom(m)
     assert calls and all(c[0] == "u" for c in calls)
     assert n["dir"] == "uplink"
     assert n["category"] == "CPDLC"
@@ -1296,7 +1297,7 @@ def test_normalize_satcom_adsc_uplink_redecode_never_yields_position(monkeypatch
     monkeypatch.setattr(app.subprocess, "run", _libacars_fake(vectors, calls))
     m = _satcom({"mode": "2", "label": "A6", "reg": "N740070", "msg_text": text},
                 src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
-    n = app._normalize_satcom(m)
+    n = acars_parse._normalize_satcom(m)
     assert calls and all(c[0] == "u" for c in calls)
     assert n["dir"] == "uplink"
     assert n["category"] == "ADS-C"
@@ -1320,7 +1321,7 @@ def test_normalize_satcom_redecode_success_does_not_hide_real_crc_failure(monkey
             "arinc622": {"msg_type": "fans1a_cpdlc_msg", "cpdlc": {"err": True}},
         }},
     }, src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
-    n = app._normalize_satcom(m)
+    n = acars_parse._normalize_satcom(m)
     assert n["error"] == 1                                    # CRC כושל לא מוסתר
     assert n["decoded"] and "CONFIRM ASSIGNED ROUTE" in n["decoded"]   # אבל התוכן כן מוצג
 
@@ -1352,17 +1353,17 @@ def test_normalize_satcom_redecode_missing_binary_falls_back(monkeypatch):
     monkeypatch.setattr(app.subprocess, "run", fake_run)
     m = _satcom(_FALLBACK_MSG, src_type="Aircraft Earth Station",
                dst_type="Ground Earth Station")
-    n = app._normalize_satcom(m)      # לא זורק exception
+    n = acars_parse._normalize_satcom(m)      # לא זורק exception
     _assert_fallback_preserved_original_decode(n)
 
 
 def test_normalize_satcom_redecode_timeout_falls_back(monkeypatch):
     def fake_run(cmd, **kw):
-        raise subprocess.TimeoutExpired(cmd=cmd, timeout=app.LIBACARS_DECODE_TIMEOUT)
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=acars_parse.LIBACARS_DECODE_TIMEOUT)
     monkeypatch.setattr(app.subprocess, "run", fake_run)
     m = _satcom(_FALLBACK_MSG, src_type="Aircraft Earth Station",
                dst_type="Ground Earth Station")
-    n = app._normalize_satcom(m)
+    n = acars_parse._normalize_satcom(m)
     _assert_fallback_preserved_original_decode(n)
 
 
@@ -1373,7 +1374,7 @@ def test_normalize_satcom_redecode_nonzero_returncode_falls_back(monkeypatch):
     monkeypatch.setattr(app.subprocess, "run", fake_run)
     m = _satcom(_FALLBACK_MSG, src_type="Aircraft Earth Station",
                dst_type="Ground Earth Station")
-    n = app._normalize_satcom(m)
+    n = acars_parse._normalize_satcom(m)
     _assert_fallback_preserved_original_decode(n)
 
 
@@ -1386,7 +1387,7 @@ def test_normalize_satcom_redecode_invalid_json_falls_back(monkeypatch):
     monkeypatch.setattr(app.subprocess, "run", fake_run)
     m = _satcom(_FALLBACK_MSG, src_type="Aircraft Earth Station",
                dst_type="Ground Earth Station")
-    n = app._normalize_satcom(m)
+    n = acars_parse._normalize_satcom(m)
     _assert_fallback_preserved_original_decode(n)
 
 
@@ -1426,7 +1427,7 @@ def test_normalize_satcom_20260814_capture_uplink_vectors(monkeypatch, label, te
     monkeypatch.setattr(app.subprocess, "run", _libacars_fake(vectors))
     m = _satcom({"mode": "2", "label": label, "reg": "TEST", "msg_text": text},
                 src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
-    n = app._normalize_satcom(m)
+    n = acars_parse._normalize_satcom(m)
     assert n["dir"] == "uplink"
     assert n["category"] == kind
     assert n["decoded"] and expect_substr in n["decoded"]
@@ -1447,8 +1448,8 @@ def test_normalize_satcom_nul_in_text_does_not_drop_message(monkeypatch):
             raise ValueError("embedded null byte")
         raise AssertionError("לא צפוי")
     monkeypatch.setattr(app.subprocess, "run", real_like_run)
-    app._libacars_cache.clear()
+    acars_parse._libacars_cache.clear()
     m = _satcom({"mode": "2", "label": "AA", "reg": "C-GEGP", "msg_text": text},
                 src_type="Ground Earth Station", dst_type="Aircraft Earth Station")
-    n = app._normalize_satcom(m)
+    n = acars_parse._normalize_satcom(m)
     assert n["dir"] == "uplink" and n["tail"]

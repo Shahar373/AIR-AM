@@ -14,6 +14,7 @@ import types
 import pytest
 
 import app
+import acars_parse
 from helpers import ok_proc as _ok
 
 
@@ -74,7 +75,7 @@ def test_normalize_vdl2_acars_label15_position():
         "flight": "LY0315", "msg_num": "M55", "msg_num_seq": "A",
         "msg_text": "(2N32016E034538ELY315",
     }}), t_sec=t0)
-    n = app._normalize_vdl2(m)
+    n = acars_parse._normalize_vdl2(m)
     assert n is not None
     assert abs(n["t"] - (t0 + 0.25)) < 1e-6        # t.sec + t.usec/1e6
     assert n["freq"] == 136.975                    # Hz => MHz
@@ -96,7 +97,7 @@ def test_normalize_vdl2_acars_msgno_int_does_not_raise():
     """⚠ רגרסיה אמיתית: msg_num/msg_num_seq עלולים להגיע כ-int (dumpvdl2 לא
     מבטיח str) — חיבור מחרוזות ישיר (‎"" + int) היה מפיל את כל הפריים
     ב-TypeError, שנתפס ע"י _vdl2_listener אבל זרק את ההודעה כולה בשקט."""
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
         "err": False, "crc_ok": True, "more": False, "reg": ".4X-EKF",
         "mode": "2", "label": "_d", "blk_id": "3", "ack": "^",
         "msg_num": 5, "msg_num_seq": "A", "msg_text": "",
@@ -107,20 +108,20 @@ def test_normalize_vdl2_acars_msgno_int_does_not_raise():
 
 def test_normalize_vdl2_acars_empty_ack_tolerated():
     """ACK ריק (label _d, בלי טקסט) — נסבל בלי קריסה, כמו ב-acarsdec."""
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
         "err": False, "crc_ok": True, "more": False, "reg": ".4X-EKF",
         "mode": "2", "label": "_d", "blk_id": "3", "ack": "^", "msg_text": "",
     }})))
     assert n is not None
     assert n["label"] == "_d" and not n["text"]
-    assert n["category"] == app.ACARS_LABELS["_d"][0]
+    assert n["category"] == acars_parse.ACARS_LABELS["_d"][0]
     assert n["icao"] == "738065"
 
 
 def test_normalize_vdl2_acars_arinc622_nested():
     """יישום מפוענח (ADS-C) מקונן *בתוך* אובייקט ה-acars (מבנה libacars) =>
     מוזרם כ-libacars ל-_normalize_acars: מיקום מ-_scan_latlon, קטגוריית ADS-C."""
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
         "err": False, "crc_ok": True, "more": False, "reg": ".4X-EDA",
         "mode": "2", "label": "H1", "blk_id": "2", "ack": "!",
         "flight": "LY0027", "msg_num": "D64", "msg_num_seq": "A",
@@ -140,7 +141,7 @@ def test_normalize_vdl2_path_a_uplink_adsc_never_yields_position():
     למטה, שם זה כן עובד במסלול B) לא חל בכלל כאן, בדיוק המסלול הכי סביר לשאת
     ADS-C אמיתי (ACARS-over-AVLC). err=False בכל מקום (הפענוח "מצליח" מבנית) —
     ה-guard חייב לחסום בכל זאת מכיוון בלבד."""
-    n = app._normalize_vdl2(_vdl2(_avlc_uplink({"acars": {
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_uplink({"acars": {
         "err": False, "crc_ok": True, "more": False, "reg": ".4X-EDA",
         "mode": "2", "label": "H1", "blk_id": "2", "ack": "!",
         "flight": "LY0027", "msg_num": "D64", "msg_num_seq": "A",
@@ -157,7 +158,7 @@ def test_normalize_vdl2_path_a_uplink_adsc_never_yields_position():
 def test_normalize_vdl2_crc_error_blocks_text_heuristic():
     """crc_ok=False => error=1 => שומר ה-error חוסם חילוץ נ"צ מטקסט חופשי
     (בדיוק כמו acarsdec error>0)."""
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
         "err": False, "crc_ok": False, "more": False, "reg": ".4X-EKF",
         "mode": "2", "label": "H1", "blk_id": "1", "ack": "!",
         "msg_text": "POS N3206.0,E03450.0",
@@ -175,7 +176,7 @@ def test_normalize_vdl2_structural_dir_overrides_label():
             "acars": {"err": False, "crc_ok": True, "reg": ".4X-EKF",
                       "mode": "2", "label": "80", "blk_id": "A", "ack": "!",
                       "msg_text": "TEST"}}
-    n = app._normalize_vdl2(_vdl2(avlc))
+    n = acars_parse._normalize_vdl2(_vdl2(avlc))
     assert n["dir"] == "uplink"
     assert n["icao"] == "738065"                   # צד-המטוס הוא ה-dst
 
@@ -189,7 +190,7 @@ def test_normalize_vdl2_cpdlc_generic_card():
             "x25": {"err": False, "pkt_type_name": "Data",
                     "clnp": {"cotp": {"cpdlc": {
                         "atc_uplink_msg": {"msg_data": {"msg_text": "CLIMB TO FL350"}}}}}}}
-    n = app._normalize_vdl2(_vdl2(avlc))
+    n = acars_parse._normalize_vdl2(_vdl2(avlc))
     assert n["category"] == "CPDLC (VDL2)" and n["group"] == "clearance"
     assert "CLIMB TO FL350" in (n["decoded"] or "")
     assert n["dir"] == "uplink" and n["icao"] == "738065"
@@ -200,7 +201,7 @@ def test_normalize_vdl2_cpdlc_generic_card():
 
 
 def test_normalize_vdl2_adsc_x25_position():
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({
         "x25": {"err": False, "pkt_type_name": "Data",
                 "clnp": {"cotp": {"adsc": {
                     "basic_report": {"lat": 31.9, "lon": 35.1, "alt": 37000}}}}}})))
@@ -214,7 +215,7 @@ def test_normalize_vdl2_cpdlc_with_adsc_substring_not_treated_as_position():
     exclusive מול "cpdlc" בו. הודעת CPDLC שמזכירה "ADSC" בתוך טקסט חופשי מקונן
     (למשל בקשת קונטרקט) עדיין עברה בעבר את תנאי חילוץ המיקום למרות שה-category
     כבר הוכרע כ-CPDLC — waypoint מ-route_clearance יוחס בטעות כמיקום המטוס."""
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({
         "x25": {"err": False, "pkt_type_name": "Data",
                 "clnp": {"cotp": {"cpdlc": {
                     "err": False,
@@ -231,7 +232,7 @@ def test_normalize_vdl2_adsc_decode_failed_never_yields_position():
     err:true על יישום ה-ADS-C המקונן, שדה lat/lon שרירותי/שריד-מפענוח-חלקי
     עדיין היה מתפרסם כאילו הוא מיקום אמיתי. תיקון: מיקום מ-ADS-C (VDL2 מסלול B)
     נאמן רק כש-decode_failed=False."""
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({
         "x25": {"err": False, "pkt_type_name": "Data",
                 "clnp": {"cotp": {"adsc": {
                     "err": True, "basic_report": {"lat": 5.69, "lon": 2.11}}}}}})))
@@ -248,7 +249,7 @@ def test_normalize_vdl2_uplink_adsc_never_yields_position_even_without_err():
     מ-adsc.c). כאן ‏err=False בכל מקום (הפענוח "מצליח" מבנית) — ה-guard חייב
     לחסום בכל זאת מכיוון בלבד (`direction` נגזר מבנית מ-AVLC src/dst.type,
     לא heuristic)."""
-    n = app._normalize_vdl2(_vdl2(_avlc_uplink({
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_uplink({
         "x25": {"err": False, "pkt_type_name": "Data",
                 "clnp": {"cotp": {"adsc": {
                     "err": False, "basic_report": {"lat": 18.34167, "lon": 2.11006}}}}}})))
@@ -259,7 +260,7 @@ def test_normalize_vdl2_uplink_adsc_never_yields_position_even_without_err():
 
 
 def test_normalize_vdl2_xid_generic_card():
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({
         "frame_type": "U", "cmd": "XID",
         "xid": {"err": False, "type": "XID_CMD_LE",
                 "type_descr": "Link Establishment", "vdl_params": {}}})))
@@ -270,12 +271,12 @@ def test_normalize_vdl2_xid_generic_card():
 
 def test_normalize_vdl2_bare_frame_and_garbage():
     # פריים AVLC בלי תוכן מוכר => כרטיס גנרי לפי frame_type
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({"frame_type": "S", "cmd": "RR"})))
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({"frame_type": "S", "cmd": "RR"})))
     assert n["category"] == "VDL2 · S" and n["group"] == "comm"
     # בלי עטיפת vdl2 / בלי avlc => None (לא בר-הצגה)
-    assert app._normalize_vdl2({"foo": 1}) is None
-    assert app._normalize_vdl2({"vdl2": {"t": {"sec": 1}, "freq": 136975000}}) is None
-    assert app._normalize_vdl2({"vdl2": "not-a-dict"}) is None
+    assert acars_parse._normalize_vdl2({"foo": 1}) is None
+    assert acars_parse._normalize_vdl2({"vdl2": {"t": {"sec": 1}, "freq": 136975000}}) is None
+    assert acars_parse._normalize_vdl2({"vdl2": "not-a-dict"}) is None
 
 
 # --- write_vdl2_env (פורמט EnvironmentFile + המרת Hz) ------------------------

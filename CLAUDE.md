@@ -108,6 +108,9 @@ webtune/
                             #   שלב 1) + שכבת הנתונים של ההצלבה (lookup ממוקד/trace/OpenSky,
                             #   אינדקס hex, רישום↔hex). thread נפרד. ידני:
                             #   `python3 adsb.py [--selftest | --lookup reg G-ZBKM | --trace 406f79 [epoch]]`.
+  acars_parse.py            # נרמול ופענוח ACARS/VDL2/SATCOM: `_normalize_acars/vdl2/satcom` + כל ה-parsers, טבלאות ה-labels, כיוון מבני,
+                            #   `_libacars_decode`/`_decode_libacars_app`/`_run_libacars`. טהור — בלי Flask/state/systemd (נבדק מכנית).
+                            #   הוצא מ-app.py בשלב ג2. ⚠ קוראים אליו כ-`acars_parse.<שם>` (לא `from … import`).
   storage.py                # כתיבה אטומית (`atomic_write`, fsync לקובץ+תיקייה) וקריאה/כתיבה של JSONL (`read_log_lines`,
                             #   `append_line_on_boundary`, `jsonl_records`, `trim_jsonl_log`, `csv_safe`). בלי תלות ב-app. ⚠ קוראים
                             #   אליו כ-`storage.<שם>` (לא `from storage import`) — כדי שהחלפה בבדיקה תשפיע. הוצא מ-app.py בשלב ג2.
@@ -419,7 +422,8 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   כניסה ללוח שאף רגל שלו לא בחלון **עוצרת את הצרכן שרץ** (`_enter_standby`) — אחרת
   SATCOM נשאר דלוק (bias-T) בזמן שה-UI מציג "ממתין". רגל "זהה" לא נכנסת מחדש רק
   כשהצרכן שלה עדיין `active` (ה-reconcile לא מטפל ב-scan).
-- **ACARS:** `_acars_listener` (thread, מאזין UDP 5556), `_normalize_acars` (הלב —
+- **ACARS** (⚠ כל פונקציות הנרמול/הפענוח שבסעיפים ACARS/VDL2/SATCOM שלמטה — `_normalize_*`, `_parse_*`, `_libacars_*`, טבלאות ה-labels —
+  יושבות עכשיו ב-`acars_parse.py`, לא ב-`app.py`): `_acars_listener` (thread, מאזין UDP 5556), `_normalize_acars` (הלב —
   ממיר JSON גולמי לכרטיס אחיד: label→קטגוריה, **כיוון מבני מה-block ID**
   (`_acars_block_dir`: ספרה=downlink / אות=uplink — הכלל של acarsdec עצמו, שפולט
   msgno/flight רק ב-downlink; `block_id` נשמר בכרטיס. `_ACARS_DIR_BY_LABEL`/header —

@@ -15,6 +15,7 @@ import pytest
 
 import adsb
 import app
+import acars_parse
 import xcheck
 
 T_RX = calendar.timegm((2026, 10, 23, 13, 45, 40)) + 0.0
@@ -64,7 +65,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(adsb, "REG_HEX_PATH", tmp_path / "reg_hex.json")
     monkeypatch.setattr(adsb, "_http_get_json",
                         lambda *a, **k: pytest.fail("ניסיון רשת לא-ממוקף בבדיקה"))
-    monkeypatch.setattr(app, "_run_libacars", lambda *a, **k: None)
+    monkeypatch.setattr(acars_parse, "_run_libacars", lambda *a, **k: None)
     with adsb._LOCK:
         adsb._S["aircraft"].clear()
         adsb._S["by_hex"].clear()
@@ -158,24 +159,24 @@ def test_station_post_requires_same_origin(client):
 # --- נרמול: פרטי ADS-C ו-AES ------------------------------------------------------
 
 def test_normalize_acars_extracts_adsc_report_details():
-    n = app._normalize_acars(_raw_b6())
+    n = acars_parse._normalize_acars(_raw_b6())
     assert n["dir"] == "downlink" and n["pos_src"] == "adsc"
     assert n["adsc"]["ts_sec"] == 2739.375 and n["adsc"]["alt_ft"] == 37996
     assert n["adsc"]["accuracy_nm"] == 0.05 and n["adsc"]["tcas_avail"] is True
     # הודעה בלי ADS-C — השדה קיים ו-None (תאימות: שדה חדש, לא שינוי קיים)
-    assert app._normalize_acars({"timestamp": 1.0, "label": "H1", "text": "hi"})["adsc"] is None
+    assert acars_parse._normalize_acars({"timestamp": 1.0, "label": "H1", "text": "hi"})["adsc"] is None
 
 
 def test_adsc_details_earth_reference_keys():
-    d = app._adsc_details({"tags": [{"basic_report": {"lat": 1.0, "lon": 2.0, "alt": 100}},
+    d = acars_parse._adsc_details({"tags": [{"basic_report": {"lat": 1.0, "lon": 2.0, "alt": 100}},
                                     {"earth_ref_data": {"true_trk_deg": 121.5, "true_trk_valid": True,
                                                         "gnd_spd_kts": 478.0, "vspd_ftmin": 0}}]})
     assert d["true_trk_deg"] == 121.5 and d["gnd_spd_kts"] == 478.0 and d["vspd_ftmin"] == 0
-    assert app._adsc_details({"x": 1}) is None
+    assert acars_parse._adsc_details({"x": 1}) is None
 
 
 def test_satcom_card_carries_aes_not_icao():
-    card = app._normalize_satcom({
+    card = acars_parse._normalize_satcom({
         "t": {"sec": 1_792_763_140, "usec": 0},
         "isu": {"src": {"addr": "406F79", "type": "Aircraft Earth Station"},
                 "dst": {"addr": "42", "type": "Ground Earth Station"},
@@ -189,7 +190,7 @@ def test_verify_zbkm_historical_blos_supported(client, monkeypatch):
     """ההודעה הישנה (רק ב-jsonl, לא בזיכרון) => lookup לפי רישום מגלה את ה-hex
     (מהטיסה הנוכחית) => trace היסטורי => אינטרפולציה בזמן הדוח => ראיות חזקות."""
     _set_station(client)
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     calls = _mock_net(monkeypatch, lookup=_lookup_found_now, trace=_trace_zbkm)
     r = client.post("/api/xcheck/verify", json={"src": "acars", "t": T_RX, "tail": ".G-ZBKM",
                                                 "label": "B6"})
@@ -214,7 +215,7 @@ def test_verify_zbkm_historical_blos_supported(client, monkeypatch):
 
 def _saved_zbkm(client, monkeypatch):
     _set_station(client)
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     _mock_net(monkeypatch, lookup=_lookup_found_now, trace=_trace_zbkm)
     return client.post("/api/xcheck/verify", json={"src": "acars", "t": T_RX}).get_json()["saved"]
 
@@ -254,7 +255,7 @@ def test_verify_without_adsb_still_answers_weak(client, monkeypatch):
     """ספקי ADS-B לא זמינים => תשובה תקינה (200) עם "אין נתונים" לכל מקור —
     המיקום מה-ADS-C לבדו: חריגה מאופק, ראיה חלשה. אירוע נשמר (חריג)."""
     _set_station(client)
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     _mock_net(monkeypatch)
     body = client.post("/api/xcheck/verify", json={"src": "acars", "t": T_RX}).get_json()
     res = body["result"]
@@ -269,7 +270,7 @@ def test_verify_old_record_redecodes_and_recomputes_direction(client, monkeypatc
     """הודעה שנשמרה *לפני* v2.26.0: ‏dir="uplink" (באג ה-B6) ובלי שדה adsc. הכיוון
     מחושב מחדש לפי ה-label, ופרטי הדוח מפוענחים מחדש ב-decode_acars_apps."""
     _set_station(client)
-    old = app._normalize_acars(_raw_b6())
+    old = acars_parse._normalize_acars(_raw_b6())
     old.update(dir="uplink", adsc=None)
     _store_jsonl(old)
     seen = []
@@ -278,7 +279,7 @@ def test_verify_old_record_redecodes_and_recomputes_direction(client, monkeypatc
         seen.append((dir_arg, label, as_json))
         return text + "\n" + json.dumps(LIBACARS)        # decode_acars_apps מדפיס הד + JSON
 
-    monkeypatch.setattr(app, "_run_libacars", fake_run)
+    monkeypatch.setattr(acars_parse, "_run_libacars", fake_run)
     _mock_net(monkeypatch, lookup=_lookup_found_now, trace=_trace_zbkm)
     res = client.post("/api/xcheck/verify", json={"src": "acars", "t": T_RX}).get_json()["result"]
     assert seen == [("d", "B6", True)]
@@ -307,7 +308,7 @@ def test_verify_user_hex_contradicted_by_trace_registration(client, monkeypatch)
     """hex שהמשתמש הזין שייך (לפי ה-trace) לרישום אחר => סתירת זהות; נקודות ה-trace
     לא משמשות, ואין פסק-דין BLOS מחוזק."""
     _set_station(client)
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     _mock_net(monkeypatch, trace=lambda hx, t: {**_trace_zbkm(hx, t), "meta": {"r": "EI-XYZ"}})
     res = client.post("/api/xcheck/verify",
                       json={"src": "acars", "t": T_RX, "hex": "4ca123"}).get_json()["result"]
@@ -318,7 +319,7 @@ def test_verify_user_hex_contradicted_by_trace_registration(client, monkeypatch)
 
 def test_verify_uplink_label_is_not_applicable(client, monkeypatch):
     _set_station(client)
-    up = app._normalize_acars({"timestamp": T_RX, "label": "A6", "tail": ".G-ZBKM",
+    up = acars_parse._normalize_acars({"timestamp": T_RX, "label": "A6", "tail": ".G-ZBKM",
                                "text": "/QUKAXBA.ADS.G-ZBKM0000"})
     _store_jsonl(up)
     _mock_net(monkeypatch)
@@ -338,7 +339,7 @@ def test_verify_input_errors(client, monkeypatch):
 
 def test_verify_station_override_is_recorded(client, monkeypatch):
     """תחנה ניידת: אימות בדיעבד מול המיקום שבו התחנה *הייתה* — נשמר בראיה."""
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     _mock_net(monkeypatch)
     near = {"lat": 33.0, "lon": 28.0, "alt_m": 10.0}
     res = client.post("/api/xcheck/verify",
@@ -417,7 +418,7 @@ def test_out_of_range_aircraft_two_stage_lookup_saves_event(client, monkeypatch)
             "provider": "adsb.lol"}]}
 
     calls = _mock_net(monkeypatch, lookup=lk)
-    rec = app._normalize_acars({**_raw_b6(), "timestamp": t_rx, "libacars": None})
+    rec = acars_parse._normalize_acars({**_raw_b6(), "timestamp": t_rx, "libacars": None})
     rec.update(id=11, lat=ZBKM_LAT, lon=ZBKM_LON)                       # בלי ts_sec של ADS-C
     app._xc_run_job({"src": "acars", "rec": rec, "stage": 1, "prior": []})
     assert calls["lookup"] == [("reg", ".G-ZBKM")]
@@ -485,7 +486,7 @@ def test_verify_with_imported_trace_replaces_network_history(client, monkeypatch
     """globe.adsb.lol החזיר 403 על ה-Pi => המשתמש מעלה את הקובץ מהארכיון. הקובץ
     משמש במקום trace/OpenSky מהרשת (לא נקראים בכלל), ונשמר בראיה כמקור "import"."""
     _set_station(client)
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     calls = _mock_net(monkeypatch, lookup=_lookup_found_now, trace=_trace_zbkm)
     r = client.post("/api/xcheck/verify", json={"src": "acars", "t": T_RX, "trace_b64": _trace_file(),
                                                 "trace_name": "trace_full_406f79.json"})
@@ -501,7 +502,7 @@ def test_verify_with_imported_trace_replaces_network_history(client, monkeypatch
 
 def test_imported_trace_of_another_aircraft_is_a_conflict(client, monkeypatch):
     _set_station(client)
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     _mock_net(monkeypatch)
     res = client.post("/api/xcheck/verify", json={
         "src": "acars", "t": T_RX, "trace_b64": _trace_file(icao="4ca123", reg="EI-XYZ")}).get_json()["result"]
@@ -514,7 +515,7 @@ def test_imported_trace_of_another_aircraft_is_a_conflict(client, monkeypatch):
 def test_imported_trace_without_comparable_identity_is_not_used(client, monkeypatch):
     """הודעה עם מספר טיסה בלבד וקובץ בלי רישום — אין מה להשוות => לא בשימוש."""
     _set_station(client)
-    _store_jsonl(app._normalize_acars(_raw_b6(tail=None)))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6(tail=None)))
     _mock_net(monkeypatch)
     res = client.post("/api/xcheck/verify", json={
         "src": "acars", "t": T_RX, "trace_b64": _trace_file(reg=None)}).get_json()["result"]
@@ -524,7 +525,7 @@ def test_imported_trace_without_comparable_identity_is_not_used(client, monkeypa
 
 def test_imported_trace_input_errors(client, monkeypatch):
     import base64
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     _mock_net(monkeypatch)
     post = lambda b64: client.post("/api/xcheck/verify", json={"src": "acars", "t": T_RX, "trace_b64": b64})
     assert post("!!!not base64!!!").status_code == 400

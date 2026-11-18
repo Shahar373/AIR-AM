@@ -9,6 +9,7 @@ import time
 import pytest
 
 import app
+import acars_parse
 import adsb
 
 
@@ -40,37 +41,37 @@ def _clean_adsb_series():
 def _msg(t, tail=None, label=None, group="comm", decoded=None, pos_src=None):
     return {"t": t, "tail": tail, "flight": None, "icao": None, "label": label,
             "group": group, "category": "x", "decoded": decoded, "pos_src": pos_src,
-            "notable": app._interest_score({"group": group, "decoded": decoded,
+            "notable": acars_parse._interest_score({"group": group, "decoded": decoded,
                                             "pos_src": pos_src, "label": label})}
 
 
 # --- _interest_score ---------------------------------------------------------
 
 def test_interest_score_generic_group_not_notable():
-    assert app._interest_score({"group": "comm", "decoded": None, "pos_src": None, "label": None}) is False
-    assert app._interest_score({"group": "text", "decoded": None, "pos_src": None, "label": None}) is False
+    assert acars_parse._interest_score({"group": "comm", "decoded": None, "pos_src": None, "label": None}) is False
+    assert acars_parse._interest_score({"group": "text", "decoded": None, "pos_src": None, "label": None}) is False
 
 
 def test_interest_score_real_category_is_notable():
-    assert app._interest_score({"group": "oooi", "decoded": None, "pos_src": None, "label": None}) is True
+    assert acars_parse._interest_score({"group": "oooi", "decoded": None, "pos_src": None, "label": None}) is True
 
 
 def test_interest_score_decoded_text_is_notable():
-    assert app._interest_score({"group": "comm", "decoded": "המראה 26", "pos_src": None, "label": None}) is True
+    assert acars_parse._interest_score({"group": "comm", "decoded": "המראה 26", "pos_src": None, "label": None}) is True
 
 
 def test_interest_score_adsc_position_is_notable():
-    assert app._interest_score({"group": "text", "decoded": None, "pos_src": "adsc", "label": None}) is True
+    assert acars_parse._interest_score({"group": "text", "decoded": None, "pos_src": "adsc", "label": None}) is True
 
 
 def test_interest_score_rich_label_is_notable():
-    assert app._interest_score({"group": "clearance", "decoded": None, "pos_src": None, "label": "A3"}) is True
+    assert acars_parse._interest_score({"group": "clearance", "decoded": None, "pos_src": None, "label": "A3"}) is True
 
 
 def test_normalize_acars_includes_notable_field():
-    n = app._normalize_acars({"timestamp": 1.0, "label": "A3", "tail": "4X-A", "text": "PDC"})
+    n = acars_parse._normalize_acars({"timestamp": 1.0, "label": "A3", "tail": "4X-A", "text": "PDC"})
     assert n["notable"] is True
-    ack = app._normalize_acars({"timestamp": 1.0, "label": "Q0"})
+    ack = acars_parse._normalize_acars({"timestamp": 1.0, "label": "Q0"})
     assert ack["notable"] is False
 
 
@@ -131,12 +132,12 @@ def test_session_highlights_collapse_retransmissions(client, paths):
     הוא היה ממלא את כל שמונה ה"בולטות". מופע אחד (האחרון), והשאר נשארות."""
     now = time.time()
     since = now - 3600
-    qp = app._normalize_acars({"label": "QP", "tail": "9H-SHO", "msgno": "M27A",
+    qp = acars_parse._normalize_acars({"label": "QP", "tail": "9H-SHO", "msgno": "M27A",
                                "block_id": "7", "text": "LEBLLEBL16420007"})
     assert qp["notable"] is True
     for i in range(20):
         app._append_acars_log({**qp, "t": since + 60 + i * 90})
-    other = app._normalize_acars({"label": "QR", "tail": "F-GSQI", "msgno": "M95A",
+    other = acars_parse._normalize_acars({"label": "QR", "tail": "F-GSQI", "msgno": "M95A",
                                   "block_id": "5", "text": "LFPGLLBG1136113618021521"})
     app._append_acars_log({**other, "t": since + 30})
     data = client.get("/api/session?since=" + str(since)).get_json()
