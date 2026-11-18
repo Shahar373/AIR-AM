@@ -10,6 +10,7 @@ def test_no_system_paths_remain_during_tests():
 
 def test_isolation_preserves_filename_and_structure():
     import app
-    assert app.STATE_PATH.name == "state.json"
+    import appstate
+    assert appstate.STATE_PATH.name == "state.json"
     assert app.ACARS_ENV_PATH.parent.name == "airam"
-    assert "_sys" in app.STATE_PATH.parts
+    assert "_sys" in appstate.STATE_PATH.parts

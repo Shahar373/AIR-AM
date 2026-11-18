@@ -14,12 +14,13 @@ import zipfile
 import pytest
 
 import app
+import appstate  # noqa: E402
 import recordings  # noqa: E402
 
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "ACTIVITY_PATH", tmp_path / "activity.jsonl")
     rec = tmp_path / "recordings"
     rec.mkdir()
@@ -346,7 +347,7 @@ def test_model_falls_back_along_chain(paths, monkeypatch):
 
 def test_transcribe_lang_toggle_persists(client, paths):
     assert client.post("/api/transcribe", json={"lang": "he"}).get_json()["tx"]["lang"] == "he"
-    assert app.load_state()["transcribe_lang"] == "he"
+    assert appstate.load_state()["transcribe_lang"] == "he"
 
 
 def test_transcribe_bad_lang_rejected(client, paths):
@@ -411,7 +412,7 @@ def test_transcribe_on_demand_already_pending_is_idempotent(client, paths, monke
 
 def test_transcribe_auto_toggle_persists(client, paths):
     assert client.post("/api/transcribe", json={"auto": True}).get_json()["tx"]["auto"]
-    assert app.load_state()["transcribe_auto"] is True
+    assert appstate.load_state()["transcribe_auto"] is True
     assert not client.post("/api/transcribe", json={"auto": False}).get_json()["tx"]["auto"]
 
 
@@ -419,7 +420,7 @@ def test_transcribe_auto_defaults_to_off(paths):
     """⚠ ברירת המחדל היא כבוי, גם אם AIRAM_TRANSCRIBE=1 (כפי ש-install.sh
     כותב עם INSTALL_WHISPER=1) — אחרת כל מי שהתקין whisper מקבל תמלול-הכול
     בלי שביקש, וזה קפיצה משמעותית בעומס עם המודל האיטי יותר."""
-    assert app.DEFAULT_STATE["transcribe_auto"] is False
+    assert appstate.DEFAULT_STATE["transcribe_auto"] is False
 
 
 def test_transcribe_toggle_requires_field(client, paths):

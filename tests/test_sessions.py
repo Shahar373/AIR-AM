@@ -15,13 +15,14 @@ import pytest
 
 import adsb
 import app
+import appstate  # noqa: E402
 import recordings  # noqa: E402
 import storage
 
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(adsb, "TRACK_PATH", tmp_path / "track.jsonl")
     monkeypatch.setattr(recordings, "SESSIONS_DIR", tmp_path / "sessions")
     rec = tmp_path / "recordings"

@@ -13,6 +13,7 @@ import zipfile
 import pytest
 
 import app
+import appstate  # noqa: E402
 import diag
 
 ORIGIN = {"Origin": "http://localhost"}
@@ -155,7 +156,8 @@ def test_timeline_and_summary_render():
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
-    for name in ("STATE_PATH", "DIAG_PATH", "ACARS_LOG_PATH", "VDL2_LOG_PATH", "SATCOM_LOG_PATH",
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
+    for name in ("DIAG_PATH", "ACARS_LOG_PATH", "VDL2_LOG_PATH", "SATCOM_LOG_PATH",
                  "ACTIVITY_PATH", "CONFIG_PATH", "VOICE2_CONFIG_PATH", "ACARS_ENV_PATH",
                  "ACARS2_ENV_PATH", "VDL2_ENV_PATH", "VDL2B_ENV_PATH", "SATCOM_ENV_PATH",
                  "SDR_ENV_PATH", "DENOISE_ENV_PATH", "RFLOG_PATH"):

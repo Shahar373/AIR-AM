@@ -6,13 +6,14 @@
 import pytest
 
 import app
+import appstate  # noqa: E402
 from helpers import ok_proc as _ok
 
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "airband.conf")
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "ACARS_ENV_PATH", tmp_path / "acars.env")
     monkeypatch.setattr(app, "VDL2_ENV_PATH", tmp_path / "vdl2.env")
     monkeypatch.setattr(app, "SATCOM_ENV_PATH", tmp_path / "satcom.env")
@@ -31,32 +32,32 @@ def sysctl_calls(monkeypatch):
 
 
 def test_boot_restore_voice_restarts_rtl_airband(paths, no_sleep, sysctl_calls, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "freq": 121.5, "app_mode": "voice"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "freq": 121.5, "app_mode": "voice"})
     monkeypatch.setattr(app, "_restart_and_verify", lambda: (None, None, False))
     app._boot_restore()
     # הקונפיג נכתב מה-state (מכסה גם שדרוג stats_filepath/localtime)
     assert "freq = 121.5000;" in app.CONFIG_PATH.read_text()
-    assert app.load_state()["app_mode"] == "voice"     # השחזור לא משנה את הכוונה
+    assert appstate.load_state()["app_mode"] == "voice"     # השחזור לא משנה את הכוונה
 
 
 def test_boot_restore_acars_enters_acars(paths, no_sleep, sysctl_calls, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "acars", "acars_freqs": ["131.550"]})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "acars", "acars_freqs": ["131.550"]})
     # אחרי reboot כלום לא רץ; השירות "נהיה פעיל" רק אחרי ה-restart של השחזור
     # (מדמה את המציאות וגם מספק את אימות הפולינג של _enter_acars)
     monkeypatch.setattr(app, "_is_active", lambda svc: ("restart", svc) in sysctl_calls)
     app._boot_restore()
     assert ("restart", app.ACARS_SERVICE) in sysctl_calls
     assert "ACARS_FREQS=131.550" in app.ACARS_ENV_PATH.read_text()
-    assert app.load_state()["app_mode"] == "acars"
+    assert appstate.load_state()["app_mode"] == "acars"
 
 
 def test_boot_restore_vdl2_enters_vdl2(paths, no_sleep, sysctl_calls, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "vdl2", "vdl2_freqs": ["136.975"]})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "vdl2", "vdl2_freqs": ["136.975"]})
     monkeypatch.setattr(app, "_is_active", lambda svc: ("restart", svc) in sysctl_calls)
     app._boot_restore()
     assert ("restart", app.VDL2_SERVICE) in sysctl_calls
     assert "VDL2_FREQS=136975000" in app.VDL2_ENV_PATH.read_text()   # MHz→Hz
-    assert app.load_state()["app_mode"] == "vdl2"
+    assert appstate.load_state()["app_mode"] == "vdl2"
 
 
 def test_boot_restore_satcom_does_not_auto_enter(paths, no_sleep, sysctl_calls, monkeypatch):
@@ -67,7 +68,7 @@ def test_boot_restore_satcom_does_not_auto_enter(paths, no_sleep, sysctl_calls, 
     בכלל. גם מוודא שלא נפלנו בטעות לענף ה-scan הגנרי (שהיה "מצליח" להגיע
     ל-off באותה תוצאה שטחית, אבל מהסיבה הלא-נכונה): _validate_scan_plan לא
     נקרא כלל עבור מצב satcom."""
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "satcom", "satcom_freqs": ["AF1"]})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "satcom", "satcom_freqs": ["AF1"]})
     monkeypatch.setattr(app, "_is_active", lambda svc: ("restart", svc) in sysctl_calls)
     entered = []
     monkeypatch.setattr(app, "_enter_satcom", lambda freqs: entered.append(freqs) or (None, None))
@@ -77,22 +78,22 @@ def test_boot_restore_satcom_does_not_auto_enter(paths, no_sleep, sysctl_calls, 
     assert entered == []
     assert scan_validated == []
     assert ("restart", app.SATCOM_SERVICE) not in sysctl_calls
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["app_mode"] == "off"
     assert st["prev_mode"] == "satcom"
 
 
 def test_boot_restore_off_is_noop(paths, no_sleep, sysctl_calls):
     # off שורד reboot: אחרי אתחול כלום לא רץ => אין שום קריאת systemctl
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "off"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "off"})
     app._boot_restore()
     assert sysctl_calls == []
-    assert app.load_state()["app_mode"] == "off"
+    assert appstate.load_state()["app_mode"] == "off"
 
 
 def test_boot_restore_off_stops_leftover_consumer(paths, no_sleep, sysctl_calls, monkeypatch):
     # state אומר off אבל צרכן רץ (restart של airam-web באמצע אי-התאמה) => עוצרים
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "off"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "off"})
     monkeypatch.setattr(app, "_is_active", lambda svc: svc == "rtl_airband")
     app._boot_restore()
     assert ("stop", "rtl_airband") in sysctl_calls
@@ -100,7 +101,7 @@ def test_boot_restore_off_stops_leftover_consumer(paths, no_sleep, sysctl_calls,
 
 def test_boot_restore_skips_when_consumer_already_running(paths, no_sleep, sysctl_calls, monkeypatch):
     # restart של airam-web באמצע סשן: הצרכן השמור כבר רץ => no-op (לא מפריעים לקליטה)
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "acars"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "acars"})
     monkeypatch.setattr(app, "_is_active", lambda svc: svc == app.ACARS_SERVICE)
     app._boot_restore()
     assert sysctl_calls == []
@@ -108,7 +109,7 @@ def test_boot_restore_skips_when_consumer_already_running(paths, no_sleep, sysct
 
 def test_boot_restore_voice_running_but_stale_config_rewrites(paths, no_sleep, sysctl_calls, monkeypatch):
     # קול רץ אבל הקונפיג ישן (שדרוג: חסר stats_filepath) => משכתבים ומרימים פעם אחת
-    app.save_state({**app.DEFAULT_STATE, "freq": 121.5, "app_mode": "voice"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "freq": 121.5, "app_mode": "voice"})
     app.CONFIG_PATH.write_text("# old config without the new attributes")
     monkeypatch.setattr(app, "_is_active", lambda svc: svc == "rtl_airband")
     monkeypatch.setattr(app, "_restart_and_verify", lambda: (None, None, False))
@@ -118,9 +119,9 @@ def test_boot_restore_voice_running_but_stale_config_rewrites(paths, no_sleep, s
 
 def test_boot_restore_failure_falls_to_off(paths, no_sleep, sysctl_calls, monkeypatch):
     # הכניסה למצב השמור נכשלה (SDR נוכח) => off + prev_mode, לא נפילה לקול
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "vdl2"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "vdl2"})
     app._boot_restore()          # _is_active=False => האימות של _enter_vdl2 נכשל
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["app_mode"] == "off" and st["prev_mode"] == "vdl2"
     assert ("restart", "rtl_airband") not in sysctl_calls
 
@@ -128,11 +129,11 @@ def test_boot_restore_failure_falls_to_off(paths, no_sleep, sysctl_calls, monkey
 def test_boot_restore_sdr_absent_keeps_voice_intent(paths, no_sleep, sysctl_calls, monkeypatch):
     # SDR מנותק באתחול: הכוונה (voice) נשמרת — Restart=always של היחידה ימשיך
     # לנסות, ו-health מדווח תקלה. לא נופלים ל-off.
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "voice"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "voice"})
     monkeypatch.setattr(app, "_sdr_present", lambda: False)
     monkeypatch.setattr(app, "_restart_and_verify", lambda: ("נתקע", None, True))
     app._boot_restore()
-    assert app.load_state()["app_mode"] == "voice"
+    assert appstate.load_state()["app_mode"] == "voice"
 
 
 @pytest.mark.parametrize("mode,svc_attr,freqs_key,freqs", [
@@ -144,7 +145,7 @@ def test_boot_restore_sdr_absent_keeps_data_mode_intent_then_recovers(
     """⚠ רגרסיה: רק voice שמר על הכוונה כשה-SDR חסר באתחול. ACARS/VDL2 נפלו
     ל-off — ונשארו שם גם אחרי חיבור ה-SDR, כי _mode_reconcile_once לא נוגע
     ב-off. עכשיו: הכוונה נשמרת, וה-reconcile מחזיר את המצב כשה-SDR מופיע."""
-    app.save_state({**app.DEFAULT_STATE, "app_mode": mode, freqs_key: freqs})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": mode, freqs_key: freqs})
     present = {"v": False}
     monkeypatch.setattr(app, "_sdr_present", lambda: present["v"])
     # כל עוד ה-SDR חסר — הכניסה נכשלת (השירות לא עולה)
@@ -152,7 +153,7 @@ def test_boot_restore_sdr_absent_keeps_data_mode_intent_then_recovers(
                         lambda svc: present["v"] and ("restart", svc) in sysctl_calls[cut:])
     cut = 0
     app._boot_restore()
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["app_mode"] == mode                      # לא נפל ל-off
 
     app._mode_reconcile_once()                         # SDR עדיין חסר => לא נוגעים
@@ -163,24 +164,24 @@ def test_boot_restore_sdr_absent_keeps_data_mode_intent_then_recovers(
     present["v"] = True                                # חיברו את ה-SDR
     app._mode_reconcile_once()
     assert ("restart", getattr(app, svc_attr)) in sysctl_calls[cut:]
-    assert app.load_state()["app_mode"] == mode
+    assert appstate.load_state()["app_mode"] == mode
 
 
 def test_boot_restore_defers_to_user_lock(paths, no_sleep, sysctl_calls):
     # המשתמש כבר התחיל מעבר מצב מה-UI (TUNE_LOCK תפוס) => השחזור מוותר בשקט
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "acars"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "acars"})
     assert app.TUNE_LOCK.acquire(blocking=False)
     try:
         app._boot_restore()
         assert sysctl_calls == []
-        assert app.load_state()["app_mode"] == "acars"
+        assert appstate.load_state()["app_mode"] == "acars"
     finally:
         app.TUNE_LOCK.release()
 
 
 def test_boot_restore_never_raises(paths, monkeypatch):
     # חוזה הבטיחות: כל חריגה נבלעת — _boot_restore לעולם לא מפיל את שרת הווב
-    monkeypatch.setattr(app, "load_state", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(appstate, "load_state", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
     app._boot_restore()          # לא זורק
 
 
@@ -189,16 +190,16 @@ def test_boot_restore_state_changed_while_waiting_for_sdr(paths, no_sleep, sysct
     # BOOT_SDR_WAIT_SEC שניות). אם המשתמש הספיק לבחור מצב אחר מה-UI *ואותה
     # בחירה כבר הסתיימה* (הנעילה שוב פנויה) — השחזור חייב לוותר, לא לדרוס אותה
     # עם ה-state הישן שנקרא לפני ההמתנה.
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "voice", "freq": 121.5})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "voice", "freq": 121.5})
 
     def sdr_present_and_switch():
         # מדמה שהמשתמש עבר ל-acars מה-UI *בזמן* שה-boot restore חיכה ל-SDR
-        app.save_state({**app.DEFAULT_STATE, "app_mode": "acars", "acars_freqs": ["131.550"]})
+        appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "acars", "acars_freqs": ["131.550"]})
         return True
     monkeypatch.setattr(app, "_sdr_present", sdr_present_and_switch)
     app._boot_restore()
     assert sysctl_calls == []                        # לא נגע בכוונה הישנה (voice) בכלל
-    assert app.load_state()["app_mode"] == "acars"    # הבחירה הטרייה של המשתמש נשמרת
+    assert appstate.load_state()["app_mode"] == "acars"    # הבחירה הטרייה של המשתמש נשמרת
 
 
 # --- _mode_reconcile_once: התאוששות מקריסת sdrplay שלא הופצה לצרכן ------------
@@ -206,15 +207,15 @@ def test_boot_restore_state_changed_while_waiting_for_sdr(paths, no_sleep, sysct
 def test_mode_reconcile_reenters_when_consumer_dead(paths, sysctl_calls, monkeypatch):
     """המצב השמור voice, אבל אף צרכן לא רץ (סימולציית קריסת sdrplay שלא
     הופצה) — הבדיקה נכנסת מחדש."""
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "acars", "acars_freqs": ["131.550"]})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "acars", "acars_freqs": ["131.550"]})
     monkeypatch.setattr(app, "_is_active", lambda svc: ("restart", svc) in sysctl_calls)
     app._mode_reconcile_once()
     assert ("restart", app.ACARS_SERVICE) in sysctl_calls
-    assert app.load_state()["app_mode"] == "acars"    # המצב השמור לא השתנה — רק נכנס בפועל
+    assert appstate.load_state()["app_mode"] == "acars"    # המצב השמור לא השתנה — רק נכנס בפועל
 
 
 def test_mode_reconcile_noop_when_consumer_already_alive(paths, sysctl_calls, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "voice"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "voice"})
     monkeypatch.setattr(app, "_live_mode", lambda: "voice")   # כבר רץ
     app._mode_reconcile_once()
     assert sysctl_calls == []                          # לא ניגע בכלום — אין תקלה
@@ -224,13 +225,13 @@ def test_mode_reconcile_skips_off_scan_satcom(paths, sysctl_calls, monkeypatch):
     """off/scan/satcom לא בטיפול הפוליסה הזו — scan יש לו thread ייעודי משלו,
     ו-satcom לא משוחזר אוטומטית בכוונה (בטיחות bias-T, ר' §12)."""
     for mode in ("off", "scan", "satcom"):
-        app.save_state({**app.DEFAULT_STATE, "app_mode": mode})
+        appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": mode})
         app._mode_reconcile_once()
     assert sysctl_calls == []
 
 
 def test_mode_reconcile_skips_when_sdr_absent(paths, sysctl_calls, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "vdl2", "vdl2_freqs": ["136.975"]})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "vdl2", "vdl2_freqs": ["136.975"]})
     monkeypatch.setattr(app, "_sdr_present", lambda: False)
     app._mode_reconcile_once()
     assert sysctl_calls == []                          # udev יטפל כשה-SDR יחזור, לא אנחנו
@@ -238,7 +239,7 @@ def test_mode_reconcile_skips_when_sdr_absent(paths, sysctl_calls, monkeypatch):
 
 def test_mode_reconcile_defers_to_concurrent_operation(paths, sysctl_calls):
     """TUNE_LOCK תפוס (המשתמש כרגע עושה משהו אחר) => לא מתחרים, מוותר בשקט."""
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "voice"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "voice"})
     assert app.TUNE_LOCK.acquire(blocking=False)
     try:
         app._mode_reconcile_once()

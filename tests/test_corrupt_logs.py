@@ -22,6 +22,7 @@ import json
 import pytest
 
 import app
+import appstate  # noqa: E402
 import recordings  # noqa: E402
 import storage
 
@@ -116,8 +117,8 @@ def test_parse_stats_survives_unparsable_value(bad):
 
 def test_api_metrics_survives_torn_stats_file(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "STATS_PATH", tmp_path / "stats.txt")
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
-    app.save_state({**app.DEFAULT_STATE, "freq": 132.5, "app_mode": "voice"})
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
+    appstate.save_state({**appstate.DEFAULT_STATE, "freq": 132.5, "app_mode": "voice"})
     app.STATS_PATH.write_text('channel_dbfs_noise_level{freq="132.500"} .\n')
     r = app.app.test_client().get("/api/metrics")
     assert r.status_code == 200

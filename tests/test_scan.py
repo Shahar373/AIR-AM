@@ -8,13 +8,14 @@ import types
 import pytest
 
 import app
+import appstate  # noqa: E402
 from helpers import ok_proc as _ok
 
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "airband.conf")
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "ACARS_ENV_PATH", tmp_path / "acars.env")
     monkeypatch.setattr(app, "VDL2_ENV_PATH", tmp_path / "vdl2.env")
     return tmp_path
@@ -125,8 +126,8 @@ def test_api_mode_enter_scan_starts_leg0_and_thread(client, paths, no_sleep, mon
     j = r.get_json()
     assert r.status_code == 200 and j["ok"] and j["app_mode"] == "scan"
     assert j["scan_plan"] == [ACARS_LEG, VDL2_LEG]
-    assert app.load_state()["app_mode"] == "scan"
-    assert app.load_state()["scan_plan"] == [ACARS_LEG, VDL2_LEG]
+    assert appstate.load_state()["app_mode"] == "scan"
+    assert appstate.load_state()["scan_plan"] == [ACARS_LEG, VDL2_LEG]
     # רגל 0 (acars) הוכנסה סינכרונית — כמו שאר ה-_enter_* (משוב מיידי)
     assert ("restart", app.ACARS_SERVICE) in calls
     # thread הסבב רץ ברקע לשאר הלוח
@@ -137,7 +138,7 @@ def test_api_mode_enter_scan_starts_leg0_and_thread(client, paths, no_sleep, mon
 
 
 def test_api_mode_enter_scan_leg0_failure_falls_to_off(client, paths, no_sleep, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "acars"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "acars"})
     monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
     monkeypatch.setattr(app, "_is_active", lambda svc: False)   # אף שירות לא עולה => כשל
     r = client.post("/api/mode", json={"mode": "scan", "plan": [ACARS_LEG]})
@@ -145,14 +146,14 @@ def test_api_mode_enter_scan_leg0_failure_falls_to_off(client, paths, no_sleep, 
     body = r.get_json()
     assert body["app_mode"] == "off" and body["state"]["app_mode"] == "off"
     assert body["state"]["prev_mode"] == "acars"
-    assert app.load_state()["app_mode"] == "off"
+    assert appstate.load_state()["app_mode"] == "off"
     assert app._scan_thread is None            # לא נשאר thread תלוי אחרי כשל
 
 
 def test_api_mode_scan_rejects_invalid_plan(client, paths):
     r = client.post("/api/mode", json={"mode": "scan", "plan": []})
     assert r.status_code == 400
-    assert app.load_state().get("app_mode") != "scan"
+    assert appstate.load_state().get("app_mode") != "scan"
 
 
 def test_api_mode_scan_rejects_satcom_leg(client, paths, monkeypatch):
@@ -165,12 +166,12 @@ def test_api_mode_scan_rejects_satcom_leg(client, paths, monkeypatch):
     r = client.post("/api/mode", json={"mode": "scan",
                                        "plan": [ACARS_LEG, {"mode": "satcom", "dwell_sec": 60}]})
     assert r.status_code == 400
-    assert app.load_state().get("app_mode") != "scan"
+    assert appstate.load_state().get("app_mode") != "scan"
     assert calls == []
 
 
 def test_api_mode_scan_uses_saved_plan_when_none_supplied(client, paths, no_sleep, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "off", "scan_plan": [VDL2_LEG]})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "off", "scan_plan": [VDL2_LEG]})
     monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
     monkeypatch.setattr(app, "_is_active", lambda svc: True)
     r = client.post("/api/mode", json={"mode": "scan"})
@@ -220,7 +221,7 @@ def test_api_health_scan_ok_reflects_live_consumer(client, paths, no_sleep, monk
 # --- _scan_loop: התנהגות פנימית של הסבב --------------------------------------
 
 def test_scan_loop_all_legs_fail_falls_to_off(paths, no_sleep, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "scan"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "scan"})
     monkeypatch.setattr(app, "_scan_enter_leg", lambda leg: ("נכשל", None))
     # ⚠ מפורש: SDR נוכח => כשל אמיתי של הלוח. בלי זה הבדיקה הייתה תלויה בכך
     # ש-lsusb חסר בסביבה (‏_sdr_present מניח אז True) — ועם SDR חסר הסבב ממתין.
@@ -230,7 +231,7 @@ def test_scan_loop_all_legs_fail_falls_to_off(paths, no_sleep, monkeypatch):
     stop_evt = threading.Event()
     plan = [ACARS_LEG, VDL2_LEG]
     app._scan_loop(stop_evt, plan, 0, 0)      # קורא ישירות (לא thread) — חסום עד שמסיים
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["app_mode"] == "off" and st["prev_mode"] == "scan"
 
 
@@ -290,7 +291,7 @@ def test_scan_activate_leg0_failure_no_thread(paths, no_sleep, monkeypatch):
 # --- _boot_restore עם scan ----------------------------------------------------
 
 def test_boot_restore_scan_enters_leg0(paths, no_sleep, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [ACARS_LEG, VDL2_LEG]})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [ACARS_LEG, VDL2_LEG]})
     calls = []
     monkeypatch.setattr(app, "_sysctl",
                         lambda action, svc, timeout=45: calls.append((action, svc)) or _ok())
@@ -298,26 +299,26 @@ def test_boot_restore_scan_enters_leg0(paths, no_sleep, monkeypatch):
     monkeypatch.setattr(app, "_is_active", lambda svc: ("restart", svc) in calls)
     app._boot_restore()
     assert ("restart", app.ACARS_SERVICE) in calls
-    assert app.load_state()["app_mode"] == "scan"
+    assert appstate.load_state()["app_mode"] == "scan"
     assert app._scan_thread is not None and app._scan_thread.is_alive()
 
 
 def test_boot_restore_scan_invalid_plan_falls_to_off(paths, no_sleep, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "scan", "scan_plan": []})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "scan", "scan_plan": []})
     monkeypatch.setattr(app, "_sdr_present", lambda: True)
     monkeypatch.setattr(app, "_is_active", lambda svc: False)
     app._boot_restore()
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["app_mode"] == "off" and st["prev_mode"] == "scan"
 
 
 def test_boot_restore_scan_leg0_failure_falls_to_off(paths, no_sleep, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [ACARS_LEG]})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [ACARS_LEG]})
     monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
     monkeypatch.setattr(app, "_sdr_present", lambda: True)
     monkeypatch.setattr(app, "_is_active", lambda svc: False)
     app._boot_restore()
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["app_mode"] == "off" and st["prev_mode"] == "scan"
 
 
@@ -454,7 +455,7 @@ def test_scan_loop_skips_leg_outside_window(paths, no_sleep):
 
 def test_api_state_scan_waiting_for_window_not_fault(client, paths, no_sleep, monkeypatch):
     leg = {"mode": "acars", "dwell_sec": 60, "active_from": "02:00", "active_to": "03:00"}
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [leg]})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [leg]})
     monkeypatch.setattr(app, "_is_active", lambda svc: False)   # אין צרכן חי
     monkeypatch.setattr(app, "_scan_thread_alive", lambda: True)  # ה-thread ממתין לחלון
     _at(monkeypatch, 12, 0)                                    # מחוץ לחלון
@@ -464,7 +465,7 @@ def test_api_state_scan_waiting_for_window_not_fault(client, paths, no_sleep, mo
 
 def test_api_health_scan_waiting_for_window_not_fault(client, paths, no_sleep, monkeypatch):
     leg = {"mode": "acars", "dwell_sec": 60, "active_from": "02:00", "active_to": "03:00"}
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [leg]})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [leg]})
     _at(monkeypatch, 12, 0)
 
     def fake_run(cmd, **kw):
@@ -479,7 +480,7 @@ def test_scan_dead_thread_is_fault(client, paths, no_sleep, monkeypatch):
     """thread סריקה שמת (חריגה) לא מסובב יותר את הרגלים — גם אם הצרכן של הרגל
     האחרונה עדיין רץ, זו תקלה ולא "סורק תקין"."""
     leg = {"mode": "acars", "dwell_sec": 60}
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [leg, leg]})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [leg, leg]})
     monkeypatch.setattr(app, "_is_active", lambda svc: svc == app.ACARS_SERVICE)
     monkeypatch.setattr(app, "_scan_thread_alive", lambda: False)
     assert client.get("/api/state").get_json()["mode_ok"] is False
@@ -590,7 +591,7 @@ def test_api_mode_invalid_new_plan_does_not_stop_running_scan(client, paths, no_
     assert r.status_code == 400
     # הסבב הקודם (התקין) לא נגע בו כלל — אותו thread עדיין רץ
     assert app._scan_thread is thread_before and app._scan_thread.is_alive()
-    assert app.load_state()["app_mode"] == "scan"
+    assert appstate.load_state()["app_mode"] == "scan"
 
 
 def test_api_mode_tune_lock_busy_does_not_stop_running_scan(client, paths, monkeypatch):
@@ -611,7 +612,7 @@ def test_api_mode_tune_lock_busy_does_not_stop_running_scan(client, paths, monke
     finally:
         app.TUNE_LOCK.release()
     assert app._scan_thread is thread_before and app._scan_thread.is_alive()
-    assert app.load_state()["app_mode"] == "scan"
+    assert appstate.load_state()["app_mode"] == "scan"
 
 
 # --- באג: active_from==active_to אמור להיות "תמיד פעיל", לא "אף פעם" -----------
@@ -650,7 +651,7 @@ def test_api_tune_stops_running_scan(client, paths, monkeypatch):
     r = client.post("/api/tune", json={"freq": 134.6})
     assert r.status_code == 200
     assert app._scan_thread is None
-    assert app.load_state()["app_mode"] == "voice"
+    assert appstate.load_state()["app_mode"] == "voice"
 
 
 def test_api_mode_voice_tune_lock_busy_does_not_stop_running_scan(client, paths, monkeypatch):
@@ -671,7 +672,7 @@ def test_api_mode_voice_tune_lock_busy_does_not_stop_running_scan(client, paths,
     finally:
         app.TUNE_LOCK.release()
     assert app._scan_thread is thread_before and app._scan_thread.is_alive()
-    assert app.load_state()["app_mode"] == "scan"
+    assert appstate.load_state()["app_mode"] == "scan"
 
 
 # --- באג: _scan_activate כפולה (למשל _boot_restore אחרי שהמשתמש כבר התחיל
@@ -738,7 +739,7 @@ def test_scan_loop_waits_for_sdr_instead_of_falling_to_off(paths, monkeypatch):
     ⚠ ובזמן ההמתנה **לא מנסים להיכנס בכלל**: כל ניסיון חוסם עד ~45ש' תחת
     TUNE_LOCK, ומעבר-מצב מה-UI היה מקבל 409 רוב הזמן.
     סנכרון על Event — בלי sleep (ר' test_scan_loop_skips_failed_leg_and_recovers)."""
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "scan"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "scan"})
     checks = []
     attempts_while_absent = []
     entered = threading.Event()
@@ -765,13 +766,13 @@ def test_scan_loop_waits_for_sdr_instead_of_falling_to_off(paths, monkeypatch):
         "הסבב לא חזר לרגל אחרי שה-SDR חובר"
     assert attempts_while_absent == []                  # לא החזיק את TUNE_LOCK לחינם
     assert ("stop", app.ACARS_SERVICE) in calls          # הצרכן שרץ נעצר
-    assert app.load_state()["app_mode"] == "scan"       # לא נכתב off בשום שלב
+    assert appstate.load_state()["app_mode"] == "scan"       # לא נכתב off בשום שלב
 
 
 def test_scan_loop_sdr_vanishing_mid_round_is_not_a_plan_failure(paths, monkeypatch):
     """המרוץ: ה-SDR היה בבדיקה שלפני כל רגל, אבל נעלם בזמן הכניסה — כל הרגלים
     נכשלו. אם הוא חסר ברגע ספירת הכשלונות, זה ניתוק ולא כשל של הלוח."""
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "scan"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "scan"})
     script = iter([True, True, False, False])           # 2 רגלים, ואז נעלם
     entered = threading.Event()
     tries = []
@@ -789,18 +790,18 @@ def test_scan_loop_sdr_vanishing_mid_round_is_not_a_plan_failure(paths, monkeypa
     monkeypatch.setattr(app, "_is_active", lambda svc: False)
     monkeypatch.setattr(app, "SCAN_WINDOW_RECHECK_SEC", 0.01)
     assert _run_loop_until(threading.Event(), [ACARS_LEG, VDL2_LEG], 0, False, entered)
-    assert app.load_state()["app_mode"] == "scan"
+    assert appstate.load_state()["app_mode"] == "scan"
 
 
 def test_boot_restore_scan_sdr_absent_waits_and_reports_fault(client, paths, no_sleep, monkeypatch):
     """אתחול בלי SDR: הסבב מתחיל במצב המתנה (לא off), ו-health מדווח תקלה —
     רגל אמורה לרוץ ואף צרכן לא פעיל. זה לא "ממתין לחלון" (שאינו תקלה)."""
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [ACARS_LEG]})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "scan", "scan_plan": [ACARS_LEG]})
     monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
     monkeypatch.setattr(app, "_sdr_present", lambda: False)
     monkeypatch.setattr(app, "_is_active", lambda svc: False)
     app._boot_restore()
-    assert app.load_state()["app_mode"] == "scan"
+    assert appstate.load_state()["app_mode"] == "scan"
     assert app._scan_thread is not None and app._scan_thread.is_alive()
     assert app._scan_status["idx"] == -1 and app._scan_status["leg"] is None
     # ה-UI מבדיל בין "ממתין ל-SDR" (תקלה) ל"ממתין לחלון" (לא תקלה) לפי השדה הזה
@@ -817,11 +818,11 @@ def test_boot_restore_scan_sdr_absent_waits_and_reports_fault(client, paths, no_
 def test_api_mode_scan_without_sdr_still_errors_immediately(client, paths, no_sleep, monkeypatch):
     """ההמתנה ל-SDR היא רק לשחזור באתחול. כניסה ידנית מה-UI עם SDR מנותק
     ממשיכה לקבל שגיאה מיידית — המשתמש מול המסך וצריך לדעת עכשיו."""
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "off"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "off"})
     monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
     monkeypatch.setattr(app, "_sdr_present", lambda: False)
     monkeypatch.setattr(app, "_is_active", lambda svc: False)
     r = client.post("/api/mode", json={"mode": "scan", "plan": [ACARS_LEG]})
     assert r.status_code == 500
-    assert app.load_state()["app_mode"] == "off"
+    assert appstate.load_state()["app_mode"] == "off"
     assert app._scan_thread is None

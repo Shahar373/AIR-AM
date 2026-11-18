@@ -12,6 +12,7 @@ import time
 import pytest
 
 import app
+import appstate  # noqa: E402
 from dual_env import A, B, ORIGIN, _params, _roles, env, env2  # noqa: F401  (fixtures נטענים לפי שם)
 
 
@@ -33,7 +34,7 @@ def _only_one_receiver(monkeypatch, present_serial):
 
 def test_reconcile_skips_unplugged_secondary_without_lock(env, monkeypatch):
     _roles()
-    app._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
+    appstate._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
     env.active = {"rtl_airband"}
     _only_one_receiver(monkeypatch, B)                    # המשני (A) לא מחובר
     calls = []
@@ -46,7 +47,7 @@ def test_reconcile_skips_unplugged_secondary_without_lock(env, monkeypatch):
 
 def test_reconcile_leaves_activating_secondary_alone(env, monkeypatch):
     _roles()
-    app._merge_state({"app_mode": "voice2"})
+    appstate._merge_state({"app_mode": "voice2"})
     env.active = {"rtl_airband"}
     _activating(monkeypatch, env, {"rtl_airband2"})
     env.log.clear()
@@ -56,7 +57,7 @@ def test_reconcile_leaves_activating_secondary_alone(env, monkeypatch):
 
 def test_reconcile_still_restarts_dead_present_secondary(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
+    appstate._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
     env.active = {"rtl_airband"}
     app._mode_reconcile_once()
     assert env.active == {"rtl_airband", "airam-acars2"}
@@ -66,18 +67,18 @@ def test_reconcile_still_restarts_dead_present_secondary(env):
 
 def test_tune_keeps_composite_while_secondary_activating(env, monkeypatch):
     _roles()
-    app._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
+    appstate._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
     env.active = {"rtl_airband"}
     _activating(monkeypatch, env, {"airam-acars2"})
     r = app.app.test_client().post("/api/tune", json={"freq": 120.5}, headers=ORIGIN)
     assert r.status_code == 200 and r.get_json()["app_mode"] == "voice_acars"
-    assert app.load_state()["app_mode"] == "voice_acars"
+    assert appstate.load_state()["app_mode"] == "voice_acars"
     assert ("stop", "airam-acars2") not in [(e, u) for e, u, _t in env.log]
 
 
 def test_mode_voice_stops_activating_secondary(env):
     _roles()
-    app._merge_state({"app_mode": "voice2"})
+    appstate._merge_state({"app_mode": "voice2"})
     env.active = {"rtl_airband"}                          # rtl_airband2 ב-activating (לא active)
     r = app.app.test_client().post("/api/mode", json={"mode": "voice"}, headers=ORIGIN)
     assert r.status_code == 200
@@ -89,17 +90,17 @@ def test_mode_voice_stops_activating_secondary(env):
 
 def test_boot_secondary_missing_keeps_voice_and_intent(env, monkeypatch):
     _roles()
-    app._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
+    appstate._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
     env.fail = {"airam-acars2"}
     monkeypatch.setattr(app, "_config_stale", lambda: False)
     app._boot_restore()
-    assert app.load_state()["app_mode"] == "voice_acars"
+    assert appstate.load_state()["app_mode"] == "voice_acars"
     assert "rtl_airband" in env.active                    # הקול לא נהרס
 
 
 def test_tune_with_pinned_primary_missing_keeps_intent(env, monkeypatch):
     _roles()
-    app._merge_state({"app_mode": "voice", "freq": 132.5})
+    appstate._merge_state({"app_mode": "voice", "freq": 132.5})
     _only_one_receiver(monkeypatch, A)                    # רק המשני מחובר
     monkeypatch.setattr(app, "_restart_and_verify",
                         lambda: ("restart failed", "", not app._role_present("primary")))
@@ -107,7 +108,7 @@ def test_tune_with_pinned_primary_missing_keeps_intent(env, monkeypatch):
     monkeypatch.setattr(app, "_rollback", lambda prev: rolled.append(1) or False)
     r = app.app.test_client().post("/api/tune", json={"freq": 120.5}, headers=ORIGIN)
     assert r.status_code == 500
-    assert app.load_state()["app_mode"] == "voice"        # לא off
+    assert appstate.load_state()["app_mode"] == "voice"        # לא off
     assert not rolled                                     # בלי רולבק שנדון לאותו כשל
 
 
@@ -128,7 +129,7 @@ def test_role_present_logic(env, monkeypatch):
 
 def test_reconcile_primary_missing_keeps_secondary(env, monkeypatch):
     _roles()
-    app._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
+    appstate._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
     env.active = {"airam-acars2"}
     _only_one_receiver(monkeypatch, A)
     env.log.clear()
@@ -138,7 +139,7 @@ def test_reconcile_primary_missing_keeps_secondary(env, monkeypatch):
 
 def test_reconcile_primary_dead_present_restarts_only_primary(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
+    appstate._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
     env.active = {"airam-acars2"}
     env.log.clear()
     app._mode_reconcile_once()
@@ -150,30 +151,30 @@ def test_reconcile_primary_dead_present_restarts_only_primary(env):
 
 def test_tune_primary_to_voice2_freq_rejected(env2):
     _roles()
-    app._merge_state({"app_mode": "voice2", "voice2_freq": 121.4, "freq": 132.5})
+    appstate._merge_state({"app_mode": "voice2", "voice2_freq": 121.4, "freq": 132.5})
     env2.active = {"rtl_airband", "rtl_airband2"}
     r = app.app.test_client().post("/api/tune", json={"freq": 121.4}, headers=ORIGIN)
     assert r.status_code == 400
-    assert app.load_state()["freq"] == 132.5
+    assert appstate.load_state()["freq"] == 132.5
 
 
 # --- 7. החלפת תפקידים באמצע מצב כפול -------------------------------------------
 
 def test_roles_change_refused_in_composite(env):
     _roles(B, A)
-    app._merge_state({"app_mode": "voice_acars"})
+    appstate._merge_state({"app_mode": "voice_acars"})
     env.active = {"rtl_airband", "airam-acars2"}
     r = app.app.test_client().post("/api/sdr/roles", json={"primary": A, "secondary": B}, headers=ORIGIN)
     assert r.status_code == 409
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["sdr_primary"] == B and st["sdr_secondary"] == A
 
 
 def test_roles_change_allowed_in_single_mode(env):
     _roles(B, None)
-    app._merge_state({"app_mode": "voice"})
+    appstate._merge_state({"app_mode": "voice"})
     r = app.app.test_client().post("/api/sdr/roles", json={"secondary": A}, headers=ORIGIN)
-    assert r.status_code == 200 and app.load_state()["sdr_secondary"] == A
+    assert r.status_code == 200 and appstate.load_state()["sdr_secondary"] == A
 
 
 def test_roles_change_409_while_tune_lock_held(env):
@@ -189,7 +190,7 @@ def test_roles_change_409_while_tune_lock_held(env):
 
 def test_start_secondary_refuses_without_roles(env2):
     _roles(B, None)
-    err, _d = app._start_secondary("voice2", app.load_state())
+    err, _d = app._start_secondary("voice2", appstate.load_state())
     assert err and not env2.active
     assert not app.VOICE2_CONFIG_PATH.exists()            # שום קונפיג "כל מקלט"
 
@@ -198,7 +199,7 @@ def test_start_secondary_refuses_without_roles(env2):
 
 def test_mode_voice2_secondary_only_failure_restores_config(env2, monkeypatch):
     _roles()
-    app._merge_state({"app_mode": "voice2", "voice2_freq": 121.4, "freq": 132.5})
+    appstate._merge_state({"app_mode": "voice2", "voice2_freq": 121.4, "freq": 132.5})
     env2.active = {"rtl_airband", "rtl_airband2"}
     real = env2.sysctl
     n = {"restart": 0}
@@ -214,12 +215,12 @@ def test_mode_voice2_secondary_only_failure_restores_config(env2, monkeypatch):
     r = app.app.test_client().post("/api/mode", json={"mode": "voice2", "freq2": 119.1}, headers=ORIGIN)
     assert r.status_code == 500 and "rtl_airband" in env2.active
     assert "freq = 121.4000" in app.VOICE2_CONFIG_PATH.read_text()
-    assert app.load_state()["voice2_freq"] == 121.4
+    assert appstate.load_state()["voice2_freq"] == 121.4
 
 
 def test_mode_voice2_same_params_is_noop(env2):
     _roles()
-    app._merge_state({"app_mode": "voice2", "voice2_freq": 121.4, "voice2_mod": "am"})
+    appstate._merge_state({"app_mode": "voice2", "voice2_freq": 121.4, "voice2_mod": "am"})
     env2.active = {"rtl_airband", "rtl_airband2"}
     env2.log.clear()
     r = app.app.test_client().post("/api/mode", json={"mode": "voice2"}, headers=ORIGIN)
@@ -228,7 +229,7 @@ def test_mode_voice2_same_params_is_noop(env2):
 
 def test_mode_voice_acars_same_bank_is_noop(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
+    appstate._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
     env.active = {"rtl_airband", "airam-acars2"}
     env.log.clear()
     r = app.app.test_client().post("/api/mode", json={"mode": "voice_acars", "freqs": ["131.550"]},
@@ -252,7 +253,7 @@ def test_stagger_uses_new_process_start_time(env, monkeypatch):
 
 def test_boot_restore_with_secondary_activating_is_noop(env, monkeypatch):
     _roles()
-    app._merge_state({"app_mode": "voice2"})
+    appstate._merge_state({"app_mode": "voice2"})
     env.active = {"rtl_airband"}
     _activating(monkeypatch, env, {"rtl_airband2"})
     monkeypatch.setattr(app, "_config_stale", lambda: False)

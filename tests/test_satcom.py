@@ -17,6 +17,7 @@ import types
 import pytest
 
 import app
+import appstate  # noqa: E402
 import config  # noqa: E402
 import acars_parse
 from helpers import ok_proc as _ok
@@ -25,7 +26,7 @@ from helpers import ok_proc as _ok
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "airband.conf")
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "ACARS_ENV_PATH", tmp_path / "acars.env")
     monkeypatch.setattr(app, "VDL2_ENV_PATH", tmp_path / "vdl2.env")
     monkeypatch.setattr(app, "SATCOM_ENV_PATH", tmp_path / "satcom.env")
@@ -329,7 +330,7 @@ def test_api_mode_enter_satcom(client, paths, no_sleep, monkeypatch):
     j = r.get_json()
     assert r.status_code == 200 and j["ok"] and j["app_mode"] == "satcom"
     assert j["satcom_freqs"] == list(config.SATCOM_FREQS_DEFAULT)
-    assert app.load_state()["app_mode"] == "satcom"
+    assert appstate.load_state()["app_mode"] == "satcom"
     # שחרר את *שלושת* הצרכנים האחרים והרים את inmarsat-sniffer
     assert ("stop", "rtl_airband") in calls
     assert ("stop", app.ACARS_SERVICE) in calls
@@ -367,7 +368,7 @@ def test_enter_satcom_reset_failed_is_best_effort(paths, no_sleep, monkeypatch):
 
 def test_api_mode_enter_satcom_failure_falls_to_off(client, paths, no_sleep, monkeypatch):
     # אין fallback לקול: כישלון כניסה למצב נופל ל-off (standby) — המצבים שווי-מעמד
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "vdl2"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "vdl2"})
     monkeypatch.setattr(app, "_sysctl",
                         lambda action, svc, timeout=45: _ok())
     monkeypatch.setattr(app, "_is_active", lambda svc: False)  # inmarsat-sniffer לא עלה => כישלון
@@ -376,7 +377,7 @@ def test_api_mode_enter_satcom_failure_falls_to_off(client, paths, no_sleep, mon
     body = r.get_json()
     assert body["app_mode"] == "off" and body["state"]["app_mode"] == "off"
     assert body["state"]["prev_mode"] == "vdl2"
-    assert app.load_state()["app_mode"] == "off"
+    assert appstate.load_state()["app_mode"] == "off"
 
 
 def test_api_mode_satcom_rejects_unknown_satellite(client, paths, monkeypatch):
@@ -393,7 +394,7 @@ def test_api_mode_satcom_custom_satellite_saved(client, paths, no_sleep, monkeyp
     monkeypatch.setattr(app, "_is_active", lambda svc: True)
     r = client.post("/api/mode", json={"mode": "satcom", "freqs": ["4F3"]})
     assert r.status_code == 200
-    assert app.load_state()["satcom_freqs"] == ["4F3"]
+    assert appstate.load_state()["satcom_freqs"] == ["4F3"]
     # כניסה חוזרת בלי freqs => משתמש בלוויין השמור
     r = client.post("/api/mode", json={"mode": "satcom"})
     assert r.get_json()["satcom_freqs"] == ["4F3"]
@@ -410,7 +411,7 @@ def test_api_mode_satcom_default_bias_tee_is_on(client, paths, no_sleep, monkeyp
     assert r.status_code == 200
     assert r.get_json()["satcom_bias_tee"] is True
     assert "SATCOM_BIAS_TEE=-B" in app.SATCOM_ENV_PATH.read_text()
-    assert app.load_state()["satcom_bias_tee"] is True
+    assert appstate.load_state()["satcom_bias_tee"] is True
 
 
 def _env_lines(path):
@@ -426,7 +427,7 @@ def test_api_mode_satcom_bias_tee_false_writes_empty_flag(client, paths, no_slee
     assert r.status_code == 200
     assert r.get_json()["satcom_bias_tee"] is False
     assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_BIAS_TEE"] == ""
-    assert app.load_state()["satcom_bias_tee"] is False
+    assert appstate.load_state()["satcom_bias_tee"] is False
 
 
 def test_api_mode_satcom_bias_tee_remembered_when_omitted(client, paths, no_sleep, monkeypatch):
@@ -463,7 +464,7 @@ def test_api_mode_satcom_default_skip_c_is_on(client, paths, no_sleep, monkeypat
     assert r.status_code == 200
     assert r.get_json()["satcom_skip_c"] is True
     assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SKIP_C"] == "--skip-c-channel"
-    assert app.load_state()["satcom_skip_c"] is True
+    assert appstate.load_state()["satcom_skip_c"] is True
 
 
 def test_api_mode_satcom_skip_c_false_decodes_all_channels(client, paths, no_sleep, monkeypatch):
@@ -473,7 +474,7 @@ def test_api_mode_satcom_skip_c_false_decodes_all_channels(client, paths, no_sle
     assert r.status_code == 200
     assert r.get_json()["satcom_skip_c"] is False
     assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SKIP_C"] == ""
-    assert app.load_state()["satcom_skip_c"] is False
+    assert appstate.load_state()["satcom_skip_c"] is False
 
 
 def test_api_mode_satcom_skip_c_remembered_when_omitted(client, paths, no_sleep, monkeypatch):
@@ -726,7 +727,7 @@ def test_api_mode_satcom_default_spectrum_is_on(client, paths, no_sleep, monkeyp
     r = client.post("/api/mode", json={"mode": "satcom"})
     assert r.status_code == 200 and r.get_json()["satcom_spectrum"] is True
     assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_SPECTRUM"] == "--spectrum"
-    assert app.load_state()["satcom_spectrum"] is True
+    assert appstate.load_state()["satcom_spectrum"] is True
 
 
 def test_api_mode_satcom_spectrum_false_and_remembered(client, paths, no_sleep, monkeypatch):
@@ -904,7 +905,7 @@ def test_api_mode_satcom_default_gain_is_agc(client, paths, no_sleep, monkeypatc
     r = client.post("/api/mode", json={"mode": "satcom"})
     assert r.status_code == 200 and r.get_json()["satcom_gain"] is None
     assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == ""
-    assert app.load_state()["satcom_gain"] is None
+    assert appstate.load_state()["satcom_gain"] is None
 
 
 def test_api_mode_satcom_manual_gain_writes_sdrplay_flag(client, paths, no_sleep, monkeypatch):
@@ -916,7 +917,7 @@ def test_api_mode_satcom_manual_gain_writes_sdrplay_flag(client, paths, no_sleep
     env = _env_lines(app.SATCOM_ENV_PATH)
     assert env["SATCOM_GAIN"] == "--sdrplay-gain=35"
     assert "soapy" not in env["SATCOM_GAIN"]
-    assert app.load_state()["satcom_gain"] == 35
+    assert appstate.load_state()["satcom_gain"] == 35
 
 
 def test_api_mode_satcom_gain_out_of_range_is_clamped(client, paths, no_sleep, monkeypatch):
@@ -943,11 +944,11 @@ def test_api_mode_satcom_explicit_null_gain_returns_to_agc(client, paths, no_sle
     monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
     monkeypatch.setattr(app, "_is_active", lambda svc: True)
     client.post("/api/mode", json={"mode": "satcom", "gain": 30})
-    assert app.load_state()["satcom_gain"] == 30
+    assert appstate.load_state()["satcom_gain"] == 30
     r = client.post("/api/mode", json={"mode": "satcom", "gain": None})
     assert r.get_json()["satcom_gain"] is None
     assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == ""
-    assert app.load_state()["satcom_gain"] is None
+    assert appstate.load_state()["satcom_gain"] is None
 
 
 def test_api_mode_satcom_junk_gain_keeps_saved_choice(client, paths, no_sleep, monkeypatch):

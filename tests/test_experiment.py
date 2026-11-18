@@ -13,11 +13,13 @@ import types
 import pytest
 
 import app
+import appstate  # noqa: E402
 
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
-    for name, fn in (("CONFIG_PATH", "airband.conf"), ("STATE_PATH", "state.json"),
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
+    for name, fn in (("CONFIG_PATH", "airband.conf"),
                      ("STATS_PATH", "stats.txt"), ("RFLOG_PATH", "rf_log.jsonl"),
                      ("ACARS_ENV_PATH", "acars.env"), ("VDL2_ENV_PATH", "vdl2.env"),
                      ("SATCOM_ENV_PATH", "satcom.env")):

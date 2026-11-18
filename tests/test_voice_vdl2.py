@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import app
+import appstate  # noqa: E402
 from dual_env import A, B, ORIGIN, _params, _roles, env  # noqa: F401  (fixtures נטענים לפי שם)
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,7 +46,7 @@ def test_api_mode_voice_vdl2_and_state_health(env3):
     c = app.app.test_client()
     r = c.post("/api/mode", json={"mode": "voice_vdl2", "freqs": ["136.975"]}, headers=ORIGIN)
     assert r.status_code == 200 and r.get_json()["vdl2_freqs"] == ["136.975"]
-    assert app.load_state()["app_mode"] == "voice_vdl2"
+    assert appstate.load_state()["app_mode"] == "voice_vdl2"
     s = c.get("/api/state").get_json()
     assert s["app_mode"] == "voice_vdl2" and s["mode_ok"] is True
     h = c.get("/api/health").get_json()
@@ -64,7 +65,7 @@ def test_voice_vdl2_window_and_roles_checked(env3):
 
 def test_bank_change_restarts_only_secondary(env3):
     _roles()
-    app._merge_state({"app_mode": "voice_vdl2", "vdl2_freqs": ["136.975"]})
+    appstate._merge_state({"app_mode": "voice_vdl2", "vdl2_freqs": ["136.975"]})
     env3.active |= {"rtl_airband", "airam-vdl2-2"}
     env3.log.clear()
     r = app.app.test_client().post("/api/mode", json={"mode": "voice_vdl2",
@@ -75,7 +76,7 @@ def test_bank_change_restarts_only_secondary(env3):
 
 def test_reconcile_and_boot(env3, monkeypatch):
     _roles()
-    app._merge_state({"app_mode": "voice_vdl2", "vdl2_freqs": ["136.975"]})
+    appstate._merge_state({"app_mode": "voice_vdl2", "vdl2_freqs": ["136.975"]})
     env3.active = {"rtl_airband"}
     app._mode_reconcile_once()
     assert env3.active == {"rtl_airband", "airam-vdl2-2"}

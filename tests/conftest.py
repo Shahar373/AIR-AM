@@ -30,10 +30,12 @@ _SYSTEM_PREFIXES = ("/var/", "/etc/", "/run/", "/opt/", "/usr/")
 
 
 def _app_modules():
+    """כל מודול שנטען מתוך webtune/ — גילוי אוטומטי, כדי שמודול חדש (appstate, experiment…) ייכלל בלי עריכה כאן."""
+    webtune = (Path(__file__).resolve().parent.parent / "webtune").resolve()
     mods = []
-    for name in ("app", "recordings", "storage", "acars_parse", "adsb", "xcheck", "diag"):
-        m = sys.modules.get(name)
-        if m is not None:
+    for m in list(sys.modules.values()):
+        f = getattr(m, "__file__", None)
+        if f and Path(f).resolve().parent == webtune:
             mods.append(m)
     return mods
 

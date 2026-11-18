@@ -12,6 +12,7 @@ import types
 import pytest
 
 import app
+import appstate  # noqa: E402
 import config  # noqa: E402
 import acars_parse
 from helpers import ok_proc as _ok
@@ -20,7 +21,7 @@ from helpers import ok_proc as _ok
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "airband.conf")
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "ACARS_ENV_PATH", tmp_path / "acars.env")
     monkeypatch.setattr(app, "ACARS_LOG_PATH", tmp_path / "acars.jsonl")
     return tmp_path
@@ -179,7 +180,7 @@ def test_api_mode_enter_acars(client, paths, no_sleep, monkeypatch):
     j = r.get_json()
     assert r.status_code == 200 and j["ok"] and j["app_mode"] == "acars"
     assert j["acars_freqs"] == list(config.ACARS_FREQS_DEFAULT)
-    assert app.load_state()["app_mode"] == "acars"
+    assert appstate.load_state()["app_mode"] == "acars"
     # שחרר את rtl_airband והרים את acarsdec
     assert ("stop", "rtl_airband") in calls and ("restart", app.ACARS_SERVICE) in calls
     # נכתב env תקין (בנק ברירת המחדל)
@@ -188,7 +189,7 @@ def test_api_mode_enter_acars(client, paths, no_sleep, monkeypatch):
 
 def test_api_mode_enter_acars_failure_falls_to_off(client, paths, no_sleep, monkeypatch):
     # אין fallback לקול: כישלון כניסה למצב נופל ל-off (standby) — המצבים שווי-מעמד
-    app.save_state({**app.DEFAULT_STATE, "freq": 121.5, "app_mode": "voice"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "freq": 121.5, "app_mode": "voice"})
     calls = []
     monkeypatch.setattr(app, "_sysctl",
                         lambda action, svc, timeout=45: calls.append((action, svc)) or _ok())
@@ -199,7 +200,7 @@ def test_api_mode_enter_acars_failure_falls_to_off(client, paths, no_sleep, monk
     assert body["app_mode"] == "off"                           # החוזה ל-UI: נחיתה בבית
     assert body["state"]["app_mode"] == "off"
     assert body["state"]["prev_mode"] == "voice"               # מה היה לפני הכישלון
-    assert app.load_state()["app_mode"] == "off"               # נשמר => שורד reboot
+    assert appstate.load_state()["app_mode"] == "off"               # נשמר => שורד reboot
     assert ("restart", "rtl_airband") not in calls             # שום ניסיון "לחזור לקול"
     # standby עצר את כל הצרכנים
     for svc in (app.ACARS_SERVICE, app.VDL2_SERVICE, "rtl_airband"):
@@ -216,7 +217,7 @@ def test_api_mode_failure_response_shape(client, paths, no_sleep, monkeypatch):
 
 
 def test_api_mode_voice_stops_acars_and_tunes(client, paths, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "freq": 121.5, "app_mode": "acars"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "freq": 121.5, "app_mode": "acars"})
     monkeypatch.setattr(app, "_restart_and_verify", lambda: (None, None, False))
     monkeypatch.setattr(app, "_is_active", lambda svc: True)   # acars פעיל כרגע
     calls = []
@@ -237,7 +238,7 @@ def test_api_tune_exits_acars_mode(client, paths, monkeypatch):
                         lambda action, svc, timeout=45: calls.append((action, svc)) or _ok())
     r = client.post("/api/tune", json={"freq": 134.6})
     assert r.get_json()["ok"]
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["app_mode"] == "voice" and st["freq"] == 134.6
     assert ("stop", app.ACARS_SERVICE) in calls               # כיוונון קולי עוצר ACARS
 
@@ -258,7 +259,7 @@ def test_api_state_reports_live_mode(client, paths, monkeypatch):
 def test_api_state_idle_reports_saved_intent(client, paths, monkeypatch):
     # המצב השמור אמור לרוץ אבל אף צרכן לא פעיל => מדווח את הכוונה + mode_ok=False
     # (תקלה גלויה, לא "voice" שקט כמו פעם)
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "acars"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "acars"})
     monkeypatch.setattr(app, "_is_active", lambda svc: False)
     body = client.get("/api/state").get_json()
     assert body["app_mode"] == "acars"
@@ -1529,17 +1530,17 @@ def test_api_mode_off_stops_all_consumers(client, paths, no_sleep, monkeypatch):
     assert ("stop", "rtl_airband") in calls and ("stop", app.ACARS_SERVICE) in calls
     assert ("stop", app.VDL2_SERVICE) in calls
     assert all(svc != "sdrplay" for _, svc in calls)           # sdrplay לא נגעו בו
-    assert app.load_state()["app_mode"] == "off"
+    assert appstate.load_state()["app_mode"] == "off"
 
 
 def test_api_state_reports_off(client, paths, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "off"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "off"})
     monkeypatch.setattr(app, "_is_active", lambda svc: False)   # שני הצרכנים כבויים
     assert client.get("/api/state").get_json()["app_mode"] == "off"
 
 
 def test_api_health_off_not_fault(client, paths, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "off"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "off"})
 
     def fake_run(cmd, **kw):
         svc = cmd[-1]
@@ -1552,11 +1553,11 @@ def test_api_health_off_not_fault(client, paths, monkeypatch):
 
 
 def test_api_mode_off_then_voice(client, paths, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "freq": 118.1, "app_mode": "off"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "freq": 118.1, "app_mode": "off"})
     monkeypatch.setattr(app, "_restart_and_verify", lambda: (None, None, False))
     monkeypatch.setattr(app, "_is_active", lambda svc: False)   # יוצאים מ-standby
     monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
     r = client.post("/api/mode", json={"mode": "voice"})
     j = r.get_json()
     assert r.status_code == 200 and j["ok"] and j["app_mode"] == "voice"
-    assert app.load_state()["app_mode"] == "voice"
+    assert appstate.load_state()["app_mode"] == "voice"

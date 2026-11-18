@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import app
+import appstate  # noqa: E402
 from dual_env import A, B, ORIGIN, _params, _roles, env  # noqa: F401  (fixtures נטענים לפי שם)
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -89,7 +90,7 @@ def test_api_mode_success_and_failure_paths(env):
     c = app.app.test_client()
     r = c.post("/api/mode", json={"mode": "voice_acars", "freqs": ["131.550"]}, headers=ORIGIN)
     assert r.status_code == 200, r.get_json()
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["app_mode"] == "voice_acars" and st["acars_freqs"] == ["131.550"]
     env.fail = {"airam-acars2"}
     # כבר במצב ⇒ רק המשני מאותחל (בנק אחר); כשלו לא מפיל את הקול (test_voice2: ‏secondary_only)
@@ -120,7 +121,7 @@ def test_live_mode_needs_both(env):
 
 def test_state_and_health_report_partial_as_fault(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars"})
+    appstate._merge_state({"app_mode": "voice_acars"})
     c = app.app.test_client()
     env.active = {"rtl_airband", "airam-acars2"}
     s = c.get("/api/state").get_json()
@@ -144,22 +145,22 @@ def test_standby_stops_acars2(env):
 
 def test_tune_inside_dual_keeps_acars(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars"})
+    appstate._merge_state({"app_mode": "voice_acars"})
     env.active = {"rtl_airband", "airam-acars2"}
     r = app.app.test_client().post("/api/tune", json={"freq": 120.5}, headers=ORIGIN)
     assert r.status_code == 200, r.get_json()
     assert "airam-acars2" in env.active
-    assert app.load_state()["app_mode"] == "voice_acars"
+    assert appstate.load_state()["app_mode"] == "voice_acars"
     assert ("stop", "airam-acars2") not in [(a, u) for a, u, _t in env.log]
 
 
 def test_explicit_voice_mode_leaves_dual(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars"})
+    appstate._merge_state({"app_mode": "voice_acars"})
     env.active = {"rtl_airband", "airam-acars2"}
     r = app.app.test_client().post("/api/mode", json={"mode": "voice"}, headers=ORIGIN)
     assert r.status_code == 200
-    assert env.active == {"rtl_airband"} and app.load_state()["app_mode"] == "voice"
+    assert env.active == {"rtl_airband"} and appstate.load_state()["app_mode"] == "voice"
 
 
 @pytest.mark.parametrize("mode", ["acars", "vdl2"])
@@ -174,7 +175,7 @@ def test_other_modes_stop_acars2(env, mode):
 
 def test_reconcile_restarts_only_acars2_when_voice_alive(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
+    appstate._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
     env.active = {"rtl_airband"}
     app._mode_reconcile_once()
     seq = [(a, u) for a, u, _t in env.log]
@@ -185,17 +186,17 @@ def test_reconcile_restarts_only_acars2_when_voice_alive(env):
 
 def test_reconcile_full_reenter_when_nothing_runs(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
+    appstate._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
     app._mode_reconcile_once()
     assert env.active == {"rtl_airband", "airam-acars2"}
 
 
 def test_boot_restore_enters_dual(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
+    appstate._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
     app._boot_restore()
     assert env.active == {"rtl_airband", "airam-acars2"}
-    assert app.load_state()["app_mode"] == "voice_acars"
+    assert appstate.load_state()["app_mode"] == "voice_acars"
 
 
 def test_antenna_check_refused_in_dual(env):

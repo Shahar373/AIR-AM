@@ -111,6 +111,9 @@ webtune/
   acars_parse.py            # נרמול ופענוח ACARS/VDL2/SATCOM: `_normalize_acars/vdl2/satcom` + כל ה-parsers, טבלאות ה-labels, כיוון מבני,
                             #   `_libacars_decode`/`_decode_libacars_app`/`_run_libacars`. טהור — בלי Flask/state/systemd (נבדק מכנית).
                             #   הוצא מ-app.py בשלב ג2. ⚠ קוראים אליו כ-`acars_parse.<שם>` (לא `from … import`).
+  appstate.py               # המצב השמור (state.json): `STATE_PATH`, `DEFAULT_STATE`, `load_state`, `save_state`, `_merge_state` (+`_STATE_LOCK`, דגל פגימה).
+                            #   תלוי רק ב-`config`/`recordings`(ברירת שפת תמלול)/`storage`. ⚠ קוראים אליו `appstate.<שם>` — לא `state` (משתנה מקומי נפוץ
+                            #   שמסתיר מודול). בבדיקות: `monkeypatch.setattr(appstate, "STATE_PATH", …)`. הוצא בשלב ג2.
   config.py                 # נתונים טהורים: בנקי תדרים (`ACARS_BANKS`/`VDL2_BANKS`/`SATCOM_BANKS` + `*_FREQS_DEFAULT`), רווחים (`IFGR_*`/`RFGR_*`/`SNR_*`),
                             #   `CHAN_FILTERS`, `DENOISE_ENGINES`. בלי לוגיקה/IO. ⚠ קוראים אליו כ-`config.<שם>`; ב-`_FEEDS` כשם-מחרוזת "config.X".
                             #   קיים כדי ש-appstate לא ייצור ייבוא מעגלי. הוצא בשלב ג2. עריכת ברירת מחדל קבועה — כאן.

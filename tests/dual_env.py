@@ -10,6 +10,7 @@ import time
 import pytest
 
 import app
+import appstate  # noqa: E402
 
 B, A = "240404AF60", "230405A498"
 ORIGIN = {"Origin": "http://localhost"}
@@ -39,7 +40,8 @@ class FakeSystemd:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    for name, fn in (("STATE_PATH", "state.json"), ("ACARS_ENV_PATH", "acars.env"),
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
+    for name, fn in (("ACARS_ENV_PATH", "acars.env"),
                      ("ACARS2_ENV_PATH", "acars2.env"), ("SDR_ENV_PATH", "sdr.env"),
                      ("CONFIG_PATH", "airband.conf"), ("STATS_PATH", "stats.txt"),
                      ("VDL2_ENV_PATH", "vdl2.env"), ("SATCOM_ENV_PATH", "satcom.env")):
@@ -74,11 +76,11 @@ def env(tmp_path, monkeypatch):
 
 
 def _roles(primary=B, secondary=A):
-    app._merge_state({"sdr_primary": primary, "sdr_secondary": secondary})
+    appstate._merge_state({"sdr_primary": primary, "sdr_secondary": secondary})
 
 
 def _params():
-    p, _ = app._parse_tune(app.DEFAULT_STATE)
+    p, _ = app._parse_tune(appstate.DEFAULT_STATE)
     return p
 
 

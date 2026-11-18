@@ -15,6 +15,7 @@ import pytest
 
 import adsb
 import app
+import appstate  # noqa: E402
 import acars_parse
 import xcheck
 
@@ -57,7 +58,8 @@ def _synthetic(lat0, lon0, t0, times, brg=120.0, gs=480.0, src_type="adsb_icao")
 
 @pytest.fixture(autouse=True)
 def env(tmp_path, monkeypatch):
-    for name, fname in (("STATE_PATH", "state.json"), ("ACARS_LOG_PATH", "acars.jsonl"),
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
+    for name, fname in (("ACARS_LOG_PATH", "acars.jsonl"),
                         ("VDL2_LOG_PATH", "vdl2.jsonl"), ("SATCOM_LOG_PATH", "satcom.jsonl"),
                         ("XC_EVENTS_PATH", "xcheck_events.jsonl"), ("CONFIG_PATH", "airband.conf")):
         monkeypatch.setattr(app, name, tmp_path / fname)

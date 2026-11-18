@@ -12,12 +12,13 @@
 import pytest
 
 import app
+import appstate  # noqa: E402
 from dual_env import A, B, ORIGIN, _params, _roles, env, env2  # noqa: F401  (fixtures נטענים לפי שם)
 
 
 def test_voice2_config_pins_secondary_own_stats_mount_no_udp(env2):
     _roles()
-    app._merge_state({"voice2_freq": 120.5, "squelch_mode": "auto"})
+    appstate._merge_state({"voice2_freq": 120.5, "squelch_mode": "auto"})
     app.write_voice2_config()
     c = app.VOICE2_CONFIG_PATH.read_text()
     assert f'device_string = "driver=sdrplay,serial={A}' in c
@@ -72,7 +73,7 @@ def test_api_mode_voice2_saves_and_rejects_same_freq(env2):
     r = c.post("/api/mode", json={"mode": "voice2", "freq2": 121.4, "mod2": "nfm"}, headers=ORIGIN)
     d = r.get_json()
     assert r.status_code == 200 and d["app_mode"] == "voice2" and d["voice2_freq"] == 121.4
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["app_mode"] == "voice2" and st["voice2_mod"] == "nfm"
     s = c.get("/api/state").get_json()
     assert s["app_mode"] == "voice2" and s["mode_ok"] is True and s["mount2"] == app.MOUNT2
@@ -87,7 +88,7 @@ def test_api_mode_voice2_without_roles_400(env2):
 
 def test_partial_is_fault(env2):
     _roles()
-    app._merge_state({"app_mode": "voice2"})
+    appstate._merge_state({"app_mode": "voice2"})
     env2.active |= {"rtl_airband"}
     c = app.app.test_client()
     assert c.get("/api/state").get_json()["mode_ok"] is False
@@ -97,37 +98,37 @@ def test_partial_is_fault(env2):
 
 def test_tune2_restarts_only_secondary(env2):
     _roles()
-    app._merge_state({"app_mode": "voice2", "voice2_freq": 121.4})
+    appstate._merge_state({"app_mode": "voice2", "voice2_freq": 121.4})
     env2.active |= {"rtl_airband", "rtl_airband2"}
     env2.log.clear()
     r = app.app.test_client().post("/api/tune2", json={"freq2": 118.05}, headers=ORIGIN)
     assert r.status_code == 200 and r.get_json()["voice2_freq"] == 118.05
     units = {u for e, u, _t in env2.log if e in ("restart", "stop")}
     assert units == {"rtl_airband2"}
-    assert app.load_state()["voice2_freq"] == 118.05
+    assert appstate.load_state()["voice2_freq"] == 118.05
     assert "freq = 118.0500" in app.VOICE2_CONFIG_PATH.read_text()
 
 
 def test_tune2_outside_voice2_409(env2):
     _roles()
-    app._merge_state({"app_mode": "voice"})
+    appstate._merge_state({"app_mode": "voice"})
     r = app.app.test_client().post("/api/tune2", json={"freq2": 118.05}, headers=ORIGIN)
     assert r.status_code == 409
 
 
 def test_tune2_failure_rolls_back_and_keeps_state(env2):
     _roles()
-    app._merge_state({"app_mode": "voice2", "voice2_freq": 121.4})
+    appstate._merge_state({"app_mode": "voice2", "voice2_freq": 121.4})
     env2.active |= {"rtl_airband", "rtl_airband2"}
     env2.fail = {"rtl_airband2"}
     r = app.app.test_client().post("/api/tune2", json={"freq2": 118.05}, headers=ORIGIN)
     assert r.status_code == 500
-    assert app.load_state()["voice2_freq"] == 121.4
+    assert appstate.load_state()["voice2_freq"] == 121.4
 
 
 def test_tune2_requires_guard(env2):
     _roles()
-    app._merge_state({"app_mode": "voice2"})
+    appstate._merge_state({"app_mode": "voice2"})
     r = app.app.test_client().post("/api/tune2", json={"freq2": 118.05},
                                    headers={"Origin": "http://evil.example"})
     assert r.status_code == 403
@@ -135,7 +136,7 @@ def test_tune2_requires_guard(env2):
 
 def test_primary_tune_keeps_second_channel(env2):
     _roles()
-    app._merge_state({"app_mode": "voice2", "voice2_freq": 121.4})
+    appstate._merge_state({"app_mode": "voice2", "voice2_freq": 121.4})
     env2.active |= {"rtl_airband", "rtl_airband2"}
     r = app.app.test_client().post("/api/tune", json={"freq": 134.6}, headers=ORIGIN)
     assert r.status_code == 200 and r.get_json()["app_mode"] == "voice2"
@@ -144,7 +145,7 @@ def test_primary_tune_keeps_second_channel(env2):
 
 def test_mode_voice_leaves_voice2(env2):
     _roles()
-    app._merge_state({"app_mode": "voice2"})
+    appstate._merge_state({"app_mode": "voice2"})
     env2.active |= {"rtl_airband", "rtl_airband2"}
     r = app.app.test_client().post("/api/mode", json={"mode": "voice"}, headers=ORIGIN)
     assert r.status_code == 200 and "rtl_airband2" not in env2.active
@@ -161,7 +162,7 @@ def test_other_modes_stop_second_channel(env2, enter):
 
 def test_reconcile_restarts_only_secondary(env2):
     _roles()
-    app._merge_state({"app_mode": "voice2"})
+    appstate._merge_state({"app_mode": "voice2"})
     env2.active |= {"rtl_airband"}
     env2.log.clear()
     app._mode_reconcile_once()
@@ -171,14 +172,14 @@ def test_reconcile_restarts_only_secondary(env2):
 
 def test_boot_restore_voice2(env2, monkeypatch):
     _roles()
-    app._merge_state({"app_mode": "voice2"})
+    appstate._merge_state({"app_mode": "voice2"})
     monkeypatch.setattr(app, "_config_stale", lambda: False)
     app._boot_restore()
     assert env2.active == {"rtl_airband", "rtl_airband2"}
 
 
 def test_metrics_ch2_reads_second_stats(env2):
-    app._merge_state({"voice2_freq": 121.4})
+    appstate._merge_state({"voice2_freq": 121.4})
     app.STATS2_PATH.write_text(
         'channel_dbfs_signal_level{freq="121.400"} -20.0\n'
         'channel_dbfs_noise_level{freq="121.400"} -40.0\n')
@@ -218,7 +219,7 @@ def test_unit_conflicts_and_stagger():
 
 def test_acars_bank_change_in_voice_acars_restarts_only_secondary(env2):
     _roles()
-    app._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
+    appstate._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
     env2.active |= {"rtl_airband", "airam-acars2"}
     env2.log.clear()
     r = app.app.test_client().post("/api/mode", json={"mode": "voice_acars",
@@ -227,23 +228,23 @@ def test_acars_bank_change_in_voice_acars_restarts_only_secondary(env2):
     assert r.status_code == 200 and d["secondary_only"] is True
     assert {u for e, u, _t in env2.log} == {"airam-acars2"}       # הקול לא נעצר ולא אותחל
     assert env2.active == {"rtl_airband", "airam-acars2"}
-    assert app.load_state()["acars_freqs"] == ["131.725", "131.850"]
+    assert appstate.load_state()["acars_freqs"] == ["131.725", "131.850"]
 
 
 def test_acars_bank_change_failure_keeps_voice(env2):
     _roles()
-    app._merge_state({"app_mode": "voice_acars"})
+    appstate._merge_state({"app_mode": "voice_acars"})
     env2.active |= {"rtl_airband", "airam-acars2"}
     env2.fail = {"airam-acars2"}
     r = app.app.test_client().post("/api/mode", json={"mode": "voice_acars", "freqs": ["131.725"]},
                                    headers=ORIGIN)
     assert r.status_code == 500 and "rtl_airband" in env2.active
-    assert app.load_state()["app_mode"] == "voice_acars"            # לא נפל ל-off — הקול רץ
+    assert appstate.load_state()["app_mode"] == "voice_acars"            # לא נפל ל-off — הקול רץ
 
 
 def test_voice2_mode_repeat_restarts_only_secondary(env2):
     _roles()
-    app._merge_state({"app_mode": "voice2", "voice2_freq": 121.4})
+    appstate._merge_state({"app_mode": "voice2", "voice2_freq": 121.4})
     env2.active |= {"rtl_airband", "rtl_airband2"}
     env2.log.clear()
     r = app.app.test_client().post("/api/mode", json={"mode": "voice2", "freq2": 118.05}, headers=ORIGIN)
@@ -254,7 +255,7 @@ def test_voice2_mode_repeat_restarts_only_secondary(env2):
 def test_voice_acars_from_plain_voice_is_full_entry(env2):
     # קול רגיל ⇒ voice_acars: כניסה מלאה (המצב השמור הוא voice, לא voice_acars)
     _roles()
-    app._merge_state({"app_mode": "voice"})
+    appstate._merge_state({"app_mode": "voice"})
     env2.active |= {"rtl_airband"}
     r = app.app.test_client().post("/api/mode", json={"mode": "voice_acars"}, headers=ORIGIN)
     assert r.status_code == 200 and "secondary_only" not in r.get_json()
@@ -262,7 +263,7 @@ def test_voice_acars_from_plain_voice_is_full_entry(env2):
 
 def test_voice2_config_uses_airam2_recording_prefix(env2):
     _roles()
-    app._merge_state({"squelch_mode": "auto"})              # "open" (ATIS) לא מקליט בכלל
+    appstate._merge_state({"squelch_mode": "auto"})              # "open" (ATIS) לא מקליט בכלל
     app.write_voice2_config()
     assert 'filename_template = "airam2";' in app.VOICE2_CONFIG_PATH.read_text()
     app.write_config(132.5, "am", True, 40, 4, "auto")

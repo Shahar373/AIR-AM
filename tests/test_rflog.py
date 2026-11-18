@@ -12,12 +12,13 @@ import time
 import pytest
 
 import app
+import appstate  # noqa: E402
 
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "airband.conf")
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "STATS_PATH", tmp_path / "stats.txt")
     monkeypatch.setattr(app, "RFLOG_PATH", tmp_path / "rf_log.jsonl")
     return tmp_path

@@ -41,6 +41,7 @@ from flask import Flask, request, jsonify, send_from_directory, send_file, abort
 
 import diag   # יומן בדיקה וייצוא לוגים — הניתוח הטהור (פענוח journald, בדיקות, summary.md)
 import acars_parse   # נרמול ופענוח ACARS/VDL2/SATCOM (הוצא בשלב ג2)
+import appstate   # המצב השמור: load/save/_merge_state (הוצא בשלב ג2)
 import config   # הגדרות ונתוני-ברירת-מחדל טהורים (הוצא בשלב ג2)
 import recordings   # הקלטות, ★, תמלול, סשנים — קבצים בדיסק (הוצא בשלב ג2)
 import storage   # אחסון: כתיבה אטומית + JSONL (הוצא מכאן בשלב ג2)
@@ -53,7 +54,6 @@ log = logging.getLogger("airam")
 
 # --- קבועים ---------------------------------------------------------------
 CONFIG_PATH = Path("/etc/rtl_airband/airband.conf")
-STATE_PATH = Path("/var/lib/airam/state.json")
 MOUNT = "live.mp3"          # שם ה-stream הקבוע ב-Icecast
 ICECAST_PORT = 8000
 SOURCE_PW = "airam"         # חייבת להיות זהה ל-SOURCE_PW ב-install.sh (נכתבת ל-Icecast שם)
@@ -389,71 +389,6 @@ def load_presets():
         pass   # אין קובץ / פגום => ברירת המחדל (הקובץ נכתב רק בעריכה הראשונה)
     return [dict(p) for p in DEFAULT_PRESETS]
 
-DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
-                 "if_gain": config.IF_GAIN_DEFAULT, "rf_gain": config.RF_GAIN_DEFAULT,
-                 "squelch_mode": "open", "squelch_snr": config.SNR_DEFAULT,  # ברירת מחדל ATIS => תמיד פתוח
-                 # "voice" (rtl_airband) | "acars" (acarsdec) | "vdl2" (dumpvdl2) |
-                 # "satcom" (inmarsat-sniffer) | "off" (standby).
-                 # ברירת המחדל ניטרלית (off): אין "מצב ראשי" — התקנה טרייה נוחתת במסך
-                 # הבית והמשתמש בוחר מצב. המצב הנבחר שורד reboot (משוחזר ע"י _boot_restore).
-                 "app_mode": "off",
-                 "acars_freqs": config.ACARS_FREQS_DEFAULT,
-                 "vdl2_freqs": config.VDL2_FREQS_DEFAULT,
-                 "satcom_freqs": config.SATCOM_FREQS_DEFAULT,
-                 # True = bias-T של ה-RSP1B מזין את ה-LNA (ברירת המחדל ההיסטורית).
-                 # False = המשתמש מזין את ה-LNA ממקור חיצוני (ר' _enter_satcom).
-                 "satcom_bias_tee": True,
-                 # True (ברירת מחדל) = מדלגים על דמודולטורי ה-C-channel — חוסך
-                 # ~50% CPU ובקושי עולה במידע (ר' §12 ב-CLAUDE.md ו-write_satcom_env).
-                 "satcom_skip_c": True,
-                 # True (ברירת מחדל) = --spectrum פעיל => GET /api/satcom/spectrum
-                 # עובד. זה כלי האבחון היחיד שמראה אם יש RF בכלל (ר' הערת
-                 # SATCOM_SPECTRUM_BINS). דולק כברירת מחדל כי בלי נעילה המצב חסר
-                 # ערך ממילא, ועלות ה-CPU היא אפס; ניתן לכיבוי מי שמעדיף לא לחשוף
-                 # את GET /api/tune של הכלי ברשת המקומית (§9).
-                 "satcom_spectrum": True,
-                 # None = AGC (ברירת המחדל); int 20..59 = gRdB ידני (*הפחתה*,
-                 # קטן=רווח גדול — כמו if_gain של הקול). ר' SATCOM_GAIN_DEFAULT.
-                 "satcom_gain": config.SATCOM_GAIN_DEFAULT,
-                 # בסיס כיול למד השדה: {"noise": dBFS, "freq": MHz, "ts": epoch} או None.
-                 # נמדד תמיד תחת אותם תנאים קבועים (AGC, /api/antenna/check) => בר-השוואה
-                 # לעצמו לאורך זמן, בלי תלות באיזה מצב פעיל עכשיו. לעולם לא ממציאים
-                 # אותו — בלי כיול מפורש של המשתמש, אין פסק דין (ר' §12).
-                 "signal_baseline": None,
-                 # מתי המשתמש ראה לאחרונה את דוח הסשן (epoch) — None עד /api/session/ack
-                 # הראשון. /api/session נופל ל"שעה אחורה" כשזה חסר (התקנה טרייה/שדרוג),
-                 # לא לכל ההיסטוריה.
-                 "last_session_view_at": None,
-                 # תמלול *כל* הקלטה אוטומטית ברקע. ⚠ ברירת המחדל **כבויה**:
-                 # מי שמתקין whisper (INSTALL_WHISPER=1) לא בהכרח רוצה שהוא ירוץ
-                 # על כל הקלטה — תמלול לפי דרישה (📝) ושל הקלטות שמורות (★)
-                 # עובדים תמיד בלי המתג הזה. המתג ב-UI הוא מקור-האמת היחיד.
-                 "transcribe_auto": False,
-                 # שפת התמלול: "en" (ATC בנתב"ג) או "he". דורש מודל רב-לשוני
-                 # לעברית — ר' WHISPER_MODELS ו-_whisper_model.
-                 "transcribe_lang": recordings.TX_LANG_DEFAULT,
-                 # תחנת הקליטה להצלבת ADS-B/אופק הרדיו: {"lat","lon","alt_m","name",
-                 # "source","set_at"} או None. ⚠ אין ברירת מחדל (לא נתב"ג): AIR-AM נייד,
-                 # ומיקום מומצא היה מייצר אופק שגוי בשקט — בלי תחנה אין פסק-דין BLOS.
-                 "station": None,
-                 # סינון רעשים חי לסטרים /clean.mp3. מתג גלובלי; כבוי כברירת מחדל.
-                 # ר' _denoise_sync. denoise_engine — מתוך DENOISE_ENGINES.
-                 "denoise": False,
-                 "denoise_engine": config.DENOISE_ENGINE_DEFAULT,
-                 # מסנן הערוץ של הקול (CHAN_FILTERS) — ברירת המחדל = ההתנהגות ההיסטורית.
-                 "chan_filter": config.CHAN_FILTER_DEFAULT,
-                 # מסנן notch לשידורי FM/MW ב-RSP1B (rfnotch_ctrl של SoapySDRPlay3).
-                 # ⚠ ההנחתה שלו בתחום 118–137MHz לא נמדדה — מתג, לא ברירת מחדל.
-                 "fm_notch": False,
-                 # serial של המקלט הראשי (docs/dual-sdr-feasibility.md §3.1). None = כמו תמיד:
-                 # "driver=sdrplay" בלי serial ⇒ המקלט הראשון שה-API מחזיר — נכון רק כשיש
-                 # מקלט אחד. עם שניים מחוברים בלי בחירה, איזה מהם נפתח נקבע במקרה.
-                 "sdr_primary": None,
-                 # המקלט המשני (קול + ACARS / קול כפול).
-                 "sdr_secondary": None,
-                 # הערוץ השני של "קול כפול" (על המשני). squelch/מסנן/notch — כמו הראשי; רווח — תמיד
-                 # AGC (מקלט אחר, ואין לו פקדי רווח משלו בממשק).
-                 "voice2_freq": 134.600, "voice2_mod": "am"}
 
 
 # --- שורת ה-squelch: מקור אמת יחיד -----------------------------------------
@@ -579,7 +514,7 @@ def _cleanup_orphan_tmp(dirs=None):
     מחיקת tmp של כתיבה *חיה* תפיל אותה. מחזיר את מספר הקבצים שנמחקו (ללוג)."""
     removed = 0
     now = time.time()
-    default_dirs = (STATE_PATH.parent, CONFIG_PATH.parent, ACARS_ENV_PATH.parent,
+    default_dirs = (appstate.STATE_PATH.parent, CONFIG_PATH.parent, ACARS_ENV_PATH.parent,
                     recordings.REC_DIR, recordings._saved_dir())
     for d in (dirs if dirs is not None else default_dirs):
         try:
@@ -610,7 +545,7 @@ def _voice2_params(st):
         if not (0.1 <= f2 <= 1999.5):
             raise ValueError
     except (TypeError, ValueError):
-        f2 = DEFAULT_STATE["voice2_freq"]
+        f2 = appstate.DEFAULT_STATE["voice2_freq"]
     m2 = "nfm" if str(st.get("voice2_mod", "am")).lower() == "nfm" else "am"
     return f2, m2
 
@@ -618,7 +553,7 @@ def _voice2_params(st):
 def write_voice2_config(st=None):
     """קונפיג הערוץ השני (קול כפול) על המקלט המשני. נכתב לפני כל הפעלה — כמו acars2.env.
     squelch/מסנן/notch מהראשי, רווח AGC, בלי פלט UDP לסינון (ר' render_config)."""
-    st = st if st is not None else load_state()
+    st = st if st is not None else appstate.load_state()
     f2, m2 = _voice2_params(st)
     sq_mode = str(st.get("squelch_mode", "auto")).lower()
     if sq_mode not in SQUELCH_MODES:
@@ -647,7 +582,7 @@ def _sanitize_serial(v):
 def _primary_serial():
     """ה-serial של המקלט הראשי, או None ("כל מקלט" — ההתנהגות של מקלט יחיד)."""
     try:
-        return _sanitize_serial(load_state().get("sdr_primary"))
+        return _sanitize_serial(appstate.load_state().get("sdr_primary"))
     except Exception:
         return None
 
@@ -655,7 +590,7 @@ def _primary_serial():
 def _secondary_serial():
     """ה-serial של המקלט המשני (מצב קול + ACARS), או None."""
     try:
-        return _sanitize_serial(load_state().get("sdr_secondary"))
+        return _sanitize_serial(appstate.load_state().get("sdr_secondary"))
     except Exception:
         return None
 
@@ -688,71 +623,16 @@ def write_sdr_env(primary, secondary):
     storage.atomic_write(SDR_ENV_PATH, text)
 
 
-_state_corrupt_warned = False   # חד-פעמי לאירוע פגימה, לא לכל קריאה — ר' load_state
 
 
-def load_state():
-    """קורא את המצב השמור, ממוזג על ברירות המחדל (שדות חדשים בשדרוג נכנסים לבד).
-    ⚠ מבחין בין *קובץ חסר* (תקין לגמרי — התקנה טרייה) לבין *קובץ פגום*: פגימות
-    מתרחשת בעיקר בכיבוי פתאומי (ר' storage.atomic_write), ובלי לוג המשתמש היה מאבד
-    תדר/gain/בנקים/satcom_bias_tee/scan_plan בשקט מוחלט ונוחת בברירות מחדל בלי
-    להבין למה. שומרים עותק .corrupt לאבחון. ⚠ הלוג+הכתיבה חד-פעמיים לאירוע פגימה
-    (flag גלובלי, מתאפס בקריאה תקינה הבאה) ולא לכל קריאה — הפונקציה נקראת גם
-    מראוטים בתדירות גבוהה (כולל /api/metrics ב-polling), ובלי ה-flag קובץ פגום
-    יחיד היה מייצר ספאם ללוג ודריסה חוזרת של .corrupt בכל בקשה."""
-    global _state_corrupt_warned
-    try:
-        raw = STATE_PATH.read_text()
-    except FileNotFoundError:
-        return dict(DEFAULT_STATE)         # התקנה טרייה — לא אירוע
-    except OSError as e:
-        log.warning("קריאת state נכשלה (%s) — ברירות מחדל", e)
-        return dict(DEFAULT_STATE)
-    try:
-        st = json.loads(raw)
-    except ValueError as e:
-        if not _state_corrupt_warned:
-            log.warning("state.json פגום (%s) — נופלים לברירות מחדל; עותק נשמר ב-%s.corrupt",
-                        e, STATE_PATH.name)
-            try:
-                STATE_PATH.with_suffix(STATE_PATH.suffix + ".corrupt").write_text(raw)
-            except OSError:
-                pass                       # אבחון בלבד — לא שווה להיכשל בגללו
-            _state_corrupt_warned = True
-        return dict(DEFAULT_STATE)
-    if not isinstance(st, dict):           # JSON תקין אך לא אובייקט (למשל "null")
-        if not _state_corrupt_warned:
-            log.warning("state.json אינו אובייקט (%s) — ברירות מחדל", type(st).__name__)
-            _state_corrupt_warned = True
-        return dict(DEFAULT_STATE)
-    _state_corrupt_warned = False          # התאוששנו — אירוע פגימה עתידי יתועד שוב
-    return {**DEFAULT_STATE, **st}
 
 
-def _reset_state_corrupt_warned():
-    """מאפס את ה-flag. נחוץ לבדיקות (מצב גלובלי דולף בין בדיקות שמשאירות
-    state.json פגום — בלי איפוס, בדיקה הבאה שמצפה ללוג הייתה מדוכאת בשקט)."""
-    global _state_corrupt_warned
-    _state_corrupt_warned = False
 
 
-def save_state(st):
-    storage.atomic_write(STATE_PATH, json.dumps(st))
 
 
-_STATE_LOCK = threading.Lock()
 
 
-def _merge_state(changes):
-    """read-modify-write של state.json: טוען טרי, ממזג רק את המפתחות של הקורא
-    ושומר. מחזיר את ה-state החדש.
-    ⚠ מעבר מצב/כיוונון מחזיק snapshot לאורך restart של 3–45ש'; שמירת
-    {**st, ...} מאותו snapshot דרסה שינוי מקביל (למשל "תמלל הכול" או בחירת
-    שפה באמצע מעבר) — lost update שקט. כל שמירה אחרי פעולה ארוכה עוברת כאן."""
-    with _STATE_LOCK:
-        st = {**load_state(), **changes}
-        save_state(st)
-        return st
 
 
 # --- הפעלה מחדש מאומתת + רולבק --------------------------------------------
@@ -1068,7 +948,7 @@ def _feed_response(feed):
         cursor = _fv(feed, "seq")
     extra = {"adsb": _fv(feed, "adsb")()} if spec["adsb"] else {}
     return jsonify(ok=True, active=any(_is_active(globals()[n]) for n in spec["services"]),
-                   freqs=load_state().get(spec["freqs_key"], _fv(feed, "freqs_default")),
+                   freqs=appstate.load_state().get(spec["freqs_key"], _fv(feed, "freqs_default")),
                    cursor=cursor, messages=msgs, **extra, **_xc_feed_payload(feed))
 
 
@@ -1582,7 +1462,7 @@ def _enter_voice_acars(params, freqs):
 
 def _enter_voice2(params, st=None):
     """מצב "קול כפול" (שני מקלטים) — ר' _enter_composite."""
-    return _enter_composite("voice2", params, st if st is not None else load_state())
+    return _enter_composite("voice2", params, st if st is not None else appstate.load_state())
 
 
 def _enter_voice_vdl2(params, freqs):
@@ -1616,7 +1496,7 @@ _ICE_STATUS_LOCK = threading.Lock()
 
 def _denoise_engine(st=None):
     """המנוע השמור, תמיד מתוך הרשימה הסגורה (state ישן/פגום ⇒ ברירת המחדל)."""
-    e = (st if st is not None else load_state()).get("denoise_engine")
+    e = (st if st is not None else appstate.load_state()).get("denoise_engine")
     return e if e in config.DENOISE_ENGINES else config.DENOISE_ENGINE_DEFAULT
 
 
@@ -1690,7 +1570,7 @@ def _denoise_state(enabled, missing, voice_on, service, live):
 def _denoise_status(services=None):
     """מצב הסינון ל-/api/denoise ול-/api/health. services — מפה מוכנה מ-
     _services_status (‏/api/health כבר מחזיק אותה => בלי fork נוסף)."""
-    st = load_state()
+    st = appstate.load_state()
     enabled = bool(st.get("denoise"))
     engine = _denoise_engine(st)
     missing = _denoise_missing(engine)
@@ -1720,7 +1600,7 @@ def _denoise_sync():
     ברדיו: גם כשל מלא כאן משאיר את /live.mp3 ואת ההקלטות בדיוק כמו שהיו.
     לא מחזיק TUNE_LOCK (נקרא גם מתוך _enter_voice שכבר מחזיק אותו)."""
     try:
-        st = load_state()
+        st = appstate.load_state()
         engine = _denoise_engine(st)
         want = (bool(st.get("denoise")) and not _denoise_missing(engine)
                 and _is_active("rtl_airband"))
@@ -1743,7 +1623,7 @@ def _denoise_after_voice():
     """וו אחרי כניסה מוצלחת לקול. בלי מתג דלוק — אפס פעולות (אף fork): הנתיב
     הזה רץ בכל כיוונון, והמתג הכבוי הוא ברירת המחדל."""
     try:
-        if load_state().get("denoise"):
+        if appstate.load_state().get("denoise"):
             _denoise_sync()
     except Exception:
         log.exception("denoise after voice נכשל (מתעלמים)")
@@ -1758,7 +1638,7 @@ def _fail_to_off(st, err, detail, log_prefix):
         _enter_standby()   # שגיאה משנית לא מעניינת — ממילא מדווחים על המקורית
     except Exception:
         pass
-    new_state = _merge_state({"app_mode": "off", "prev_mode": st.get("app_mode", "off")})
+    new_state = appstate._merge_state({"app_mode": "off", "prev_mode": st.get("app_mode", "off")})
     return {"ok": False, "error": err, "detail": detail,
             "app_mode": "off", "state": new_state}, 500
 
@@ -1844,15 +1724,15 @@ def _scan_enter_leg(leg):
     (עקבי עם _enter_voice/_enter_acars/_enter_vdl2). מחזיר (error, detail)."""
     mode = leg["mode"]
     if mode == "voice":
-        params, perr = _parse_tune(load_state())
+        params, perr = _parse_tune(appstate.load_state())
         if perr:
-            params, _ = _parse_tune(DEFAULT_STATE)
+            params, _ = _parse_tune(appstate.DEFAULT_STATE)
         err, detail, _sdr_down = _enter_voice(params)
         return err, detail
     key = "acars_freqs" if mode == "acars" else "vdl2_freqs"
     default = config.ACARS_FREQS_DEFAULT if mode == "acars" else config.VDL2_FREQS_DEFAULT
     enter = _enter_acars if mode == "acars" else _enter_vdl2
-    freqs = leg.get("freqs") or load_state().get(key) or default
+    freqs = leg.get("freqs") or appstate.load_state().get(key) or default
     return enter(freqs)
 
 
@@ -2020,7 +1900,7 @@ def _scan_loop_body(stop_evt, plan, start_idx, first_dwell, consumer_active=Fals
                     _enter_standby()
                     if stop_evt.is_set():
                         return   # מעבר מצב אחר כבר תפס פיקוד בינתיים — לא דורסים את ה-state שלו
-                    _merge_state({"app_mode": "off", "prev_mode": "scan"})
+                    appstate._merge_state({"app_mode": "off", "prev_mode": "scan"})
                 finally:
                     TUNE_LOCK.release()
                 with _scan_lock:
@@ -2116,7 +1996,7 @@ def live_playlist():
     host = request.host.split(":", 1)[0]          # רק ה-hostname, בלי פורט ה-web
     # המתג גלובלי => גם הנגן החיצוני מקבל את המסונן כשהוא דלוק. בטוח גם כשהסינון
     # לא חי: Icecast מגיש את /live.mp3 למבקשי /clean.mp3 (fallback-mount).
-    mount = DENOISE_MOUNT if load_state().get("denoise") else MOUNT
+    mount = DENOISE_MOUNT if appstate.load_state().get("denoise") else MOUNT
     url = f"http://{host}:{ICECAST_PORT}/{mount}"
     body = "#EXTM3U\n#EXTINF:-1,AIR-AM live\n" + url + "\n"
     return app.response_class(body, mimetype="audio/x-mpegurl")
@@ -2178,7 +2058,7 @@ def root_asset(fname):
 
 @app.route("/api/state")
 def api_state():
-    st = load_state()
+    st = appstate.load_state()
     # מקור-אמת למצב = המציאות (השירות הפעיל), ובאין צרכן פעיל — הכוונה השמורה.
     # אין ברירת-מחדל לקול: מצב שמור שאמור לרוץ אבל לא רץ מדווח כתקלה (mode_ok)
     # במקום להעמיד פנים שאנחנו בקול. _live_mode בודק את rtl_airband ראשון
@@ -2444,7 +2324,7 @@ def api_sdr():
 def api_sdr_devices():
     """המקלטים שה-API מציע עכשיו + התפקידים השמורים. ⚠ מקלט שצרכן (שלנו או זר)
     מחזיק לא מופיע ב-find — לכן `held` מסמן שהרשימה חלקית, לא שהוא "לא קיים"."""
-    st = load_state()
+    st = appstate.load_state()
     held, _ = _sdr_holder(_services_status(SDR_CONSUMERS))
     try:
         r = subprocess.run(["SoapySDRUtil", "--find=driver=sdrplay"],
@@ -2487,7 +2367,7 @@ def api_sdr_roles():
     if not TUNE_LOCK.acquire(blocking=False):
         return jsonify({"ok": False, "error": "פעולה אחרת מתבצעת — נסה שוב בעוד רגע"}), 409
     try:
-        st = load_state()
+        st = appstate.load_state()
         if st.get("app_mode") in COMPOSITE_SECONDARY or any(_is_active(s2) for s2 in SECONDARY_SERVICES):
             return jsonify({"ok": False, "error": "מצב של שני מקלטים פעיל — עבור לקול רגיל או לכיבוי "
                             "לפני שינוי תפקידי המקלטים"}), 409
@@ -2495,7 +2375,7 @@ def api_sdr_roles():
         sec = changes.get("sdr_secondary", st.get("sdr_secondary"))
         if prim and sec and prim == sec:
             return jsonify({"ok": False, "error": "אותו מקלט לא יכול להיות גם ראשי וגם משני"}), 400
-        new = _merge_state(changes)
+        new = appstate._merge_state(changes)
         try:
             write_sdr_env(new.get("sdr_primary"), new.get("sdr_secondary"))
         except OSError as e:
@@ -2533,7 +2413,7 @@ def _health_snapshot():
     vdl2b_on = services.get(VDL2B_SERVICE) == "active"
     # standby מכוון: כל הצרכנים כבויים ו-state מסומן off => תקין, *לא* תקלה (אחרת
     # מצב הכיבוי שביקש המשתמש היה נראה כקריסה). sdrplay נשאר active במפה.
-    saved_state = load_state()
+    saved_state = appstate.load_state()
     saved = saved_state.get("app_mode", "off")
     off_ok = (saved == "off"
               and services["rtl_airband"] != "active"
@@ -2584,7 +2464,7 @@ def api_denoise():
                 or ("engine" in data and data["engine"] not in config.DENOISE_ENGINES)):
             return jsonify(ok=False, error="נדרש {\"enabled\": true|false} ו/או {\"engine\": "
                            + "|".join(config.DENOISE_ENGINES) + "}"), 400
-        st = load_state()
+        st = appstate.load_state()
         enabled = data.get("enabled", bool(st.get("denoise")))
         engine = data.get("engine", _denoise_engine(st))
         missing = _denoise_missing(engine)
@@ -2593,7 +2473,7 @@ def api_denoise():
             return jsonify(ok=False, error="סינון הרעשים לא מותקן (חסר: " + ", ".join(missing) + ")",
                            **_denoise_status()), 501
         changed_engine = engine != _denoise_engine(st)
-        _merge_state({"denoise": enabled, "denoise_engine": engine})
+        appstate._merge_state({"denoise": enabled, "denoise_engine": engine})
         log.info("denoise %s engine=%s (from %s)", "on" if enabled else "off", engine,
                  request.remote_addr)
         if changed_engine:
@@ -2666,7 +2546,7 @@ def _last_logged_ts():
 def _tx_status():
     """מצב מנגנון התמלול כולו — הבסיס לשורת הסטטוס ב-UI. ⚠ הערך שהופך את
     הפיצ'ר לגלוי: בלעדיו 'whisper לא מותקן' נראה בדיוק כמו 'אין מה לתמלל'."""
-    st = load_state()
+    st = appstate.load_state()
     lang = st.get("transcribe_lang") or recordings.TX_LANG_DEFAULT
     bin_ok = Path(recordings.WHISPER_BIN).exists()
     model = recordings._whisper_model(lang)
@@ -2682,7 +2562,7 @@ def _tx_status():
 def _transcribe_worker():
     """wrapper דק: הלולאה עצמה ב-recordings.transcribe_worker; כאן רק קריאת ה-state."""
     def cfg():
-        st = load_state()
+        st = appstate.load_state()
         return (st.get("transcribe_lang") or recordings.TX_LANG_DEFAULT,
                 bool(st.get("transcribe_auto")))
     recordings.transcribe_worker(cfg)
@@ -2818,7 +2698,7 @@ def api_transcribe_one():
     if mp3 is None:
         return jsonify(ok=False, error="ההקלטה כבר לא קיימת"), 404
     data = request.get_json(silent=True) or {}
-    lang = data.get("lang") or load_state().get("transcribe_lang") or recordings.TX_LANG_DEFAULT
+    lang = data.get("lang") or appstate.load_state().get("transcribe_lang") or recordings.TX_LANG_DEFAULT
     if lang not in recordings.TX_LANGS:
         return jsonify(ok=False, error="שפה לא נתמכת"), 400
     bin_ok, model = recordings._whisper_ready(lang)
@@ -2855,7 +2735,7 @@ def api_transcribe():
             if data.get("lang") not in recordings.TX_LANGS:
                 return jsonify(ok=False, error="שפה לא נתמכת"), 400
             changes["transcribe_lang"] = data["lang"]
-        _merge_state(changes)
+        appstate._merge_state(changes)
     return jsonify(ok=True, tx=_tx_status())
 
 
@@ -2992,7 +2872,7 @@ def api_sessions():
     # אין ב-AIR-AM יומן מעברי-מצב (ר' docs/session-replay-design.md §4.3 —
     # `modes` שם היה תכנון-אידיאלי; לממש אותו דורש מנגנון חדש לגמרי, לא רק
     # קריאת state קיים). מתועד כאן כסטייה מכוונת, לא כשגיאה.
-    st = load_state()
+    st = appstate.load_state()
     meta = {
         "id": session_id,
         "t_start": t_start,
@@ -3171,7 +3051,7 @@ def _read_voice_metrics(ch=1):
         return {"fresh": False, "age": None, "signal": None, "noise": None,
                 "snr": None, "overload": False, "squelch_opens": None}
 
-    st = load_state()
+    st = appstate.load_state()
     want = f"{(_voice2_params(st)[0] if ch == 2 else st['freq']):.3f}"   # מתויגים freq=MHz ב-3 ספרות
     vals = parse_stats(text, want)
 
@@ -3216,7 +3096,7 @@ def api_signal():
                בדיקת אנטנה יזומה (שמשתמשת בקול) מייצרת מדידה בת-השוואה.
       satcom — יש לו כלי ייעודי (/api/satcom/health); כאן רק מפנים אליו.
       off/אין מצב חי — kind="none"."""
-    st = load_state()
+    st = appstate.load_state()
     mode = _live_mode()
     baseline = st.get("signal_baseline")
     payload = {"ok": True, "mode": mode or "off"}
@@ -3340,13 +3220,13 @@ def api_antenna_check():
     serialized תחת TUNE_LOCK כמו כל שינוי חומרה אחר — אם כיוונון/מעבר מצב
     אחר כבר רץ, מחזיר 409 במקום לתקוע את שניהם."""
     data = request.get_json(silent=True) or {}
-    prev = load_state()
+    prev = appstate.load_state()
     try:
         freq = float(data.get("freq"))
         if not (0.1 <= freq <= 1999.5):
             raise ValueError
     except (TypeError, ValueError):
-        freq = prev.get("freq", DEFAULT_STATE["freq"])
+        freq = prev.get("freq", appstate.DEFAULT_STATE["freq"])
     calibrate = bool(data.get("calibrate"))
 
     if not TUNE_LOCK.acquire(blocking=False):
@@ -3394,7 +3274,7 @@ def api_antenna_check():
 
         if calibrate:
             baseline = {"noise": result["noise"], "freq": freq, "ts": time.time()}
-            _merge_state({"signal_baseline": baseline})
+            appstate._merge_state({"signal_baseline": baseline})
         else:
             baseline = prev.get("signal_baseline")
         verdict = _signal_verdict(result["noise"], baseline)
@@ -3913,7 +3793,7 @@ def _diag_journal(start, end, match):
 
 
 def _diag_redacted_state():
-    st = load_state()
+    st = appstate.load_state()
     station = st.get("station")
     if isinstance(station, dict):
         st["station"] = {**station, **{k: round(station[k], 2) for k in ("lat", "lon")
@@ -3952,8 +3832,8 @@ def _diag_system_text(units_show):
         pass
     L.append(f"memory: total={_meminfo_mb('MemTotal')}MB available={_meminfo_mb('MemAvailable')}MB")
     try:
-        du = shutil.disk_usage(STATE_PATH.parent)
-        L.append(f"disk {STATE_PATH.parent}: free={du.free // 2**20}MB / total={du.total // 2**20}MB")
+        du = shutil.disk_usage(appstate.STATE_PATH.parent)
+        L.append(f"disk {appstate.STATE_PATH.parent}: free={du.free // 2**20}MB / total={du.total // 2**20}MB")
     except OSError:
         pass
     for args in (["lsusb"], ["lsusb", "-t"]):
@@ -4341,7 +4221,7 @@ def _experiment_start():
     if not TUNE_LOCK.acquire(blocking=False):
         return {"ok": False, "error": "פעולה אחרת מתבצעת כרגע — נסה שוב בעוד רגע"}, 409
     try:
-        prev = load_state()
+        prev = appstate.load_state()
         acars = prev.get("acars_freqs") or config.ACARS_FREQS_DEFAULT
         try:
             probe_freq = float(acars[0])
@@ -4677,7 +4557,7 @@ def _parse_tune(data):
     # עם freq) היה מאפס בשקט את מסנן הערוץ ואת ה-notch שהמשתמש בחר.
     saved = None
     if "chan_filter" not in data or "fm_notch" not in data:
-        saved = load_state()
+        saved = appstate.load_state()
     # רשימה סגורה => שום ערך מהלקוח לא נכתב לקונפיג כמות שהוא
     chan_filter = str(data["chan_filter"] if "chan_filter" in data
                       else saved.get("chan_filter", config.CHAN_FILTER_DEFAULT))
@@ -4699,14 +4579,14 @@ def _voice_tune(params, keep_secondary=None):
     if not TUNE_LOCK.acquire(blocking=False):
         # state בתשובה => ה-UI מיישר את התצוגה האופטימית חזרה למציאות
         return {"ok": False, "error": "כיוונון אחר מתבצע כרגע — המתן שנייה ונסה שוב",
-                "state": load_state()}, 409
+                "state": appstate.load_state()}, 409
     try:
         # תפסנו את הנעילה — הבקשה תקינה, עוצרים סבב קודם (אם יש), בדיוק כמו
         # שאר המצבים ב-/api/mode (ר' ההערה שם): *לא* לפני הנעילה, אחרת ניסיון
         # כיוונון שנכשל לתפוס נעילה (409, למשל בדיקת אנטנה מקבילה) היה עוצר
         # סבב תקין "בחינם" ומשאיר "scan זומבי" — צרכן רץ בלי thread שממשיך אותו.
         _scan_stop_thread()
-        prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
+        prev = appstate.load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
         pm = prev.get("app_mode")
         if keep_secondary is None:
             # ⚠ לפי הכוונה השמורה, לא לפי is-active של המשני: משני ב-"activating" (sleep המדורג,
@@ -4735,7 +4615,7 @@ def _voice_tune(params, keep_secondary=None):
                 # ה-SDR מנותק: רולבק ייתקע באותה המתנה בדיוק, אז מדלגים עליו.
                 # הקונפיג החדש נשאר על הדיסק וייקלט כשהמכשיר יחובר (udev מרים
                 # את השירותים) => שומרים state תואם לדיסק, לא את הקודם.
-                new_state = _merge_state({**params, "app_mode": vmode})
+                new_state = appstate._merge_state({**params, "app_mode": vmode})
                 return {"ok": False, "detail": detail, "state": new_state,
                         "error": err + " — התדר יוחל אוטומטית כשה-SDR יחובר"}, 500
             # config רע => מנסים את קונפיג הקול האחרון שעבד (retry בתוך קול, לא
@@ -4747,7 +4627,7 @@ def _voice_tune(params, keep_secondary=None):
                                 detail, "voice tune")
 
         # נשמר רק אחרי שאומת שהשירות חי => state תמיד משקף הגדרות שעובדות
-        new_state = _merge_state({**params, "app_mode": vmode})
+        new_state = appstate._merge_state({**params, "app_mode": vmode})
         return {"ok": True, **new_state}, 200
     finally:
         TUNE_LOCK.release()
@@ -4797,9 +4677,9 @@ def api_tune2():
     data = request.get_json(silent=True) or {}
     if not TUNE_LOCK.acquire(blocking=False):
         return jsonify(ok=False, error="כיוונון אחר מתבצע כרגע — המתן שנייה ונסה שוב",
-                       state=load_state()), 409
+                       state=appstate.load_state()), 409
     try:
-        st = load_state()
+        st = appstate.load_state()
         if st.get("app_mode") != "voice2":
             return jsonify(ok=False, error="הערוץ השני פעיל רק במצב קול כפול", state=st), 409
         v2, verr = _parse_voice2(data, st)
@@ -4812,8 +4692,8 @@ def api_tune2():
             log.warning("tune2 %.3f failed: %s — חוזר לתדר הקודם", v2["voice2_freq"], err)
             back, _d = _start_voice2(st)
             msg = err + (" (חזרתי לתדר הקודם)" if back is None else " — וגם החזרה לתדר הקודם נכשלה")
-            return jsonify(ok=False, error=msg, detail=detail, state=load_state()), 500
-        new = _merge_state(v2)
+            return jsonify(ok=False, error=msg, detail=detail, state=appstate.load_state()), 500
+        new = appstate._merge_state(v2)
         return jsonify(ok=True, voice2_freq=new["voice2_freq"], voice2_mod=new["voice2_mod"])
     finally:
         TUNE_LOCK.release()
@@ -5173,7 +5053,7 @@ def api_session():
     מיד אחרי restart. idempotent (לא מקדם סמן) — /api/session/ack עושה זאת
     במפורש. ‏?since=<epoch> אופציונלי לדריסת הסמן השמור (למשל מה-UI, לצפייה
     חוזרת)."""
-    st = load_state()
+    st = appstate.load_state()
     now = time.time()
     since = None
     raw_since = request.args.get("since")
@@ -5248,7 +5128,7 @@ def api_session_ack():
     ‏_merge_state (מפתח יחיד, תחת _STATE_LOCK) מספיק נגד lost update: גם מעברי
     המצב שומרים עכשיו דרכו. קודם זה היה תחת TUNE_LOCK, ולכן "✓ הבנתי" קיבל 409
     לאורך כל ניסוי כיול (~20 דק') וכל מעבר רגל בסריקה."""
-    _merge_state({"last_session_view_at": time.time()})
+    appstate._merge_state({"last_session_view_at": time.time()})
     return jsonify(ok=True)
 
 
@@ -5585,7 +5465,7 @@ def _xc_evaluate(src, rec, *, network, full, hex_override=None, station=None, pr
     pos_at = (xcheck.position_at(pts, adsc["t"])
               if adsc and adsc.get("t") is not None and xcheck.valid_latlon(rec.get("lat"), rec.get("lon"))
               else None)
-    st = station if station is not None else load_state().get("station")
+    st = station if station is not None else appstate.load_state().get("station")
     res = xcheck.assess(src, rec, direction, st, col["match"], rx_at, pos_at, adsc,
                         direction_basis=basis)
     res.update({
@@ -5842,16 +5722,16 @@ def api_station():
     """תחנת הקליטה (מיקום + גובה אנטנה מעל פני הים) להצלבת ADS-B/אופק. POST
     ‏{lat, lon, alt_m, name?, source?} או {clear:true}. דרך _guard (POST)."""
     if request.method == "GET":
-        return jsonify(ok=True, station=load_state().get("station"))
+        return jsonify(ok=True, station=appstate.load_state().get("station"))
     data = request.get_json(silent=True) or {}
     if data.get("clear"):
-        _merge_state({"station": None})
+        appstate._merge_state({"station": None})
         return jsonify(ok=True, station=None)
     st, err = _sanitize_station(data)
     if err:
         return jsonify(ok=False, error=err), 400
     st["set_at"] = round(time.time(), 1)
-    _merge_state({"station": st})
+    appstate._merge_state({"station": st})
     return jsonify(ok=True, station=st)
 
 
@@ -5859,7 +5739,7 @@ def api_station():
 def api_xcheck_status():
     with _xc_cv:
         queued, stats = len(_xc_heap), dict(_xc_stats)
-    return jsonify(ok=True, station=load_state().get("station"), auto_lookup=XC_AUTO_LOOKUP,
+    return jsonify(ok=True, station=appstate.load_state().get("station"), auto_lookup=XC_AUTO_LOOKUP,
                    queue=queued, stats=stats, net=adsb.net_status())
 
 
@@ -5981,14 +5861,14 @@ def api_mode():
     # ולא ניתקל ב-409 שקרי בגלל תחרות-עצמית עם הסבב. timeout קטן (לא 0) סופג
     # בדיוק את החלון הקצר הזה; רק חסימה ממושכת אמיתית (פעולה אחרת) עדיין
     # מחזירה 409 — ובלי לגעת בסבב כלל.
-    st = load_state()
+    st = appstate.load_state()
 
     if mode == "voice":
         # קול = כיוונון להגדרות השמורות האחרונות (או מפורשות). _voice_tune מחזיק
         # את ה-TUNE_LOCK בעצמו => לא לוקחים אותו כאן (deadlock).
         params, perr = _parse_tune(data if "freq" in data else st)
         if perr:   # state פגום => נופלים לברירת מחדל
-            params, _ = _parse_tune(DEFAULT_STATE)
+            params, _ = _parse_tune(appstate.DEFAULT_STATE)
         # _scan_stop_thread נקרא בתוך _voice_tune עצמו, אחרי שהוא תופס את
         # TUNE_LOCK — לא כאן (ר' ההערה בתוך _voice_tune; אותה סיבה בדיוק
         # שהמצבים האחרים למטה קוראים לו רק אחרי הנעילה).
@@ -6012,12 +5892,12 @@ def api_mode():
         start = _start_vdl2b if is_vdl2 else _start_acars2
         params, perr = _parse_tune(st)
         if perr:
-            params, _ = _parse_tune(DEFAULT_STATE)
+            params, _ = _parse_tune(appstate.DEFAULT_STATE)
         if not TUNE_LOCK.acquire(timeout=0.5):
-            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב", state=load_state()), 409
+            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב", state=appstate.load_state()), 409
         try:
             _scan_stop_thread()
-            st = load_state()
+            st = appstate.load_state()
             if _composite_secondary_only(mode, st):
                 # כבר במצב (או הקול חי והמשני נפל): החלפת תדרי הדאטה ⇒ רק המשני מאותחל, הקול לא נוגע
                 if freqs == st.get(key) and _secondary_starting_or_up(mode):
@@ -6031,8 +5911,8 @@ def api_mode():
                     back, _d = start(st.get(key))
                     return jsonify(ok=False, error=err + (" — הקול על הראשי ממשיך" if back is None else
                                                           " — וגם החזרה לבנק הקודם נכשלה; הקול ממשיך"),
-                                   detail=detail, state=load_state()), 500
-                _merge_state({key: freqs})
+                                   detail=detail, state=appstate.load_state()), 500
+                appstate._merge_state({key: freqs})
                 return jsonify(ok=True, app_mode=mode, **{key: freqs}, secondary_only=True)
             log.info("mode -> %s freq=%.3f %s=%s (from %s)",
                      mode, params["freq"], label, freqs, request.remote_addr)
@@ -6040,7 +5920,7 @@ def api_mode():
             if err:
                 payload, status = _fail_to_off(st, err, detail, "enter " + mode)
                 return jsonify(payload), status
-            _merge_state({"app_mode": mode, key: freqs})
+            appstate._merge_state({"app_mode": mode, key: freqs})
             return jsonify(ok=True, app_mode=mode, **{key: freqs})
         finally:
             TUNE_LOCK.release()
@@ -6055,15 +5935,15 @@ def api_mode():
             return jsonify(ok=False, error=verr, state=st), 400
         params, perr = _parse_tune(st)
         if perr:
-            params, _ = _parse_tune(DEFAULT_STATE)
+            params, _ = _parse_tune(appstate.DEFAULT_STATE)
         if not TUNE_LOCK.acquire(timeout=0.5):
-            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב", state=load_state()), 409
+            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב", state=appstate.load_state()), 409
         try:
             _scan_stop_thread()
-            st = {**load_state(), **v2}
+            st = {**appstate.load_state(), **v2}
             if _composite_secondary_only("voice2", st):
                 # כבר בקול כפול: רק הערוץ השני מאותחל (כמו /api/tune2), הראשי לא נוגע
-                old = load_state()
+                old = appstate.load_state()
                 if (_voice2_params(old) == (v2["voice2_freq"], v2["voice2_mod"])
                         and _secondary_starting_or_up("voice2")):
                     return jsonify(ok=True, app_mode="voice2", voice2_freq=v2["voice2_freq"],
@@ -6073,8 +5953,8 @@ def api_mode():
                     back, _d = _start_voice2(old)     # ר' voice_acars למעלה
                     return jsonify(ok=False, error=err + (" — הערוץ הראשי ממשיך" if back is None else
                                                           " — וגם החזרה לתדר הקודם נכשלה; הראשי ממשיך"),
-                                   detail=detail, state=load_state()), 500
-                new = _merge_state(v2)
+                                   detail=detail, state=appstate.load_state()), 500
+                new = appstate._merge_state(v2)
                 return jsonify(ok=True, app_mode="voice2", voice2_freq=new["voice2_freq"],
                                voice2_mod=new["voice2_mod"], secondary_only=True)
             log.info("mode -> VOICE2 freq=%.3f freq2=%.3f (from %s)",
@@ -6083,7 +5963,7 @@ def api_mode():
             if err:
                 payload, status = _fail_to_off(st, err, detail, "enter voice2")
                 return jsonify(payload), status
-            new = _merge_state({"app_mode": "voice2", **v2})
+            new = appstate._merge_state({"app_mode": "voice2", **v2})
             return jsonify(ok=True, app_mode="voice2", voice2_freq=new["voice2_freq"],
                            voice2_mod=new["voice2_mod"])
         finally:
@@ -6132,10 +6012,10 @@ def api_mode():
 
     if not TUNE_LOCK.acquire(timeout=0.5):
         return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב",
-                       state=load_state()), 409
+                       state=appstate.load_state()), 409
     try:
         _scan_stop_thread()   # תפסנו את הנעילה — הבקשה תקינה, עוצרים סבב קודם (אם יש)
-        st = load_state()     # רענון אחרי stop_thread — לא לדרוס שינוי מקביל
+        st = appstate.load_state()     # רענון אחרי stop_thread — לא לדרוס שינוי מקביל
         if mode == "off":
             # כיבוי (standby): עוצר את כל צרכני ה-SDR ומשחרר את ה-RSP1B ליישום
             # אחר. airam-web/הדף נשארים פעילים => אפשר להדליק שוב מה-UI בכל רגע.
@@ -6149,7 +6029,7 @@ def api_mode():
             # דורסים prev_mode ב-"off" עצמו; שומרים את prev_mode הקודם כדי
             # שכפתור ההדלקה עדיין יזכור את המצב האמיתי האחרון שהיה פעיל.
             cur_mode = st.get("app_mode", "off")
-            _merge_state({"app_mode": "off",
+            appstate._merge_state({"app_mode": "off",
                           "prev_mode": (cur_mode if cur_mode != "off"
                                         else st.get("prev_mode", "off"))})
             return jsonify(ok=True, app_mode="off")
@@ -6160,7 +6040,7 @@ def api_mode():
             if err:
                 payload, status = _fail_to_off(st, err, detail, "enter scan (leg 0)")
                 return jsonify(payload), status
-            _merge_state({"app_mode": "scan", "scan_plan": plan})
+            appstate._merge_state({"app_mode": "scan", "scan_plan": plan})
             return jsonify(ok=True, app_mode="scan", scan_plan=plan)
 
         # acars / vdl2 / satcom — מסלול דאטה סימטרי (satcom מקבל גם bias_tee/skip_c/spectrum)
@@ -6173,7 +6053,7 @@ def api_mode():
         extra = ({"satcom_bias_tee": bias_tee, "satcom_skip_c": skip_c,
                   "satcom_spectrum": spectrum, "satcom_gain": gain}
                  if mode == "satcom" else {})
-        _merge_state({"app_mode": mode, key: freqs, **extra})
+        appstate._merge_state({"app_mode": mode, key: freqs, **extra})
         return jsonify(ok=True, app_mode=mode, **{key: freqs}, **extra)
     finally:
         TUNE_LOCK.release()
@@ -6215,7 +6095,7 @@ def _boot_restore():
     רץ ב-thread daemon => לא חוסם את app.run; כל כישלון => off + לוג, לעולם לא
     מפיל את שרת הווב."""
     try:
-        st = load_state()
+        st = appstate.load_state()
         mode = st.get("app_mode", "off")
         live = _live_mode()
         # scan: live הוא תמיד voice/acars/vdl2/None, לעולם לא "scan" עצמו (זו
@@ -6249,7 +6129,7 @@ def _boot_restore():
             # שניות (המתנה ל-SDR) — אם המשתמש הספיק לבחור מצב אחר מה-UI *ואותה
             # בחירה כבר הסתיימה* (הנעילה שוב פנויה), st הישן היה דורס אותה.
             # קוראים מחדש ומוותרים על השחזור אם המצב השמור השתנה בינתיים.
-            st2 = load_state()
+            st2 = appstate.load_state()
             if st2.get("app_mode", "off") != mode:
                 log.info("boot restore: המצב השמור השתנה בזמן ההמתנה ל-SDR (%s) — מוותרים על השחזור",
                          st2.get("app_mode"))
@@ -6258,7 +6138,7 @@ def _boot_restore():
             if mode == "voice":
                 params, perr = _parse_tune(st)
                 if perr:   # state פגום => ברירת מחדל
-                    params, _ = _parse_tune(DEFAULT_STATE)
+                    params, _ = _parse_tune(appstate.DEFAULT_STATE)
                 err, detail, sdr_down = _enter_voice(params)
                 if err and sdr_down:
                     # הכוונה נשמרת: Restart=always של היחידה ימשיך לנסות,
@@ -6268,7 +6148,7 @@ def _boot_restore():
             elif mode in COMPOSITE_SECONDARY:
                 params, perr = _parse_tune(st)
                 if perr:
-                    params, _ = _parse_tune(DEFAULT_STATE)
+                    params, _ = _parse_tune(appstate.DEFAULT_STATE)
                 err, _detail, sdr_down = _enter_composite_saved(mode, params, st)
                 if err and sdr_down:
                     log.warning("boot restore: SDR לא נוכח — %s יעלה כשיחובר", mode)
@@ -6311,7 +6191,7 @@ def _boot_restore():
             if err:
                 log.warning("boot restore -> %s failed: %s — falling to off", mode, err)
                 _enter_standby()
-                _merge_state({"app_mode": "off", "prev_mode": mode})
+                appstate._merge_state({"app_mode": "off", "prev_mode": mode})
             else:
                 log.info("boot restore -> %s", mode)
         finally:
@@ -6337,7 +6217,7 @@ def _mode_reconcile_once():
     satcom שלא משוחזר אוטומטית בכוונה, ר' §12) אבל אף צרכן לא רץ בפועל, ומנסה
     כניסה מחדש. best-effort: כשל לא נופל ל-off (כדי לא להילחם עם המשתמש שאולי
     כבר מתקן ידנית) — פשוט מנסה שוב במחזור הבא."""
-    st = load_state()
+    st = appstate.load_state()
     mode = st.get("app_mode", "off")
     if mode not in ("voice", "acars", "vdl2", *COMPOSITE_SECONDARY):
         return                          # off/scan/satcom — לא בטיפול הפוליסה הזו
@@ -6360,7 +6240,7 @@ def _mode_reconcile_once():
     if not TUNE_LOCK.acquire(blocking=False):
         return                          # פעולה אחרת כרגע — לא מתחרים, ננסה שוב במחזור הבא
     try:
-        st2 = load_state()
+        st2 = appstate.load_state()
         live = _live_mode()
         if st2.get("app_mode") != mode or (live is not None and not (composite and live == "voice")):
             return                      # השתנה בזמן שחיכינו לנעילה
@@ -6375,7 +6255,7 @@ def _mode_reconcile_once():
         if mode in ("voice", *COMPOSITE_SECONDARY):
             params, perr = _parse_tune(st2)
             if perr:
-                params, _ = _parse_tune(DEFAULT_STATE)
+                params, _ = _parse_tune(appstate.DEFAULT_STATE)
             if mode == "voice":
                 err, detail, _sdr_down = _enter_voice(params)
             elif _secondary_starting_or_up(mode):
@@ -6416,7 +6296,7 @@ if __name__ == "__main__":
         log.warning("נוקו %d קובצי tmp יתומים (כתיבה שנקטעה — כיבוי פתאומי?)", _orphans)
     # sdr.env מסונכרן ל-state (שער airam-wait-sdrplay מחכה ל-serial הזה). עטוף: עלייה היא חובה.
     try:
-        _st0 = load_state()
+        _st0 = appstate.load_state()
         if _st0.get("sdr_primary") or _st0.get("sdr_secondary") or SDR_ENV_PATH.exists():
             write_sdr_env(_st0.get("sdr_primary"), _st0.get("sdr_secondary"))
     except Exception as _e:
