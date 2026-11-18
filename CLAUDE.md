@@ -115,8 +115,13 @@ webtune/
                             #   תלוי רק ב-`config`/`recordings`(ברירת שפת תמלול)/`storage`. ⚠ קוראים אליו `appstate.<שם>` — לא `state` (משתנה מקומי נפוץ
                             #   שמסתיר מודול). בבדיקות: `monkeypatch.setattr(appstate, "STATE_PATH", …)`. הוצא בשלב ג2.
   config.py                 # נתונים טהורים: בנקי תדרים (`ACARS_BANKS`/`VDL2_BANKS`/`SATCOM_BANKS` + `*_FREQS_DEFAULT`), רווחים (`IFGR_*`/`RFGR_*`/`SNR_*`),
-                            #   `CHAN_FILTERS`, `DENOISE_ENGINES`. בלי לוגיקה/IO. ⚠ קוראים אליו כ-`config.<שם>`; ב-`_FEEDS` כשם-מחרוזת "config.X".
+                            #   `CHAN_FILTERS`, `DENOISE_ENGINES`, `DISCONNECT_DROP_DB`. בלי לוגיקה/IO. ⚠ קוראים אליו כ-`config.<שם>`; ב-`_FEEDS` כשם-מחרוזת "config.X".
                             #   קיים כדי ש-appstate לא ייצור ייבוא מעגלי. הוצא בשלב ג2. עריכת ברירת מחדל קבועה — כאן.
+  experiment.py             # רשם ניסוי RF (`_rflog_*`, `_parse_airband_conf`) + ניסוי הכיול האוטומטי (`_experiment_*`, `_exp_*`, `EXP_*`, `_experiment_summary`).
+                            #   באותו מודול כי תלויים הדדית. ⚠ תלויות ב-app (`_enter_voice`, `_probe_params`, `_restore_after_probe`, `_sample_probe_stats`,
+                            #   `_live_mode`, `TUNE_LOCK`, `STATS_PATH`/`CONFIG_PATH`, `ANTENNA_CHECK_SAMPLE_SEC`…) **מוזרקות** ב-`experiment.bind(...)` (בסוף app.py)
+                            #   כ-lambda שפותר את השם בזמן הקריאה ⇒ החלפה על `app` בבדיקות ממשיכה לעבוד. אין לייבא `app` מכאן (`__main__` ⇒ עותק שני).
+                            #   בבדיקות: `RFLOG_PATH`/`EXP_*`/`RFLOG_*` על `experiment`; `_enter_voice`/`ANTENNA_CHECK_SAMPLE_SEC`/`TUNE_LOCK` נשארים על `app`. הוצא בשלב ג2.
   recordings.py             # הקלטות (`_rec_*`, `_iter_recordings`, `_sweep_recordings`, `_scan_new_recordings`), ★ שמורות (`saved/`,
                             #   `_move_recording`, `_saved_usage`), תמלול (sidecar `.tx.json`, `_whisper_*`, `_transcribe_file`,
                             #   `_tx_next_target`, `transcribe_worker(get_cfg)`) ועזרי סשן (`_session_dir`, `_session_clip_paths`).
@@ -531,7 +536,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   אומתה, ר' §12 ו-`docs/antenna-calibration-experiment.md`), `_sample_probe_stats`+
   `_restore_after_probe` (הלב של `POST /api/antenna/check`: מעבר זמני לקול,
   מדידה, שחזור המצב הקודם — best-effort גם בכישלון, לא נוגע ב-`state["app_mode"]`).
-  **רשם ניסוי RF** (`docs/antenna-calibration-experiment.md`): `_rflog_start`/`_rflog_stop`/
+  **רשם ניסוי RF** (⚠ הרשם והניסוי האוטומטי שלמטה יושבים ב-`experiment.py`, לא ב-`app.py`; ר' §3) (`docs/antenna-calibration-experiment.md`): `_rflog_start`/`_rflog_stop`/
   `_rflog_worker` (thread רק כשמופעל, `stop_evt.wait` ולא sleep), `_rflog_sample` (שורה רק
   כשחתימת ה-mtime של stats/conf השתנתה), `_parse_airband_conf` (הקונפיג *שבאמת רץ* — לא
   state, כי ה-probe לא כותב state), `_rflog_event` (סימונים + תוצאת כל `/api/antenna/check`,

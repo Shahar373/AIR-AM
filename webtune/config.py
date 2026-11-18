@@ -114,3 +114,5 @@ SATCOM_BANKS = [
 ]
 SATCOM_SATELLITES = {b["id"] for b in SATCOM_BANKS}  # דגלי --satellite= תקינים
 SATCOM_FREQS_DEFAULT = SATCOM_BANKS[0]["freqs"]      # ["AF1"] — Alphasat, ל-EMEA/ישראל
+
+DISCONNECT_DROP_DB = 10.0

@@ -12,6 +12,7 @@ import time
 import pytest
 
 import app
+import experiment  # noqa: E402
 import appstate  # noqa: E402
 
 
@@ -20,7 +21,7 @@ def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "airband.conf")
     monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "STATS_PATH", tmp_path / "stats.txt")
-    monkeypatch.setattr(app, "RFLOG_PATH", tmp_path / "rf_log.jsonl")
+    monkeypatch.setattr(experiment, "RFLOG_PATH", tmp_path / "rf_log.jsonl")
     return tmp_path
 
 
@@ -30,9 +31,9 @@ def _rflog_clean(paths):
     # RFLOG_PATH לנתיב האמיתי. בלי זה, שורת ה-stop של הניקוי נכתבה ל-
     # /var/lib/airam — עבר בשקט כ-root, ונכשל ב-CI (PermissionError).
     yield
-    app._rflog_stop("test-teardown")
-    with app._rflog_lock:
-        app._rflog.update(active=False, started_at=None, until=None, rows=0,
+    experiment._rflog_stop("test-teardown")
+    with experiment._rflog_lock:
+        experiment._rflog.update(active=False, started_at=None, until=None, rows=0,
                           marks=0, thread=None, stop=None)
 
 
@@ -58,14 +59,14 @@ def _rows(paths):
 # --- הקונפיג שבאמת רץ ---------------------------------------------------------
 
 def test_parse_conf_agc_has_no_gain_line():
-    c = app._parse_airband_conf(app.render_config(132.5, "am", True, 40, 4, "open", 9.0))
+    c = experiment._parse_airband_conf(app.render_config(132.5, "am", True, 40, 4, "open", 9.0))
     assert c["freq"] == 132.5             # שורת ה-channel, לא centerfreq (=132.8)
     assert c["agc"] is True and c["ifgr"] is None and c["rfgr"] is None
     assert c["squelch_snr"] == 0.0 and c["mod"] == "am"
 
 
 def test_parse_conf_manual_gain_and_auto_squelch():
-    c = app._parse_airband_conf(app.render_config(131.55, "am", False, 20, 0, "auto", 9.0))
+    c = experiment._parse_airband_conf(app.render_config(131.55, "am", False, 20, 0, "auto", 9.0))
     assert c["agc"] is False and c["ifgr"] == 20 and c["rfgr"] == 0
     assert c["squelch_snr"] is None       # auto = אין שורה, לא ניחוש של ערך
 
@@ -75,15 +76,15 @@ def test_parse_conf_manual_gain_and_auto_squelch():
 def test_sample_writes_only_on_new_stats(paths):
     _write_conf(paths, 121.5, agc=False)
     _write_stats(paths, 121.5, -40.0, -61.5, mtime=1000.0)
-    row, sig = app._rflog_sample(None)
+    row, sig = experiment._rflog_sample(None)
     assert row["freq"] == 121.5 and row["agc"] is False and row["ifgr"] == 20
     assert row["noise"] == -61.5 and row["signal"] == -40.0
     assert row["stats_mtime"] == 1000.0
     # אותה חתימה => אין שורה (stats קפוא במצבים שאינם קול לא ממלא את הקובץ)
-    row2, sig2 = app._rflog_sample(sig)
+    row2, sig2 = experiment._rflog_sample(sig)
     assert row2 is None and sig2 == sig
     _write_stats(paths, 121.5, -40.0, -72.0, mtime=1001.0)
-    row3, _ = app._rflog_sample(sig)
+    row3, _ = experiment._rflog_sample(sig)
     assert row3["noise"] == -72.0
 
 
@@ -91,7 +92,7 @@ def test_sample_other_freq_stats_are_none_not_guessed(paths):
     """stats של תהליך קודם על תדר אחר => None, לא הערך שלו (§12)."""
     _write_conf(paths, 131.55)
     _write_stats(paths, 121.5, -40.0, -61.5, mtime=1000.0)
-    row, _ = app._rflog_sample(None)
+    row, _ = experiment._rflog_sample(None)
     assert row["freq"] == 131.55 and row["noise"] is None and row["signal"] is None
 
 
@@ -102,7 +103,7 @@ def test_sample_records_both_mtimes_without_filtering(paths):
     _write_stats(paths, 121.5, -40.0, -61.5, mtime=1000.0)
     _write_conf(paths, 121.5, agc=True)
     os.utime(paths / "airband.conf", (1005.0, 1005.0))
-    row, _ = app._rflog_sample(None)
+    row, _ = experiment._rflog_sample(None)
     assert row["stats_mtime"] < row["conf_mtime"]
 
 
@@ -114,15 +115,15 @@ def test_mark_rejected_when_off(client):
 
 
 def test_start_mark_stop_roundtrip(client, paths, monkeypatch):
-    monkeypatch.setattr(app, "RFLOG_POLL_SEC", 0.05)
+    monkeypatch.setattr(experiment, "RFLOG_POLL_SEC", 0.05)
     r = client.post("/api/rflog", json={"active": True})
     assert r.get_json()["active"] is True
     # "נותרו" מחושב בשרת (שעון הטלפון בשטח לא בהכרח מסונכרן עם ה-Pi)
-    assert 0 < r.get_json()["remaining"] <= app.RFLOG_MAX_SEC
+    assert 0 < r.get_json()["remaining"] <= experiment.RFLOG_MAX_SEC
     r = client.post("/api/rflog/mark", json={"label": "  מנותק  "})
     assert r.status_code == 200 and r.get_json()["label"] == "מנותק"
     assert r.get_json()["marks"] == 1
-    th = app._rflog["thread"]
+    th = experiment._rflog["thread"]
     r = client.post("/api/rflog", json={"active": False})
     assert r.get_json()["active"] is False and r.get_json()["remaining"] is None
     assert not th.is_alive()
@@ -133,37 +134,37 @@ def test_start_mark_stop_roundtrip(client, paths, monkeypatch):
 
 def test_start_is_idempotent(client, paths):
     client.post("/api/rflog", json={"active": True})
-    first = app._rflog["thread"]
+    first = experiment._rflog["thread"]
     client.post("/api/rflog", json={"active": True})
-    assert app._rflog["thread"] is first
+    assert experiment._rflog["thread"] is first
     assert [r["ev"] for r in _rows(paths)].count("start") == 1
 
 
 def test_label_is_truncated(client, paths):
     client.post("/api/rflog", json={"active": True})
     r = client.post("/api/rflog/mark", json={"label": "א" * 200})
-    assert len(r.get_json()["label"]) == app.RFLOG_LABEL_MAX
+    assert len(r.get_json()["label"]) == experiment.RFLOG_LABEL_MAX
 
 
 def test_auto_stop_after_max_duration(client, paths, monkeypatch):
     """לא כותבים ל-SD לנצח אם שכחו לכבות — כיבוי אוטומטי עם סיבה מפורשת."""
-    monkeypatch.setattr(app, "RFLOG_MAX_SEC", 0)
+    monkeypatch.setattr(experiment, "RFLOG_MAX_SEC", 0)
     client.post("/api/rflog", json={"active": True})
-    app._rflog["thread"].join(timeout=3)
-    assert app._rflog["active"] is False
+    experiment._rflog["thread"].join(timeout=3)
+    assert experiment._rflog["active"] is False
     last = _rows(paths)[-1]
     assert last["ev"] == "stop" and last["reason"] == "timeout"
 
 
 def test_worker_records_live_rows(client, paths, monkeypatch):
-    monkeypatch.setattr(app, "RFLOG_POLL_SEC", 0.02)
+    monkeypatch.setattr(experiment, "RFLOG_POLL_SEC", 0.02)
     _write_conf(paths, 121.5, agc=True)
     _write_stats(paths, 121.5, -35.0, -58.0, mtime=2000.0)
     client.post("/api/rflog", json={"active": True})
     # המתנה מבוססת-מצב (לא sleep קבוע): עד שנרשמה שורת מדידה, תקרה 3ש'
     deadline = time.time() + 3
     while time.time() < deadline and not any("noise" in r for r in _rows(paths)):
-        app._rflog["stop"].wait(0.02)
+        experiment._rflog["stop"].wait(0.02)
     client.post("/api/rflog", json={"active": False})
     data = [r for r in _rows(paths) if "noise" in r]
     assert data and data[0]["noise"] == -58.0 and data[0]["agc"] is True
@@ -212,8 +213,8 @@ def test_write_failure_is_counted_not_raised(client, paths, monkeypatch):
     (בגרסה הראשונה הוא זרק, וזה השאיר את הניסוי האוטומטי "רץ" לנצח.)"""
     blocker = paths / "not-a-dir"
     blocker.write_text("x")                        # קובץ, לא תיקייה => mkdir נכשל
-    monkeypatch.setattr(app, "RFLOG_PATH", blocker / "rf_log.jsonl")
-    assert app._rflog_write({"ev": "x"}) is False
+    monkeypatch.setattr(experiment, "RFLOG_PATH", blocker / "rf_log.jsonl")
+    assert experiment._rflog_write({"ev": "x"}) is False
     r = client.post("/api/rflog", json={"active": True})
     assert r.status_code == 200 and r.get_json()["write_errors"] >= 1
 
@@ -223,17 +224,17 @@ def test_no_timeout_while_experiment_running(client, paths, monkeypatch):
     """⚠ regression: רשם שהופעל ידנית לפני ~שעתיים נכבה באמצע ניסוי הכיול
     (_rflog_start החזיר False ולא האריך את until), והניסוי הסתיים בלי נתונים
     אחרי שהמשתמש כבר ניתק וחיבר את האנטנה. כל עוד הניסוי רץ — לא נכבים."""
-    monkeypatch.setattr(app, "RFLOG_MAX_SEC", 0)
-    monkeypatch.setattr(app, "RFLOG_POLL_SEC", 0.02)
-    with app._exp_lock:
-        app._exp["running"] = True
+    monkeypatch.setattr(experiment, "RFLOG_MAX_SEC", 0)
+    monkeypatch.setattr(experiment, "RFLOG_POLL_SEC", 0.02)
+    with experiment._exp_lock:
+        experiment._exp["running"] = True
     try:
         client.post("/api/rflog", json={"active": True})
-        app._rflog["stop"].wait(0.2)          # כמה סבבי worker אחרי שה-until עבר
-        assert app._rflog["active"] is True
+        experiment._rflog["stop"].wait(0.2)          # כמה סבבי worker אחרי שה-until עבר
+        assert experiment._rflog["active"] is True
     finally:
-        with app._exp_lock:
-            app._exp["running"] = False
-    app._rflog["thread"].join(timeout=3)      # הניסוי הסתיים => ה-timeout חל
-    assert app._rflog["active"] is False
+        with experiment._exp_lock:
+            experiment._exp["running"] = False
+    experiment._rflog["thread"].join(timeout=3)      # הניסוי הסתיים => ה-timeout חל
+    assert experiment._rflog["active"] is False
     assert _rows(paths)[-1]["reason"] == "timeout"

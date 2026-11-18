@@ -22,6 +22,7 @@ import json
 import pytest
 
 import app
+import experiment  # noqa: E402
 import appstate  # noqa: E402
 import recordings  # noqa: E402
 import storage
@@ -195,11 +196,11 @@ def test_append_to_empty_or_missing_file_adds_no_blank_line(logs):
 def test_rflog_append_after_power_cut_keeps_next_row(tmp_path, monkeypatch):
     """רשם ה-RF כותב עם fsync בדיוק בגלל power bank שקוטע — אבל fsync לא עוזר
     לשורה שנכתבה *לפני* הקטיעה. השורה הראשונה אחרי האתחול חייבת לשרוד."""
-    monkeypatch.setattr(app, "RFLOG_PATH", tmp_path / "rf_log.jsonl")
-    monkeypatch.setattr(app, "_rflog_fsync", lambda fd: None)
-    app.RFLOG_PATH.write_bytes(b'{"kind": "x"}\n{"kind": "y", "a')
-    assert app._rflog_write({"kind": "after"}) is True
-    lines = storage.read_log_lines(app.RFLOG_PATH)
+    monkeypatch.setattr(experiment, "RFLOG_PATH", tmp_path / "rf_log.jsonl")
+    monkeypatch.setattr(experiment, "_rflog_fsync", lambda fd: None)
+    experiment.RFLOG_PATH.write_bytes(b'{"kind": "x"}\n{"kind": "y", "a')
+    assert experiment._rflog_write({"kind": "after"}) is True
+    lines = storage.read_log_lines(experiment.RFLOG_PATH)
     assert json.loads(lines[-1]) == {"kind": "after"}
 
 
