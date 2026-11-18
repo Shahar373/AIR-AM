@@ -157,7 +157,6 @@ ACARS2_ENV_PATH = Path("/etc/airam/acars2.env")
 VOICE_STARTUP_WAIT_SEC = 30   # עד מתי מחכים לכתיבת ה-stats הראשונה של rtl_airband
 # המרווח עצמו ביחידה (ExecStartPre=/bin/sleep 10 ב-airam-acars2.service) — כך הוא חל גם כש-
 # systemd מאתחל את שנינו יחד (PartOf=sdrplay), לא רק כשאנחנו מתזמנים. כאן רק מחכים ל-stats.
-ACARS2_STAGGER_SEC = 0
 # מצב "קול כפול" (docs/dual-sdr-feasibility.md §8): rtl_airband *שני* על המקלט המשני — תהליך לכל
 # מקלט (תהליך אחד עם שניים נכשל ב-sdrplay_api_Fail, §7.6). קונפיג, stats ו-mount משלו; ההקלטות
 # לאותה תיקייה (include_freq ⇒ שמות שונים), כך שיומן השידורים/★/תמלול חלים על שני הערוצים בחינם.
@@ -3393,8 +3392,8 @@ def _enter_voice(params, keep_secondary=False):
 
 
 def _wait_voice_settled(since):
-    """פתיחה מדורגת: מחכה ש-rtl_airband יכתוב stats *אחרי* `since` (סיים לעלות), ועוד
-    ACARS2_STAGGER_SEC. לא נכשל — אחרי VOICE_STARTUP_WAIT_SEC ממשיכים בכל מקרה (ה-stats
+    """פתיחה מדורגת: מחכה ש-rtl_airband יכתוב stats *אחרי* `since` (סיים לעלות); המרווח
+    הנוסף יושב ביחידה (ExecStartPre=/bin/sleep 10). לא נכשל — אחרי VOICE_STARTUP_WAIT_SEC ממשיכים בכל מקרה (ה-stats
     הם סימן, לא תנאי; הקול כבר אומת ע"י _restart_and_verify)."""
     end = time.monotonic() + VOICE_STARTUP_WAIT_SEC
     while time.monotonic() < end:
@@ -3404,7 +3403,6 @@ def _wait_voice_settled(since):
         except OSError:
             pass
         time.sleep(0.5)
-    time.sleep(ACARS2_STAGGER_SEC)
 
 
 def _start_acars2(freqs):

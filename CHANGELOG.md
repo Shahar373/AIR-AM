@@ -23,6 +23,17 @@
 ### שונה (פנימי)
 - `_health_snapshot()` ו-`_power_cached()` הופרדו מ-`/api/health` ו-`/api/power` — משותפים עם היומן.
 
+### סדר (שלב א של הסקירה, 18.11.2026)
+- `tests/test_systemd_units.py` בודק עכשיו את **שבעת** צרכני ה-SDR (כולל שלושת המשניים): Conflicts לכל זוג חוץ
+  מ"משני לצד הקול", ובדיקה הפוכה שהמשני *לא* מתנגש עם `rtl_airband`. קודם רק 4 נבדקו.
+- `scripts/airam-resilience-check` מציג גם את `rtl_airband2`/`airam-acars2`/`airam-vdl2-2`/`airam-denoise`.
+- הוסר קוד מת: `ACARS2_STAGGER_SEC = 0` (והשינה עליו — המרווח יושב ביחידה), ושתי מחלקות CSS שלא בשימוש.
+- תיעוד: שורות סטטוס מעודכנות ב-`docs/dual-sdr-feasibility.md`, `satcom-feasibility.md`, `session-replay-design.md`,
+  `field-station-roadmap.md`, `dual-sdr-home-test.md`; README ("ארבעה תהליכים" + שני מקלטים); CLAUDE.md — מספרי
+  שורות, "שישה מצבים"/"ארבעה צרכנים", תיאור ה-CI, `?starred=1` (‏`saved/` ולא `starred.json`), שני קובצי בדיקה חסרים.
+- ⚠ **תגי גרסה:** במאגר קיים רק `v1.0.0`, למרות המוסכמה. גרסאות שלא קיבלו כותרת משלהן ב-CHANGELOG (למשל
+  2.33–2.36.0) קובצו לגרסה שאחריהן. מעכשיו — תג בכל מיזוג ל-main.
+
 ## [2.36.1] - 2026-11-17
 
 ### נוסף

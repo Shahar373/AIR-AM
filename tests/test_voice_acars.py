@@ -70,7 +70,6 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "_serial_on_api", lambda serial: None)
     monkeypatch.setattr(app, "_rtl_airband_start_wall", lambda: None)
     monkeypatch.setattr(app, "_denoise_after_voice", lambda: None)
-    monkeypatch.setattr(app, "ACARS2_STAGGER_SEC", 0)
     monkeypatch.setattr(app, "VOICE_STARTUP_WAIT_SEC", 2)
     monkeypatch.setattr(app.time, "sleep", lambda s: None)
     monkeypatch.setattr(app, "_services_status",

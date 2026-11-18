@@ -77,6 +77,9 @@
 `Conflicts` (כל יחידה מצהירה Conflicts מול *כל* קודמותיה => כל הזוגות מכוסים,
 דו-כיווני; `airam-satcom` מצהיר מול שלושת האחרים) — הפעלת אחת עוצרת אוטומטית את השאר.
 **אי אפשר שניים מהם בו-זמנית עם SDR אחד.** מעבר מצב = ~3 שניות.
+עם **מקלט שני** (v2.33+) יש שלושה צרכנים נוספים על המשני (`airam-acars2`/`rtl_airband2`/`airam-vdl2-2`)
+שרצים *לצד* הקול על הראשי — Conflicts מול כל השאר, אבל לא מול `rtl_airband` (ר' §5, המצבים הכפולים;
+נאכף ב-`tests/test_systemd_units.py`).
 
 **תפיסת ההפעלה — אין "מצב ראשי", airam-web הוא המתזמר:** קול/ACARS/VDL2/SATCOM הם
 "אפליקציות" שוות-מעמד על משאב ה-SDR, ו-`off` (standby) הוא המצב הניטרלי היחיד.
@@ -99,7 +102,7 @@ CLAUDE.md                   # ← המסמך הזה: ארכיטקטורה + פי
 webtune/
   app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, SATCOM, סריקה,
                             #   רוסטר מאוחד, מד שדה + בדיקת אנטנה, דוח סשן, REST API, יומן,
-                            #   הקלטות, תמלול, METAR, מדדי RF, מעבר מצבים, ארכיון חיפוש. ~5200 שורות.
+                            #   הקלטות, תמלול, METAR, מדדי RF, מעבר מצבים, ארכיון חיפוש. הקובץ הגדול בפרויקט.
   adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS + סדרת סשן +
                             #   buffer מתגלגל לשחזור-סשן (docs/session-replay-design.md,
                             #   שלב 1) + שכבת הנתונים של ההצלבה (lookup ממוקד/trace/OpenSky,
@@ -110,7 +113,7 @@ webtune/
   xcheck.py                 # ★ הצלבת הודעות מול ADS-B + אופק רדיו/BLOS — פונקציות טהורות בלבד
                             #   (גאודזיה, אופק, זהות, מיקום-בזמן, קריטריונים). ר' §5.
   static/
-    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~5800 שורות). PWA. 5 תצוגות:
+    index.html              # ה-UI כולו (HTML+CSS+JS inline). PWA. 5 תצוגות:
                             #   🏠 מרכז (בית/standby/scan, כולל דוח סשן+התראות) + קול + ACARS +
                             #   VDL2 + SATCOM. ACARS/VDL2/SATCOM שלושה מופעים סימטריים של אותו
                             #   פקטורי createDataView (ר' §7); מד השדה — פקטורי מקביל, שני.
@@ -212,7 +215,10 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_recordings.py       # ★ שמירת הקלטות (saved/, מכסה תחת מרוץ-מקביל, ?starred=1, ZIP) +
                            #   תמלול (5 מצבי tx.state, תור מבוסס-sidecar ששורד restart, שתי
                            #   שפות/מודלים, fallback מודל, retention עמיד ל-stat שנכשל).
-  test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
+  test_security.py         # _guard: Origin/CSRF, PIN.
+  test_systemd_units.py    # אינווריאנטות היחידות: Conflicts לכל זוג צרכנים (חוץ מהמשני לצד הקול), אף צרכן לא
+                           #   enabled, Requires+PartOf=sdrplay, StartLimit רק ל-satcom ורק ב-[Unit].
+  test_adsc_matrix.py      # מטריצת ADS-C: מיקום מותר ⟺ הפענוח לא נכשל וגם הכיוון אינו uplink, בשלושת המסלולים.
   test_frontend.py         # UI בלי דפדפן: `node --check` על הסקריפט ה-inline + בדיקות סטטיות.
   test_ui_browser.py       # ★ UI בדפדפן אמיתי (Playwright, API מזויף ב-route interception):
                            #   אישור bias-T ב-SATCOM, כישלון כניסה⇒בית, הודעות SDR-חסר, ארכיון,
@@ -275,7 +281,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
                             #   מפת טווח קליטה, פעילות לפי שעה + הצעת לוח סריקה, היסטוריית מסלול/GPS, יומן מטוסים,
                             #   ומקלט GPS ב-USB (VK-162) כמיקום תחנה/חיישן שיבוש מקומי/שעה. טרם מומש.
   session-replay-design.md  # ★ תכנון "שחזור סשן" (מפה+אודיו על ציר זמן). שלבים 0–2 בוצעו
-                            #   (buffer מתגלגל + POST /api/sessions) — ר' §11 למימוש שנותר (UI).
+                            #   (buffer מתגלגל + POST /api/sessions), ושלב 3 (רשימה + נגן ב-UI) — ר' §7.
   denoise-design.md         # ★ סינון רעשים חי (מומש, v2.29.0): ארכיטקטורה מקבילית, ממצאי מקור (rtl_airband
                             #   udp_stream, Icecast fallback), הניסוי והחלטת המנוע, ניתוח כשלים, מה נדחה, אימות על ה-Pi.
   audio-comfort-design.md   # ★ המשך ל-denoise-design (מומש, v2.32.0): האזנה על ATC אמיתי פסלה את RNNoise+
@@ -339,7 +345,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 
 הקובץ מאורגן בבלוקים מסומנים `# --- ... ---`. נקודות עיקריות:
 
-- **קבועים (ל~145):** נתיבים, gain של SDRplay (IFGR 20–59 / RFGR 0–9, **קטן=רווח גדול**),
+- **קבועים (ראש הקובץ):** נתיבים, gain של SDRplay (IFGR 20–59 / RFGR 0–9, **קטן=רווח גדול**),
   ספי squelch, קבועי ACARS, מילוני `ACARS_LABELS` ו-`_ACARS_DIR_BY_LABEL` (חלקם
   התווספו רק מקליטת שטח אמיתית — למשל `A0`/`1B`/`4P`/`2F`, לייבלים שנצפו
   בקליטת SATCOM ראשונה מוצלחת ולא היו מתועדים קודם; ר' §12), הקלטות, whisper.
@@ -365,7 +371,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   שרץ בפועל או None), `_enter_voice` (peer סימטרי של `_enter_acars`/`_enter_vdl2`/
   `_enter_satcom`: עצירת צרכני דאטה + write_config + verify), `_fail_to_off` (כישלון
   כניסה ⇒ standby + state off+prev_mode + payload 500 — **לעולם לא fallback לקול**).
-  `/api/mode` הוא dispatcher מאוחד לששת המצבים (voice/acars/vdl2/**satcom**/off/**scan**);
+  `/api/mode` הוא dispatcher מאוחד לכל המצבים (voice/acars/vdl2/**satcom**/off/**scan** + שלושת המצבים הכפולים);
   acars/vdl2/satcom חולקים זנב גנרי `(key, default, sanitize, wcheck, enter)`.
   `_boot_restore` (thread ב-startup) משחזר את המצב השמור באתחול — ה-orchestration
   שמאפשר לאף צרכן לא להיות enabled ב-systemd.
@@ -427,7 +433,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   מקליטה אמיתית; ל-16 גם וריאנט מופרד-`/` בלי waypoint; **CPDLC נבדק ונמצא ללא תעבורה
   בפועל** בקליטה שנבדקה — לא מומש),
   `_acars_adsb` (העשרת ADS-B לזנבות שבזיכרון — ראה §6),
-  `_enter_acars` (כתיבת env + מעבר שירות), `_enter_standby` (כיבוי **ארבעת** הצרכנים, משאיר
+  `_enter_acars` (כתיבת env + מעבר שירות), `_enter_standby` (כיבוי **כל** צרכני ה-SDR — כולל אלה שעל המשני, משאיר
   sdrplay חי), `_acars_window_error` (wrapper דק מעל `_window_error` הגנרי — ≤8 ערוצים,
   span ≤ `ACARS_WINDOW_MHZ`), `ACARS_BANKS` (בנקי תדרים, כל בנק בחלון אחד), `_today_start`,
   `_day_bounds` (גבולות יום מקומי לארכיון החיפוש — `?day=YYYY-MM-DD` ב-`/api/acars`,
@@ -818,7 +824,7 @@ ADS-B מ-`GET /api/aircraft`, כולל כשה-SDR ב-standby; כולל מקור 
 נוכחית + ספירה-לאחור מקומית כל שנייה מול `scanStatus.next_switch_at` שמגיע
 מ-`GET /api/scan`; "ממתין לחלון הזמן הבא" כשאף רגל לא בחלון שלה כרגע). **אין תצוגה ייעודית
 לסריקה** — `showView` מחזיק חמש תצוגות (home/voice/acars/vdl2/**satcom**) ו-`applyMode`
-שישה מצבים; `scan` תמיד ממופה ל-`"home"` (הוא "אפליקציית-על", לא תוכן-תצוגה). הדף מושך מצב מ-`/api/*`
+את כל המצבים (כולל הכפולים, שנוחתים בתצוגת הקול); `scan` תמיד ממופה ל-`"home"` (הוא "אפליקציית-על", לא תוכן-תצוגה). הדף מושך מצב מ-`/api/*`
 ב-polling; ה-pollers של airspace/power/METAR/roster רצים בכל תצוגה, metrics/activity רק
 בקול. `pollSatcomHealth` (1ש' ב-satcom בלבד, `GET /api/satcom/health`, in-flight guard
 בדפוס `metricsInFlight`, קריאה מיידית ב-`showView`+אחרי כניסה מוצלחת — לא ממתינים
@@ -1111,7 +1117,7 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/rflog/export` | הורדת `rf_log.jsonl` (404 כשאין) |
 | GET/POST | `/api/experiment` | ניסוי כיול אוטומטי. GET: מצב (`running`/`step`/`step_index`/`steps_total`/`waiting`/`eta_sec`/`eta_prompt_sec`/`error`/`result`). POST `{action}`: `start` (409 כש-SATCOM חי/סריקה/`TUNE_LOCK` תפוס/כבר רץ), `confirm` (הפעולה הפיזית בוצעה; 409 כשאין בקשה ממתינה), `abort`. מחזיק את `TUNE_LOCK` לכל אורכו. דרך `_guard` (POST) |
 | POST | `/api/antenna/check` | בדיקת אנטנה בת ~3 שניות: מעבר זמני לקול (AGC, סקוולץ' פתוח) בתדר המבוקש, מדידת רצפת רעש אמיתית (`_sample_probe_stats`), וחזרה למצב הקודם (`_restore_after_probe`, גם בכישלון). `calibrate:true` שומר את התוצאה כ-`signal_baseline`. לא נוגע ב-`state["app_mode"]` — פעולת אבחון, לא מעבר-מצב. סריאלי תחת `TUNE_LOCK`; 409 כשתפוס |
-| GET | `/api/activity` | יומן שידורים. כל אירוע כולל `exists`, `starred`, ו-`tx` (‏`{state, text, err?, raw?, filtered?}` — ר' §12). `?starred=1` => רק ההקלטות המסומנות, **מ-`starred.json` ולא מהיומן** (שורדות את קיצוץ `ACTIVITY_KEEP`) |
+| GET | `/api/activity` | יומן שידורים. כל אירוע כולל `exists`, `starred`, ו-`tx` (‏`{state, text, err?, raw?}` — ר' §12). `?starred=1` => רק ההקלטות המסומנות, **נסרקות מ-`saved/`** ולא מהיומן (שורדות את קיצוץ `ACTIVITY_KEEP`) |
 | POST | `/api/recordings/star` | `{file, starred}` — שמירה/ביטול (★, מעביר ל/מ-`saved/`, `os.replace` אטומי תחת `_STAR_LOCK`). שמורה פטורה מ-retention. 409 כשהמכסה מלאה (**לא מוחקים שמורה ותיקה**), 404 כשההקלטה כבר לא קיימת. דרך `_guard` |
 | POST | `/api/recordings/transcribe` | `{file, lang?}` — תמלול שידור בודד לפי דרישה (כותב sidecar `state="pending"` — שורד restart, לא תור-בזיכרון). 501 עם פקודת ההתקנה כשwhisper/המודל לשפה חסר. דרך `_guard` |
 | GET | `/api/recordings/starred.zip` | ZIP של כל ההקלטות השמורות + תמלוליהן (`ZIP_STORED`, ללא דחיסה — MP3 כבר דחוס). 404 כשאין שמורות. הדרך להוציא את השמורות לפני מוות של כרטיס SD |
@@ -1242,17 +1248,19 @@ enabled, וגם לא `airam-denoise`, ובשדרוג `disable rtl_airband` אי�
   ראה ה-CHANGELOG: כל גרסה כמעט הוסיפה בדיקות).
 - **CI** (`.github/workflows/ci.yml`): pytest על **Python 3.11 ו-3.13** (מטריצה —
   Pi OS Bookworm/Debian 12 מול Pi OS Trixie/Debian 13; שתיהן בשטח בפועל)
-  + `bash -n` (בדיקת תחביר) על `install.sh` ו-`airam-wait-sdrplay`. **שמור את שניהם ירוקים.**
+  + `bash -n` ו-`shellcheck -S warning` על `install.sh` והסקריפטים, `systemd-analyze verify` על היחידות,
+  ו-job נפרד לבדיקות הדפדפן (Playwright). הרשימה המדויקת — ב-`ci.yml` עצמו. **שמור הכול ירוק.**
 - **בדיקה ידנית של adsb:** `python3 webtune/adsb.py --selftest` (בלי רשת).
 
 ---
 
 ## 12. מוסכמות וגוצ'אות (קרא לפני שינוי)
 
-- **כיוונון אחד בכל רגע:** RSP1B יחיד = תדר/מצב אחד פעיל. אל תנסה ריבוי ערוצים בו-זמני.
-- **שישה מצבי `app_mode`, שווי-מעמד:** `voice` (rtl_airband) · `acars` (acarsdec) ·
+- **כיוונון אחד בכל רגע — לכל מקלט:** מקלט = תהליך אחד = תדר/מצב אחד. ריבוי ערוצים בו-זמני רק דרך
+  מקלט *שני* (המצבים הכפולים, ר' §5 ו-`docs/dual-sdr-feasibility.md`), לא בתהליך אחד.
+- **מצבי `app_mode`, שווי-מעמד** (שישה של מקלט אחד, למטה, + `voice_acars`/`voice2`/`voice_vdl2` — ר' §5): `voice` (rtl_airband) · `acars` (acarsdec) ·
   `vdl2` (dumpvdl2) · `satcom` (inmarsat-sniffer — ACARS דרך לוויין Inmarsat, ר' §5/
-  docs/satcom-feasibility.md) · `off` (standby — **ארבעת** הצרכנים עצורים, ה-SDR פנוי
+  docs/satcom-feasibility.md) · `off` (standby — **כל** הצרכנים עצורים, ה-SDR פנוי
   ליישום אחר) · `scan` (סבב אוטומטי — **לא** צרכן/שירות נוסף, אלא thread שמסתובב בין
   קריאות ל-`_enter_voice`/`_enter_acars`/`_enter_vdl2` הקיימים; ראו §5. `satcom` **אינו**
   scannable כרגע — MVP מכוון).
@@ -1278,7 +1286,7 @@ enabled, וגם לא `airam-denoise`, ובשדרוג `disable rtl_airband` אי�
   השמורה; מצב שמור שלא רץ = תקלה (`mode_ok=False`/`ok=False`), standby ≠ תקלה.
   ב-`scan` ה"מצב" המדווח הוא `scan` עצמו (לא הרגל הנוכחית) — ראו `/api/scan`.
   ברירת המחדל של state חסר היא `off` (התקנה טרייה נוחתת במסך הבית).
-  `_enter_standby`/`_voice_tune` עוצרים את *שלושת* הצרכנים האחרים; `_scan_stop_thread`
+  `_enter_standby` עוצר את כל הצרכנים ו-`_voice_tune` את כל השאר (חוץ מהמשני כשהמצב הכפול נשמר); `_scan_stop_thread`
   נקרא ב*כל* מעבר `/api/mode` (גם למעבר בין תוכן-לוח שונה של scan עצמו).
 - **⚠ satcom דורש החלפת אנטנה פיזית *ידנית*** (VHF airband ↔ L-band+LNA) —
   ר' docs/satcom-feasibility.md §3. הבחירה במצב מהטלפון **לא** מבצעת את ההחלפה
