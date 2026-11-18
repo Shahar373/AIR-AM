@@ -23,11 +23,6 @@ def paths(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 def _cfg(**kw):
     args = dict(freq=132.5, mod="am", agc=True, if_gain=40, rf_gain=4, squelch_mode="auto")
     args.update(kw)

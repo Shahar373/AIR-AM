@@ -8,6 +8,7 @@ import types
 import pytest
 
 import app
+from helpers import ok_proc as _ok
 
 
 @pytest.fixture
@@ -17,20 +18,6 @@ def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "ACARS_ENV_PATH", tmp_path / "acars.env")
     monkeypatch.setattr(app, "VDL2_ENV_PATH", tmp_path / "vdl2.env")
     return tmp_path
-
-
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
-@pytest.fixture
-def no_sleep(monkeypatch):
-    monkeypatch.setattr(app.time, "sleep", lambda *a, **k: None)
-
-
-def _ok(**kw):
-    return types.SimpleNamespace(returncode=0, stdout="", stderr="", **kw)
 
 
 def _mk_is_active(calls):

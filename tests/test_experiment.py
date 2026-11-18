@@ -25,11 +25,6 @@ def paths(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 @pytest.fixture(autouse=True)
 def _clean(paths):
     # ⚠ תלוי ב-paths — הניקוי חייב להתפרק לפני ש-monkeypatch מחזיר את הנתיבים

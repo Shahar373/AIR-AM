@@ -21,11 +21,6 @@ def paths(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 @pytest.fixture(autouse=True)
 def _clean_state_corrupt_flag():
     app._reset_state_corrupt_warned()

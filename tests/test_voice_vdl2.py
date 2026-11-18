@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 import app
-from test_voice_acars import A, B, ORIGIN, _params, _roles, env  # noqa: F401  (fixture)
+from dual_env import A, B, ORIGIN, _params, _roles, env  # noqa: F401  (fixtures נטענים לפי שם)
 
 ROOT = Path(__file__).resolve().parent.parent
 

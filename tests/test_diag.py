@@ -173,11 +173,6 @@ def paths(tmp_path, monkeypatch):
                          requests=0, write_errors=0, thread=None, stop=None, last_run=None)
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 def _rows(paths):
     f = paths / "diag.jsonl"
     return [json.loads(l) for l in f.read_text(encoding="utf-8").splitlines()] if f.exists() else []

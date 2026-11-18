@@ -25,11 +25,6 @@ def paths(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 @pytest.fixture(autouse=True)
 def _clean_adsb_state():
     """‏_S הוא מצב גלובלי (module-level) — בלי איפוס, בדיקה שממלאת aircraft/

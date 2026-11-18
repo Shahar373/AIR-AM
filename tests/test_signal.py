@@ -6,7 +6,6 @@
 # ============================================================================
 import threading
 import time
-import types
 
 import pytest
 
@@ -22,11 +21,6 @@ def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "VDL2_ENV_PATH", tmp_path / "vdl2.env")
     monkeypatch.setattr(app, "SATCOM_ENV_PATH", tmp_path / "satcom.env")
     return tmp_path
-
-
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
 
 
 @pytest.fixture(autouse=True)
@@ -187,10 +181,6 @@ def test_signal_satcom_points_to_dedicated_panel(client, monkeypatch):
 
 
 # --- POST /api/antenna/check --------------------------------------------------
-
-def _ok(**kw):
-    return types.SimpleNamespace(returncode=0, stdout="", stderr="", **kw)
-
 
 def test_antenna_check_busy_returns_409(client):
     assert app.TUNE_LOCK.acquire(blocking=False)   # מדמה כיוונון/מעבר מצב אחר שכבר רץ

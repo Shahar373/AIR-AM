@@ -32,11 +32,6 @@ def paths(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 @pytest.fixture(autouse=True)
 def _reset_buffers():
     with app._acars_lock:

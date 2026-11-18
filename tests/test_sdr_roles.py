@@ -32,11 +32,6 @@ def paths(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 def _set_primary(serial):
     app._merge_state({"sdr_primary": serial})
 

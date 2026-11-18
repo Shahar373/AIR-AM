@@ -12,14 +12,7 @@ import time
 import pytest
 
 import app
-from test_voice_acars import A, B, ORIGIN, _params, _roles, env  # noqa: F401  (fixture)
-
-
-@pytest.fixture
-def env2(env, tmp_path, monkeypatch):
-    monkeypatch.setattr(app, "VOICE2_CONFIG_PATH", tmp_path / "airband2.conf")
-    monkeypatch.setattr(app, "STATS2_PATH", tmp_path / "stats2.txt")
-    return env
+from dual_env import A, B, ORIGIN, _params, _roles, env, env2  # noqa: F401  (fixtures נטענים לפי שם)
 
 
 def _activating(monkeypatch, env, units):

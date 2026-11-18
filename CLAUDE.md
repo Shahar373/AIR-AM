@@ -191,7 +191,10 @@ udev/
   99-airam.rules           # חיבור RSP1B (Vendor 1df7) → restart אוטומטי לשירותי SDR.
 
 tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/systemd ממוקפים).
-  conftest.py              # מוסיף webtune/ ל-sys.path.
+  conftest.py              # מוסיף webtune/ ל-sys.path + fixtures משותפים: `client` (לפי ה-`paths` של הקובץ)
+                           #   ו-`no_sleep`. קובץ עם fixture באותו שם דורס (‏test_sdr/test_security/test_xcheck_api).
+  helpers.py               # `ok_proc` (תוצאת subprocess מוצלחת מזויפת), `ORIGIN`.
+  dual_env.py              # סביבת המצבים הכפולים: `env`/`env2` (systemd מדומה), `A`/`B` (serials), `_roles`/`_params`.
   test_app.py              # render_config, parse, presets, מדדים, יומן, רולבק/נפילה-ל-off.
   test_acars.py            # נרמול ACARS, כיוון מבני (block ID), latlon, labels, ATIS, OOOI, actype,
                            #   מעברי מצב; פערי קליטת 24.10.2026 (label 11/15/16, QP–QS, B3/B4, זנב פגום).

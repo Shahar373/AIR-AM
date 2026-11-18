@@ -26,11 +26,6 @@ def paths(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 @pytest.fixture(autouse=True)
 def _clean_tx_state():
     """‏_TX_BUSY/_TX_FAILS הם מצב גלובלי (module-level) — בלי איפוס, בדיקה

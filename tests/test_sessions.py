@@ -28,11 +28,6 @@ def paths(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 def _write_track(rows):
     adsb.TRACK_PATH.write_text(
         "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")

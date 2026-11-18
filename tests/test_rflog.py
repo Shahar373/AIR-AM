@@ -23,11 +23,6 @@ def paths(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 @pytest.fixture(autouse=True)
 def _rflog_clean(paths):
     # ⚠ תלוי ב-paths בכוונה: כך הניקוי מתפרק *לפני* ש-monkeypatch מחזיר את

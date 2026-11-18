@@ -18,11 +18,6 @@ def paths(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 def _day_epoch(date_str, hour=12):
     lt = time.strptime(date_str + (" %02d:00:00" % hour), "%Y-%m-%d %H:%M:%S")
     return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, lt.tm_hour, 0, 0, 0, 0, -1))

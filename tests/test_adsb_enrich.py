@@ -30,11 +30,6 @@ def paths(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 def _feed(ac_list, now=None):
     with adsb._LOCK:
         adsb.process(ac_list, now if now is not None else time.monotonic())
