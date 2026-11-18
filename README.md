@@ -388,7 +388,7 @@ bank של 5V/3A, שני מקלטים שעולים באותו רגע הפילו �
 > האזרחית, ובפועל מופיעים על **131.550** (שכלול בבנק ברירת המחדל).
 
 בחירת בנק בזמן קליטה חיה מחליפה מיד את החלון. לשינוי **ברירת מחדל קבועה** ערוך את
-`config/acars.env` בריפו (או את `ACARS_BANKS` ב-`webtune/app.py`). עריכה ידנית של
+`config/acars.env` בריפו (או את `ACARS_BANKS` ב-`webtune/config.py`). עריכה ידנית של
 `/etc/airam/acars.env` אפשרית (פורמט EnvironmentFile של systemd), אך **כל מעבר ל-ACARS
 מהממשק דורס אותה**:
 
@@ -804,6 +804,10 @@ AIR-AM בנוי לרוץ **לבד** לאורך זמן (שרידות reboot, סר
 
 - **`webtune/app.py`** — שרת Flask קטן. בכל `POST /api/tune` הוא כותב `/etc/rtl_airband/airband.conf`
   עם ערוץ יחיד ממורכז על התדר הנבחר (ולכן תמיד בתוך החלון), ומריץ `systemctl restart rtl_airband`.
+- **מודולי העזר של `webtune/`** (הוצאו מ-`app.py` כדי שיהיה קל לקרוא ולבדוק אותו; אין שינוי בהתנהגות):
+  `storage.py` (כתיבה אטומית וקבצי JSONL), `config.py` (בנקי תדרים וברירות מחדל), `appstate.py` (`state.json`),
+  `acars_parse.py` (פענוח ACARS/VDL2/SATCOM), `recordings.py` (הקלטות, ★ ותמלול), `experiment.py` (רשם ה-RF וניסוי הכיול),
+  `xcheck_jobs.py` (תור ההצלבה מול ADS-B) ו-`xcheck.py`/`diag.py` (ניתוח טהור). מפת הקבצים המלאה — ב-`CLAUDE.md` §3.
 - **`webtune/adsb.py`** — ניתוח ADS-B (מסלול פעיל + GPS) ב-thread נפרד; מגיש את
   `GET /api/airspace` מהזיכרון בלבד, כך שתקלת רשת לא נוגעת בנתיב הרדיו.
 - **`config/airband.conf`** — קובץ ברירת מחדל לאתחול ראשון (ATIS 132.5). נדרס ע"י הבורר בכל כיוונון.
