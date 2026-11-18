@@ -111,6 +111,12 @@ webtune/
   acars_parse.py            # נרמול ופענוח ACARS/VDL2/SATCOM: `_normalize_acars/vdl2/satcom` + כל ה-parsers, טבלאות ה-labels, כיוון מבני,
                             #   `_libacars_decode`/`_decode_libacars_app`/`_run_libacars`. טהור — בלי Flask/state/systemd (נבדק מכנית).
                             #   הוצא מ-app.py בשלב ג2. ⚠ קוראים אליו כ-`acars_parse.<שם>` (לא `from … import`).
+  recordings.py             # הקלטות (`_rec_*`, `_iter_recordings`, `_sweep_recordings`, `_scan_new_recordings`), ★ שמורות (`saved/`,
+                            #   `_move_recording`, `_saved_usage`), תמלול (sidecar `.tx.json`, `_whisper_*`, `_transcribe_file`,
+                            #   `_tx_next_target`, `transcribe_worker(get_cfg)`) ועזרי סשן (`_session_dir`, `_session_clip_paths`).
+                            #   עובד על קבצים בלבד — בלי Flask/state/systemd (pyflakes: כל שם מוגדר). נתיבי ה-HTTP ו-`load_state`
+                            #   נשארו ב-app.py (ה-worker מקבל `(lang, auto)` דרך `get_cfg`). ⚠ קוראים אליו כ-`recordings.<שם>`;
+                            #   הבדיקות מחליפות `REC_DIR`/`WHISPER_*`/`_write_tx` על `recordings`, לא על `app`. הוצא בשלב ג2.
   storage.py                # כתיבה אטומית (`atomic_write`, fsync לקובץ+תיקייה) וקריאה/כתיבה של JSONL (`read_log_lines`,
                             #   `append_line_on_boundary`, `jsonl_records`, `trim_jsonl_log`, `csv_safe`). בלי תלות ב-app. ⚠ קוראים
                             #   אליו כ-`storage.<שם>` (לא `from storage import`) — כדי שהחלפה בבדיקה תשפיע. הוצא מ-app.py בשלב ג2.
@@ -628,6 +634,8 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   `/live.mp3` למבקשי `/clean.mp3` כשהסינון לא חי, ומעביר מאזינים בלי ניתוק כשהוא קורס.
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_sweep_recordings` (retention — **לא רואה `saved/` בכלל**, ר' למטה).
+- **הקלטות/★/תמלול/סשנים:** (⚠ הלוגיקה שעל קבצים — `_rec_*`, `_iter_recordings`, `_sweep_recordings`, sidecar התמלול, `_whisper_*`, `_session_dir` —
+  יושבת עכשיו ב-`recordings.py`; ב-app.py נשארו רק נתיבי ה-HTTP, יומן השידורים ו-wrapper דק ל-`_transcribe_worker`.)
 - **הקלטות שמורות (★) + תמלול — שני פיצ'רים מחוברים:** הפטור מ-retention הוא
   **מיקום הקובץ**, לא רשומה במאגר-מצב: `_saved_dir()` (`REC_DIR/saved/`),
   `_rec_path`/`_is_saved` (מחפשים בשתי התיקיות), `_rec_event` (בונה שורת-יומן
