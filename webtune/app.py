@@ -2469,43 +2469,83 @@ def _day_bounds(date_str):
     return start, end
 
 
-def _load_acars_history():
-    """טוען את זנב acars.jsonl ל-ring buffer בעלייה => הודעות *היום* שורדות restart,
-    ממוינות לפי זמן (t עולה) עם id רץ. נקרא *לפני* הפעלת thread ה-listener (אין מרוץ).
-    רק הודעות מהיום נטענות לזיכרון (ההיסטוריה המלאה נשמרת בדיסק)."""
-    global _acars_seq
+# --- שלושת פידי הדאטה (ACARS / VDL2 / SATCOM): מימוש אחד -------------------
+# אותו מחזור חיים לשלושתם: UDP מהמפענח ⇒ נרמול ⇒ dedup של שידורים חוזרים ⇒ jsonl ⇒ ring
+# buffer עם id רץ ⇒ תור ההצלבה; וטעינת "היום" מהדיסק בעלייה. עד v2.37 זה היה כתוב שלוש פעמים.
+# ⚠ ערכי המפרט הם *שמות* של משתנים גלובליים, ונפתרים בזמן הקריאה (_fv): הבדיקות מחליפות
+# app.ACARS_LOG_PATH / app.ACARS_UDP_PORT / app._acars_seq = 0 ישירות, וכך זה ממשיך לעבוד.
+_FEEDS = {
+    "acars": {"label": "ACARS", "port": "ACARS_UDP_PORT", "log": "ACARS_LOG_PATH", "keep": "ACARS_LOG_KEEP",
+              "buf": "ACARS_BUF_MAX", "lock": "_acars_lock", "msgs": "_acars_msgs", "seq": "_acars_seq",
+              "drop": None, "normalize": "_normalize_acars", "ident": ("tail",),
+              "services": ("ACARS_SERVICE", "ACARS2_SERVICE"), "freqs_key": "acars_freqs",
+              "freqs_default": "ACARS_FREQS_DEFAULT", "adsb": "_acars_adsb"},
+    "vdl2": {"label": "VDL2", "port": "VDL2_UDP_PORT", "log": "VDL2_LOG_PATH", "keep": "VDL2_LOG_KEEP",
+             "buf": "VDL2_BUF_MAX", "lock": "_vdl2_lock", "msgs": "_vdl2_msgs", "seq": "_vdl2_seq",
+             "drop": "_vdl2_drop_count", "normalize": "_normalize_vdl2", "ident": ("tail", "icao"),
+             "services": ("VDL2_SERVICE", "VDL2B_SERVICE"), "freqs_key": "vdl2_freqs",
+             "freqs_default": "VDL2_FREQS_DEFAULT", "adsb": "_vdl2_adsb"},
+    # SATCOM: זהות = tail בלבד (רוב ה-ACARS הלוויני נושא רישום); בלי שדה adsb בתשובה
+    "satcom": {"label": "SATCOM", "port": "SATCOM_UDP_PORT", "log": "SATCOM_LOG_PATH", "keep": "SATCOM_LOG_KEEP",
+               "buf": "SATCOM_BUF_MAX", "lock": "_satcom_lock", "msgs": "_satcom_msgs", "seq": "_satcom_seq",
+               "drop": "_satcom_drop_count", "normalize": "_normalize_satcom", "ident": ("tail",),
+               "services": ("SATCOM_SERVICE",), "freqs_key": "satcom_freqs",
+               "freqs_default": "SATCOM_FREQS_DEFAULT", "adsb": None},
+}
+FEED_DEDUP_SEC = 90      # שידור חוזר (אין ACK מהקרקע — המטוס שולח שוב, עד 7 פעמים) ⇒ retry_count, לא כרטיס
+FEED_DEDUP_MAX = 500     # מעל זה מנקים ערכים ישנים ממפת ה-dedup (מניעת דליפת זיכרון)
+FEED_TRIM_EVERY = 200    # קיצוץ תקופתי של ה-jsonl (ה-listener הוא הכותב היחיד)
+
+
+def _fv(feed, key):
+    """ערך מהמפרט של פיד, נפתר מ-globals() *עכשיו* (ר' ההערה מעל _FEEDS)."""
+    return globals()[_FEEDS[feed][key]]
+
+
+def _feed_push(feed, rec):
+    """id רץ + הכנסה ל-ring buffer. ⚠ רק תחת הנעילה של הפיד."""
+    name = _FEEDS[feed]["seq"]
+    globals()[name] += 1
+    rec["id"] = globals()[name]
+    _fv(feed, "msgs").append(rec)
+
+
+def _load_feed_history(feed):
+    """טוען את זנב ה-jsonl ל-ring buffer בעלייה => הודעות *היום* שורדות restart, ממוינות
+    לפי זמן (t עולה) עם id רץ. נקרא *לפני* הפעלת thread ה-listener (אין מרוץ). רק הודעות
+    מהיום נטענות לזיכרון (ההיסטוריה המלאה נשמרת בדיסק)."""
     try:
-        lines = _read_log_lines(ACARS_LOG_PATH)
+        lines = _read_log_lines(_fv(feed, "log"))
     except OSError:
         return
-    recs = _jsonl_records(lines[-ACARS_BUF_MAX:])
+    recs = _jsonl_records(lines[-_fv(feed, "buf"):])
     floor = _today_start()
     recs = [r for r in recs if (r.get("t") or 0) >= floor]   # היום בלבד (הדיסק נשמר)
     recs.sort(key=lambda r: r.get("t") or 0)
-    with _acars_lock:
+    with _fv(feed, "lock"):
         for r in recs:
-            _acars_seq += 1
-            r["id"] = _acars_seq
-            _acars_msgs.append(r)
+            _feed_push(feed, r)
     if recs:
-        log.info("ACARS: נטענו %d הודעות מההיסטוריה", len(recs))
+        log.info("%s: נטענו %d הודעות מההיסטוריה", _FEEDS[feed]["label"], len(recs))
 
 
-def _acars_listener():
-    """thread רקע: מאזין ל-UDP מ-acarsdec (-j), שומר ל-acars.jsonl, ומכניס ל-ring
-    buffer. רץ תמיד (גם במצב קול) — פשוט לא יגיעו דאטהגרמות כש-acarsdec כבוי."""
-    global _acars_seq
+def _feed_listener(feed):
+    """thread רקע: מאזין ל-UDP מהמפענח, שומר ל-jsonl ומכניס ל-ring buffer. רץ תמיד (גם
+    כשהמצב אחר) — פשוט לא מגיעות דאטהגרמות כשהמפענח כבוי."""
+    spec = _FEEDS[feed]
+    label = spec["label"]
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    port = _fv(feed, "port")
     try:
-        sock.bind((ACARS_UDP_HOST, ACARS_UDP_PORT))
+        sock.bind((ACARS_UDP_HOST, port))
     except OSError:
-        log.warning("ACARS listener: port %d busy - /api/acars יחזיר ריק", ACARS_UDP_PORT)
+        log.warning("%s listener: port %d busy - /api/%s יחזיר ריק", label, port, feed)
         return
+    normalize = _fv(feed, "normalize")
     seen = 0
-    # dedup: (tail, label, text[:80]) → (timestamp, rec_dict). מונע כפילות מ-ACARS retries
-    # (כש-ground station לא שולח ACK, המטוס שולח שוב — עד 7 פעמים ב-APU fault של OO-ACF).
-    # retry_count מצטבר על הכרטיס המקורי בזיכרון; ה-JSONL נשמר נקי מחזרות.
-    _dedup: dict = {}
+    # dedup: (זהות, label, text[:80]) → (timestamp, rec). retry_count מצטבר על הכרטיס המקורי
+    # בזיכרון; ה-jsonl נשמר נקי מחזרות.
+    dedup: dict = {}
     while True:
         try:
             data, _ = sock.recvfrom(65535)
@@ -2516,39 +2556,85 @@ def _acars_listener():
         except (ValueError, UnicodeError):
             continue                          # דאטהגרם לא-JSON => מתעלמים
         try:
-            rec = _normalize_acars(msg)
+            rec = normalize(msg)
         except Exception:
-            # שדה עם טיפוס בלתי-צפוי (label כרשימה, level כמחרוזת וכו') לא יפיל
-            # את ה-thread לצמיתות — הפיד ימשיך לזרום להודעות הבאות.
-            log.exception("ACARS: נרמול נכשל על דאטהגרם — מדולג")
+            # שדה עם טיפוס בלתי-צפוי (label כרשימה, level כמחרוזת וכו') לא יפיל את
+            # ה-thread לצמיתות — הפיד ימשיך לזרום להודעות הבאות.
+            log.exception("%s: נרמול נכשל על דאטהגרם — מדולג", label)
+            continue
+        if rec is None:
+            # לא בר-הצגה (סכמה לא תואמת וכו') — לוג תקופתי, כדי להבדיל "אין תעבורה"
+            # מ"המפענח שינה סכמה" בלי לקרוא קוד.
+            if spec["drop"]:
+                globals()[spec["drop"]] += 1
+                n = globals()[spec["drop"]]
+                if n % 200 == 1:
+                    log.warning("%s: הודעה לא זוהתה (סכמה לא תואמת?) — %d עד כה", label, n)
             continue
 
-        # בדיקת dedup: רק להודעות עם tail+text (ACK ריקים אינם מוחזרים)
-        tail, label, text = rec.get("tail"), rec.get("label"), rec.get("text") or ""
+        ident = next((rec.get(k) for k in spec["ident"] if rec.get(k)), None)
+        text = rec.get("text") or ""
         ts = rec.get("t") or time.time()
-        if tail and text:
-            dedup_key = (tail, label, text[:80])
-            prev_ts, prev_rec = _dedup.get(dedup_key, (0, None))
-            if prev_rec is not None and ts - prev_ts < 90:
-                # prev_rec חי גם ב-_acars_msgs שקוראים ממנו routes => מוטציה רק תחת הנעילה
-                with _acars_lock:
+        if ident and text:                    # רק הודעות עם זהות+טקסט (ACK ריקים אינם מוחזרים)
+            key = (ident, rec.get("label"), text[:80])
+            prev_ts, prev_rec = dedup.get(key, (0, None))
+            if prev_rec is not None and ts - prev_ts < FEED_DEDUP_SEC:
+                # prev_rec חי גם ב-buffer שקוראים ממנו routes => מוטציה רק תחת הנעילה
+                with _fv(feed, "lock"):
                     prev_rec["retry_count"] = prev_rec.get("retry_count", 1) + 1
-                continue                      # retry — לא מוסיפים כרטיס חדש
-            _dedup[dedup_key] = (ts, rec)
-            if len(_dedup) > 500:             # ניקוי ערכים ישנים (מניעת דליפת זיכרון)
-                cutoff = ts - 90
-                for k in [k for k, (t, _) in _dedup.items() if t < cutoff]:
-                    del _dedup[k]
+                continue
+            dedup[key] = (ts, rec)
+            if len(dedup) > FEED_DEDUP_MAX:
+                cutoff = ts - FEED_DEDUP_SEC
+                for k in [k for k, (t0, _) in dedup.items() if t0 < cutoff]:
+                    del dedup[k]
 
-        _append_acars_log(rec)                # התמדה לפני הקצאת id הזמני (הקובץ נקי מ-id)
-        with _acars_lock:
-            _acars_seq += 1
-            rec["id"] = _acars_seq
-            _acars_msgs.append(rec)
-        _xc_submit("acars", rec)              # הצלבת ADS-B — תור לא-חוסם, thread נפרד
+        _append_jsonl_log(_fv(feed, "log"), rec)   # התמדה לפני הקצאת id (הקובץ נקי מ-id)
+        with _fv(feed, "lock"):
+            _feed_push(feed, rec)
+        _xc_submit(feed, rec)                 # הצלבת ADS-B — תור לא-חוסם, thread נפרד
         seen += 1
-        if seen % 200 == 0:                   # קיצוץ תקופתי (הכותב היחיד)
-            _trim_acars_log()
+        if seen % FEED_TRIM_EVERY == 0:
+            _trim_jsonl_log(_fv(feed, "log"), _fv(feed, "keep"))
+
+
+def _feed_response(feed):
+    """הלב של /api/acars, /api/vdl2, /api/satcom. ?since=<id> => רק חדשות מאותו cursor.
+    כברירת מחדל רק הודעות *היום* (שעון ה-Pi) => סשן חדש לא מוצף בתעבורת ימים קודמים;
+    ?all=1 => כל מה שבזיכרון. ?day=YYYY-MM-DD => ארכיון: קורא מהדיסק (לא מהזיכרון) את
+    כל הודעות אותו יום מקומי — מצב סטטי, בלי cursor/adsb, עצמאי מהפיד החי."""
+    spec = _FEEDS[feed]
+    day = request.args.get("day")
+    if day:
+        bounds = _day_bounds(day)
+        if bounds is None:
+            return jsonify(ok=False, error="תאריך לא תקין (פורמט: YYYY-MM-DD)"), 400
+        start, end = bounds
+        msgs = [r for r in _read_jsonl_log(_fv(feed, "log")) if start <= (r.get("t") or 0) < end]
+        return jsonify(ok=True, day=day, messages=msgs)
+    try:
+        since = int(request.args.get("since", 0))
+    except (TypeError, ValueError):
+        since = 0
+    show_all = request.args.get("all") in ("1", "true", "yes")
+    floor = 0 if show_all else _today_start()
+    with _fv(feed, "lock"):
+        # עותקים (לא references): jsonify מסדרל אחרי שחרור הנעילה, ו-retry_count עלול
+        # להתעדכן ע"י ה-listener באמצע האיטרציה של ה-encoder
+        msgs = [dict(m) for m in _fv(feed, "msgs") if m["id"] > since and (m.get("t") or 0) >= floor]
+        cursor = _fv(feed, "seq")
+    extra = {"adsb": _fv(feed, "adsb")()} if spec["adsb"] else {}
+    return jsonify(ok=True, active=any(_is_active(globals()[n]) for n in spec["services"]),
+                   freqs=load_state().get(spec["freqs_key"], _fv(feed, "freqs_default")),
+                   cursor=cursor, messages=msgs, **extra, **_xc_feed_payload(feed))
+
+
+def _load_acars_history():
+    _load_feed_history("acars")
+
+
+def _acars_listener():
+    _feed_listener("acars")
 
 
 # --- VDL2: נרמול, התמדה ו-listener ------------------------------------------
@@ -2711,87 +2797,11 @@ def _trim_vdl2_log():
 
 
 def _load_vdl2_history():
-    """טוען את זנב vdl2.jsonl ל-ring buffer בעלייה (היום בלבד, כמו ACARS).
-    נקרא *לפני* הפעלת thread ה-listener (אין מרוץ)."""
-    global _vdl2_seq
-    try:
-        lines = _read_log_lines(VDL2_LOG_PATH)
-    except OSError:
-        return
-    recs = _jsonl_records(lines[-VDL2_BUF_MAX:])
-    floor = _today_start()
-    recs = [r for r in recs if (r.get("t") or 0) >= floor]
-    recs.sort(key=lambda r: r.get("t") or 0)
-    with _vdl2_lock:
-        for r in recs:
-            _vdl2_seq += 1
-            r["id"] = _vdl2_seq
-            _vdl2_msgs.append(r)
-    if recs:
-        log.info("VDL2: נטענו %d הודעות מההיסטוריה", len(recs))
+    _load_feed_history("vdl2")
 
 
 def _vdl2_listener():
-    """thread רקע: מאזין ל-UDP מ-dumpvdl2, שומר ל-vdl2.jsonl ומכניס ל-ring buffer.
-    רץ תמיד (גם כשהמצב אחר) — פשוט לא מגיעות דאטהגרמות כש-dumpvdl2 כבוי.
-    dedup כמו ב-ACARS: זהות = tail או icao (לפריימים בלי רישום)."""
-    global _vdl2_seq, _vdl2_drop_count
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.bind((ACARS_UDP_HOST, VDL2_UDP_PORT))
-    except OSError:
-        log.warning("VDL2 listener: port %d busy - /api/vdl2 יחזיר ריק", VDL2_UDP_PORT)
-        return
-    seen = 0
-    _dedup: dict = {}
-    while True:
-        try:
-            data, _ = sock.recvfrom(65535)
-        except OSError:
-            continue
-        try:
-            msg = json.loads(data.decode("utf-8", "replace"))
-        except (ValueError, UnicodeError):
-            continue                          # דאטהגרם לא-JSON => מתעלמים
-        try:
-            rec = _normalize_vdl2(msg)
-        except Exception:
-            # שדה עם טיפוס בלתי-צפוי לא יפיל את ה-thread לצמיתות (כמו ב-ACARS).
-            log.exception("VDL2: נרמול נכשל על דאטהגרם — מדולג")
-            continue
-        if rec is None:
-            # פריים לא בר-הצגה (בלי AVLC, סכמה לא תואמת וכו') — לוג תקופתי (לא רועש)
-            # כדי להבדיל "אין תעבורה" מ"dumpvdl2 שינה סכמה" בלי לקרוא קוד.
-            _vdl2_drop_count += 1
-            if _vdl2_drop_count % 200 == 1:
-                log.warning("VDL2: פריים לא זוהה (סכמה לא תואמת?) — %d עד כה", _vdl2_drop_count)
-            continue
-
-        ident = rec.get("tail") or rec.get("icao")
-        text = rec.get("text") or ""
-        ts = rec.get("t") or time.time()
-        if ident and text:
-            dedup_key = (ident, rec.get("label"), text[:80])
-            prev_ts, prev_rec = _dedup.get(dedup_key, (0, None))
-            if prev_rec is not None and ts - prev_ts < 90:
-                with _vdl2_lock:              # prev_rec חי גם ב-_vdl2_msgs => מוטציה תחת נעילה
-                    prev_rec["retry_count"] = prev_rec.get("retry_count", 1) + 1
-                continue
-            _dedup[dedup_key] = (ts, rec)
-            if len(_dedup) > 500:
-                cutoff = ts - 90
-                for k in [k for k, (t0, _) in _dedup.items() if t0 < cutoff]:
-                    del _dedup[k]
-
-        _append_vdl2_log(rec)                 # התמדה לפני הקצאת id (הקובץ נקי מ-id)
-        with _vdl2_lock:
-            _vdl2_seq += 1
-            rec["id"] = _vdl2_seq
-            _vdl2_msgs.append(rec)
-        _xc_submit("vdl2", rec)
-        seen += 1
-        if seen % 200 == 0:
-            _trim_vdl2_log()
+    _feed_listener("vdl2")
 
 
 # --- SATCOM: normalize + listener (מסלול יחיד, בניגוד ל-VDL2) ----------------
@@ -2911,86 +2921,11 @@ def _trim_satcom_log():
 
 
 def _load_satcom_history():
-    """טוען את זנב satcom.jsonl ל-ring buffer בעלייה (היום בלבד, כמו ACARS/VDL2).
-    נקרא *לפני* הפעלת thread ה-listener (אין מרוץ)."""
-    global _satcom_seq
-    try:
-        lines = _read_log_lines(SATCOM_LOG_PATH)
-    except OSError:
-        return
-    recs = _jsonl_records(lines[-SATCOM_BUF_MAX:])
-    floor = _today_start()
-    recs = [r for r in recs if (r.get("t") or 0) >= floor]
-    recs.sort(key=lambda r: r.get("t") or 0)
-    with _satcom_lock:
-        for r in recs:
-            _satcom_seq += 1
-            r["id"] = _satcom_seq
-            _satcom_msgs.append(r)
-    if recs:
-        log.info("SATCOM: נטענו %d הודעות מההיסטוריה", len(recs))
+    _load_feed_history("satcom")
 
 
 def _satcom_listener():
-    """thread רקע: מאזין ל-UDP מ-inmarsat-sniffer (‎--udp=127.0.0.1:5558), שומר
-    ל-satcom.jsonl ומכניס ל-ring buffer. רץ תמיד (גם כשהמצב אחר) — פשוט לא
-    מגיעות דאטהגרמות כש-inmarsat-sniffer כבוי. dedup כמו ב-ACARS/VDL2: זהות =
-    tail (רוב הודעות ה-ACARS הלוויני נושאות רישום, בניגוד ל-icao ב-VDL2)."""
-    global _satcom_seq, _satcom_drop_count
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.bind((ACARS_UDP_HOST, SATCOM_UDP_PORT))
-    except OSError:
-        log.warning("SATCOM listener: port %d busy - /api/satcom יחזיר ריק", SATCOM_UDP_PORT)
-        return
-    seen = 0
-    _dedup: dict = {}
-    while True:
-        try:
-            data, _ = sock.recvfrom(65535)
-        except OSError:
-            continue
-        try:
-            msg = json.loads(data.decode("utf-8", "replace"))
-        except (ValueError, UnicodeError):
-            continue                          # דאטהגרם לא-JSON => מתעלמים
-        try:
-            rec = _normalize_satcom(msg)
-        except Exception:
-            # שדה עם טיפוס בלתי-צפוי לא יפיל את ה-thread לצמיתות (כמו ב-ACARS/VDL2)
-            log.exception("SATCOM: נרמול נכשל על דאטהגרם — מדולג")
-            continue
-        if rec is None:
-            _satcom_drop_count += 1
-            if _satcom_drop_count % 200 == 1:
-                log.warning("SATCOM: הודעה לא זוהתה (סכמה לא תואמת?) — %d עד כה", _satcom_drop_count)
-            continue
-
-        ident = rec.get("tail")
-        text = rec.get("text") or ""
-        ts = rec.get("t") or time.time()
-        if ident and text:
-            dedup_key = (ident, rec.get("label"), text[:80])
-            prev_ts, prev_rec = _dedup.get(dedup_key, (0, None))
-            if prev_rec is not None and ts - prev_ts < 90:
-                with _satcom_lock:             # prev_rec חי גם ב-_satcom_msgs => מוטציה תחת נעילה
-                    prev_rec["retry_count"] = prev_rec.get("retry_count", 1) + 1
-                continue
-            _dedup[dedup_key] = (ts, rec)
-            if len(_dedup) > 500:
-                cutoff = ts - 90
-                for k in [k for k, (t0, _) in _dedup.items() if t0 < cutoff]:
-                    del _dedup[k]
-
-        _append_satcom_log(rec)               # התמדה לפני הקצאת id (הקובץ נקי מ-id)
-        with _satcom_lock:
-            _satcom_seq += 1
-            rec["id"] = _satcom_seq
-            _satcom_msgs.append(rec)
-        _xc_submit("satcom", rec)
-        seen += 1
-        if seen % 200 == 0:
-            _trim_satcom_log()
+    _feed_listener("satcom")
 
 
 HEALTH_SERVICES = ("rtl_airband", "icecast2", "sdrplay",
@@ -7179,35 +7114,8 @@ def _acars_adsb():
 
 @app.route("/api/acars")
 def api_acars():
-    """הודעות ACARS אחרונות. ?since=<id> => רק חדשות מאותו cursor (פולינג יעיל).
-    כברירת מחדל מוחזרות רק הודעות *היום* (שעון ה-Pi) => סשן חדש לא מוצף בתעבורת
-    ימים קודמים. ?all=1 => כל מה שבזיכרון; ההיסטוריה המלאה תמיד זמינה בייצוא.
-    ?day=YYYY-MM-DD => ארכיון: קורא מהדיסק (acars.jsonl, לא מהזיכרון) ומחזיר
-    את כל הודעות אותו יום מקומי — מצב סטטי (בלי cursor/adsb), עצמאי מהפיד החי."""
-    day = request.args.get("day")
-    if day:
-        bounds = _day_bounds(day)
-        if bounds is None:
-            return jsonify(ok=False, error="תאריך לא תקין (פורמט: YYYY-MM-DD)"), 400
-        start, end = bounds
-        msgs = [r for r in _read_acars_log() if start <= (r.get("t") or 0) < end]
-        return jsonify(ok=True, day=day, messages=msgs)
-    try:
-        since = int(request.args.get("since", 0))
-    except (TypeError, ValueError):
-        since = 0
-    show_all = request.args.get("all") in ("1", "true", "yes")
-    floor = 0 if show_all else _today_start()
-    with _acars_lock:
-        # עותקים (לא references): jsonify מסדרל אחרי שחרור הנעילה, ו-retry_count
-        # עלול להתעדכן ע"י ה-listener באמצע האיטרציה של ה-encoder
-        msgs = [dict(m) for m in _acars_msgs
-                if m["id"] > since and (m.get("t") or 0) >= floor]
-        cursor = _acars_seq
-    return jsonify(ok=True, active=_is_active(ACARS_SERVICE) or _is_active(ACARS2_SERVICE),
-                   freqs=load_state().get("acars_freqs", ACARS_FREQS_DEFAULT),
-                   cursor=cursor, messages=msgs, adsb=_acars_adsb(),
-                   **_xc_feed_payload("acars"))
+    """ר' _feed_response."""
+    return _feed_response("acars")
 
 
 ACARS_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "snr", "mode", "label",
@@ -7305,32 +7213,8 @@ def _vdl2_adsb():
 
 @app.route("/api/vdl2")
 def api_vdl2():
-    """הודעות VDL2 אחרונות. ?since=<id> => רק חדשות מאותו cursor (פולינג יעיל).
-    כברירת מחדל רק הודעות *היום*; ?all=1 => כל מה שבזיכרון (כמו /api/acars).
-    ?day=YYYY-MM-DD => ארכיון מהדיסק (vdl2.jsonl), כמו ב-/api/acars."""
-    day = request.args.get("day")
-    if day:
-        bounds = _day_bounds(day)
-        if bounds is None:
-            return jsonify(ok=False, error="תאריך לא תקין (פורמט: YYYY-MM-DD)"), 400
-        start, end = bounds
-        msgs = [r for r in _read_vdl2_log() if start <= (r.get("t") or 0) < end]
-        return jsonify(ok=True, day=day, messages=msgs)
-    try:
-        since = int(request.args.get("since", 0))
-    except (TypeError, ValueError):
-        since = 0
-    show_all = request.args.get("all") in ("1", "true", "yes")
-    floor = 0 if show_all else _today_start()
-    with _vdl2_lock:
-        # עותקים (לא references): retry_count עלול להתעדכן ע"י ה-listener תוך כדי סדרול
-        msgs = [dict(m) for m in _vdl2_msgs
-                if m["id"] > since and (m.get("t") or 0) >= floor]
-        cursor = _vdl2_seq
-    return jsonify(ok=True, active=_is_active(VDL2_SERVICE) or _is_active(VDL2B_SERVICE),
-                   freqs=load_state().get("vdl2_freqs", VDL2_FREQS_DEFAULT),
-                   cursor=cursor, messages=msgs, adsb=_vdl2_adsb(),
-                   **_xc_feed_payload("vdl2"))
+    """ר' _feed_response."""
+    return _feed_response("vdl2")
 
 
 @app.route("/api/vdl2/export")
@@ -7348,30 +7232,8 @@ SATCOM_EXPORT_COLS = ACARS_EXPORT_COLS   # אותה סכמת כרטיס בדיו
 
 @app.route("/api/satcom")
 def api_satcom():
-    """הודעות SATCOM (Inmarsat, inmarsat-sniffer) אחרונות. ?since=<id> => רק
-    חדשות מאותו cursor. כברירת מחדל רק הודעות *היום*; ?all=1 => כל מה שבזיכרון
-    (כמו /api/acars). ?day=YYYY-MM-DD => ארכיון מהדיסק (satcom.jsonl)."""
-    day = request.args.get("day")
-    if day:
-        bounds = _day_bounds(day)
-        if bounds is None:
-            return jsonify(ok=False, error="תאריך לא תקין (פורמט: YYYY-MM-DD)"), 400
-        start, end = bounds
-        msgs = [r for r in _read_satcom_log() if start <= (r.get("t") or 0) < end]
-        return jsonify(ok=True, day=day, messages=msgs)
-    try:
-        since = int(request.args.get("since", 0))
-    except (TypeError, ValueError):
-        since = 0
-    show_all = request.args.get("all") in ("1", "true", "yes")
-    floor = 0 if show_all else _today_start()
-    with _satcom_lock:
-        msgs = [dict(m) for m in _satcom_msgs
-                if m["id"] > since and (m.get("t") or 0) >= floor]
-        cursor = _satcom_seq
-    return jsonify(ok=True, active=_is_active(SATCOM_SERVICE),
-                   freqs=load_state().get("satcom_freqs", SATCOM_FREQS_DEFAULT),
-                   cursor=cursor, messages=msgs, **_xc_feed_payload("satcom"))
+    """ר' _feed_response."""
+    return _feed_response("satcom")
 
 
 @app.route("/api/satcom/export")

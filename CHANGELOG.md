@@ -31,6 +31,12 @@
 - תיעוד: שורות סטטוס מעודכנות ב-`docs/dual-sdr-feasibility.md`, `satcom-feasibility.md`, `session-replay-design.md`,
   `field-station-roadmap.md`, `dual-sdr-home-test.md`; README ("ארבעה תהליכים" + שני מקלטים); CLAUDE.md — מספרי
   שורות, "שישה מצבים"/"ארבעה צרכנים", תיאור ה-CI, `?starred=1` (‏`saved/` ולא `starred.json`), שני קובצי בדיקה חסרים.
+
+### סדר (שלב ב, 18.11.2026) — בלי שינוי התנהגות
+- **שלושת פידי הדאטה (ACARS/VDL2/SATCOM) — מימוש אחד** (`_FEEDS` + `_feed_listener`/`_load_feed_history`/
+  `_feed_response`) במקום שלושה עותקים של ה-listener, טעינת ההיסטוריה וה-route (‏−138 שורות). הודעת הלוג
+  ל"הודעה לא זוהתה" אוחדה לניסוח אחד.
+- **הפעלת צרכן מאומתת** (`_stop_services`/`_restart_verified`) במקום 8 העתקים של restart+פולינג ו-6 לולאות עצירה.
 - ⚠ **תגי גרסה:** במאגר קיים רק `v1.0.0`, למרות המוסכמה. גרסאות שלא קיבלו כותרת משלהן ב-CHANGELOG (למשל
   2.33–2.36.0) קובצו לגרסה שאחריהן. מעכשיו — תג בכל מיזוג ל-main.
 

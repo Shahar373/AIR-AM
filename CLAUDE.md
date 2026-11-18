@@ -360,7 +360,13 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   ו-`fft_size<256`/קצב שאינו כפולה של 16kHz אסורים. `_parse_tune`: מפתח שלא נשלח ⇒ **הערך השמור**.
   `_probe_params`/`_exp_voice_params` לא נושאים אותם ⇒ בדיקת אנטנה/ניסוי בתנאים קבועים;
   `_restore_after_probe`/`_rollback` מחזירים את בחירת המשתמש.
-- **restart מאומת + רולבק:** `_restart_and_verify` בודק שה-SDR נוכח ושהשירות עלה;
+- **שלושת פידי הדאטה — מימוש אחד:** `_FEEDS` (מפרט לכל פיד: פורט, jsonl, נעילה/buffer/seq, נרמול, זהות
+  ל-dedup, שירותים, adsb) + `_feed_listener`/`_load_feed_history`/`_feed_response`. ⚠ ערכי המפרט הם *שמות*
+  גלובליים שנפתרים בזמן הקריאה (`_fv`) — הבדיקות מחליפות `app.ACARS_LOG_PATH`/`app._acars_seq` ישירות.
+  `_acars_listener`/`_load_vdl2_history`/`api_satcom` וכו' הם עטיפות דקות (נקראות מ-`__main__` ומהבדיקות).
+- **הפעלת צרכן מאומתת:** `_stop_services` (עצירה best-effort לפי סדר) + `_restart_verified` (restart + פולינג
+  ~3.5ש' שהשירות *נשאר* למעלה) — משותפים לכל `_enter_acars/vdl2/satcom` ו-`_start_acars2/voice2/vdl2b`.
+- **restart מאומת + רולבק (קול):** `_restart_and_verify` בודק שה-SDR נוכח ושהשירות עלה;
   `_rollback` מחזיר לקונפיג קודם אם נכשל **ומאומת** (מחזיר bool; כישלון ⇒ `_fail_to_off`).
   כיוונון אחד בכל רגע (`TUNE_LOCK`). **כל שמירת state אחרי פעולה ארוכה עוברת
   `_merge_state(changes)`** (טוען טרי + ממזג רק את מפתחות הקורא, תחת `_STATE_LOCK`) —
@@ -447,7 +453,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   ה-AVLC של צד-המטוס; `dir` מבני מסוג הכתובת דורס heuristics), `write_vdl2_env` (**ממיר
   MHz→Hz**, `VDL2_GAIN` מכיל את הדגל כולו או ריק), `_enter_vdl2` (עוצר rtl_airband+acars,
   מרים dumpvdl2, verify), `_vdl2_window_error`, `_vdl2_adsb`, `VDL2_BANKS`. התמדה:
-  `_append_vdl2_log`/`_trim_vdl2_log`/`_load_vdl2_history` (clones של צמד ה-ACARS).
+  `_append_vdl2_log`/`_trim_vdl2_log`/`_load_vdl2_history` (עטיפות מעל `_FEEDS`, ר' למעלה).
 - **SATCOM (מצב רביעי, ACARS דרך לוויין Inmarsat):** `_satcom_listener` (thread, מאזין
   UDP 5558 מ-`inmarsat-sniffer`), `_normalize_satcom` (מסלול יחיד — הכלי מפיק רק ACARS:
   מסנתז dict בסגנון acarsdec משדות `isu.acars.*` (סכמת JAERO JSONdump, אומתה מ-`feed.c`
@@ -524,7 +530,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   תקרת-הפעלות קודמת עם `reset-failed` לפני ה-restart — ר' §12, מרים
   inmarsat-sniffer, verify), `_sanitize_satellite`/`_satcom_window_error` (לוויין יחיד
   מתוך `SATCOM_BANKS`, לא בנק תדרים), `SATCOM_BANKS` (לוויינים: AF1/4F3/3F5/F1). התמדה:
-  `_append_satcom_log`/`_trim_satcom_log`/`_load_satcom_history` (clones של צמד ה-VDL2).
+  `_append_satcom_log`/`_trim_satcom_log`/`_load_satcom_history` (עטיפות מעל `_FEEDS`).
   **אבחון (שלוש שכבות, כל אחת עונה על שאלה שהקודמת לא יכולה):** (1)
   `_fetch_satcom_web_state`/`api_satcom_health` — proxy מקומי (כמו `/stream`)
   ל-dashboard האבחוני המובנה של inmarsat-sniffer (`--web=SATCOM_WEB_PORT`,
