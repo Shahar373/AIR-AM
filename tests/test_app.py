@@ -12,6 +12,7 @@ import time
 import pytest
 
 import app
+import storage
 
 
 @pytest.fixture
@@ -331,7 +332,7 @@ def test_atomic_write_concurrent_threads_dont_corrupt_file(paths):
     def writer(text):
         try:
             for _ in range(20):
-                app._atomic_write(target, text)
+                storage.atomic_write(target, text)
         except Exception as e:                    # noqa: BLE001
             errors.append(e)
 
@@ -361,7 +362,7 @@ def test_atomic_write_fsyncs_file_and_directory(paths, monkeypatch):
     monkeypatch.setattr(app.os, "fsync", spy_fsync)
 
     target = paths / "durable.json"
-    app._atomic_write(target, "content")
+    storage.atomic_write(target, "content")
 
     assert target.read_text() == "content"
     assert len(fsync_calls) == 2      # ה-tmp file וגם ה-fd של התיקייה

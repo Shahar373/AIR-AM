@@ -108,6 +108,9 @@ webtune/
                             #   שלב 1) + שכבת הנתונים של ההצלבה (lookup ממוקד/trace/OpenSky,
                             #   אינדקס hex, רישום↔hex). thread נפרד. ידני:
                             #   `python3 adsb.py [--selftest | --lookup reg G-ZBKM | --trace 406f79 [epoch]]`.
+  storage.py                # כתיבה אטומית (`atomic_write`, fsync לקובץ+תיקייה) וקריאה/כתיבה של JSONL (`read_log_lines`,
+                            #   `append_line_on_boundary`, `jsonl_records`, `trim_jsonl_log`, `csv_safe`). בלי תלות ב-app. ⚠ קוראים
+                            #   אליו כ-`storage.<שם>` (לא `from storage import`) — כדי שהחלפה בבדיקה תשפיע. הוצא מ-app.py בשלב ג2.
   diag.py                   # יומן בדיקה וייצוא לוגים — החלק הטהור: פענוח journald/systemctl show,
                             #   אירועי קרנל/יחידות, analyze (תקין/אזהרה/תקלה — רק מעובדה שנרשמה), summary.md.
   xcheck.py                 # ★ הצלבת הודעות מול ADS-B + אופק רדיו/BLOS — פונקציות טהורות בלבד
@@ -654,7 +657,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   קורא `adsb.read_track_slice`, ובונה את `sessions/<id>/`: קליפ **שמור מ*עתיק***
   (`shutil.copy2` — נשאר גם מוגן ב-`saved/`), קליפ **רגיל מ*ועבר*** (`_move_recording`
   הקיים — משתחרר מ-`_sweep_recordings` בדיוק כמו ★, ר' §4.4 בתכנון), `track.jsonl.gz`
-  נכתב עם `gzip.open`+`os.replace`, `meta.json` עם `_atomic_write`; `app_mode`/`freq`
+  נכתב עם `gzip.open`+`os.replace`, `meta.json` עם `storage.atomic_write`; `app_mode`/`freq`
   הם תמונת-מצב *נוכחית* (מ-`load_state()`), לא היסטוריית-מעברים — אין ל-AIR-AM
   יומן כזה, סטייה מתועדת מהתכנון המקורי), `api_session_detail` (dispatcher
   ל-`GET`/`DELETE /api/sessions/<id>` — ה-GET מעשיר כל קליף ב-`tx` **שנקרא
@@ -1404,7 +1407,7 @@ enabled, וגם לא `airam-denoise`, ובשדרוג `disable rtl_airband` אי�
   נגזרים שניהם מהניווט של המטוס (רק MLAT בלתי-תלוי). מנגנון התפשטות ושיבוש GPS — לעולם לא
   נטענים כעובדה. אינטרפולציה רק בתנאים של `xcheck.position_at`; אחרת "לא מאומת"/"אין" —
   לא מיקום מחושב. **אין ברירת מחדל לתחנה** (AIR-AM נייד; נתב"ג כברירת מחדל היה אופק שגוי בשקט).
-- **כתיבה אטומית + עמידה בניתוק חשמל** לקבצי קונפיג/state (`_atomic_write`) — אסור
+- **כתיבה אטומית + עמידה בניתוק חשמל** לקבצי קונפיג/state (`storage.atomic_write`) — אסור
   להשאיר קובץ חצי-כתוב. לא רק `tmp`+`rename` (אטומי מול קוראים מקבילים) אלא גם
   `fsync` על קובץ ה-tmp *ועל תיקיית היעד* — בלעדיו הנתונים יכולים לשבת ב-page cache
   בלבד ולהיעלם בכיבוי פתאומי (תרחיש אמיתי בהפעלה מסוללה). `_cleanup_orphan_tmp`
@@ -1415,14 +1418,14 @@ enabled, וגם לא `airam-denoise`, ובשדרוג `disable rtl_airband` אי�
   דרך flag גלובלי שמתאפס בקריאה תקינה הבאה — לא לכל קריאה, כי הפונקציה נקראת גם
   מראוטים ב-polling תכוף כמו `/api/metrics`).
   **קובצי JSONL (append, בלי rewrite) — שני כללים, שניהם נלמדו מכיבוי פתאומי:**
-  קוראים **רק** דרך `_read_log_lines` (`errors="replace"` — תו עברי קטוע זרק
+  קוראים **רק** דרך `storage.read_log_lines` (`errors="replace"` — תו עברי קטוע זרק
   `UnicodeDecodeError`, שהוא `ValueError` ולא `OSError`, והפיל את airam-web
-  בעלייה), וכותבים דרך `_append_line_on_boundary` (משלים `\n` לשורה קטועה,
+  בעלייה), וכותבים דרך `storage.append_line_on_boundary` (משלים `\n` לשורה קטועה,
   אחרת הרשומה הבאה מודבקת אליה ואובדת). כל קוד שרץ ב-`__main__` לפני
   `app.run()` חייב להיות עטוף — היסטוריה היא נוחות, עלייה היא חובה.
 - **threaded=True חובה** ל-Flask (סטרים ארוך-טווח לא חוסם בקשות).
 - **שמע ברקע = MediaSession** (אין API ל"שיחת טלפון" בדפדפן). אל תחפש חלופה.
-- **עברית ב-RTL** ב-UI; CSV עם BOM ל-Excel. `_csv_safe` (`_export_response`)
+- **עברית ב-RTL** ב-UI; CSV עם BOM ל-Excel. `storage.csv_safe` (`_export_response`)
   מנטרל הזרקת נוסחה: תא שמתחיל ב-`=`/`+`/`-`/`@`/Tab/CR (למשל תוכן `text`/`tail`
   שמגיע משידור רדיו — לא נתון סטטי-מהימן) מקבל `'` מוביל לפני שהוא נכתב.
 

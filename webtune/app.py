@@ -40,6 +40,7 @@ from urllib.parse import urlparse
 from flask import Flask, request, jsonify, send_from_directory, send_file, abort
 
 import diag   # יומן בדיקה וייצוא לוגים — הניתוח הטהור (פענוח journald, בדיקות, summary.md)
+import storage   # אחסון: כתיבה אטומית + JSONL (הוצא מכאן בשלב ג2)
 import adsb   # מסלול פעיל + אינדיקציית GPS מנתוני ADS-B (thread נפרד)
 import xcheck   # הצלבת הודעות מול ADS-B + אופק רדיו (פונקציות טהורות)
 
@@ -851,34 +852,7 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
     return "\n".join(lines)
 
 
-def _atomic_write(path, text):
-    """כתיבה אטומית (tmp + rename): rtl_airband יכול לעלות בכל רגע
-    (Restart=always / udev) ואסור שיקרא קובץ חצי-כתוב. tmp ייחודי לפר-thread
-    (pid+ident) => שתי בקשות מקבילות (PUT /api/presets וכו') לא דורסות זו את
-    קובץ ה-tmp של זו; ה-rename האחרון פשוט מנצח (last-write-wins), בלי קובץ פגום.
-    ⚠ ‏fsync (על הקובץ *ועל התיקייה*) הוא מה שהופך את זה גם לעמיד-בניתוק-חשמל,
-    לא רק אטומי-מול-קוראים: בלעדיו הנתונים יכולים לשבת ב-page cache ולהיעלם
-    בכיבוי פתאומי (תרחיש אמיתי בהפעלה מסוללה — ר' README, אזהרת ספק כוח).
-    ה-fsync על התיקייה נדרש כי בלעדיו ה-rename עצמו לא בהכרח שרד."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f"{path.suffix}.tmp{os.getpid()}-{threading.get_ident()}")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-    # התיקייה עצמה: best-effort — כשל כאן לא שווה הפלת הכתיבה שכבר הצליחה
-    try:
-        dfd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
-    except OSError:
-        pass
-
-
-# תבנית קובצי ה-tmp של _atomic_write (‎<שם>.<סיומת>.tmp<pid>-<tid>) — לניקוי
+# תבנית קובצי ה-tmp של storage.atomic_write (‎<שם>.<סיומת>.tmp<pid>-<tid>) — לניקוי
 # יתומים בעלייה. ניתוק חשמל *בין* הכתיבה ל-rename משאיר קובץ כזה מאחור.
 _TMP_GLOB = "*.tmp*"
 _TMP_ORPHAN_AGE_SEC = 3600     # שעה: זהיר בהרבה ממשך כתיבה אמיתי (מילישניות)
@@ -886,7 +860,7 @@ _TMP_ORPHAN_AGE_SEC = 3600     # שעה: זהיר בהרבה ממשך כתיבה
 
 def _cleanup_orphan_tmp(dirs=None):
     """מוחק קובצי tmp יתומים שנשארו מכתיבה שנקטעה (ניתוק חשמל באמצע
-    _atomic_write). ⚠ נקרא *רק בעלייה* ורק על קבצים ישנים מ-_TMP_ORPHAN_AGE_SEC:
+    storage.atomic_write). ⚠ נקרא *רק בעלייה* ורק על קבצים ישנים מ-_TMP_ORPHAN_AGE_SEC:
     ה-pid בשם חוזר על עצמו במערכת, ולכן אי אפשר להסיק ממנו בבטחה שהתהליך מת —
     מחיקת tmp של כתיבה *חיה* תפיל אותה. מחזיר את מספר הקבצים שנמחקו (ללוג)."""
     removed = 0
@@ -911,7 +885,7 @@ def _cleanup_orphan_tmp(dirs=None):
 
 def write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
                  chan_filter=CHAN_FILTER_DEFAULT, fm_notch=False):
-    _atomic_write(CONFIG_PATH, render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr,
+    storage.atomic_write(CONFIG_PATH, render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr,
                                              chan_filter, fm_notch, serial=_primary_serial()))
 
 
@@ -942,7 +916,7 @@ def write_voice2_config(st=None):
     cf = st.get("chan_filter", CHAN_FILTER_DEFAULT)
     if cf not in CHAN_FILTERS:
         cf = CHAN_FILTER_DEFAULT
-    _atomic_write(VOICE2_CONFIG_PATH, render_config(
+    storage.atomic_write(VOICE2_CONFIG_PATH, render_config(
         f2, m2, True, IF_GAIN_DEFAULT, RF_GAIN_DEFAULT, sq_mode, sq_snr, cf,
         bool(st.get("fm_notch")), serial=_secondary_serial(),
         stats_path=STATS2_PATH, mount=MOUNT2, denoise_udp=False, rec_template=REC_BASENAME2))
@@ -997,7 +971,7 @@ def write_sdr_env(primary, secondary):
         "SDR_SECONDARY=" + (_sanitize_serial(secondary) or ""),
         "",
     ])
-    _atomic_write(SDR_ENV_PATH, text)
+    storage.atomic_write(SDR_ENV_PATH, text)
 
 
 _state_corrupt_warned = False   # חד-פעמי לאירוע פגימה, לא לכל קריאה — ר' load_state
@@ -1006,7 +980,7 @@ _state_corrupt_warned = False   # חד-פעמי לאירוע פגימה, לא ל
 def load_state():
     """קורא את המצב השמור, ממוזג על ברירות המחדל (שדות חדשים בשדרוג נכנסים לבד).
     ⚠ מבחין בין *קובץ חסר* (תקין לגמרי — התקנה טרייה) לבין *קובץ פגום*: פגימות
-    מתרחשת בעיקר בכיבוי פתאומי (ר' _atomic_write), ובלי לוג המשתמש היה מאבד
+    מתרחשת בעיקר בכיבוי פתאומי (ר' storage.atomic_write), ובלי לוג המשתמש היה מאבד
     תדר/gain/בנקים/satcom_bias_tee/scan_plan בשקט מוחלט ונוחת בברירות מחדל בלי
     להבין למה. שומרים עותק .corrupt לאבחון. ⚠ הלוג+הכתיבה חד-פעמיים לאירוע פגימה
     (flag גלובלי, מתאפס בקריאה תקינה הבאה) ולא לכל קריאה — הפונקציה נקראת גם
@@ -1049,7 +1023,7 @@ def _reset_state_corrupt_warned():
 
 
 def save_state(st):
-    _atomic_write(STATE_PATH, json.dumps(st))
+    storage.atomic_write(STATE_PATH, json.dumps(st))
 
 
 _STATE_LOCK = threading.Lock()
@@ -2355,94 +2329,12 @@ def _normalize_acars(m):
     return rec
 
 
-def _jsonl_records(lines):
-    """מפרסר שורות JSONL לרשומות — **רק אובייקטים**. משותף לכל הקוראים
-    (ייצוא, ארכיון, וטעינת ההיסטוריה באתחול).
-
-    ⚠ למה בדיקת ה-dict קריטית ולא קוסמטית: הקוראים ניגשים מיד ל-`r.get("t")`.
-    שורה שהיא JSON *תקין* אך אינה אובייקט (‏`null`, ‏`0`, מחרוזת, מערך — שריד
-    אפשרי של בלוק פגום אחרי כיבוי פתאומי, בדיוק התרחיש ש-_atomic_write נבנה
-    בשבילו) הפילה את הקוראים ב-AttributeError. ‏json.loads הצליח עליה, ולכן
-    ה-`except ValueError` הקיים *לא* תפס אותה.
-    החומרה: `_load_*_history` נקראות ב-__main__ **בלי try** לפני `app.run()`,
-    כך ששורה אחת כזאת מנעה מ-airam-web לעלות בכלל — וזה המתזמר שמשחזר את מצב
-    ה-SDR (‏`_boot_restore`). עם `Restart=always` זו לולאת קריסה: התחנה כולה
-    מתה, ובשטח אין SSH כדי לאבחן (ר' §9/§12 ב-CLAUDE.md)."""
-    out = []
-    for ln in lines:
-        try:
-            rec = json.loads(ln)
-        except ValueError:
-            continue                          # שורה פגומה (כתיבה חלקית) => דילוג
-        if isinstance(rec, dict):
-            out.append(rec)
-    return out
-
-
-def _read_log_lines(path):
-    """שורות קובץ לוג append-only (JSONL), **סובלני ל-UTF-8 שבור**. זורק OSError
-    בלבד (קובץ חסר/הרשאה) — כמו read_text, כך שהקוראים לא משתנים.
-    ⚠ למה errors="replace" קריטי ולא קוסמטי: הרשומות נכתבות עם
-    ensure_ascii=False ומכילות עברית (קטגוריה, decoded). כיבוי פתאומי באמצע
-    כתיבה יכול לחתוך תו עברי באמצע (2 בייטים ב-UTF-8), ואז read_text קפדני
-    זורק UnicodeDecodeError — שהוא ValueError, לא OSError, ולכן ה-except
-    הקיים לא תפס אותו. ‏_load_*_history נקראות ב-__main__ לפני app.run(), כך
-    שזה מנע מ-airam-web (המתזמר) לעלות בכלל: לולאת קריסה עם Restart=always,
-    והתחנה כולה מתה עד תיקון ידני ב-SSH. הוכח ב-tests/test_corrupt_logs.py.
-    עם replace השארית הופכת לשורה פגומה אחת, ש-_jsonl_records ממילא מדלג עליה."""
-    return path.read_text(encoding="utf-8", errors="replace").splitlines()
-
-
-def _append_line_on_boundary(f, data):
-    """כותב data (bytes שמסתיים ב-\\n) לקובץ שנפתח ב-"a+b", ומוודא שהוא מתחיל
-    בשורה חדשה. ⚠ כיבוי פתאומי משאיר את הקובץ בלי \\n בסוף — שורה קטועה, או
-    זנב של בייטי NUL ש-ext4 משאיר אחרי delayed allocation. append רגיל היה
-    מדביק את הרשומה הבאה לשארית הזאת, והקוראים מדלגים על השורה המשולבת כולה:
-    **הרשומה הראשונה אחרי כל כיבוי פתאומי אבדה**. עם \\n משלים השארית נשארת
-    שורה פגומה בודדת, והרשומה החדשה שלמה. ב-"a+b" הכתיבה תמיד לסוף (O_APPEND),
-    כך שה-seek לקריאת הבייט האחרון לא משנה לאן נכתב."""
-    f.seek(0, os.SEEK_END)
-    if f.tell() > 0:
-        f.seek(-1, os.SEEK_END)
-        if f.read(1) != b"\n":
-            data = b"\n" + data
-    f.write(data)
-
-
-def _append_jsonl_log(path, rec):
-    """מוסיף הודעה מנורמלת לקובץ JSONL (append; thread ה-listener הוא הכותב היחיד).
-    נכשל בשקט (דיסק מלא וכו') => הפיד החי ממשיך לפעול. משותף ל-ACARS ול-VDL2."""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a+b") as f:
-            _append_line_on_boundary(
-                f, (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8"))
-    except OSError:
-        log.exception("jsonl log append (%s)", path)
-
-
-def _trim_jsonl_log(path, keep):
-    """קיצוץ ל-keep שורות (rewrite אטומי). נקרא מדי פעם מ-thread ה-listener
-    (הכותב היחיד => אין מרוץ). קוראים (ייצוא) סובלים שורה אחרונה חלקית."""
-    try:
-        lines = _read_log_lines(path)
-    except OSError:
-        return
-    if len(lines) > keep:
-        # ⚠ נקרא מחוץ ל-try של ה-listener: OSError (דיסק מלא) היה הורג את thread
-        # ה-ACARS/VDL2/SATCOM, והפיד מת עד restart של airam-web.
-        try:
-            _atomic_write(path, "\n".join(lines[-keep:]) + "\n")
-        except OSError:
-            log.warning("קיצוץ %s נכשל", path, exc_info=True)
-
-
 def _append_acars_log(rec):
-    _append_jsonl_log(ACARS_LOG_PATH, rec)
+    storage.append_jsonl_log(ACARS_LOG_PATH, rec)
 
 
 def _trim_acars_log():
-    _trim_jsonl_log(ACARS_LOG_PATH, ACARS_LOG_KEEP)
+    storage.trim_jsonl_log(ACARS_LOG_PATH, ACARS_LOG_KEEP)
 
 
 def _today_start():
@@ -2515,10 +2407,10 @@ def _load_feed_history(feed):
     לפי זמן (t עולה) עם id רץ. נקרא *לפני* הפעלת thread ה-listener (אין מרוץ). רק הודעות
     מהיום נטענות לזיכרון (ההיסטוריה המלאה נשמרת בדיסק)."""
     try:
-        lines = _read_log_lines(_fv(feed, "log"))
+        lines = storage.read_log_lines(_fv(feed, "log"))
     except OSError:
         return
-    recs = _jsonl_records(lines[-_fv(feed, "buf"):])
+    recs = storage.jsonl_records(lines[-_fv(feed, "buf"):])
     floor = _today_start()
     recs = [r for r in recs if (r.get("t") or 0) >= floor]   # היום בלבד (הדיסק נשמר)
     recs.sort(key=lambda r: r.get("t") or 0)
@@ -2589,13 +2481,13 @@ def _feed_listener(feed):
                 for k in [k for k, (t0, _) in dedup.items() if t0 < cutoff]:
                     del dedup[k]
 
-        _append_jsonl_log(_fv(feed, "log"), rec)   # התמדה לפני הקצאת id (הקובץ נקי מ-id)
+        storage.append_jsonl_log(_fv(feed, "log"), rec)   # התמדה לפני הקצאת id (הקובץ נקי מ-id)
         with _fv(feed, "lock"):
             _feed_push(feed, rec)
         _xc_submit(feed, rec)                 # הצלבת ADS-B — תור לא-חוסם, thread נפרד
         seen += 1
         if seen % FEED_TRIM_EVERY == 0:
-            _trim_jsonl_log(_fv(feed, "log"), _fv(feed, "keep"))
+            storage.trim_jsonl_log(_fv(feed, "log"), _fv(feed, "keep"))
 
 
 def _feed_response(feed):
@@ -2610,7 +2502,7 @@ def _feed_response(feed):
         if bounds is None:
             return jsonify(ok=False, error="תאריך לא תקין (פורמט: YYYY-MM-DD)"), 400
         start, end = bounds
-        msgs = [r for r in _read_jsonl_log(_fv(feed, "log")) if start <= (r.get("t") or 0) < end]
+        msgs = [r for r in storage.read_jsonl_log(_fv(feed, "log")) if start <= (r.get("t") or 0) < end]
         return jsonify(ok=True, day=day, messages=msgs)
     try:
         since = int(request.args.get("since", 0))
@@ -2789,11 +2681,11 @@ def _normalize_vdl2(m):
 
 
 def _append_vdl2_log(rec):
-    _append_jsonl_log(VDL2_LOG_PATH, rec)
+    storage.append_jsonl_log(VDL2_LOG_PATH, rec)
 
 
 def _trim_vdl2_log():
-    _trim_jsonl_log(VDL2_LOG_PATH, VDL2_LOG_KEEP)
+    storage.trim_jsonl_log(VDL2_LOG_PATH, VDL2_LOG_KEEP)
 
 
 def _load_vdl2_history():
@@ -2913,11 +2805,11 @@ def _normalize_satcom(m):
 
 
 def _append_satcom_log(rec):
-    _append_jsonl_log(SATCOM_LOG_PATH, rec)
+    storage.append_jsonl_log(SATCOM_LOG_PATH, rec)
 
 
 def _trim_satcom_log():
-    _trim_jsonl_log(SATCOM_LOG_PATH, SATCOM_LOG_KEEP)
+    storage.trim_jsonl_log(SATCOM_LOG_PATH, SATCOM_LOG_KEEP)
 
 
 def _load_satcom_history():
@@ -3079,7 +2971,7 @@ def write_acars_env(freqs, gain=ACARS_GAIN_DEFAULT, ratemult=ACARS_RATEMULT_DEFA
         "ACARS_SERIAL=" + _serial_arg(serial if path else _primary_serial()),
         "",
     ])
-    _atomic_write(path or ACARS_ENV_PATH, text)
+    storage.atomic_write(path or ACARS_ENV_PATH, text)
 
 
 def write_vdl2_env(freqs, ifgr=None, rfgr=None, path=None, serial=None):
@@ -3102,7 +2994,7 @@ def write_vdl2_env(freqs, ifgr=None, rfgr=None, path=None, serial=None):
         "VDL2_SERIAL=" + _serial_arg(serial if path else _primary_serial()),
         "",
     ])
-    _atomic_write(path or VDL2_ENV_PATH, text)
+    storage.atomic_write(path or VDL2_ENV_PATH, text)
 
 
 def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True, spectrum=True):
@@ -3142,7 +3034,7 @@ def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True, spectrum=True
         "SATCOM_SERIAL=" + _serial_arg(_primary_serial(), sep="-"),
         "",
     ])
-    _atomic_write(SATCOM_ENV_PATH, text)
+    storage.atomic_write(SATCOM_ENV_PATH, text)
 
 
 def _stop_services(services, timeout=30):
@@ -3453,7 +3345,7 @@ def write_denoise_env(engine):
     לא shell). הערך תמיד מהרשימה הסגורה; הסקריפט גם הוא מסרב לכל דבר אחר."""
     if engine not in DENOISE_ENGINES:
         engine = DENOISE_ENGINE_DEFAULT
-    _atomic_write(DENOISE_ENV_PATH, "# נכתב אוטומטית ע\"י AIR-AM (סינון רעשים). שינויים ידניים נדרסים.\n"
+    storage.atomic_write(DENOISE_ENV_PATH, "# נכתב אוטומטית ע\"י AIR-AM (סינון רעשים). שינויים ידניים נדרסים.\n"
                                     f"AIRAM_DENOISE_ENGINE={engine}\n")
 
 
@@ -4037,7 +3929,7 @@ def api_presets():
     ok, cleaned = _validate_presets(data)
     if not ok:
         return jsonify(ok=False, error="רשימת פריסטים לא תקינה", presets=load_presets()), 400
-    _atomic_write(PRESETS_PATH, json.dumps(cleaned, ensure_ascii=False))
+    storage.atomic_write(PRESETS_PATH, json.dumps(cleaned, ensure_ascii=False))
     log.info("presets updated (%d items, from %s)", len(cleaned), request.remote_addr)
     return jsonify(ok=True, presets=cleaned)
 
@@ -4472,7 +4364,7 @@ def _append_activity(rows):
     lines += [json.dumps(r, ensure_ascii=False) for r in rows]
     if len(lines) > ACTIVITY_KEEP * 2:   # קיצוץ בהיסטרזיס - לא משכתבים בכל append
         lines = lines[-ACTIVITY_KEEP:]
-    _atomic_write(ACTIVITY_PATH, "\n".join(lines) + "\n")
+    storage.atomic_write(ACTIVITY_PATH, "\n".join(lines) + "\n")
 
 
 def _last_logged_ts():
@@ -4580,14 +4472,14 @@ def _read_tx(mp3):
 def _write_tx(mp3, state, text=None, err=None, lang=None):
     rec = {"state": state, "text": text}
     if not mp3.parent.is_dir():
-        # ‏_atomic_write יוצר תיקיות-אב: סשן שנמחק בזמן שה-worker מתמלל קליפ
+        # ‏storage.atomic_write יוצר תיקיות-אב: סשן שנמחק בזמן שה-worker מתמלל קליפ
         # שלו היה "קם לתחייה" כתיקייה עם sidecar בודד ובלי meta.json.
         return rec
     if err:
         rec["err"] = err
     if lang:
         rec["lang"] = lang
-    _atomic_write(_tx_path(mp3), json.dumps(rec, ensure_ascii=False))
+    storage.atomic_write(_tx_path(mp3), json.dumps(rec, ensure_ascii=False))
     return rec
 
 
@@ -4986,7 +4878,7 @@ def api_activity():
             ev = json.loads(ln)
         except ValueError:
             continue
-        # ⚠ אותה משפחת באג כמו ב-_jsonl_records: שורת JSON תקין שאינה אובייקט
+        # ⚠ אותה משפחת באג כמו ב-storage.jsonl_records: שורת JSON תקין שאינה אובייקט
         # (‏null/מספר/מערך — שריד בלוק פגום אחרי כיבוי פתאומי) עברה את
         # ה-except ValueError ואז הפילה את הראוט ב-TypeError. ‏/api/activity
         # נקרא בפולינג כל 15 שניות במצב קול, כך שזה 500 חוזר ולא תקלה חד-פעמית.
@@ -5291,7 +5183,7 @@ def api_sessions():
         "counts": {"clips": len(clips), "aircraft": len(aircraft), "samples": len(rows)},
     }
     try:
-        _atomic_write(sdir / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
+        storage.atomic_write(sdir / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
     except OSError as e:
         for name in moved:
             try:
@@ -5763,7 +5655,7 @@ def _rflog_write(obj):
         try:
             RFLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(RFLOG_PATH, "a+b") as f:
-                _append_line_on_boundary(f, line)   # ר' שם: שורה קטועה מכיבוי קודם
+                storage.append_line_on_boundary(f, line)   # ר' שם: שורה קטועה מכיבוי קודם
                 f.flush()
                 _rflog_fsync(f.fileno())
         except OSError as e:
@@ -5948,7 +5840,7 @@ def _diag_write(obj):
         try:
             DIAG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(DIAG_PATH, "a+b") as f:
-                _append_line_on_boundary(f, line)
+                storage.append_line_on_boundary(f, line)
                 f.flush()
                 _diag_fsync(f.fileno())
         except OSError as e:
@@ -6068,7 +5960,7 @@ def _diag_status():
 
 def _diag_read_rows():
     try:
-        return _jsonl_records(_read_log_lines(DIAG_PATH))
+        return storage.jsonl_records(storage.read_log_lines(DIAG_PATH))
     except OSError:
         return []
 
@@ -6303,10 +6195,10 @@ def _diag_collect(start, end, test):
 
     msgs, sample = {}, {}
     for src, path in (("acars", ACARS_LOG_PATH), ("vdl2", VDL2_LOG_PATH), ("satcom", SATCOM_LOG_PATH)):
-        recs_m = [r for r in _read_jsonl_log(path) if start <= (r.get("t") or 0) <= end]
+        recs_m = [r for r in storage.read_jsonl_log(path) if start <= (r.get("t") or 0) <= end]
         msgs[src] = len(recs_m)
         sample[src] = recs_m[-DIAG_MSG_SAMPLE:]
-    act = [r for r in _jsonl_records(guard("activity", lambda: _read_log_lines(ACTIVITY_PATH)
+    act = [r for r in storage.jsonl_records(guard("activity", lambda: storage.read_log_lines(ACTIVITY_PATH)
                                            if ACTIVITY_PATH.exists() else []) or [])
            if start <= (r.get("ts") or 0) <= end]
     msgs["שידורי קול"] = len(act)
@@ -6658,7 +6550,7 @@ def _read_rflog_run(run_id):
     """כל שורות הרשם בין exp_start ל-exp_end של ריצה מסוימת (שורה פגומה מדולגת)."""
     rows, inside = [], False
     try:
-        lines = _read_log_lines(RFLOG_PATH)
+        lines = storage.read_log_lines(RFLOG_PATH)
     except OSError:
         return rows
     for line in lines:
@@ -7127,37 +7019,12 @@ VDL2_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "snr", "mode", "la
                     "error", "lat", "lon", "pos_src", "text"]
 
 
-def _read_jsonl_log(path):
-    """כל ההודעות מקובץ JSONL, ממוינות לפי זמן (t עולה). סובל שורות פגומות
-    (כתיבה חלקית של ההודעה האחרונה בזמן הקריאה). משותף ל-ACARS ול-VDL2."""
-    try:
-        lines = _read_log_lines(path)
-    except OSError:
-        return []
-    out = _jsonl_records(lines)
-    out.sort(key=lambda r: r.get("t") or 0)
-    return out
-
-
 def _read_acars_log():
-    return _read_jsonl_log(ACARS_LOG_PATH)
+    return storage.read_jsonl_log(ACARS_LOG_PATH)
 
 
 def _read_vdl2_log():
-    return _read_jsonl_log(VDL2_LOG_PATH)
-
-
-_CSV_FORMULA_CHARS = ("=", "+", "-", "@", "\t", "\r")
-
-
-def _csv_safe(v):
-    """מונע הזרקת נוסחה ב-Excel/LibreOffice/Sheets: תא שמתחיל ב-=/+/-/@/Tab/CR
-    מתפרש כנוסחה (או DDE/HYPERLINK חי) עם פתיחת הקובץ. תוכן ה-text/decoded/
-    tail מגיע משידור רדיו — לא נתון סטטי-מהימן — אז לא מניחים שהוא 'בטוח' רק
-    כי הוא טקסט. מוסיף ' מוביל (המוסכמה הסטנדרטית לניטרול) רק כשצריך."""
-    if isinstance(v, str) and v[:1] in _CSV_FORMULA_CHARS:
-        return "'" + v
-    return v
+    return storage.read_jsonl_log(VDL2_LOG_PATH)
 
 
 def _export_response(recs, cols, basename):
@@ -7182,9 +7049,9 @@ def _export_response(recs, cols, basename):
                 elif c == "timestamp":
                     row.append(t)
                 elif c == "text":
-                    row.append(_csv_safe((r.get("text") or "").replace("\r", " ").replace("\n", " ")))
+                    row.append(storage.csv_safe((r.get("text") or "").replace("\r", " ").replace("\n", " ")))
                 else:
-                    row.append(_csv_safe(r.get(c)))
+                    row.append(storage.csv_safe(r.get(c)))
             w.writerow(row)
         # BOM => Excel מזהה UTF-8 ומציג עברית (category) נכון
         resp = app.response_class("﻿" + buf.getvalue(),
@@ -7224,7 +7091,7 @@ def api_vdl2_export():
 
 
 def _read_satcom_log():
-    return _read_jsonl_log(SATCOM_LOG_PATH)
+    return storage.read_jsonl_log(SATCOM_LOG_PATH)
 
 
 SATCOM_EXPORT_COLS = ACARS_EXPORT_COLS   # אותה סכמת כרטיס בדיוק (בלי icao — ר' _normalize_satcom)
@@ -8020,7 +7887,7 @@ def _xc_save_event(res, reason):
         try:
             XC_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
             with XC_EVENTS_PATH.open("a+b") as f:
-                _append_line_on_boundary(f, data)
+                storage.append_line_on_boundary(f, data)
                 f.flush()
                 os.fsync(f.fileno())
         except OSError:
@@ -8030,18 +7897,18 @@ def _xc_save_event(res, reason):
             _xc_stats["events_saved"] += 1
             n = _xc_stats["events_saved"]
         if n % 50 == 0:
-            _trim_jsonl_log(XC_EVENTS_PATH, XC_EVENTS_KEEP)
+            storage.trim_jsonl_log(XC_EVENTS_PATH, XC_EVENTS_KEEP)
     return rec["id"]
 
 
 def _xc_read_events():
     """כל האירועים, הגרסה האחרונה לכל id, מהחדש לישן (לפי זמן הקליטה)."""
     try:
-        lines = _read_log_lines(XC_EVENTS_PATH)
+        lines = storage.read_log_lines(XC_EVENTS_PATH)
     except OSError:
         return []
     latest = {}
-    for r in _jsonl_records(lines):
+    for r in storage.jsonl_records(lines):
         if isinstance(r.get("id"), str):
             latest[r["id"]] = r
     return sorted(latest.values(), key=lambda r: r.get("t_rx") or 0, reverse=True)
@@ -8140,7 +8007,7 @@ def _xc_find_message(src, t, tail=None, label=None):
         for m in reversed(msgs):
             if ok(m):
                 return dict(m)
-    for r in reversed(_read_jsonl_log(path)):
+    for r in reversed(storage.read_jsonl_log(path)):
         if ok(r):
             return r
     return None
@@ -8246,13 +8113,13 @@ def api_xcheck_event(event_id):
         return jsonify(ok=True, event=ev)
     with _XC_EVENTS_LOCK:                        # DELETE (דרך _guard): כתיבה מחדש אטומית
         try:
-            lines = _read_log_lines(XC_EVENTS_PATH)
+            lines = storage.read_log_lines(XC_EVENTS_PATH)
         except OSError:
             lines = []
-        keep = [ln for ln, r in ((ln, _jsonl_records([ln])) for ln in lines)
+        keep = [ln for ln, r in ((ln, storage.jsonl_records([ln])) for ln in lines)
                 if not (r and r[0].get("id") == event_id)]
         try:
-            _atomic_write(XC_EVENTS_PATH, "\n".join(keep) + ("\n" if keep else ""))
+            storage.atomic_write(XC_EVENTS_PATH, "\n".join(keep) + ("\n" if keep else ""))
         except OSError:
             return jsonify(ok=False, error="המחיקה נכשלה (דיסק?)"), 500
     return jsonify(ok=True)
@@ -8748,7 +8615,7 @@ if __name__ == "__main__":
     # ⚠ טעינת ההיסטוריה עטופה: היא רצה לפני app.run(), וכל חריגה כאן מונעת
     # מהמתזמר לעלות => לולאת קריסה (Restart=always) והתחנה כולה מתה. זה כבר
     # קרה פעמיים מקובץ שנפגם בכיבוי פתאומי (שורה שאינה אובייקט, ותו UTF-8 קטוע
-    # — ר' _jsonl_records/_read_log_lines). היסטוריה היא נוחות; עלייה היא חובה.
+    # — ר' storage.jsonl_records/storage.read_log_lines). היסטוריה היא נוחות; עלייה היא חובה.
     for _load in (_load_acars_history, _load_vdl2_history, _load_satcom_history):
         try:
             _load()                                                 # לפני ה-listener => אין מרוץ

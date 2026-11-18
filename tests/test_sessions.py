@@ -15,6 +15,7 @@ import pytest
 
 import adsb
 import app
+import storage
 
 
 @pytest.fixture
@@ -381,13 +382,13 @@ def test_meta_write_failure_moves_recordings_back(client, paths, monkeypatch):
     now = time.time()
     _write_track([_ac_row(now - 60, [("4X-EHD", 32.2, 34.7, 3200, 90.0, 180.0, 8)])])
     rec = _mk_rec(NAME1, age=30)
-    real = app._atomic_write
+    real = storage.atomic_write
 
     def fail_meta(path, data):
         if path.name == "meta.json":
             raise OSError(28, "No space left on device")
         return real(path, data)
-    monkeypatch.setattr(app, "_atomic_write", fail_meta)
+    monkeypatch.setattr(storage, "atomic_write", fail_meta)
     r = client.post("/api/sessions", json={"minutes": 5})
     assert r.status_code == 500
     assert rec.is_file()                                  # הוחזרה לתיקייה החיה
