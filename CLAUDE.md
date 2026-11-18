@@ -122,6 +122,10 @@ webtune/
                             #   `_live_mode`, `TUNE_LOCK`, `STATS_PATH`/`CONFIG_PATH`, `ANTENNA_CHECK_SAMPLE_SEC`…) **מוזרקות** ב-`experiment.bind(...)` (בסוף app.py)
                             #   כ-lambda שפותר את השם בזמן הקריאה ⇒ החלפה על `app` בבדיקות ממשיכה לעבוד. אין לייבא `app` מכאן (`__main__` ⇒ עותק שני).
                             #   בבדיקות: `RFLOG_PATH`/`EXP_*`/`RFLOG_*` על `experiment`; `_enter_voice`/`ANTENNA_CHECK_SAMPLE_SEC`/`TUNE_LOCK` נשארים על `app`. הוצא בשלב ג2.
+  xcheck_jobs.py            # תור ההצלבה מול ADS-B: `_xc_submit` (heap בלבד — נקרא מה-listeners), `_xc_worker` (שני שלבים), `_xc_evaluate`/`_xc_collect`,
+                            #   `_xc_store` (תקצירי פיד), `_xc_save_event`/`_xc_read_events` (ראיות), `XC_*`. ⚠ המעגליות מול הבאפרים של הפידים נפתרת בהזרקה
+                            #   `xcheck_jobs.bind(buffers=…, day_bounds=…, version=…)` (בסוף app.py, lambda שפותר את `_xc_buffers` בזמן קריאה). נתיבי HTTP,
+                            #   `_xc_feed_payload`, `_xc_export`, `_xc_buffers` נשארו ב-app.py. בבדיקות: `xcheck_jobs._xc_heap`/`XC_QUEUE_MAX`/`XC_EVENTS_PATH`. הוצא בשלב ג2.
   recordings.py             # הקלטות (`_rec_*`, `_iter_recordings`, `_sweep_recordings`, `_scan_new_recordings`), ★ שמורות (`saved/`,
                             #   `_move_recording`, `_saved_usage`), תמלול (sidecar `.tx.json`, `_whisper_*`, `_transcribe_file`,
                             #   `_tx_next_target`, `transcribe_worker(get_cfg)`) ועזרי סשן (`_session_dir`, `_session_clip_paths`).
@@ -692,7 +696,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   ‏`/recordings/<name>`), `api_session_export` (`GET .../export.zip`, אותו דפוס
   בדיוק כמו `api_starred_zip`). **בלי retention אוטומטי לסשנים** — מחיקה היא
   ‏`DELETE` מפורש בלבד, עקבי עם "לא מוחקים מה שהמשתמש הגן עליו".
-- **הצלבת ADS-B + אופק רדיו / BLOS (`docs/adsb-crosscheck-design.md`):** שלוש שכבות —
+- **הצלבת ADS-B + אופק רדיו / BLOS (`docs/adsb-crosscheck-design.md`):** (⚠ התור, ה-worker, ההערכה והראיות — `_xc_*`/`XC_*` — יושבים ב-`xcheck_jobs.py`; ב-app.py נשארו נתיבי ה-HTTP ו-`_xc_buffers`) שלוש שכבות —
   `adsb.py` (נתונים), `xcheck.py` (ניתוח טהור), וכאן תזמור. ה-listeners קוראים
   `_xc_submit(src, rec)` אחרי ההתמדה — **הכנסה ל-heap בלבד** (נעילה לרגע, בלי רשת/I/O,
   לעולם לא זורק; מלא ⇒ `dropped`). `_xc_worker` (thread יחיד) מריץ `_xc_run_job` בשני

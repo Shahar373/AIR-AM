@@ -15,6 +15,7 @@ import pytest
 
 import adsb
 import app
+import xcheck_jobs  # noqa: E402
 import appstate  # noqa: E402
 import acars_parse
 import xcheck
@@ -59,9 +60,10 @@ def _synthetic(lat0, lon0, t0, times, brg=120.0, gs=480.0, src_type="adsb_icao")
 @pytest.fixture(autouse=True)
 def env(tmp_path, monkeypatch):
     monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(xcheck_jobs, "XC_EVENTS_PATH", tmp_path / "xcheck_events.jsonl")
     for name, fname in (("ACARS_LOG_PATH", "acars.jsonl"),
                         ("VDL2_LOG_PATH", "vdl2.jsonl"), ("SATCOM_LOG_PATH", "satcom.jsonl"),
-                        ("XC_EVENTS_PATH", "xcheck_events.jsonl"), ("CONFIG_PATH", "airband.conf")):
+                        ("CONFIG_PATH", "airband.conf")):
         monkeypatch.setattr(app, name, tmp_path / fname)
     monkeypatch.setattr(adsb, "TRACK_PATH", tmp_path / "track.jsonl")
     monkeypatch.setattr(adsb, "REG_HEX_PATH", tmp_path / "reg_hex.json")
@@ -77,12 +79,12 @@ def env(tmp_path, monkeypatch):
                       (app._satcom_lock, app._satcom_msgs)):
         with lock:
             buf.clear()
-    with app._xc_cv:
-        app._xc_heap.clear()
-        for k in app._xc_stats:
-            app._xc_stats[k] = 0
-    with app._xc_res_lock:
-        app._xc_results.clear()
+    with xcheck_jobs._xc_cv:
+        xcheck_jobs._xc_heap.clear()
+        for k in xcheck_jobs._xc_stats:
+            xcheck_jobs._xc_stats[k] = 0
+    with xcheck_jobs._xc_res_lock:
+        xcheck_jobs._xc_results.clear()
     yield tmp_path
 
 
@@ -294,16 +296,16 @@ def test_xc_direction_stored_acars_prefers_structure():
     """הצלבה על הודעה שמורה: block ID (מ-v2.31.0) ⇐ MSN (רק downlink נושא אחד) ⇐
     label. ‏loadsheet של C1 שנשמר כ-downlink נבחן קודם כשידור *מהמטוס* מול האופק."""
     c1 = {"label": "C1", "text": ".UTCKM1P IZ/241150\nAGM", "block_id": "C", "dir": "downlink"}
-    d, basis = app._xc_direction("acars", c1)
+    d, basis = xcheck_jobs._xc_direction("acars", c1)
     assert d == "uplink" and basis.startswith("מבני — block ID") and "חושב מחדש" in basis
     # לפני v2.31.0 לא נשמר block ID — ‏MSN מכריע (‏B3 שה-header סיווג uplink)
     b3 = {"label": "B3", "text": "/LLBG.DC1/RCD 024", "msgno": "M34A", "dir": "uplink"}
-    d, basis = app._xc_direction("acars", b3)
+    d, basis = xcheck_jobs._xc_direction("acars", b3)
     assert d == "downlink" and "MSN" in basis and "חושב מחדש" in basis
     # בלי שניהם — הטבלה (C1 תוקן ל-uplink)
-    assert app._xc_direction("acars", {"label": "C1", "text": "X"})[0] == "uplink"
+    assert xcheck_jobs._xc_direction("acars", {"label": "C1", "text": "X"})[0] == "uplink"
     # ‏MSN לא מכריע ב-VDL2 (שם יש כתובת AVLC, ובלעדיה לא מניחים את כלל ה-acarsdec)
-    assert app._xc_direction("vdl2", {"label": "H1", "text": "X", "msgno": "M01A"})[0] is None
+    assert xcheck_jobs._xc_direction("vdl2", {"label": "H1", "text": "X", "msgno": "M01A"})[0] is None
 
 
 def test_verify_user_hex_contradicted_by_trace_registration(client, monkeypatch):
@@ -359,20 +361,20 @@ def test_corrupt_events_file_is_tolerated(client, monkeypatch, env):
 # --- worker: תור לא-חוסם, שלב 1/2, תקציר לפיד ----------------------------------------
 
 def test_submit_skips_messages_without_identity_and_never_raises(monkeypatch):
-    app._xc_submit("acars", {"t": 1.0, "label": "_d"})                 # ACK ריק
-    assert app._xc_heap == []
-    app._xc_submit("acars", {"t": 1.0, "tail": ".TCARC", "tail_is_station": True})
-    assert app._xc_heap == []
-    monkeypatch.setattr(app, "_xc_push", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
-    app._xc_submit("acars", {"t": 1.0, "tail": "G-ZBKM"})               # לא זורק לנתיב הרדיו
+    xcheck_jobs._xc_submit("acars", {"t": 1.0, "label": "_d"})                 # ACK ריק
+    assert xcheck_jobs._xc_heap == []
+    xcheck_jobs._xc_submit("acars", {"t": 1.0, "tail": ".TCARC", "tail_is_station": True})
+    assert xcheck_jobs._xc_heap == []
+    monkeypatch.setattr(xcheck_jobs, "_xc_push", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+    xcheck_jobs._xc_submit("acars", {"t": 1.0, "tail": "G-ZBKM"})               # לא זורק לנתיב הרדיו
 
 
 def test_queue_bound_drops_instead_of_blocking(monkeypatch):
-    monkeypatch.setattr(app, "XC_QUEUE_MAX", 2)
+    monkeypatch.setattr(xcheck_jobs, "XC_QUEUE_MAX", 2)
     for i in range(4):
-        app._xc_submit("acars", {"t": float(i), "tail": "G-ZBKM"})
-    assert len(app._xc_heap) == 2
-    assert app._xc_stats["dropped"] == 2 and app._xc_stats["submitted"] == 2
+        xcheck_jobs._xc_submit("acars", {"t": float(i), "tail": "G-ZBKM"})
+    assert len(xcheck_jobs._xc_heap) == 2
+    assert xcheck_jobs._xc_stats["dropped"] == 2 and xcheck_jobs._xc_stats["submitted"] == 2
 
 
 def test_live_job_uses_snapshot_and_feeds_summary(client, monkeypatch):
@@ -391,8 +393,8 @@ def test_live_job_uses_snapshot_and_feeds_summary(client, monkeypatch):
     with app._acars_lock:
         app._acars_msgs.append(rec)
     calls = _mock_net(monkeypatch)
-    app._xc_run_job({"src": "acars", "rec": rec, "stage": 1, "prior": []})
-    assert calls["lookup"] == [] and app._xc_heap == []               # ב-snapshot => בלי רשת/שלב 2
+    xcheck_jobs._xc_run_job({"src": "acars", "rec": rec, "stage": 1, "prior": []})
+    assert calls["lookup"] == [] and xcheck_jobs._xc_heap == []               # ב-snapshot => בלי רשת/שלב 2
     data = client.get("/api/acars?since=0&xseq=0").get_json()
     s = data["xcheck"]["7"]
     assert s["adsb"] == "measured" and s["by"] == "reg" and s["v"] == "line_of_sight"
@@ -422,12 +424,12 @@ def test_out_of_range_aircraft_two_stage_lookup_saves_event(client, monkeypatch)
     calls = _mock_net(monkeypatch, lookup=lk)
     rec = acars_parse._normalize_acars({**_raw_b6(), "timestamp": t_rx, "libacars": None})
     rec.update(id=11, lat=ZBKM_LAT, lon=ZBKM_LON)                       # בלי ts_sec של ADS-C
-    app._xc_run_job({"src": "acars", "rec": rec, "stage": 1, "prior": []})
+    xcheck_jobs._xc_run_job({"src": "acars", "rec": rec, "stage": 1, "prior": []})
     assert calls["lookup"] == [("reg", ".G-ZBKM")]
-    assert len(app._xc_heap) == 1                                       # שלב 2 מתוזמן
-    _due, _tie, job2 = app._xc_heap.pop()
+    assert len(xcheck_jobs._xc_heap) == 1                                       # שלב 2 מתוזמן
+    _due, _tie, job2 = xcheck_jobs._xc_heap.pop()
     assert job2["stage"] == 2 and len(job2["prior"]) == 1
-    app._xc_run_job(job2)
+    xcheck_jobs._xc_run_job(job2)
     assert len(calls["lookup"]) == 2
     ev = client.get("/api/xcheck/events").get_json()["events"]
     assert len(ev) == 1 and ev[0]["adsb_status"] == "interpolated"
@@ -460,13 +462,13 @@ def test_live_worker_never_reads_track_buffer_and_interpolates_across_stages(cli
 
     snap(before, before["t"])
     rec = {"id": 3, "t": t_rx, "tail": ".4X-EHD", "label": "H1", "text": "x", "error": 0}
-    app._xc_run_job({"src": "acars", "rec": rec, "stage": 1, "prior": []})
-    _due, _tie, job2 = app._xc_heap.pop()
+    xcheck_jobs._xc_run_job({"src": "acars", "rec": rec, "stage": 1, "prior": []})
+    _due, _tie, job2 = xcheck_jobs._xc_heap.pop()
     assert [p["origin"] for p in job2["prior"]] == ["live"]
     snap(after, after["t"])
-    app._xc_run_job(job2)
-    with app._xc_res_lock:
-        summ = app._xc_results[("acars", 3)][1]
+    xcheck_jobs._xc_run_job(job2)
+    with xcheck_jobs._xc_res_lock:
+        summ = xcheck_jobs._xc_results[("acars", 3)][1]
     assert summ["adsb"] == "interpolated" and summ["v"] == "line_of_sight"
 
 
