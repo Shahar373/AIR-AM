@@ -111,6 +111,9 @@ webtune/
   acars_parse.py            # נרמול ופענוח ACARS/VDL2/SATCOM: `_normalize_acars/vdl2/satcom` + כל ה-parsers, טבלאות ה-labels, כיוון מבני,
                             #   `_libacars_decode`/`_decode_libacars_app`/`_run_libacars`. טהור — בלי Flask/state/systemd (נבדק מכנית).
                             #   הוצא מ-app.py בשלב ג2. ⚠ קוראים אליו כ-`acars_parse.<שם>` (לא `from … import`).
+  config.py                 # נתונים טהורים: בנקי תדרים (`ACARS_BANKS`/`VDL2_BANKS`/`SATCOM_BANKS` + `*_FREQS_DEFAULT`), רווחים (`IFGR_*`/`RFGR_*`/`SNR_*`),
+                            #   `CHAN_FILTERS`, `DENOISE_ENGINES`. בלי לוגיקה/IO. ⚠ קוראים אליו כ-`config.<שם>`; ב-`_FEEDS` כשם-מחרוזת "config.X".
+                            #   קיים כדי ש-appstate לא ייצור ייבוא מעגלי. הוצא בשלב ג2. עריכת ברירת מחדל קבועה — כאן.
   recordings.py             # הקלטות (`_rec_*`, `_iter_recordings`, `_sweep_recordings`, `_scan_new_recordings`), ★ שמורות (`saved/`,
                             #   `_move_recording`, `_saved_usage`), תמלול (sidecar `.tx.json`, `_whisper_*`, `_transcribe_file`,
                             #   `_tx_next_target`, `transcribe_worker(get_cfg)`) ועזרי סשן (`_session_dir`, `_session_clip_paths`).

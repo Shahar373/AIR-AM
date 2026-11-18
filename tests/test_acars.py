@@ -12,6 +12,7 @@ import types
 import pytest
 
 import app
+import config  # noqa: E402
 import acars_parse
 from helpers import ok_proc as _ok
 
@@ -29,8 +30,8 @@ def paths(tmp_path, monkeypatch):
 
 def test_sanitize_freqs_filters_and_defaults():
     assert app._sanitize_freqs(["131.525", "bad; reboot", "136.9"]) == ["131.525", "136.9"]
-    assert app._sanitize_freqs([]) == list(app.ACARS_FREQS_DEFAULT)
-    assert app._sanitize_freqs(["$(reboot)", "x"]) == list(app.ACARS_FREQS_DEFAULT)
+    assert app._sanitize_freqs([]) == list(config.ACARS_FREQS_DEFAULT)
+    assert app._sanitize_freqs(["$(reboot)", "x"]) == list(config.ACARS_FREQS_DEFAULT)
     assert app._sanitize_freqs(["131.55"]) == ["131.55"]   # 2 ספרות עשרוניות גם תקין
 
 
@@ -177,12 +178,12 @@ def test_api_mode_enter_acars(client, paths, no_sleep, monkeypatch):
     r = client.post("/api/mode", json={"mode": "acars"})
     j = r.get_json()
     assert r.status_code == 200 and j["ok"] and j["app_mode"] == "acars"
-    assert j["acars_freqs"] == list(app.ACARS_FREQS_DEFAULT)
+    assert j["acars_freqs"] == list(config.ACARS_FREQS_DEFAULT)
     assert app.load_state()["app_mode"] == "acars"
     # שחרר את rtl_airband והרים את acarsdec
     assert ("stop", "rtl_airband") in calls and ("restart", app.ACARS_SERVICE) in calls
     # נכתב env תקין (בנק ברירת המחדל)
-    assert ("ACARS_FREQS=" + " ".join(app.ACARS_FREQS_DEFAULT)) in app.ACARS_ENV_PATH.read_text()
+    assert ("ACARS_FREQS=" + " ".join(config.ACARS_FREQS_DEFAULT)) in app.ACARS_ENV_PATH.read_text()
 
 
 def test_api_mode_enter_acars_failure_falls_to_off(client, paths, no_sleep, monkeypatch):
@@ -251,7 +252,7 @@ def test_api_state_reports_live_mode(client, paths, monkeypatch):
     body = client.get("/api/state").get_json()
     assert body["app_mode"] == "off"
     assert body["mode_ok"] is True                 # standby מכוון אינו תקלה
-    assert body["acars_freqs"] == list(app.ACARS_FREQS_DEFAULT)
+    assert body["acars_freqs"] == list(config.ACARS_FREQS_DEFAULT)
 
 
 def test_api_state_idle_reports_saved_intent(client, paths, monkeypatch):
@@ -1444,8 +1445,8 @@ def test_tail_with_control_char_is_not_an_identity_real_capture():
 
 def test_acars_banks_default():
     # ברירת המחדל היא הבנק הראשון (131.x מורחב), והוא נכנס בחלון אחד
-    assert app.ACARS_FREQS_DEFAULT == app.ACARS_BANKS[0]["freqs"]
-    for bank in app.ACARS_BANKS:
+    assert config.ACARS_FREQS_DEFAULT == config.ACARS_BANKS[0]["freqs"]
+    for bank in config.ACARS_BANKS:
         assert app._acars_window_error(bank["freqs"]) is None   # כל בנק חוקי
         assert len(bank["freqs"]) <= app.ACARS_MAX_CHANNELS
 

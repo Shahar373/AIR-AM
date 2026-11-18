@@ -14,6 +14,7 @@ import types
 import pytest
 
 import app
+import config  # noqa: E402
 import acars_parse
 from helpers import ok_proc as _ok
 
@@ -304,15 +305,15 @@ def test_write_vdl2_env_sanitizes(paths):
 
 def test_write_vdl2_env_empty_falls_to_default(paths):
     app.write_vdl2_env([])
-    expect = " ".join(str(int(round(float(f) * 1e6))) for f in app.VDL2_FREQS_DEFAULT)
+    expect = " ".join(str(int(round(float(f) * 1e6))) for f in config.VDL2_FREQS_DEFAULT)
     assert f"VDL2_FREQS={expect}" in app.VDL2_ENV_PATH.read_text()
 
 
 # --- בנקים + ולידציית חלון ---------------------------------------------------
 
 def test_vdl2_banks_all_valid():
-    assert app.VDL2_FREQS_DEFAULT == app.VDL2_BANKS[0]["freqs"]
-    for bank in app.VDL2_BANKS:
+    assert config.VDL2_FREQS_DEFAULT == config.VDL2_BANKS[0]["freqs"]
+    for bank in config.VDL2_BANKS:
         assert app._vdl2_window_error(bank["freqs"]) is None
         assert len(bank["freqs"]) <= app.VDL2_MAX_CHANNELS
 
@@ -326,7 +327,7 @@ def test_vdl2_window_error_cases():
 
 def test_generic_window_error_shared_with_acars():
     # ה-wrapper של ACARS ממשיך לעבוד דרך הפונקציה המשותפת
-    assert app._acars_window_error(list(app.ACARS_FREQS_DEFAULT)) is None
+    assert app._acars_window_error(list(config.ACARS_FREQS_DEFAULT)) is None
     assert app._acars_window_error(["130.450", "136.975"]) is not None
 
 
@@ -417,13 +418,13 @@ def test_api_mode_enter_vdl2(client, paths, no_sleep, monkeypatch):
     r = client.post("/api/mode", json={"mode": "vdl2"})
     j = r.get_json()
     assert r.status_code == 200 and j["ok"] and j["app_mode"] == "vdl2"
-    assert j["vdl2_freqs"] == list(app.VDL2_FREQS_DEFAULT)
+    assert j["vdl2_freqs"] == list(config.VDL2_FREQS_DEFAULT)
     assert app.load_state()["app_mode"] == "vdl2"
     # שחרר את *שני* הצרכנים האחרים והרים את dumpvdl2
     assert ("stop", "rtl_airband") in calls and ("stop", app.ACARS_SERVICE) in calls
     assert ("restart", app.VDL2_SERVICE) in calls
     # נכתב env תקין (בנק ברירת המחדל, ב-Hz)
-    expect = " ".join(str(int(round(float(f) * 1e6))) for f in app.VDL2_FREQS_DEFAULT)
+    expect = " ".join(str(int(round(float(f) * 1e6))) for f in config.VDL2_FREQS_DEFAULT)
     assert f"VDL2_FREQS={expect}" in app.VDL2_ENV_PATH.read_text()
 
 
@@ -513,8 +514,8 @@ def test_api_state_reports_vdl2(client, paths, monkeypatch):
     monkeypatch.setattr(app, "_is_active", lambda svc: svc == app.VDL2_SERVICE)
     body = client.get("/api/state").get_json()
     assert body["app_mode"] == "vdl2"
-    assert body["vdl2_freqs"] == list(app.VDL2_FREQS_DEFAULT)
-    assert body["vdl2_banks"] == app.VDL2_BANKS
+    assert body["vdl2_freqs"] == list(config.VDL2_FREQS_DEFAULT)
+    assert body["vdl2_banks"] == config.VDL2_BANKS
 
 
 def test_api_state_vdl2_wins_over_saved(client, paths, monkeypatch):

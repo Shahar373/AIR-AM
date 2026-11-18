@@ -12,6 +12,7 @@ import time
 import pytest
 
 import app
+import config  # noqa: E402
 import recordings  # noqa: E402
 import storage
 
@@ -200,8 +201,8 @@ def test_tune_sanitizes_inputs(client, paths, tuned_ok):
     body = r.get_json()
     assert body["mod"] == "am"                    # אפנון לא מוכר => AM
     assert body["agc"] is False                   # "false" טקסטואלי מזוהה
-    assert body["if_gain"] == app.IFGR_MAX        # clamp לתקרה
-    assert body["rf_gain"] == app.RFGR_MIN        # clamp לרצפה
+    assert body["if_gain"] == config.IFGR_MAX        # clamp לתקרה
+    assert body["rf_gain"] == config.RFGR_MIN        # clamp לרצפה
     assert body["squelch_mode"] == "auto"         # מצב לא מוכר => auto
     assert body["squelch_snr"] == 0.0             # clamp לרצפה
 

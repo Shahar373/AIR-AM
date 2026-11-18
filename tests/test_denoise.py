@@ -13,6 +13,7 @@ import json
 import pytest
 
 import app
+import config  # noqa: E402
 import conftest  # נתיבים אמיתיים לפני הבידוד — ר' conftest.real_path
 import recordings  # noqa: E402
 
@@ -462,9 +463,9 @@ def test_unit_never_conflicts_with_sdr_consumers():
 # --- בחירת מנוע (docs/audio-comfort-design.md) -----------------------------------
 
 def test_engine_default_and_bad_saved_value(paths):
-    assert app._denoise_engine() == app.DENOISE_ENGINE_DEFAULT
+    assert app._denoise_engine() == config.DENOISE_ENGINE_DEFAULT
     app.save_state({**app.DEFAULT_STATE, "denoise_engine": "prod"})   # מנוע שנפסל / ערך זר
-    assert app._denoise_engine() == app.DENOISE_ENGINE_DEFAULT
+    assert app._denoise_engine() == config.DENOISE_ENGINE_DEFAULT
 
 
 def test_missing_is_per_engine(monkeypatch, tmp_path):
@@ -511,7 +512,7 @@ def test_api_switch_engine_while_running_restarts_only_denoise(client, monkeypat
 def test_api_same_engine_no_restart(client, monkeypatch, installed):
     s = Sys(monkeypatch, units={app.DENOISE_SERVICE: "active"})
     app.save_state({**app.DEFAULT_STATE, "denoise": True})
-    client.post("/api/denoise", json={"engine": app.DENOISE_ENGINE_DEFAULT})
+    client.post("/api/denoise", json={"engine": config.DENOISE_ENGINE_DEFAULT})
     assert s.calls == []
 
 
@@ -528,7 +529,7 @@ def test_api_unavailable_engine_while_enabled_501_unchanged(client, monkeypatch)
     app.save_state({**app.DEFAULT_STATE, "denoise": True})
     r = client.post("/api/denoise", json={"engine": "speex"})
     assert r.status_code == 501 and "airam-speexdn" in r.get_json()["error"]
-    assert app.load_state()["denoise_engine"] == app.DENOISE_ENGINE_DEFAULT
+    assert app.load_state()["denoise_engine"] == config.DENOISE_ENGINE_DEFAULT
     assert s.calls == []
 
 
@@ -553,8 +554,8 @@ def test_status_lists_engines_with_availability(client, monkeypatch):
     Sys(monkeypatch)
     d = client.get("/api/denoise").get_json()
     eng = {e["id"]: e for e in d["engines"]}
-    assert set(eng) == set(app.DENOISE_ENGINES)
+    assert set(eng) == set(config.DENOISE_ENGINES)
     assert eng["rnmix"]["available"] is True and eng["speex"]["available"] is False
-    assert d["engine"] == app.DENOISE_ENGINE_DEFAULT
+    assert d["engine"] == config.DENOISE_ENGINE_DEFAULT
     st = client.get("/api/state").get_json()
-    assert st["denoise_engine"] == app.DENOISE_ENGINE_DEFAULT
+    assert st["denoise_engine"] == config.DENOISE_ENGINE_DEFAULT

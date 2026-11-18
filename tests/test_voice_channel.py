@@ -9,6 +9,7 @@ rfnotch_ctrl), וברירת המחדל = ההתנהגות ההיסטורית; (2
 import pytest
 
 import app
+import config  # noqa: E402
 import recordings  # noqa: E402
 
 
@@ -71,7 +72,7 @@ def test_unknown_filter_falls_back_to_standard():
 
 def test_fft_sizes_are_valid_for_rtl_airband():
     """rtl_airband מקבל רק חזקות של 2 בטווח 256..8192 (MIN/MAX_FFT_SIZE_LOG=8..13)."""
-    for spec in app.CHAN_FILTERS.values():
+    for spec in config.CHAN_FILTERS.values():
         n = spec["fft"]
         assert 256 <= n <= 8192 and n & (n - 1) == 0
         # bandwidth 0 = כבוי; אחרת חייב להיות בתוך Nyquist של ה-I/Q ב-16kHz

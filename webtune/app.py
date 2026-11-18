@@ -41,6 +41,7 @@ from flask import Flask, request, jsonify, send_from_directory, send_file, abort
 
 import diag   # יומן בדיקה וייצוא לוגים — הניתוח הטהור (פענוח journald, בדיקות, summary.md)
 import acars_parse   # נרמול ופענוח ACARS/VDL2/SATCOM (הוצא בשלב ג2)
+import config   # הגדרות ונתוני-ברירת-מחדל טהורים (הוצא בשלב ג2)
 import recordings   # הקלטות, ★, תמלול, סשנים — קבצים בדיסק (הוצא בשלב ג2)
 import storage   # אחסון: כתיבה אטומית + JSONL (הוצא מכאן בשלב ג2)
 import adsb   # מסלול פעיל + אינדיקציית GPS מנתוני ADS-B (thread נפרד)
@@ -66,44 +67,11 @@ DENOISE_SCRIPT = Path("/usr/local/bin/airam-denoise")
 DENOISE_RNNOISE = Path("/usr/local/bin/airam-rnnoise")
 DENOISE_SPEEXDN = Path("/usr/local/bin/airam-speexdn")
 DENOISE_ENV_PATH = Path("/etc/airam/denoise.env")   # EnvironmentFile של airam-denoise.service
-# המנועים — רשימה סגורה, ורק מה שעבר את מעבדת ההאזנה העיוורת על הקלטות אמיתיות
-# (docs/audio-comfort-design.md, 13.11.2026). RNNoise 100% + נורמליזציה (v2.29.0)
-# נפסל שם ("לא טבעי" ב-3/3) ולכן אינו אופציה. הפרמטרים עצמם בסקריפט.
-DENOISE_ENGINES = {
-    "rnmix": {"label": "RNNoise עדין"},   # 50% גולמי מיושר — airam-rnnoise --mix
-    "speex": {"label": "Speex"},          # תקרת הנחתה 15dB — airam-speexdn
-}
-DENOISE_ENGINE_DEFAULT = "rnmix"    # כבר מותקן אצל כולם (שלב 4e) — Speex דורש שלב 4f
 DENOISE_INSTALL_HINT = "cd ~/AIR-AM && git pull && sudo ./install.sh"
 SAMPLE_RATE = 2.56          # Msps - ערוץ יחיד, חלון צר מספיק
-# מסנן הערוץ (docs/voice-channel-design.md). ⚠ הערוץ *אינו* "בין FFT ברוחב 5kHz":
-# rtl_airband מכפיל כל בלוק בחלון Blackman-Harris של 7 איברים ולוקח את עוצמת
-# הבין, והחלון הזה רחב בכמה בינים. נמדד (rtl_airband v5.2.0 אמיתי, IQ סינתטי):
-# ב-fft 512 התגובה שטוחה עד 4kHz, אבל שכן חזק ב-8.33/12.5kHz *עובר* (‎+3/+1.8dB
-# מעל האות). fft גדול יותר = בין צר יותר = פחות רעש ושכנים, ומעט פחות גבוהים.
-# ‏"bandwidth" (lowpass I/Q של rtl_airband) לבדו **מסוכן**: עם שכן חזק ב-8.33kHz
-# הוא השתיק את הערוץ כולו (הסקוולץ' מודד אז את האות המסונן) — לכן רק יחד עם 1024.
-# ⚠ fft_size קטן מ-256 לא מותר ב-rtl_airband, וקצב דגימה שאינו כפולה שלמה של
-# 16kHz (למשל 1Msps) משבש את השמע (נמדד) — לכן הקצב לא משתנה כאן.
-CHAN_FILTERS = {
-    "standard": {"fft": 512, "bandwidth": 0},      # ההתנהגות ההיסטורית
-    "narrow": {"fft": 1024, "bandwidth": 0},       # נמדד: רעש ‎-4.6dB, שכן 25kHz ‎-4.4dB, ‎-1.4dB ב-3kHz
-    "narrow8k": {"fft": 1024, "bandwidth": 8000},  # נמדד: שכנים ‎-37dB, רעש ‎-6.3dB, ‎-2.6dB ב-3kHz
-}
-CHAN_FILTER_DEFAULT = "standard"
 DC_OFFSET = 0.3             # MHz - מזיזים את centerfreq מהתדר כדי להתרחק מ-spike ה-DC
-# רווח SDRplay (מודל legacy של SoapySDRPlay3): שני אלמנטים נפרדים, וקטן יותר = רווח גדול יותר.
-#   IFGR - הפחתת רווח בתדר הביניים, 20–59 dB.
-#   RFGR - מצב ה-LNA (הפחתת רווח RF), 0–9 (לא-לינארי, ~7dB לצעד).
-# כש-AGC כבוי כותבים gain = "IFGR=..,RFGR=.."; כש-AGC דלוק משמיטים את gain => AGC חומרתי.
-IFGR_MIN, IFGR_MAX = 20, 59
-RFGR_MIN, RFGR_MAX = 0, 9
-IF_GAIN_DEFAULT = 40            # IFGR - אמצע הטווח, בטוח מפני עומס יתר
-RF_GAIN_DEFAULT = 4            # RFGR - מצב LNA בינוני
 OVERLOAD_DBFS = -3.0          # סף "עומס יתר": אות ערוץ קרוב ל-full scale של ה-ADC
 SQUELCH_MODES = {"auto", "open", "manual"}
-SNR_MIN, SNR_MAX = 0.0, 60.0   # dB - תחום clamp ל-SNR ידני
-SNR_DEFAULT = 9.0              # ≈ סף ה-auto הפנימי של rtl_airband (~9.54 dB)
 STATS_PATH = Path("/run/rtl_airband_stats.txt")   # tmpfs - בלי שחיקת SD
 STATS_MAX_AGE = 5.0            # rtl_airband כותב כל ~1 שנייה; ~5 כתיבות => סובל ג'יטר אך עדיין מזהה restart
 
@@ -186,19 +154,6 @@ SDR_ENV_PATH = Path("/etc/airam/sdr.env")
 _SERIAL_RE = re.compile(r"^[0-9A-Za-z]{4,32}$")
 ACARS_UDP_HOST = "127.0.0.1"
 ACARS_UDP_PORT = 5556                 # חייב להתאים ל-ACARS_UDP ב-acars.env
-# בנקי תדרי ACARS: כל בנק נכנס בחלון דגימה *אחד* של acarsdec (≤ ACARS_WINDOW_MHZ).
-# העיקרון: acarsdec מפענח עד 8 ערוצים, וכולם חייבים ליפול בתוך חלון ~2MHz (chooseFc
-# בוחר center שמכסה את כולם). צביר 131.x וצביר 136.x רחוקים ~5MHz => *לעולם* לא בחלון
-# אחד => בנקים נפרדים להחלפה (כמו מתג קול/ACARS). הצבא ומטוסי התדלוק האמריקאים
-# (KC-135/KC-46) אינם משתמשים בתדר ACARS צבאי נפרד — הם פלטפורמות אזרחיות מותאמות
-# על רשת ARINC/SITA, ובפועל מופיעים על 131.550 (הראשי העולמי) ועל צביר אירופה.
-ACARS_BANKS = [
-    {"id": "eu131", "name": "אירופה + עולמי (131)",
-     "freqs": ["130.450", "131.425", "131.525", "131.550", "131.725", "131.825", "131.850"]},
-    {"id": "band136", "name": "אזור 136",
-     "freqs": ["136.700", "136.750", "136.800", "136.850", "136.900", "136.925", "136.975"]},
-]
-ACARS_FREQS_DEFAULT = ACARS_BANKS[0]["freqs"]   # בנק ברירת המחדל (131.x מורחב, span 1.4MHz)
 ACARS_GAIN_DEFAULT = -10              # ‎-10 => AGC (מוסכמת acarsdec)
 ACARS_RATEMULT_DEFAULT = 160          # 160 => 2.0 MS/s (חלון ±1MHz)
 ACARS_MAX_CHANNELS = 8               # מגבלת acarsdec — עד 8 ערוצים בו-זמנית
@@ -229,15 +184,6 @@ ACARS_LOG_KEEP = 5000                 # retention על הדיסק (זנב נשמ
 VDL2_SERVICE = "airam-vdl2"
 VDL2_ENV_PATH = Path("/etc/airam/vdl2.env")
 VDL2_UDP_PORT = 5557                  # חייב להתאים ל-port ב-airam-vdl2.service (host: ACARS_UDP_HOST)
-# בנקי תדרי VDL2: כל התדרים בצביר 136.7–137.0 (span ‏250kHz) => תמיד חלון דגימה אחד.
-# 136.975 הוא ה-CSC (Common Signalling Channel) העולמי — כמעט כל התעבורה באזורנו שם;
-# 4 הערוצים המשניים (אירופה) מפוענחים בו-זמנית בחינם. בנק CSC-בלבד = fallback ל-CPU.
-VDL2_BANKS = [
-    {"id": "eu_csc", "name": "עולמי + אירופה (CSC+4)",
-     "freqs": ["136.725", "136.775", "136.825", "136.875", "136.975"]},
-    {"id": "csc", "name": "CSC בלבד (136.975)", "freqs": ["136.975"]},
-]
-VDL2_FREQS_DEFAULT = VDL2_BANKS[0]["freqs"]
 VDL2_MAX_CHANNELS = 8                 # תקרה שפויה (dumpvdl2 מוגבל CPU, לא ערוצים)
 VDL2_WINDOW_MHZ = 1.9                 # SoapySDR של dumpvdl2 דוגם 2.1MS/s => ~2MHz עם שוליים
 VDL2_BUF_MAX = 500                    # הודעות אחרונות בזיכרון (כמו ACARS)
@@ -271,56 +217,9 @@ SATCOM_UDP_PORT = 5558                # חייב להתאים ל-SATCOM_UDP ב-s
 # כמו Icecast (8000, גם הוא בלי אימות, מיועד לרשת פרטית מהימנה בלבד — §9).
 SATCOM_WEB_PORT = 8888
 SATCOM_HEALTH_TIMEOUT = 2.0           # שניות — נקרא ב-polling, חייב להיות מהיר
-# דגל --spectrum (options.c/web.c, אומת מהמקור) פותח שני endpoints נוספים ב-
-# dashboard: GET /api/spectrum?ch=N&bins=N (מערך mags_db + mixer/AFC) ו-
-# /api/constellation. **זה האבחון היחיד שמבחין בין "אין RF בכלל" ל"יש RF, לא
-# נעול"**: ebno/lock לבדם מראים "אין נעילה" גם כשהאנטנה מנותקת וגם כשהיא
-# מכוונת ב-5° שגיאה. רצפת רעש שמזנקת ~20-30dB כשה-LNA מוזן היא הראיה הישירה
-# היחידה שהשרשרת RF חיה בכלל (ר' §12 — משווים מול מדידה של המשתמש, לא מול סף
-# מומצא). המחיר: **אפס CPU רציף** — web_get_spectrum_by_channel קורא את מצב
-# הדמודולטור הקיים (jaero_pmsk_get_spectrum), אין ring buffer ואין FFT מתמשך;
-# העבודה מתרחשת רק כשה-UI מבקש. ⚠ המחיר האמיתי הוא אבטחתי: הדגל מוסיף גם
-# GET /api/tune?ch=N&hz=X (משנה-מצב!) לאותו פורט לא-מאומת שנקשר ל-INADDR_ANY
-# (ר' SATCOM_WEB_PORT למעלה ו-§9) — לכן זה משתנה-מצב שניתן לכבות, ולא קבוע.
-# רווח ידני: ‏inmarsat-sniffer מקבל ‎--sdrplay-gain=N ומטפל בו כך (sdrplay.c,
-# אומת מהמקור — הציטוט חשוב כי ההתנהגות **לא** מקבילה לזו של הקול):
-#     if (sdrplay_gain_val >= 0) {
-#         int grdb = sdrplay_gain_val;
-#         if (grdb < 20) grdb = 20;  if (grdb > 59) grdb = 59;
-#         chp->tunerParams.gain.gRdB = grdb;
-#         chp->tunerParams.gain.LNAstate = 0;          /* ← לא ניתן לשליטה */
-#         chp->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
-#     } else {
-#         chp->ctrlParams.agc.enable  = sdrplay_api_AGC_5HZ;
-#         chp->ctrlParams.agc.setPoint_dBfs = -30;
-#     }
-# שתי מסקנות מעשיות:
-# (1) **הטווח 20–59 זהה ל-IFGR של הקול** (IFGR_MIN/IFGR_MAX) — אותה סמנטיקה
-#     הפוכה בדיוק: הערך הוא *הפחתה*, קטן=רווח גדול. לכן משתמשים באותם קבועים.
-# (2) **אין שליטה ב-RFGR/LNAstate כמו בקול** — במצב ידני הכלי מקבע LNAstate=0,
-#     כלומר **רווח RF מקסימלי**. זה לא חיסרון ל-SATCOM אלא בדיוק מה שרוצים
-#     לאות לוויין חלש, וזו הסיבה שרווח ידני יכול לעזור דווקא כשה-AGC לא:
-#     ה-AGC מכוון ל-setpoint של ‎-30dBfs על *כל* מה שבחלון, כך שאנרגיה חזקה
-#     מחוץ לפס (סלולר סמוך ל-L-band — בדיוק מה שה-SAW של ה-LNA נועד לחתוך)
-#     יכולה לגרום לו להוריד רווח ולהחניק את הנשא של הלוויין. לכן זו אופציה,
-#     לא ברירת מחדל: AGC נשאר ברירת המחדל (None), והידני הוא כלי לשטח.
-SATCOM_GAIN_DEFAULT = None            # None = AGC של הדרייבר (‎5Hz, setpoint ‎-30dBfs)
 SATCOM_SPECTRUM_BINS = 256            # ברירת מחדל לבקשת ספקטרום (web.c: 32..1024)
 SATCOM_SPECTRUM_TIMEOUT = 3.0         # מעט יותר מ-health: מערך גדול יותר
 SATCOM_LOG_TAIL_LINES = 40            # GET /api/satcom/log — מספיק לשורות הפתיחה
-# "בנקים" של satcom = לוויינים (geostationary), לא צבירי-תדרים כמו ACARS/VDL2 —
-# כל "בנק" הוא לוויין יחיד (freqs בן-איבר-יחיד עם דגל ה---satellite=). זה מאפשר
-# ל-UI לעשות שימוש חוזר במנגנון בורר-הבנקים הקיים כבורר-לוויין, בלי קוד מיוחד.
-# דגלי הלוויין ושמותיהם מאומתים מ-`inmarsat-sniffer --list-satellites` (ר'
-# docs/satcom-feasibility.md §2). AF1 (Alphasat, +25.0E) ברירת המחדל ל-ישראל.
-SATCOM_BANKS = [
-    {"id": "AF1", "name": "Alphasat · EMEA (25°E)", "freqs": ["AF1"]},
-    {"id": "4F3", "name": "I-4 F3 · אמריקה (98°W)", "freqs": ["4F3"]},
-    {"id": "3F5", "name": "I-3 F5 · אטלנטי (54°W)", "freqs": ["3F5"]},
-    {"id": "F1", "name": "I-6 F1 · אוק' הודי/שקט (83°E)", "freqs": ["F1"]},
-]
-SATCOM_SATELLITES = {b["id"] for b in SATCOM_BANKS}  # דגלי --satellite= תקינים
-SATCOM_FREQS_DEFAULT = SATCOM_BANKS[0]["freqs"]      # ["AF1"] — Alphasat, ל-EMEA/ישראל
 # רווח ברירת מחדל = AGC (ריק, כמו ACARS/VDL2). לרווח ידני מעבירים gRdB ל-
 # write_satcom_env => --sdrplay-gain (הפחתה, קטן=רווח גדול). לא --soapy-gain (ר' שם).
 SATCOM_BUF_MAX = 500                  # הודעות אחרונות בזיכרון (כמו ACARS/VDL2)
@@ -491,16 +390,16 @@ def load_presets():
     return [dict(p) for p in DEFAULT_PRESETS]
 
 DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
-                 "if_gain": IF_GAIN_DEFAULT, "rf_gain": RF_GAIN_DEFAULT,
-                 "squelch_mode": "open", "squelch_snr": SNR_DEFAULT,  # ברירת מחדל ATIS => תמיד פתוח
+                 "if_gain": config.IF_GAIN_DEFAULT, "rf_gain": config.RF_GAIN_DEFAULT,
+                 "squelch_mode": "open", "squelch_snr": config.SNR_DEFAULT,  # ברירת מחדל ATIS => תמיד פתוח
                  # "voice" (rtl_airband) | "acars" (acarsdec) | "vdl2" (dumpvdl2) |
                  # "satcom" (inmarsat-sniffer) | "off" (standby).
                  # ברירת המחדל ניטרלית (off): אין "מצב ראשי" — התקנה טרייה נוחתת במסך
                  # הבית והמשתמש בוחר מצב. המצב הנבחר שורד reboot (משוחזר ע"י _boot_restore).
                  "app_mode": "off",
-                 "acars_freqs": ACARS_FREQS_DEFAULT,
-                 "vdl2_freqs": VDL2_FREQS_DEFAULT,
-                 "satcom_freqs": SATCOM_FREQS_DEFAULT,
+                 "acars_freqs": config.ACARS_FREQS_DEFAULT,
+                 "vdl2_freqs": config.VDL2_FREQS_DEFAULT,
+                 "satcom_freqs": config.SATCOM_FREQS_DEFAULT,
                  # True = bias-T של ה-RSP1B מזין את ה-LNA (ברירת המחדל ההיסטורית).
                  # False = המשתמש מזין את ה-LNA ממקור חיצוני (ר' _enter_satcom).
                  "satcom_bias_tee": True,
@@ -515,7 +414,7 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  "satcom_spectrum": True,
                  # None = AGC (ברירת המחדל); int 20..59 = gRdB ידני (*הפחתה*,
                  # קטן=רווח גדול — כמו if_gain של הקול). ר' SATCOM_GAIN_DEFAULT.
-                 "satcom_gain": SATCOM_GAIN_DEFAULT,
+                 "satcom_gain": config.SATCOM_GAIN_DEFAULT,
                  # בסיס כיול למד השדה: {"noise": dBFS, "freq": MHz, "ts": epoch} או None.
                  # נמדד תמיד תחת אותם תנאים קבועים (AGC, /api/antenna/check) => בר-השוואה
                  # לעצמו לאורך זמן, בלי תלות באיזה מצב פעיל עכשיו. לעולם לא ממציאים
@@ -540,9 +439,9 @@ DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
                  # סינון רעשים חי לסטרים /clean.mp3. מתג גלובלי; כבוי כברירת מחדל.
                  # ר' _denoise_sync. denoise_engine — מתוך DENOISE_ENGINES.
                  "denoise": False,
-                 "denoise_engine": DENOISE_ENGINE_DEFAULT,
+                 "denoise_engine": config.DENOISE_ENGINE_DEFAULT,
                  # מסנן הערוץ של הקול (CHAN_FILTERS) — ברירת המחדל = ההתנהגות ההיסטורית.
-                 "chan_filter": CHAN_FILTER_DEFAULT,
+                 "chan_filter": config.CHAN_FILTER_DEFAULT,
                  # מסנן notch לשידורי FM/MW ב-RSP1B (rfnotch_ctrl של SoapySDRPlay3).
                  # ⚠ ההנחתה שלו בתחום 118–137MHz לא נמדדה — מתג, לא ברירת מחדל.
                  "fm_notch": False,
@@ -574,8 +473,8 @@ def _squelch_line(squelch_mode, squelch_snr):
 
 
 # --- בניית קובץ ההגדרות ל-rtl_airband ------------------------------------
-def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
-                  chan_filter=CHAN_FILTER_DEFAULT, fm_notch=False, serial=None,
+def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=config.SNR_DEFAULT,
+                  chan_filter=config.CHAN_FILTER_DEFAULT, fm_notch=False, serial=None,
                   stats_path=None, mount=None, denoise_udp=True, rec_template=None):
     """קונפיג rtl_airband. ברירות המחדל = הערוץ הראשי. הערוץ השני (קול כפול) מעביר stats_path/mount
     משלו ו-denoise_udp=False: הסינון מאזין לפורט אחד, ושני שולחים אליו היו מערבבים שני תדרים."""
@@ -583,7 +482,7 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
     mount = mount or MOUNT
     rec_template = rec_template or recordings.REC_BASENAME
     f = float(freq)
-    cf = CHAN_FILTERS.get(chan_filter, CHAN_FILTERS[CHAN_FILTER_DEFAULT])
+    cf = config.CHAN_FILTERS.get(chan_filter, config.CHAN_FILTERS[config.CHAN_FILTER_DEFAULT])
     # rfnotch_ctrl: הגדרת SoapySDRPlay3 שעוברת דרך ה-device_string (נקראת ע"י writeSetting
     # בבנאי, *לפני* שהזרם עולה — ב-RSP1B היא rsp1aParams.rfNotchEnable). ערך קבוע, לא קלט.
     dev = "driver=sdrplay" + _serial_arg(serial) + (",rfnotch_ctrl=true" if fm_notch else "")
@@ -591,7 +490,7 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
         "# נוצר אוטומטית ע\"י AIR-AM web tuner. שינויים ידניים נדרסים בכל כיוונון.",
         "localtime = true;   # חותמות הזמן בשמות קובצי ההקלטה בזמן מקומי",
         f'stats_filepath = "{stats_path}";   # מדדי RF (signal/noise) ל-/api/metrics',
-        f"fft_size = {cf['fft']};   # מסנן הערוץ: {chan_filter if chan_filter in CHAN_FILTERS else CHAN_FILTER_DEFAULT}",
+        f"fft_size = {cf['fft']};   # מסנן הערוץ: {chan_filter if chan_filter in config.CHAN_FILTERS else config.CHAN_FILTER_DEFAULT}",
         "devices:",
         "(",
         "  {",
@@ -698,8 +597,8 @@ def _cleanup_orphan_tmp(dirs=None):
     return removed
 
 
-def write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
-                 chan_filter=CHAN_FILTER_DEFAULT, fm_notch=False):
+def write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=config.SNR_DEFAULT,
+                 chan_filter=config.CHAN_FILTER_DEFAULT, fm_notch=False):
     storage.atomic_write(CONFIG_PATH, render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr,
                                              chan_filter, fm_notch, serial=_primary_serial()))
 
@@ -725,14 +624,14 @@ def write_voice2_config(st=None):
     if sq_mode not in SQUELCH_MODES:
         sq_mode = "auto"
     try:
-        sq_snr = max(SNR_MIN, min(SNR_MAX, float(st.get("squelch_snr", SNR_DEFAULT))))
+        sq_snr = max(config.SNR_MIN, min(config.SNR_MAX, float(st.get("squelch_snr", config.SNR_DEFAULT))))
     except (TypeError, ValueError):
-        sq_snr = SNR_DEFAULT
-    cf = st.get("chan_filter", CHAN_FILTER_DEFAULT)
-    if cf not in CHAN_FILTERS:
-        cf = CHAN_FILTER_DEFAULT
+        sq_snr = config.SNR_DEFAULT
+    cf = st.get("chan_filter", config.CHAN_FILTER_DEFAULT)
+    if cf not in config.CHAN_FILTERS:
+        cf = config.CHAN_FILTER_DEFAULT
     storage.atomic_write(VOICE2_CONFIG_PATH, render_config(
-        f2, m2, True, IF_GAIN_DEFAULT, RF_GAIN_DEFAULT, sq_mode, sq_snr, cf,
+        f2, m2, True, config.IF_GAIN_DEFAULT, config.RF_GAIN_DEFAULT, sq_mode, sq_snr, cf,
         bool(st.get("fm_notch")), serial=_secondary_serial(),
         stats_path=STATS2_PATH, mount=MOUNT2, denoise_udp=False, rec_template=recordings.REC_BASENAME2))
 
@@ -946,7 +845,7 @@ def _rollback(prev):
     try:
         write_config(prev["freq"], prev["mod"], prev["agc"], prev["if_gain"],
                      prev["rf_gain"], prev["squelch_mode"], prev["squelch_snr"],
-                     prev.get("chan_filter", CHAN_FILTER_DEFAULT), bool(prev.get("fm_notch")))
+                     prev.get("chan_filter", config.CHAN_FILTER_DEFAULT), bool(prev.get("fm_notch")))
         subprocess.run([*SUDO, "systemctl", "restart", "rtl_airband"],
                        capture_output=True, text=True, timeout=45)
     except Exception:
@@ -1018,18 +917,18 @@ _FEEDS = {
               "buf": "ACARS_BUF_MAX", "lock": "_acars_lock", "msgs": "_acars_msgs", "seq": "_acars_seq",
               "drop": None, "normalize": "acars_parse._normalize_acars", "ident": ("tail",),
               "services": ("ACARS_SERVICE", "ACARS2_SERVICE"), "freqs_key": "acars_freqs",
-              "freqs_default": "ACARS_FREQS_DEFAULT", "adsb": "_acars_adsb"},
+              "freqs_default": "config.ACARS_FREQS_DEFAULT", "adsb": "_acars_adsb"},
     "vdl2": {"label": "VDL2", "port": "VDL2_UDP_PORT", "log": "VDL2_LOG_PATH", "keep": "VDL2_LOG_KEEP",
              "buf": "VDL2_BUF_MAX", "lock": "_vdl2_lock", "msgs": "_vdl2_msgs", "seq": "_vdl2_seq",
              "drop": "_vdl2_drop_count", "normalize": "acars_parse._normalize_vdl2", "ident": ("tail", "icao"),
              "services": ("VDL2_SERVICE", "VDL2B_SERVICE"), "freqs_key": "vdl2_freqs",
-             "freqs_default": "VDL2_FREQS_DEFAULT", "adsb": "_vdl2_adsb"},
+             "freqs_default": "config.VDL2_FREQS_DEFAULT", "adsb": "_vdl2_adsb"},
     # SATCOM: זהות = tail בלבד (רוב ה-ACARS הלוויני נושא רישום); בלי שדה adsb בתשובה
     "satcom": {"label": "SATCOM", "port": "SATCOM_UDP_PORT", "log": "SATCOM_LOG_PATH", "keep": "SATCOM_LOG_KEEP",
                "buf": "SATCOM_BUF_MAX", "lock": "_satcom_lock", "msgs": "_satcom_msgs", "seq": "_satcom_seq",
                "drop": "_satcom_drop_count", "normalize": "acars_parse._normalize_satcom", "ident": ("tail",),
                "services": ("SATCOM_SERVICE",), "freqs_key": "satcom_freqs",
-               "freqs_default": "SATCOM_FREQS_DEFAULT", "adsb": None},
+               "freqs_default": "config.SATCOM_FREQS_DEFAULT", "adsb": None},
 }
 FEED_DEDUP_SEC = 90      # שידור חוזר (אין ACK מהקרקע — המטוס שולח שוב, עד 7 פעמים) ⇒ retry_count, לא כרטיס
 FEED_DEDUP_MAX = 500     # מעל זה מנקים ערכים ישנים ממפת ה-dedup (מניעת דליפת זיכרון)
@@ -1261,7 +1160,7 @@ def _sanitize_freqs(freqs, default=None):
     שאין הזרקה: רק ספרות ונקודה (אף ש-systemd מנתח בבטחה, שמירה על קלט נקי).
     ‏default => רשימת הנפילה כשלא נשאר כלום (ברירת מחדל: תדרי ה-ACARS)."""
     out = [str(f).strip() for f in (freqs or []) if _FREQ_RE.match(str(f).strip())]
-    return out or list(default if default is not None else ACARS_FREQS_DEFAULT)
+    return out or list(default if default is not None else config.ACARS_FREQS_DEFAULT)
 
 
 def _window_error(freqs, max_channels, window_mhz, decoder):
@@ -1307,7 +1206,7 @@ def _sanitize_satellite(freqs, default=None):
     מחזיר תמיד רשימה בת-איבר-יחיד (geostationary => לוויין אחד, לא בנק)."""
     out = [str(f).strip().upper() for f in (freqs or [])
            if _SAT_RE.match(str(f).strip().upper())]
-    return out[:1] or list(default if default is not None else SATCOM_FREQS_DEFAULT)
+    return out[:1] or list(default if default is not None else config.SATCOM_FREQS_DEFAULT)
 
 
 def _sanitize_satcom_gain(value, default=None):
@@ -1325,7 +1224,7 @@ def _sanitize_satcom_gain(value, default=None):
     if value is None or (isinstance(value, str) and value.strip().lower() in ("", "agc", "auto")):
         return None
     try:
-        return max(IFGR_MIN, min(IFGR_MAX, int(float(value))))
+        return max(config.IFGR_MIN, min(config.IFGR_MAX, int(float(value))))
     except (TypeError, ValueError):
         return default
 
@@ -1339,8 +1238,8 @@ def _satcom_window_error(freqs):
         return "לא נבחר לוויין"
     if len(vals) > 1:
         return "ניתן לבחור לוויין אחד בלבד (geostationary — לא בנק ערוצים)"
-    if vals[0] not in SATCOM_SATELLITES:
-        return "לוויין לא מוכר: %s (אפשרויות: %s)" % (vals[0], ", ".join(sorted(SATCOM_SATELLITES)))
+    if vals[0] not in config.SATCOM_SATELLITES:
+        return "לוויין לא מוכר: %s (אפשרויות: %s)" % (vals[0], ", ".join(sorted(config.SATCOM_SATELLITES)))
     return None
 
 
@@ -1373,7 +1272,7 @@ def write_vdl2_env(freqs, ifgr=None, rfgr=None, path=None, serial=None):
     ‏VDL2_GAIN מכיל את הדגל *כולו* (או ריק): ‏$VDL2_GAIN לא-מצוטט ב-ExecStart נעלם
     לגמרי כשהערך ריק => ברירת המחדל היא AGC של הדרייבר (כמו rtl_airband בלי שורת gain).
     האפליקציה כותבת רק מחרוזת ריקה או ints מפורמטים => אין משטח הזרקה."""
-    mhz = _sanitize_freqs(freqs, VDL2_FREQS_DEFAULT)
+    mhz = _sanitize_freqs(freqs, config.VDL2_FREQS_DEFAULT)
     hz = " ".join(str(int(round(float(f) * 1e6))) for f in mhz)
     gain = ""
     if ifgr is not None and rfgr is not None:
@@ -1573,7 +1472,7 @@ def _enter_voice(params, keep_secondary=False):
     # לא מעבירים אותם ⇒ רצים תמיד בתנאים הקבועים (standard, בלי notch) — בר-השוואה לבסיס.
     write_config(params["freq"], params["mod"], params["agc"], params["if_gain"],
                  params["rf_gain"], params["squelch_mode"], params["squelch_snr"],
-                 params.get("chan_filter", CHAN_FILTER_DEFAULT), bool(params.get("fm_notch")))
+                 params.get("chan_filter", config.CHAN_FILTER_DEFAULT), bool(params.get("fm_notch")))
     res = _restart_and_verify()
     if res[0] is None:
         # אחרי ש-rtl_airband אומת בלבד, וב-best-effort: כשל בסינון לעולם לא
@@ -1718,14 +1617,14 @@ _ICE_STATUS_LOCK = threading.Lock()
 def _denoise_engine(st=None):
     """המנוע השמור, תמיד מתוך הרשימה הסגורה (state ישן/פגום ⇒ ברירת המחדל)."""
     e = (st if st is not None else load_state()).get("denoise_engine")
-    return e if e in DENOISE_ENGINES else DENOISE_ENGINE_DEFAULT
+    return e if e in config.DENOISE_ENGINES else config.DENOISE_ENGINE_DEFAULT
 
 
 def _denoise_missing(engine=None):
     """רכיבים חסרים לסינון במנוע הנתון (ברירת מחדל: השמור). רשימה ריקה = מותקן.
     נבדק *חי* בכל קריאה ולא פעם אחת בעלייה — אותו לקח כמו whisper (§12): התקנה
     מאוחרת חייבת להיות מורגשת בלי restart, ו"לא מותקן" חייב להיות מדווח."""
-    if engine not in DENOISE_ENGINES:
+    if engine not in config.DENOISE_ENGINES:
         engine = _denoise_engine()
     missing = [] if shutil.which("ffmpeg") else ["ffmpeg"]
     binary = DENOISE_RNNOISE if engine == "rnmix" else DENOISE_SPEEXDN
@@ -1736,8 +1635,8 @@ def _denoise_missing(engine=None):
 def write_denoise_env(engine):
     """/etc/airam/denoise.env — EnvironmentFile של airam-denoise.service (systemd,
     לא shell). הערך תמיד מהרשימה הסגורה; הסקריפט גם הוא מסרב לכל דבר אחר."""
-    if engine not in DENOISE_ENGINES:
-        engine = DENOISE_ENGINE_DEFAULT
+    if engine not in config.DENOISE_ENGINES:
+        engine = config.DENOISE_ENGINE_DEFAULT
     storage.atomic_write(DENOISE_ENV_PATH, "# נכתב אוטומטית ע\"י AIR-AM (סינון רעשים). שינויים ידניים נדרסים.\n"
                                     f"AIRAM_DENOISE_ENGINE={engine}\n")
 
@@ -1805,7 +1704,7 @@ def _denoise_status(services=None):
         mounts = _icecast_live_mounts()
         live = None if mounts is None else (DENOISE_MOUNT in mounts)
     engines = []
-    for eid, e in DENOISE_ENGINES.items():
+    for eid, e in config.DENOISE_ENGINES.items():
         m = missing if eid == engine else _denoise_missing(eid)
         engines.append({"id": eid, "label": e["label"], "available": not m, "missing": m})
     return {"enabled": enabled, "engine": engine, "engines": engines,
@@ -1930,7 +1829,7 @@ def _validate_scan_plan(raw):
                 return None
             clean["active_from"], clean["active_to"] = frm, to
         if mode in ("acars", "vdl2") and leg.get("freqs"):
-            default = ACARS_FREQS_DEFAULT if mode == "acars" else VDL2_FREQS_DEFAULT
+            default = config.ACARS_FREQS_DEFAULT if mode == "acars" else config.VDL2_FREQS_DEFAULT
             wcheck = _acars_window_error if mode == "acars" else _vdl2_window_error
             freqs = _sanitize_freqs(leg.get("freqs"), default)
             if wcheck(freqs):
@@ -1951,7 +1850,7 @@ def _scan_enter_leg(leg):
         err, detail, _sdr_down = _enter_voice(params)
         return err, detail
     key = "acars_freqs" if mode == "acars" else "vdl2_freqs"
-    default = ACARS_FREQS_DEFAULT if mode == "acars" else VDL2_FREQS_DEFAULT
+    default = config.ACARS_FREQS_DEFAULT if mode == "acars" else config.VDL2_FREQS_DEFAULT
     enter = _enter_acars if mode == "acars" else _enter_vdl2
     freqs = leg.get("freqs") or load_state().get(key) or default
     return enter(freqs)
@@ -2309,7 +2208,7 @@ def api_state():
     st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT, version=VERSION,
               denoise_mount=DENOISE_MOUNT, denoise_available=not _denoise_missing(),
               denoise_engine=_denoise_engine(st),
-              acars_banks=ACARS_BANKS, vdl2_banks=VDL2_BANKS, satcom_banks=SATCOM_BANKS)
+              acars_banks=config.ACARS_BANKS, vdl2_banks=config.VDL2_BANKS, satcom_banks=config.SATCOM_BANKS)
     return jsonify(st)
 
 
@@ -2682,9 +2581,9 @@ def api_denoise():
         data = request.get_json(silent=True)
         if (not isinstance(data, dict) or not ({"enabled", "engine"} & data.keys())
                 or ("enabled" in data and not isinstance(data["enabled"], bool))
-                or ("engine" in data and data["engine"] not in DENOISE_ENGINES)):
+                or ("engine" in data and data["engine"] not in config.DENOISE_ENGINES)):
             return jsonify(ok=False, error="נדרש {\"enabled\": true|false} ו/או {\"engine\": "
-                           + "|".join(DENOISE_ENGINES) + "}"), 400
+                           + "|".join(config.DENOISE_ENGINES) + "}"), 400
         st = load_state()
         enabled = data.get("enabled", bool(st.get("denoise")))
         engine = data.get("engine", _denoise_engine(st))
@@ -3401,11 +3300,11 @@ def _restore_after_probe(prev_state, prev_live):
         return
     try:
         if prev_live == "acars":
-            _enter_acars(prev_state.get("acars_freqs", ACARS_FREQS_DEFAULT))
+            _enter_acars(prev_state.get("acars_freqs", config.ACARS_FREQS_DEFAULT))
         elif prev_live == "vdl2":
-            _enter_vdl2(prev_state.get("vdl2_freqs", VDL2_FREQS_DEFAULT))
+            _enter_vdl2(prev_state.get("vdl2_freqs", config.VDL2_FREQS_DEFAULT))
         elif prev_live == "satcom":
-            _enter_satcom(prev_state.get("satcom_freqs", SATCOM_FREQS_DEFAULT),
+            _enter_satcom(prev_state.get("satcom_freqs", config.SATCOM_FREQS_DEFAULT),
                           bias_tee=prev_state.get("satcom_bias_tee", True),
                           skip_c=prev_state.get("satcom_skip_c", True),
                           spectrum=prev_state.get("satcom_spectrum", True),
@@ -3416,7 +3315,7 @@ def _restore_after_probe(prev_state, prev_live):
                          "rf_gain": prev_state["rf_gain"],
                          "squelch_mode": prev_state["squelch_mode"],
                          "squelch_snr": prev_state["squelch_snr"],
-                         "chan_filter": prev_state.get("chan_filter", CHAN_FILTER_DEFAULT),
+                         "chan_filter": prev_state.get("chan_filter", config.CHAN_FILTER_DEFAULT),
                          "fm_notch": bool(prev_state.get("fm_notch"))})
         else:
             _enter_standby()
@@ -3427,8 +3326,8 @@ def _restore_after_probe(prev_state, prev_live):
 def _probe_params(freq):
     """תנאי המדידה של בדיקת האנטנה (AGC, סקוולץ' פתוח, AM) — מקור-אמת יחיד
     ל-/api/antenna/check ולניסוי האוטומטי, כדי שהניסוי יבדוק *את* המסלול של המוצר."""
-    return {"freq": freq, "mod": "am", "agc": True, "if_gain": IF_GAIN_DEFAULT,
-            "rf_gain": RF_GAIN_DEFAULT, "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}
+    return {"freq": freq, "mod": "am", "agc": True, "if_gain": config.IF_GAIN_DEFAULT,
+            "rf_gain": config.RF_GAIN_DEFAULT, "squelch_mode": "open", "squelch_snr": config.SNR_DEFAULT}
 
 
 @app.route("/api/antenna/check", methods=["POST"])
@@ -4326,9 +4225,9 @@ def _experiment_status():
 
 def _exp_voice_params(st):
     return {"freq": st["freq"], "mod": "am", "agc": st["agc"],
-            "if_gain": st["ifgr"] if st["ifgr"] is not None else IF_GAIN_DEFAULT,
-            "rf_gain": st["rfgr"] if st["rfgr"] is not None else RF_GAIN_DEFAULT,
-            "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}
+            "if_gain": st["ifgr"] if st["ifgr"] is not None else config.IF_GAIN_DEFAULT,
+            "rf_gain": st["rfgr"] if st["rfgr"] is not None else config.RF_GAIN_DEFAULT,
+            "squelch_mode": "open", "squelch_snr": config.SNR_DEFAULT}
 
 
 def _exp_meta(st):
@@ -4443,11 +4342,11 @@ def _experiment_start():
         return {"ok": False, "error": "פעולה אחרת מתבצעת כרגע — נסה שוב בעוד רגע"}, 409
     try:
         prev = load_state()
-        acars = prev.get("acars_freqs") or ACARS_FREQS_DEFAULT
+        acars = prev.get("acars_freqs") or config.ACARS_FREQS_DEFAULT
         try:
             probe_freq = float(acars[0])
         except (TypeError, ValueError, IndexError):
-            probe_freq = float(ACARS_FREQS_DEFAULT[0])
+            probe_freq = float(config.ACARS_FREQS_DEFAULT[0])
         plan = _experiment_plan(probe_freq)
         own_rflog = _rflog_start()          # False => המשתמש כבר הקליט; לא נכבה אותו בסוף
         run_id = time.strftime("%Y%m%d-%H%M%S")
@@ -4756,22 +4655,22 @@ def _parse_tune(data):
     agc_raw = data.get("agc", True)   # עמיד גם ל-"false" טקסטואלי (curl), לא רק bool
     agc = agc_raw if isinstance(agc_raw, bool) else str(agc_raw).lower() not in ("false", "0", "off", "no")
     try:
-        if_gain = max(IFGR_MIN, min(IFGR_MAX, int(data.get("if_gain", IF_GAIN_DEFAULT))))
+        if_gain = max(config.IFGR_MIN, min(config.IFGR_MAX, int(data.get("if_gain", config.IF_GAIN_DEFAULT))))
     except (TypeError, ValueError):
-        if_gain = IF_GAIN_DEFAULT
+        if_gain = config.IF_GAIN_DEFAULT
     try:
-        rf_gain = max(RFGR_MIN, min(RFGR_MAX, int(data.get("rf_gain", RF_GAIN_DEFAULT))))
+        rf_gain = max(config.RFGR_MIN, min(config.RFGR_MAX, int(data.get("rf_gain", config.RF_GAIN_DEFAULT))))
     except (TypeError, ValueError):
-        rf_gain = RF_GAIN_DEFAULT
+        rf_gain = config.RF_GAIN_DEFAULT
 
     squelch_mode = str(data.get("squelch_mode", "auto")).lower()
     if squelch_mode not in SQUELCH_MODES:
         squelch_mode = "auto"
     try:
-        squelch_snr = float(data.get("squelch_snr", SNR_DEFAULT))
+        squelch_snr = float(data.get("squelch_snr", config.SNR_DEFAULT))
     except (TypeError, ValueError):
-        squelch_snr = SNR_DEFAULT
-    squelch_snr = max(SNR_MIN, min(SNR_MAX, squelch_snr))
+        squelch_snr = config.SNR_DEFAULT
+    squelch_snr = max(config.SNR_MIN, min(config.SNR_MAX, squelch_snr))
 
     # הגדרות "חומרה" קבועות (לא חלק מכיוונון רגעי): מפתח שלא נשלח ⇒ הערך השמור, לא
     # ברירת המחדל — אחרת כל קורא שבונה פרמטרים בעצמו ("האזן למגדל", curl, ‏/api/mode
@@ -4781,9 +4680,9 @@ def _parse_tune(data):
         saved = load_state()
     # רשימה סגורה => שום ערך מהלקוח לא נכתב לקונפיג כמות שהוא
     chan_filter = str(data["chan_filter"] if "chan_filter" in data
-                      else saved.get("chan_filter", CHAN_FILTER_DEFAULT))
-    if chan_filter not in CHAN_FILTERS:
-        chan_filter = CHAN_FILTER_DEFAULT
+                      else saved.get("chan_filter", config.CHAN_FILTER_DEFAULT))
+    if chan_filter not in config.CHAN_FILTERS:
+        chan_filter = config.CHAN_FILTER_DEFAULT
     notch_raw = data["fm_notch"] if "fm_notch" in data else saved.get("fm_notch", False)
     fm_notch = notch_raw if isinstance(notch_raw, bool) else str(notch_raw).lower() in ("true", "1", "on", "yes")
 
@@ -6106,7 +6005,7 @@ def api_mode():
         if rerr:
             return jsonify(ok=False, error=rerr, state=st), 400
         freqs = _sanitize_freqs(data.get("freqs") or st.get(key),
-                                VDL2_FREQS_DEFAULT if is_vdl2 else ACARS_FREQS_DEFAULT)
+                                config.VDL2_FREQS_DEFAULT if is_vdl2 else config.ACARS_FREQS_DEFAULT)
         werr = _vdl2_window_error(freqs) if is_vdl2 else _acars_window_error(freqs)
         if werr:
             return jsonify(ok=False, error=werr, state=st), 400
@@ -6200,11 +6099,11 @@ def api_mode():
         # satcom משתלב באותו זנב גנרי: "freqs" הוא כאן דגל לוויין בן-איבר-יחיד
         # (geostationary, לא בנק ערוצים) — ר' _sanitize_satellite/_satcom_window_error.
         key, default, sanitize, wcheck, enter = {
-            "acars": ("acars_freqs", ACARS_FREQS_DEFAULT, _sanitize_freqs,
+            "acars": ("acars_freqs", config.ACARS_FREQS_DEFAULT, _sanitize_freqs,
                       _acars_window_error, _enter_acars),
-            "vdl2": ("vdl2_freqs", VDL2_FREQS_DEFAULT, _sanitize_freqs,
+            "vdl2": ("vdl2_freqs", config.VDL2_FREQS_DEFAULT, _sanitize_freqs,
                      _vdl2_window_error, _enter_vdl2),
-            "satcom": ("satcom_freqs", SATCOM_FREQS_DEFAULT, _sanitize_satellite,
+            "satcom": ("satcom_freqs", config.SATCOM_FREQS_DEFAULT, _sanitize_satellite,
                        _satcom_window_error, _enter_satcom),
         }[mode]
         freqs = sanitize(data.get("freqs") or st.get(key), default)

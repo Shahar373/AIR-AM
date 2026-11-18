@@ -10,6 +10,7 @@ import time
 import pytest
 
 import app
+import config  # noqa: E402
 
 
 @pytest.fixture
@@ -363,7 +364,7 @@ def test_antenna_check_skips_reentry_when_live_params_match_probe(client, paths,
     (‏~3 שניות של קטיעת שמע) רק כדי להגיע לאותה מדידה בדיוק."""
     st = app.load_state()
     st.update(app_mode="voice", freq=121.5, mod="am", agc=True,
-              if_gain=app.IF_GAIN_DEFAULT, rf_gain=app.RF_GAIN_DEFAULT,
+              if_gain=config.IF_GAIN_DEFAULT, rf_gain=config.RF_GAIN_DEFAULT,
               squelch_mode="open")
     app.save_state(st)
     monkeypatch.setattr(app, "_live_mode", lambda: "voice")

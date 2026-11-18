@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 import app
+import config  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "airam-vdl2-ifbw"
@@ -34,7 +35,7 @@ DEFAULT_HZ = [136725000, 136775000, 136825000, 136875000, 136975000]
 
 # --- המודל מהמקור --------------------------------------------------------------
 def test_default_bank_is_the_product_default():
-    assert list(lab.DEFAULT_FREQS_MHZ) == app.VDL2_FREQS_DEFAULT
+    assert list(lab.DEFAULT_FREQS_MHZ) == config.VDL2_FREQS_DEFAULT
     assert lab.mhz_to_hz(lab.DEFAULT_FREQS_MHZ) == DEFAULT_HZ
     env = lab.read_env(ROOT / "config" / "vdl2.env")
     assert [int(x) for x in env["VDL2_FREQS"].split()] == DEFAULT_HZ
@@ -110,11 +111,11 @@ def test_install_checks_dumpvdl2_inputs_via_help_not_version():
 # --- רווח מ-vdl2.env ------------------------------------------------------------
 def test_parse_gain_roundtrips_write_vdl2_env(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "VDL2_ENV_PATH", tmp_path / "vdl2.env")
-    app.write_vdl2_env(app.VDL2_FREQS_DEFAULT)
+    app.write_vdl2_env(config.VDL2_FREQS_DEFAULT)
     env = lab.read_env(tmp_path / "vdl2.env")
     assert lab.parse_gain(env["VDL2_GAIN"]) is None
     assert [int(x) for x in env["VDL2_FREQS"].split()] == DEFAULT_HZ
-    app.write_vdl2_env(app.VDL2_FREQS_DEFAULT, ifgr=35, rfgr=3)
+    app.write_vdl2_env(config.VDL2_FREQS_DEFAULT, ifgr=35, rfgr=3)
     assert lab.parse_gain(lab.read_env(tmp_path / "vdl2.env")["VDL2_GAIN"]) == (35, 3)
 
 
@@ -128,7 +129,7 @@ def test_parse_gain_refuses_to_guess():
 
 def test_serial_from_env_matches_write_vdl2_env(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "VDL2_ENV_PATH", tmp_path / "vdl2.env")
-    app.write_vdl2_env(app.VDL2_FREQS_DEFAULT, serial="2305ABC", path=app.VDL2_ENV_PATH)
+    app.write_vdl2_env(config.VDL2_FREQS_DEFAULT, serial="2305ABC", path=app.VDL2_ENV_PATH)
     assert lab.serial_from_env(lab.read_env(tmp_path / "vdl2.env")) == "2305ABC"
     assert lab.serial_from_env({}) is None
     assert lab.serial_from_env({"VDL2_SERIAL": ""}) is None

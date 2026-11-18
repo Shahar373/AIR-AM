@@ -17,6 +17,7 @@ import types
 import pytest
 
 import app
+import config  # noqa: E402
 import acars_parse
 from helpers import ok_proc as _ok
 
@@ -241,7 +242,7 @@ def test_satcom_window_error_cases():
 
 
 def test_satcom_default_is_valid():
-    assert app._satcom_window_error(list(app.SATCOM_FREQS_DEFAULT)) is None
+    assert app._satcom_window_error(list(config.SATCOM_FREQS_DEFAULT)) is None
 
 
 # --- listener + /api/satcom roundtrip -----------------------------------------
@@ -327,7 +328,7 @@ def test_api_mode_enter_satcom(client, paths, no_sleep, monkeypatch):
     r = client.post("/api/mode", json={"mode": "satcom"})
     j = r.get_json()
     assert r.status_code == 200 and j["ok"] and j["app_mode"] == "satcom"
-    assert j["satcom_freqs"] == list(app.SATCOM_FREQS_DEFAULT)
+    assert j["satcom_freqs"] == list(config.SATCOM_FREQS_DEFAULT)
     assert app.load_state()["app_mode"] == "satcom"
     # שחרר את *שלושת* הצרכנים האחרים והרים את inmarsat-sniffer
     assert ("stop", "rtl_airband") in calls
@@ -876,9 +877,9 @@ def test_sanitize_satcom_gain_agc_forms():
 def test_sanitize_satcom_gain_clamps_to_tool_range():
     """חותכים בדיוק כמו הכלי (20..59) ולא דוחים: 400 על ערך שהחומרה מקבלת
     בשקט הוא הבחנה בלי הבדל."""
-    assert app._sanitize_satcom_gain(0) == app.IFGR_MIN
-    assert app._sanitize_satcom_gain(19) == app.IFGR_MIN
-    assert app._sanitize_satcom_gain(999) == app.IFGR_MAX
+    assert app._sanitize_satcom_gain(0) == config.IFGR_MIN
+    assert app._sanitize_satcom_gain(19) == config.IFGR_MIN
+    assert app._sanitize_satcom_gain(999) == config.IFGR_MAX
     assert app._sanitize_satcom_gain(40) == 40
     assert app._sanitize_satcom_gain("35") == 35      # מחרוזת מספרית — תקינה
     assert app._sanitize_satcom_gain(40.7) == 40      # float נחתך ל-int
@@ -922,8 +923,8 @@ def test_api_mode_satcom_gain_out_of_range_is_clamped(client, paths, no_sleep, m
     monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: _ok())
     monkeypatch.setattr(app, "_is_active", lambda svc: True)
     r = client.post("/api/mode", json={"mode": "satcom", "gain": 5})
-    assert r.get_json()["satcom_gain"] == app.IFGR_MIN
-    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == "--sdrplay-gain=%d" % app.IFGR_MIN
+    assert r.get_json()["satcom_gain"] == config.IFGR_MIN
+    assert _env_lines(app.SATCOM_ENV_PATH)["SATCOM_GAIN"] == "--sdrplay-gain=%d" % config.IFGR_MIN
 
 
 def test_api_mode_satcom_gain_remembered_when_omitted(client, paths, no_sleep, monkeypatch):

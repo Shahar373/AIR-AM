@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 import app
+import config  # noqa: E402
 import conftest  # נתיבים אמיתיים לפני הבידוד
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -64,8 +65,8 @@ def test_script_params_match_lab_winners():
 
 def test_script_engines_are_the_closed_list():
     m = re.search(r'^\s*([a-z|]+)\) ;;$', SCRIPT, re.M)
-    assert m and set(m.group(1).split("|")) == set(app.DENOISE_ENGINES)
-    assert f'AIRAM_DENOISE_ENGINE:-{app.DENOISE_ENGINE_DEFAULT}}}' in SCRIPT
+    assert m and set(m.group(1).split("|")) == set(config.DENOISE_ENGINES)
+    assert f'AIRAM_DENOISE_ENGINE:-{config.DENOISE_ENGINE_DEFAULT}}}' in SCRIPT
 
 
 def test_rejected_chain_is_gone():
