@@ -621,6 +621,8 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   `_parse_voice2` (זהה לראשי ⇒ 400 — גם שמות ההקלטות היו מתנגשים). `POST /api/tune2` — רק המשני, תחת `TUNE_LOCK`,
   כשל ⇒ restart לתדר הקודם. `/api/metrics?ch=2`, `/stream?m=live2` (רשימה סגורה). `_voice_tune` במצב מורכב שומר
   את המשני. UI: `voice2Mode`, `setComposite(m)`/`isVoiceMode`/`viewFor` (מקור יחיד לדגלים), `#homeCardVoice2`,
+  `MODES` (טבלה: `decoder`/`tabs`/`secondary`/`secName` לכל מצב — מקור יחיד ל"מה רץ במצב X"), `decoderOf`,
+  `syncDecoders(m)` (מיישר את שלושת מופעי הדאטה), `compositeFromFlags()`; `COMPOSITE_MODES` נגזר מהטבלה.
   `#v2Box` (בתוך פאנל הרדיו — לא פאנל בגריד) עם `player2` נפרד, `pollV2Metrics` (2ש'). נגן 2: ניסיונות
   חוזרים על error/ended (`v2Retry`), עצירה רק אחרי מעבר מצב שאושר. 🎧 **ערוץ לכל אוזן** (`ensureEarGraph`/
   `applyEars`): Web Audio — StereoPanner+Gain לכל נגן; ⚠ הסטרים *חייב* same-origin (`/stream?m=…`) כשהגרף קיים,
