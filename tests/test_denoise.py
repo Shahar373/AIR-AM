@@ -13,6 +13,7 @@ import json
 import pytest
 
 import app
+import recordings  # noqa: E402
 
 
 @pytest.fixture
@@ -24,7 +25,7 @@ def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "DENOISE_ENV_PATH", tmp_path / "denoise.env")
     rec = tmp_path / "recordings"
     rec.mkdir()
-    monkeypatch.setattr(app, "REC_DIR", rec)
+    monkeypatch.setattr(recordings, "REC_DIR", rec)
     return tmp_path
 
 

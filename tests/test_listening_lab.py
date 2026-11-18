@@ -53,8 +53,9 @@ def test_prod_chain_is_the_rejected_v2_29_chain():
 
 def test_rec_name_regex_matches_app():
     import app
-    assert lab.REC_NAME_RE.pattern == app._REC_NAME_RE.pattern
-    assert lab.REC_BYTES_PER_SEC == app.REC_BYTES_PER_SEC
+    import recordings
+    assert lab.REC_NAME_RE.pattern == recordings._REC_NAME_RE.pattern
+    assert lab.REC_BYTES_PER_SEC == recordings.REC_BYTES_PER_SEC
 
 
 def test_mix_floor_is_structural():

@@ -9,6 +9,7 @@ rfnotch_ctrl), וברירת המחדל = ההתנהגות ההיסטורית; (2
 import pytest
 
 import app
+import recordings  # noqa: E402
 
 
 @pytest.fixture
@@ -19,7 +20,7 @@ def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "PRESETS_PATH", tmp_path / "presets.json")
     rec = tmp_path / "recordings"
     rec.mkdir()
-    monkeypatch.setattr(app, "REC_DIR", rec)
+    monkeypatch.setattr(recordings, "REC_DIR", rec)
     return tmp_path
 
 

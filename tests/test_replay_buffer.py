@@ -12,6 +12,7 @@ import pytest
 
 import adsb
 import app
+import recordings  # noqa: E402
 
 
 NAME = "airam_20260817_120000_134600000.mp3"
@@ -20,7 +21,7 @@ NAME = "airam_20260817_120000_134600000.mp3"
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(adsb, "TRACK_PATH", tmp_path / "track.jsonl")
-    monkeypatch.setattr(app, "REC_DIR", tmp_path / "recordings")
+    monkeypatch.setattr(recordings, "REC_DIR", tmp_path / "recordings")
     (tmp_path / "recordings").mkdir()
     return tmp_path
 
@@ -291,7 +292,7 @@ def test_api_replay_buffer_reports_samples(client, paths):
 def test_api_replay_buffer_clips_available_when_recording_within_window(client, paths):
     t_oldest = time.time() - 300
     adsb.TRACK_PATH.write_text(json.dumps({"t": t_oldest, "ac": []}) + "\n")
-    p = app.REC_DIR / NAME
+    p = recordings.REC_DIR / NAME
     p.write_bytes(b"\0" * 1000)   # mtime = עכשיו, אחרי t_oldest
     r = client.get("/api/replay/buffer").get_json()
     assert r["clips_available"] is True
@@ -301,7 +302,7 @@ def test_api_replay_buffer_clips_unavailable_when_recording_older_than_buffer(cl
     import os
     t_oldest = time.time() - 60
     adsb.TRACK_PATH.write_text(json.dumps({"t": t_oldest, "ac": []}) + "\n")
-    p = app.REC_DIR / NAME
+    p = recordings.REC_DIR / NAME
     p.write_bytes(b"\0" * 1000)
     old = time.time() - 3600
     os.utime(p, (old, old))       # ההקלטה ישנה מ-t_oldest של הבאפר

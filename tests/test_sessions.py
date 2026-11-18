@@ -15,6 +15,7 @@ import pytest
 
 import adsb
 import app
+import recordings  # noqa: E402
 import storage
 
 
@@ -22,10 +23,10 @@ import storage
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(adsb, "TRACK_PATH", tmp_path / "track.jsonl")
-    monkeypatch.setattr(app, "SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(recordings, "SESSIONS_DIR", tmp_path / "sessions")
     rec = tmp_path / "recordings"
     rec.mkdir()
-    monkeypatch.setattr(app, "REC_DIR", rec)
+    monkeypatch.setattr(recordings, "REC_DIR", rec)
     return tmp_path
 
 
@@ -40,7 +41,7 @@ def _ac_row(t, aircraft):
 
 
 def _mk_rec(name, size=4096, age=0, saved=False):
-    d = app._saved_dir() if saved else app.REC_DIR
+    d = recordings._saved_dir() if saved else recordings.REC_DIR
     d.mkdir(parents=True, exist_ok=True)
     p = d / name
     p.write_bytes(b"\0" * size)
@@ -67,8 +68,8 @@ def test_create_session_basic(client, paths):
     assert meta["aircraft"] == ["4X-EHD"]
     assert meta["note"] == "בדיקה"
     assert meta["counts"]["samples"] == 2
-    assert (app.SESSIONS_DIR / r["id"] / "meta.json").is_file()
-    assert (app.SESSIONS_DIR / r["id"] / "track.jsonl.gz").is_file()
+    assert (recordings.SESSIONS_DIR / r["id"] / "meta.json").is_file()
+    assert (recordings.SESSIONS_DIR / r["id"] / "track.jsonl.gz").is_file()
 
 
 def test_create_session_no_data_is_400(client, paths):
@@ -130,8 +131,8 @@ def test_create_session_moves_unstarred_clip_into_session(client, paths):
     r = client.post("/api/sessions", json={"minutes": 5}).get_json()
     assert r["ok"]
     sid = r["id"]
-    assert not (app.REC_DIR / NAME1).exists()
-    assert (app.SESSIONS_DIR / sid / app.SESSION_CLIPS_DIRNAME / NAME1).is_file()
+    assert not (recordings.REC_DIR / NAME1).exists()
+    assert (recordings.SESSIONS_DIR / sid / recordings.SESSION_CLIPS_DIRNAME / NAME1).is_file()
     assert [c["file"] for c in r["session"]["clips"]] == [NAME1]
 
 
@@ -144,8 +145,8 @@ def test_create_session_copies_starred_clip_keeps_original(client, paths):
     r = client.post("/api/sessions", json={"minutes": 5}).get_json()
     assert r["ok"]
     sid = r["id"]
-    assert (app._saved_dir() / NAME1).is_file()          # המקור נשאר
-    assert (app.SESSIONS_DIR / sid / app.SESSION_CLIPS_DIRNAME / NAME1).is_file()
+    assert (recordings._saved_dir() / NAME1).is_file()          # המקור נשאר
+    assert (recordings.SESSIONS_DIR / sid / recordings.SESSION_CLIPS_DIRNAME / NAME1).is_file()
 
 
 def test_create_session_excludes_clips_outside_window(client, paths):
@@ -154,7 +155,7 @@ def test_create_session_excludes_clips_outside_window(client, paths):
     _mk_rec(NAME1, age=3600)   # שעה אחורה — מחוץ לחלון 5 דק'
     r = client.post("/api/sessions", json={"minutes": 5}).get_json()
     assert r["session"]["clips"] == []
-    assert (app.REC_DIR / NAME1).is_file()                # לא זזה
+    assert (recordings.REC_DIR / NAME1).is_file()                # לא זזה
 
 
 # --- GET /api/sessions (רשימה) -------------------------------------------------
@@ -166,15 +167,15 @@ def test_list_sessions_empty(client, paths):
 
 def test_list_sessions_sorted_newest_first(client, paths):
     for sid, created in (("20260101-0000", 100), ("20260102-0000", 200)):
-        d = app.SESSIONS_DIR / sid
-        (d / app.SESSION_CLIPS_DIRNAME).mkdir(parents=True)
+        d = recordings.SESSIONS_DIR / sid
+        (d / recordings.SESSION_CLIPS_DIRNAME).mkdir(parents=True)
         (d / "meta.json").write_text(json.dumps({"id": sid, "created_at": created}))
     r = client.get("/api/sessions").get_json()
     assert [s["id"] for s in r["sessions"]] == ["20260102-0000", "20260101-0000"]
 
 
 def test_list_sessions_skips_corrupt_meta(client, paths):
-    d = app.SESSIONS_DIR / "20260101-0000"
+    d = recordings.SESSIONS_DIR / "20260101-0000"
     d.mkdir(parents=True)
     (d / "meta.json").write_text("not json")
     r = client.get("/api/sessions").get_json()
@@ -206,7 +207,7 @@ def test_delete_session_removes_everything(client, paths):
     _write_track([_ac_row(now - 30, [])])
     _mk_rec(NAME1, age=30)
     sid = client.post("/api/sessions", json={"minutes": 5}).get_json()["id"]
-    sdir = app.SESSIONS_DIR / sid
+    sdir = recordings.SESSIONS_DIR / sid
     assert sdir.is_dir()
     r = client.delete(f"/api/sessions/{sid}").get_json()
     assert r["ok"]
@@ -266,7 +267,7 @@ def test_export_zip_contains_meta_track_and_clips(client, paths):
         names = z.namelist()
         assert "meta.json" in names
         assert "track.jsonl.gz" in names
-        assert f"{app.SESSION_CLIPS_DIRNAME}/{NAME1}" in names
+        assert f"{recordings.SESSION_CLIPS_DIRNAME}/{NAME1}" in names
         meta = json.loads(z.read("meta.json"))
         assert meta["id"] == sid
 
@@ -279,18 +280,18 @@ def test_export_zip_includes_transcripts(client, paths):
     _mk_rec(NAME1, age=30)
     _mk_rec(NAME2, age=20)
     sid = client.post("/api/sessions", json={"minutes": 5}).get_json()["id"]
-    clips = app.SESSIONS_DIR / sid / app.SESSION_CLIPS_DIRNAME
-    app._write_tx(clips / NAME1, "ok", text="CLEARED TO LAND RUNWAY 30")
-    app._write_tx(clips / NAME2, "empty")
+    clips = recordings.SESSIONS_DIR / sid / recordings.SESSION_CLIPS_DIRNAME
+    recordings._write_tx(clips / NAME1, "ok", text="CLEARED TO LAND RUNWAY 30")
+    recordings._write_tx(clips / NAME2, "empty")
     r = client.get(f"/api/sessions/{sid}/export.zip")
     tmp = paths / "export.zip"
     tmp.write_bytes(r.data)
     with zipfile.ZipFile(tmp) as z:
         names = z.namelist()
-        txt = f"{app.SESSION_CLIPS_DIRNAME}/{NAME1}.txt"
+        txt = f"{recordings.SESSION_CLIPS_DIRNAME}/{NAME1}.txt"
         assert txt in names
         assert z.read(txt).decode().strip() == "CLEARED TO LAND RUNWAY 30"
-        assert f"{app.SESSION_CLIPS_DIRNAME}/{NAME2}.txt" not in names   # אין טקסט => אין קובץ
+        assert f"{recordings.SESSION_CLIPS_DIRNAME}/{NAME2}.txt" not in names   # אין טקסט => אין קובץ
 
 
 def test_export_zip_404_for_unknown_session(client, paths):
@@ -306,13 +307,13 @@ def test_session_detail_exposes_live_transcript_from_sidecar(client, paths):
     _write_track([_ac_row(now - 30, [])])
     _mk_rec(NAME1, age=30)
     sid = client.post("/api/sessions", json={"minutes": 5}).get_json()["id"]
-    clip = app.SESSIONS_DIR / sid / app.SESSION_CLIPS_DIRNAME / NAME1
+    clip = recordings.SESSIONS_DIR / sid / recordings.SESSION_CLIPS_DIRNAME / NAME1
     assert clip.is_file()
     # לפני תמלול — "לא ניסינו" (none), לא היעדר שדה
     r = client.get(f"/api/sessions/{sid}").get_json()
     assert r["session"]["clips"][0]["tx"]["state"] == "none"
     # התמלול נוצר *אחרי* השמירה — חייב להופיע בלי לגעת ב-meta.json
-    app._write_tx(clip, "ok", text="cleared to land", lang="en")
+    recordings._write_tx(clip, "ok", text="cleared to land", lang="en")
     r = client.get(f"/api/sessions/{sid}").get_json()
     tx = r["session"]["clips"][0]["tx"]
     assert tx["state"] == "ok" and tx["text"] == "cleared to land"
@@ -325,10 +326,10 @@ def test_session_clips_are_queued_for_transcription(client, paths):
     _write_track([_ac_row(now - 30, [])])
     _mk_rec(NAME1, age=30)
     sid = client.post("/api/sessions", json={"minutes": 5}).get_json()["id"]
-    assert not (app.REC_DIR / NAME1).exists()      # הועבר, לא נשאר ביומן החי
-    target = app._tx_next_target(auto=False)       # auto כבוי — עדיין נבחר
+    assert not (recordings.REC_DIR / NAME1).exists()      # הועבר, לא נשאר ביומן החי
+    target = recordings._tx_next_target(auto=False)       # auto כבוי — עדיין נבחר
     assert target is not None and target.name == NAME1
-    assert app.SESSION_CLIPS_DIRNAME in target.parts
+    assert recordings.SESSION_CLIPS_DIRNAME in target.parts
 
 
 def test_session_clip_pending_request_is_picked_first(client, paths):
@@ -336,9 +337,9 @@ def test_session_clip_pending_request_is_picked_first(client, paths):
     _write_track([_ac_row(now - 30, [])])
     _mk_rec(NAME1, age=30)
     sid = client.post("/api/sessions", json={"minutes": 5}).get_json()["id"]
-    clip = app.SESSIONS_DIR / sid / app.SESSION_CLIPS_DIRNAME / NAME1
-    app._write_tx(clip, "pending", lang="en")
-    target = app._tx_next_target(auto=False)
+    clip = recordings.SESSIONS_DIR / sid / recordings.SESSION_CLIPS_DIRNAME / NAME1
+    recordings._write_tx(clip, "pending", lang="en")
+    target = recordings._tx_next_target(auto=False)
     assert target is not None and target.name == NAME1
 
 
@@ -351,7 +352,7 @@ def test_saving_new_session_does_not_steal_clips_from_existing_sessions(client, 
     _write_track([_ac_row(now - 60, []), _ac_row(now - 30, [])])
     _mk_rec(NAME1, age=60)
     sid1 = client.post("/api/sessions", json={"minutes": 5}).get_json()["id"]
-    clip1 = app.SESSIONS_DIR / sid1 / app.SESSION_CLIPS_DIRNAME / NAME1
+    clip1 = recordings.SESSIONS_DIR / sid1 / recordings.SESSION_CLIPS_DIRNAME / NAME1
     assert clip1.is_file()
     # סשן שני על אותו חלון זמן — אסור שייקח את הקליפ של הראשון
     _mk_rec(NAME2, age=30)
@@ -392,4 +393,4 @@ def test_meta_write_failure_moves_recordings_back(client, paths, monkeypatch):
     r = client.post("/api/sessions", json={"minutes": 5})
     assert r.status_code == 500
     assert rec.is_file()                                  # הוחזרה לתיקייה החיה
-    assert not any(app.SESSIONS_DIR.iterdir())            # אין תיקיית סשן יתומה
+    assert not any(recordings.SESSIONS_DIR.iterdir())            # אין תיקיית סשן יתומה

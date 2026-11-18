@@ -22,6 +22,7 @@ import json
 import pytest
 
 import app
+import recordings  # noqa: E402
 import storage
 
 # שורות JSON *תקינות* שאינן אובייקט — כולן עברו את except ValueError
@@ -34,7 +35,7 @@ def logs(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "VDL2_LOG_PATH", tmp_path / "vdl2.jsonl")
     monkeypatch.setattr(app, "SATCOM_LOG_PATH", tmp_path / "satcom.jsonl")
     monkeypatch.setattr(app, "ACTIVITY_PATH", tmp_path / "activity.jsonl")
-    monkeypatch.setattr(app, "REC_DIR", tmp_path / "recordings")
+    monkeypatch.setattr(recordings, "REC_DIR", tmp_path / "recordings")
     (tmp_path / "recordings").mkdir()
     return tmp_path
 

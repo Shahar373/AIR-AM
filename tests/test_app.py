@@ -12,6 +12,7 @@ import time
 import pytest
 
 import app
+import recordings  # noqa: E402
 import storage
 
 
@@ -25,7 +26,7 @@ def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "ACTIVITY_PATH", tmp_path / "activity.jsonl")
     rec = tmp_path / "recordings"
     rec.mkdir()
-    monkeypatch.setattr(app, "REC_DIR", rec)
+    monkeypatch.setattr(recordings, "REC_DIR", rec)
     return tmp_path
 
 
@@ -405,7 +406,7 @@ def test_cleanup_orphan_tmp_default_dirs_cover_etc_airam_and_recordings(paths, m
     old = time.time() - app._TMP_ORPHAN_AGE_SEC - 10
     state_orphan = app.STATE_PATH.parent / "state.json.tmp10-1"
     env_orphan = etc_airam / "acars.env.tmp20-1"
-    rec_orphan = app.REC_DIR / "airam_x.mp3.txt.tmp30-1"
+    rec_orphan = recordings.REC_DIR / "airam_x.mp3.txt.tmp30-1"
     for p in (state_orphan, env_orphan, rec_orphan):
         p.write_text("x")
         os.utime(p, (old, old))
@@ -421,7 +422,7 @@ def test_cleanup_orphan_tmp_default_dirs_cover_etc_airam_and_recordings(paths, m
 # --- יומן שידורים והקלטות -----------------------------------------------------
 
 def _mk_rec(paths, name, size=6000, age=60):
-    p = app.REC_DIR / name
+    p = recordings.REC_DIR / name
     p.write_bytes(b"\0" * size)
     t = time.time() - age
     os.utime(p, (t, t))
@@ -429,24 +430,24 @@ def _mk_rec(paths, name, size=6000, age=60):
 
 
 def test_rec_freq_parsing():
-    assert app._rec_freq_mhz("airam_20260611_120001_134600000.mp3") == 134.6
-    assert app._rec_freq_mhz("not_a_recording.mp3") is None
+    assert recordings._rec_freq_mhz("airam_20260611_120001_134600000.mp3") == 134.6
+    assert recordings._rec_freq_mhz("not_a_recording.mp3") is None
 
 
 def test_activity_log_and_api(client, paths):
     _mk_rec(paths, "airam_20260611_120001_134600000.mp3", size=42000, age=300)
     _mk_rec(paths, "airam_20260611_120203_121500000.mp3", age=120)
     rows = []
-    for p in sorted(app.REC_DIR.glob("*.mp3"), key=lambda p: p.stat().st_mtime):
+    for p in sorted(recordings.REC_DIR.glob("*.mp3"), key=lambda p: p.stat().st_mtime):
         st = p.stat()
-        rows.append({"ts": st.st_mtime, "freq": app._rec_freq_mhz(p.name),
-                     "file": p.name, "dur": round(st.st_size / app.REC_BYTES_PER_SEC, 1)})
+        rows.append({"ts": st.st_mtime, "freq": recordings._rec_freq_mhz(p.name),
+                     "file": p.name, "dur": round(st.st_size / recordings.REC_BYTES_PER_SEC, 1)})
     app._append_activity(rows)
     evs = client.get("/api/activity").get_json()["events"]
     assert [e["freq"] for e in evs] == [121.5, 134.6]      # חדש => ישן
     assert evs[1]["dur"] == 7.0 and evs[1]["exists"] is True
     # הקלטה שנמחקה ב-retention => האירוע נשאר עם exists=False
-    (app.REC_DIR / evs[0]["file"]).unlink()
+    (recordings.REC_DIR / evs[0]["file"]).unlink()
     evs = client.get("/api/activity").get_json()["events"]
     assert evs[0]["exists"] is False
 
@@ -463,21 +464,21 @@ def test_scan_no_duplicate_after_restart(paths):
     # ה-ts הנשמר ביומן מעוגל, אבל פעם השוואנו מולו את ה-mtime הלא-מעוגל.
     p = _mk_rec(paths, "airam_20260611_120001_134600000.mp3")
     os.utime(p, (1000.04, 1000.04))   # מתעגל ל-1000.0
-    rows, newest = app._scan_new_recordings(0.0)
+    rows, newest = recordings._scan_new_recordings(0.0)
     assert len(rows) == 1 and rows[0]["ts"] == 1000.0
     app._append_activity(rows)
     # restart: ממשיכים מה-ts שנכתב ביומן => אותה הקלטה לא נסרקת שוב
-    rows2, _ = app._scan_new_recordings(app._last_logged_ts())
+    rows2, _ = recordings._scan_new_recordings(app._last_logged_ts())
     assert rows2 == []
 
 
 def test_sweep_retention(paths):
-    for i in range(app.REC_MAX_FILES + 10):
+    for i in range(recordings.REC_MAX_FILES + 10):
         _mk_rec(paths, f"airam_20260611_13{i:04d}_134600000.mp3", size=10, age=i)
     stale_tmp = _mk_rec(paths, "airam_x.mp3.tmp", age=7200)   # שידור שנקטע בקריסה
     fresh_tmp = _mk_rec(paths, "airam_y.mp3.tmp", age=10)     # שידור בכתיבה כרגע
-    app._sweep_recordings()
-    assert len(list(app.REC_DIR.glob("*.mp3"))) == app.REC_MAX_FILES
+    recordings._sweep_recordings()
+    assert len(list(recordings.REC_DIR.glob("*.mp3"))) == recordings.REC_MAX_FILES
     assert not stale_tmp.exists() and fresh_tmp.exists()
 
 
@@ -485,7 +486,7 @@ def test_sweep_retention(paths):
 
 def test_activity_includes_transcript(client, paths):
     p = _mk_rec(paths, "airam_20260611_120001_134600000.mp3")
-    app._transcript_path(p).write_text("cleared for takeoff runway 26\n")
+    recordings._transcript_path(p).write_text("cleared for takeoff runway 26\n")
     app._append_activity([{"ts": p.stat().st_mtime, "freq": 134.6,
                            "file": p.name, "dur": 1.0}])
     ev = client.get("/api/activity").get_json()["events"][0]
@@ -499,13 +500,13 @@ def test_activity_text_none_without_sidecar(client, paths):
 
 
 def test_sweep_removes_transcript_sidecar(paths, monkeypatch):
-    monkeypatch.setattr(app, "REC_MAX_FILES", 1)
+    monkeypatch.setattr(recordings, "REC_MAX_FILES", 1)
     for i in range(3):
         p = _mk_rec(paths, f"airam_2026061{i}_120001_134600000.mp3", size=10, age=30 - i)
-        app._transcript_path(p).write_text("t")
-    app._sweep_recordings()
-    assert len(list(app.REC_DIR.glob("*.mp3"))) == 1
-    assert len(list(app.REC_DIR.glob("*.txt"))) == 1   # קובץ-הצד של הנמחק הוסר איתו
+        recordings._transcript_path(p).write_text("t")
+    recordings._sweep_recordings()
+    assert len(list(recordings.REC_DIR.glob("*.mp3"))) == 1
+    assert len(list(recordings.REC_DIR.glob("*.txt"))) == 1   # קובץ-הצד של הנמחק הוסר איתו
 
 
 def test_sweep_removes_orphaned_transcript_without_mp3(paths):
@@ -513,9 +514,9 @@ def test_sweep_removes_orphaned_transcript_without_mp3(paths):
     _transcribe_worker ל-_sweep_recordings, ר' §12) לא אמור להצטבר לנצח: הלולאה
     הרגילה מוחקת .txt רק יחד עם .mp3 שעדיין ברשימת ה-retention, ולא רואה קובץ
     שכבר נעדר ממנה בכלל."""
-    orphan = app.REC_DIR / "airam_20260611_120001_134600000.mp3.txt"
+    orphan = recordings.REC_DIR / "airam_20260611_120001_134600000.mp3.txt"
     orphan.write_text("תמלול של הקלטה שכבר נמחקה")
-    app._sweep_recordings()
+    recordings._sweep_recordings()
     assert not orphan.exists()
 
 
@@ -523,13 +524,13 @@ def test_transcribe_file_handles_failure(paths, monkeypatch):
     """כשל (ffmpeg חסר) => ('failed', ...) עם סיבה, ובלי לזרוק. ⚠ החוזה השתנה
     במכוון מ-None ל-3-tuple: 'נכשל' ו'לא ניסינו' חייבים להיות מובחנים (§12)."""
     p = _mk_rec(paths, "airam_20260611_120001_134600000.mp3")
-    monkeypatch.setattr(app, "WHISPER_BIN", str(paths / "whisper-cli"))
+    monkeypatch.setattr(recordings, "WHISPER_BIN", str(paths / "whisper-cli"))
     (paths / "whisper-cli").write_text("#!/bin/sh\n")
-    monkeypatch.setattr(app, "_whisper_model", lambda lang="en": str(paths / "model.bin"))
+    monkeypatch.setattr(recordings, "_whisper_model", lambda lang="en": str(paths / "model.bin"))
     def boom(*a, **k):
         raise FileNotFoundError("ffmpeg")
     monkeypatch.setattr(app.subprocess, "run", boom)
-    state, text, err = app._transcribe_file(p)
+    state, text, err = recordings._transcribe_file(p)
     assert state == "failed" and text is None and err
 
 
