@@ -2786,6 +2786,42 @@
     // עוזר קצר לבקשות GET שמפענחות JSON ישירות — התבנית החוזרת ביותר בקובץ.
     async function fetchJSON(url, opts) { return (await fetchTimeout(url, opts)).json(); }
 
+    // טוקן CSS מ-:root (מתחלף לפי ערכת נושא) — לציור ב-canvas/Leaflet, שלא קוראים CSS בעצמם.
+    const cssVar = (name, fallback) =>
+      getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+
+    /* Leaflet (vendored) נטען בעצלות, *פעם אחת לכל הדף*. שלוש מפות (פידי הדאטה, שחזור-סשן,
+       הצלבה) חולקות את אותו Promise — קודם לכל אחת היה דגל טעינה משלה, ושתי מפות שנפתחו יחד
+       הזריקו את הסקריפט פעמיים. כשל ⇒ ה-Promise מתאפס, וניסיון הבא טוען מחדש. */
+    let leafletPromise = null;
+    function loadLeaflet() {
+      if (window.L) return Promise.resolve(window.L);
+      if (!leafletPromise) {
+        leafletPromise = new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = "/static/vendor/leaflet/leaflet.js";
+          s.onload = () => resolve(window.L);
+          s.onerror = () => { leafletPromise = null; s.remove(); reject(new Error("leaflet")); };
+          document.head.appendChild(s);
+        });
+      }
+      return leafletPromise;
+    }
+    // אריחי OSM + הודעה אחרי 6 כשלונות (אין אינטרנט — הסמנים עדיין מוצגים)
+    function leafletTiles(onTilesFail) {
+      const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        { maxZoom: 12, attribution: "© OpenStreetMap" });
+      let tileErr = 0;
+      if (onTilesFail) tiles.on("tileerror", () => { if (++tileErr === 6) onTilesFail(); });
+      return tiles;
+    }
+    const leafletMarkerIcon = () => L.icon({
+      iconUrl: "/static/vendor/leaflet/images/marker-icon.png",
+      iconRetinaUrl: "/static/vendor/leaflet/images/marker-icon-2x.png",
+      shadowUrl: "/static/vendor/leaflet/images/marker-shadow.png",
+      iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41],
+    });
+
     async function apiSend(method, url, body, timeoutMs) {
       // timeoutMs — רק לבקשות ארוכות במכוון ("אמת מול ADS-B": רשת, עד ~30ש' בשרת)
       const opts = { method, headers: apiHeaders(), body: JSON.stringify(body), timeoutMs };
@@ -6081,21 +6117,20 @@
         secs[i] += (c.dur || 1);
       }
       const peak = Math.max(1, ...secs);
-      const css = getComputedStyle(document.documentElement);
-      ctx.fillStyle = (css.getPropertyValue("--accent") || "#6ea8fe").trim();
+      ctx.fillStyle = cssVar("--accent", "#6ea8fe");
       for (let i = 0; i < buckets; i++) {
         if (!secs[i]) continue;
         const bh = Math.max(3, secs[i] / peak * (h - 8));
         ctx.fillRect(i * bw + .5, h - bh - 3, Math.max(1.5, bw - 1), bh);
       }
       // פערי קליטת ADS-B (§7.2) — נקודתיים, לא מרווח מומצא
-      ctx.fillStyle = (css.getPropertyValue("--red") || "#ec7b73").trim();
+      ctx.fillStyle = cssVar("--red", "#ec7b73");
       for (const g of (rp.meta.gaps || [])) {
         const x = (g.t - rp.t0) / dur * w;
         ctx.fillRect(x - 1, 0, 2, 5);
       }
       // סמן המיקום הנוכחי
-      ctx.fillStyle = (css.getPropertyValue("--text") || "#e8e8ea").trim();
+      ctx.fillStyle = cssVar("--text", "#e8e8ea");
       const cx = (rp.playT - rp.t0) / dur * w;
       ctx.fillRect(cx - 1, 0, 2, h);
     }
@@ -6106,28 +6141,18 @@
       if (replayLeafLoading) return;
       if (window.L) { initReplayMap(); return; }
       replayLeafLoading = true;
-      const s = document.createElement("script");
-      s.src = "/static/vendor/leaflet/leaflet.js";
-      s.onload = () => { replayLeafLoading = false; initReplayMap(); };
-      s.onerror = () => {
+      loadLeaflet().then(() => { replayLeafLoading = false; initReplayMap(); }, () => {
         replayLeafLoading = false;
         $("replayMap").classList.add("hidden");
         const n = $("replayMapNote"); n.textContent = "המפה לא נטענה (אין חיבור?)"; n.classList.remove("hidden");
-      };
-      document.head.appendChild(s);
+      });
     }
     function initReplayMap() {
       try {
         replayMapObj = L.map("replayMap", { zoomControl: true }).setView([32.0114, 34.8867], 8);
-        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-          { maxZoom: 12, attribution: "© OpenStreetMap" }).addTo(replayMapObj);
+        leafletTiles(null).addTo(replayMapObj);
         replayMarkersLayer = L.layerGroup().addTo(replayMapObj);
-        replayMapIcon = L.icon({
-          iconUrl: "/static/vendor/leaflet/images/marker-icon.png",
-          iconRetinaUrl: "/static/vendor/leaflet/images/marker-icon-2x.png",
-          shadowUrl: "/static/vendor/leaflet/images/marker-shadow.png",
-          iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41],
-        });
+        replayMapIcon = leafletMarkerIcon();
         setTimeout(() => replayMapObj.invalidateSize(), 60);
         if (window.ResizeObserver) {
           new ResizeObserver(() => {
@@ -6578,26 +6603,14 @@
         if (leafLoading) return;
         if (window.L) { initMap(); return; }
         leafLoading = true;
-        const s = document.createElement("script");
-        s.src = "/static/vendor/leaflet/leaflet.js";
-        s.onload = () => { leafLoading = false; initMap(); };
-        s.onerror = () => { leafLoading = false; mapFail("המפה לא נטענה (אין חיבור?)"); };
-        document.head.appendChild(s);
+        loadLeaflet().then(() => { leafLoading = false; initMap(); },
+                           () => { leafLoading = false; mapFail("המפה לא נטענה (אין חיבור?)"); });
       }
       function initMap() {
         try {
           map = L.map(opts.prefix + "Map", { zoomControl: true }).setView([32.0114, 34.8867], 7);
-          const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-            { maxZoom: 12, attribution: "© OpenStreetMap" });
-          let tileErr = 0;
-          tiles.on("tileerror", () => { if (++tileErr === 6) mapNote("רקע המפה לא נטען (אין אינטרנט?) — הסמנים עדיין מוצגים."); });
-          tiles.addTo(map);
-          icon = L.icon({
-            iconUrl: "/static/vendor/leaflet/images/marker-icon.png",
-            iconRetinaUrl: "/static/vendor/leaflet/images/marker-icon-2x.png",
-            shadowUrl: "/static/vendor/leaflet/images/marker-shadow.png",
-            iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41],
-          });
+          leafletTiles(() => mapNote("רקע המפה לא נטען (אין אינטרנט?) — הסמנים עדיין מוצגים.")).addTo(map);
+          icon = leafletMarkerIcon();
           setTimeout(() => map.invalidateSize(), 60);
           // כמו ב-ACARS: פאנל-המפה בדשבורד עשוי להשתנות בגודלו בלי resize-חלון
           if (window.ResizeObserver) {
@@ -6854,7 +6867,6 @@
         const g = m.group || "text";
         const el = document.createElement("div"); el.className = "amsg g-" + g;
         const top = document.createElement("div"); top.className = "amsg-top";
-        const mk = (cls, txt) => { const s = document.createElement("span"); s.className = cls; s.textContent = txt; return s; };
         const idClick = (s) => {
           s.title = "סנן למטוס זה";
           s.tabIndex = 0; s.setAttribute("role", "button");
@@ -6863,21 +6875,21 @@
           s.onkeydown = (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); } };
           return s;
         };
-        if (m.tail) top.appendChild(idClick(mk("amsg-tail clickable", m.tail)));
-        if (m.flight) top.appendChild(idClick(mk("amsg-flight clickable", m.flight)));
+        if (m.tail) top.appendChild(idClick(mkSpan("amsg-tail clickable", m.tail)));
+        if (m.flight) top.appendChild(idClick(mkSpan("amsg-flight clickable", m.flight)));
         // פריים בלי רישום (CPDLC/XID) => מזהה ה-ICAO הוא הזהות הלחיצה
-        if (!m.tail && !m.flight && m.icao) top.appendChild(idClick(mk("amsg-tail clickable", m.icao)));
+        if (!m.tail && !m.flight && m.icao) top.appendChild(idClick(mkSpan("amsg-tail clickable", m.icao)));
         const db = dirBadge(m.dir); if (db) top.appendChild(db);
-        if (m.category) top.appendChild(mk("amsg-cat cat-" + g, m.category));
+        if (m.category) top.appendChild(mkSpan("amsg-cat cat-" + g, m.category));
         if (m.lat != null) {
-          const pos = mk("amsg-pos", "📍 " + Number(m.lat).toFixed(2) + "," + Number(m.lon).toFixed(2));
+          const pos = mkSpan("amsg-pos", "📍 " + Number(m.lat).toFixed(2) + "," + Number(m.lon).toFixed(2));
           pos.title = "מקד במפה"; pos.onclick = () => focusOnMap(m); top.appendChild(pos);
         }
         if (m.error && m.error > 0) {
           const errLabels = ["", "CRC ⚠", "link ⚠", "decode ⚠"];
-          top.appendChild(mk("amsg-err", errLabels[m.error] || ("err " + m.error + " ⚠")));
+          top.appendChild(mkSpan("amsg-err", errLabels[m.error] || ("err " + m.error + " ⚠")));
         }
-        if (m.freq != null) top.appendChild(mk("amsg-freq", Number(m.freq).toFixed(3)));
+        if (m.freq != null) top.appendChild(mkSpan("amsg-freq", Number(m.freq).toFixed(3)));
         const xb = xcBadge(m.xc);
         if (xb) {
           xb.tabIndex = 0; xb.setAttribute("role", "button");
@@ -6892,7 +6904,7 @@
           vb.onclick = (ev) => { ev.stopPropagation(); xcOpen(opts.prefix, m); };
           top.appendChild(vb);
         }
-        const tm = mk("amsg-time", fmtRel(m.t));
+        const tm = mkSpan("amsg-time", fmtRel(m.t));
         if (m.t) tm.title = new Date(m.t * 1000).toLocaleString("he-IL");
         top.appendChild(tm);
         el.appendChild(top);
@@ -6902,7 +6914,7 @@
         if (m.mode) metaParts.push("mode " + m.mode);
         if (m.msgno) metaParts.push("#" + m.msgno);
         if (blockCount && blockCount > 1) {
-          const bc = mk("amsg-block-count", "×" + blockCount); bc.title = "קובץ מרובה-block (" + blockCount + " חלקים)";
+          const bc = mkSpan("amsg-block-count", "×" + blockCount); bc.title = "קובץ מרובה-block (" + blockCount + " חלקים)";
           metaEl.appendChild(document.createTextNode(metaParts.join(" · ")));
           if (metaParts.length) metaEl.appendChild(document.createTextNode(" · "));
           metaEl.appendChild(bc);
@@ -6910,27 +6922,27 @@
         if (m.level != null) {
           const lvl = Number(m.level);
           if (metaParts.length || (blockCount && blockCount > 1)) metaEl.appendChild(document.createTextNode(" · "));
-          metaEl.appendChild(mk(qualityCls(lvl, -30, -45), lvl.toFixed(0) + " dBFS"));
+          metaEl.appendChild(mkSpan(qualityCls(lvl, -30, -45), lvl.toFixed(0) + " dBFS"));
         }
         if (m.snr != null) {                 // SNR — רק כשהמקור סיפק רצפת רעש אמינה (VDL2; ACARS לא)
           const snr = Number(m.snr);
           metaEl.appendChild(document.createTextNode(" · "));
-          metaEl.appendChild(mk(qualityCls(snr, 15, 8), snr.toFixed(0) + " dB SNR"));
+          metaEl.appendChild(mkSpan(qualityCls(snr, 15, 8), snr.toFixed(0) + " dB SNR"));
         }
         if (hasRetx) {                       // התקבל שוב (רטרנסמיט)
           if (metaEl.childNodes.length || metaEl.textContent) metaEl.appendChild(document.createTextNode(" · "));
-          const rx = mk("amsg-retx", "↻ שודר שוב");
+          const rx = mkSpan("amsg-retx", "↻ שודר שוב");
           rx.title = "התקבל יותר מפעם אחת — מוצג העותק הנקי ביותר";
           metaEl.appendChild(rx);
         }
         if (metaEl.childNodes.length || metaEl.textContent) el.appendChild(metaEl);
-        if (m.decoded) el.appendChild(mk("amsg-decoded", m.decoded));
+        if (m.decoded) el.appendChild(mkSpan("amsg-decoded", m.decoded));
         if (m.text) {
           if (m.decoded) {
             const det = document.createElement("details");
             const sum = document.createElement("summary"); sum.textContent = "טקסט גולמי";
-            det.append(sum, mk("amsg-text", m.text), mkCopyBtn(m.text)); el.appendChild(det);
-          } else el.append(mk("amsg-text", m.text), mkCopyBtn(m.text));
+            det.append(sum, mkSpan("amsg-text", m.text), mkCopyBtn(m.text)); el.appendChild(det);
+          } else el.append(mkSpan("amsg-text", m.text), mkCopyBtn(m.text));
         }
         return el;
       }
@@ -7656,20 +7668,13 @@
       if (window.L) { xcInitMap(); return; }
       if (xcLeafLoading) return;
       xcLeafLoading = true;
-      const s = document.createElement("script");
-      s.src = "/static/vendor/leaflet/leaflet.js";
-      s.onload = () => { xcLeafLoading = false; xcInitMap(); };
-      s.onerror = () => { xcLeafLoading = false; xcMapNote("המפה לא נטענה (אין חיבור?) — הנתונים מוצגים למעלה."); };
-      document.head.appendChild(s);
+      loadLeaflet().then(() => { xcLeafLoading = false; xcInitMap(); },
+        () => { xcLeafLoading = false; xcMapNote("המפה לא נטענה (אין חיבור?) — הנתונים מוצגים למעלה."); });
     }
     function xcInitMap() {
       try {
         xcMap = L.map("xcMap", { zoomControl: true }).setView([32.0, 34.9], 6);
-        const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-          { maxZoom: 12, attribution: "© OpenStreetMap" });
-        let tileErr = 0;
-        tiles.on("tileerror", () => { if (++tileErr === 6) xcMapNote("רקע המפה לא נטען (אין אינטרנט?) — הסמנים עדיין מוצגים."); });
-        tiles.addTo(xcMap);
+        leafletTiles(() => xcMapNote("רקע המפה לא נטען (אין אינטרנט?) — הסמנים עדיין מוצגים.")).addTo(xcMap);
         xcLayer = L.layerGroup().addTo(xcMap);
         setTimeout(() => { xcMap.invalidateSize(); if (xcPending) xcDraw(xcPending); }, 60);
       } catch (e) { xcMapNote("שגיאה בטעינת המפה"); }
@@ -7677,10 +7682,8 @@
     function xcDraw(r) {
       if (!xcMap || !xcLayer || !r) return;
       xcLayer.clearLayers();
-      const css = getComputedStyle(document.documentElement);
-      const col = (v, fb) => css.getPropertyValue(v).trim() || fb;
-      const accent = col("--accent", "#6ea8fe"), amber = col("--amber", "#dcae4d"),
-            green = col("--green", "#5fce85"), dim = col("--dim", "#9a9da3");
+      const accent = cssVar("--accent", "#6ea8fe"), amber = cssVar("--amber", "#dcae4d"),
+            green = cssVar("--green", "#5fce85"), dim = cssVar("--dim", "#9a9da3");
       const bounds = [];
       const st = r.station, m = r.msg || {}, rx = r.rx_at || {}, ac = r.aircraft_at_rx, hz = r.horizon;
       if (r.track && r.track.length > 1) {

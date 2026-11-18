@@ -899,7 +899,8 @@ iOS: מתג ההשתקה משתיק Web Audio — רמז בלבד; ה-workaround
 ה-AudioContext נוצר רק מלחיצה), `renderExpResult` (טבלה ב-`innerHTML` — ⚠ דרך `expEsc`, כי
 התוויות מהשרת מכילות מירכאות; נבדקה ב-360px).
 **אין build step** — עורכים את הקובץ ישירות. Leaflet vendored תחת `static/vendor/`
-(בלי CDN, עובד גם בלי אינטרנט).
+(בלי CDN, עובד גם בלי אינטרנט). ‏**כל מפה** נטענת דרך `loadLeaflet()` (Promise יחיד לכל הדף) +
+`leafletTiles(onFail)`/`leafletMarkerIcon()`; צבע מטוקן לציור ב-canvas/Leaflet — `cssVar(name, fallback)`.
 
 **טוקני עיצוב ב-`:root`:** גיאומטריה (`--r-card`/`--r-ctrl`/`--r-sm`), מרווח (`--sp-1..5`,
 בסיס 4px), הצללה (`--sh-card`/`--sh-1`/`--sh-blue`), משטחים (`--panel`/`--panel-2`/`--hover`)
