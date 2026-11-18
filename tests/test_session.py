@@ -9,28 +9,25 @@ import time
 import pytest
 
 import app
+import appstate  # noqa: E402
+import acars_parse
 import adsb
 
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "ACARS_LOG_PATH", tmp_path / "acars.jsonl")
     monkeypatch.setattr(app, "VDL2_LOG_PATH", tmp_path / "vdl2.jsonl")
     monkeypatch.setattr(app, "SATCOM_LOG_PATH", tmp_path / "satcom.jsonl")
     return tmp_path
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 @pytest.fixture(autouse=True)
 def _clean_state_corrupt_flag():
-    app._reset_state_corrupt_warned()
+    appstate._reset_state_corrupt_warned()
     yield
-    app._reset_state_corrupt_warned()
+    appstate._reset_state_corrupt_warned()
 
 
 @pytest.fixture(autouse=True)
@@ -45,37 +42,37 @@ def _clean_adsb_series():
 def _msg(t, tail=None, label=None, group="comm", decoded=None, pos_src=None):
     return {"t": t, "tail": tail, "flight": None, "icao": None, "label": label,
             "group": group, "category": "x", "decoded": decoded, "pos_src": pos_src,
-            "notable": app._interest_score({"group": group, "decoded": decoded,
+            "notable": acars_parse._interest_score({"group": group, "decoded": decoded,
                                             "pos_src": pos_src, "label": label})}
 
 
 # --- _interest_score ---------------------------------------------------------
 
 def test_interest_score_generic_group_not_notable():
-    assert app._interest_score({"group": "comm", "decoded": None, "pos_src": None, "label": None}) is False
-    assert app._interest_score({"group": "text", "decoded": None, "pos_src": None, "label": None}) is False
+    assert acars_parse._interest_score({"group": "comm", "decoded": None, "pos_src": None, "label": None}) is False
+    assert acars_parse._interest_score({"group": "text", "decoded": None, "pos_src": None, "label": None}) is False
 
 
 def test_interest_score_real_category_is_notable():
-    assert app._interest_score({"group": "oooi", "decoded": None, "pos_src": None, "label": None}) is True
+    assert acars_parse._interest_score({"group": "oooi", "decoded": None, "pos_src": None, "label": None}) is True
 
 
 def test_interest_score_decoded_text_is_notable():
-    assert app._interest_score({"group": "comm", "decoded": "המראה 26", "pos_src": None, "label": None}) is True
+    assert acars_parse._interest_score({"group": "comm", "decoded": "המראה 26", "pos_src": None, "label": None}) is True
 
 
 def test_interest_score_adsc_position_is_notable():
-    assert app._interest_score({"group": "text", "decoded": None, "pos_src": "adsc", "label": None}) is True
+    assert acars_parse._interest_score({"group": "text", "decoded": None, "pos_src": "adsc", "label": None}) is True
 
 
 def test_interest_score_rich_label_is_notable():
-    assert app._interest_score({"group": "clearance", "decoded": None, "pos_src": None, "label": "A3"}) is True
+    assert acars_parse._interest_score({"group": "clearance", "decoded": None, "pos_src": None, "label": "A3"}) is True
 
 
 def test_normalize_acars_includes_notable_field():
-    n = app._normalize_acars({"timestamp": 1.0, "label": "A3", "tail": "4X-A", "text": "PDC"})
+    n = acars_parse._normalize_acars({"timestamp": 1.0, "label": "A3", "tail": "4X-A", "text": "PDC"})
     assert n["notable"] is True
-    ack = app._normalize_acars({"timestamp": 1.0, "label": "Q0"})
+    ack = acars_parse._normalize_acars({"timestamp": 1.0, "label": "Q0"})
     assert ack["notable"] is False
 
 
@@ -94,9 +91,9 @@ def test_session_no_marker_defaults_to_one_hour_back(client, paths):
 
 def test_session_explicit_since_overrides_stored_marker(client, paths):
     now = time.time()
-    st = app.load_state()
+    st = appstate.load_state()
     st["last_session_view_at"] = now - 10  # אם היה נלקח, החלון היה כמעט ריק
-    app.save_state(st)
+    appstate.save_state(st)
     app._append_acars_log(_msg(now - 1800, tail="4X-A", group="oooi"))
     r = client.get("/api/session?since=" + str(now - 3600))
     data = r.get_json()
@@ -136,12 +133,12 @@ def test_session_highlights_collapse_retransmissions(client, paths):
     הוא היה ממלא את כל שמונה ה"בולטות". מופע אחד (האחרון), והשאר נשארות."""
     now = time.time()
     since = now - 3600
-    qp = app._normalize_acars({"label": "QP", "tail": "9H-SHO", "msgno": "M27A",
+    qp = acars_parse._normalize_acars({"label": "QP", "tail": "9H-SHO", "msgno": "M27A",
                                "block_id": "7", "text": "LEBLLEBL16420007"})
     assert qp["notable"] is True
     for i in range(20):
         app._append_acars_log({**qp, "t": since + 60 + i * 90})
-    other = app._normalize_acars({"label": "QR", "tail": "F-GSQI", "msgno": "M95A",
+    other = acars_parse._normalize_acars({"label": "QR", "tail": "F-GSQI", "msgno": "M95A",
                                   "block_id": "5", "text": "LFPGLLBG1136113618021521"})
     app._append_acars_log({**other, "t": since + 30})
     data = client.get("/api/session?since=" + str(since)).get_json()
@@ -165,9 +162,9 @@ def test_session_counts_split_by_mode(client, paths):
 
 
 def test_session_future_clock_does_not_produce_negative_window(client, paths):
-    st = app.load_state()
+    st = appstate.load_state()
     st["last_session_view_at"] = time.time() + 10_000   # שעון שהוזז אחורה בפועל (הסמן "בעתיד")
-    app.save_state(st)
+    appstate.save_state(st)
     r = client.get("/api/session")
     data = r.get_json()
     assert data["ok"] is True
@@ -175,10 +172,10 @@ def test_session_future_clock_does_not_produce_negative_window(client, paths):
 
 
 def test_session_ack_advances_marker(client, paths):
-    assert app.load_state()["last_session_view_at"] is None
+    assert appstate.load_state()["last_session_view_at"] is None
     r = client.post("/api/session/ack")
     assert r.get_json()["ok"] is True
-    marker = app.load_state()["last_session_view_at"]
+    marker = appstate.load_state()["last_session_view_at"]
     assert marker is not None
     assert abs(marker - time.time()) < 2
 
@@ -192,7 +189,7 @@ def test_session_ack_during_mode_switch_loses_neither_write(client, paths, monke
     app_mode החדש, והמעבר לא דורס את הסמן. קודם זה הושג ב-TUNE_LOCK, ולכן ack
     החזיר 409 לאורך כל ניסוי כיול (~20 דק'); עכשיו כל השמירות ממזגות מפתחות
     בודדים על state טרי (_merge_state), כך שאין צורך לחסום."""
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "off"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "off"})
 
     def slow_enter(freqs):
         r = client.post("/api/session/ack")   # באמצע המעבר — TUNE_LOCK תפוס
@@ -200,7 +197,7 @@ def test_session_ack_during_mode_switch_loses_neither_write(client, paths, monke
         return None, None
     monkeypatch.setattr(app, "_enter_acars", slow_enter)
     assert client.post("/api/mode", json={"mode": "acars"}).status_code == 200
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["app_mode"] == "acars"
     assert st["last_session_view_at"] is not None
 

@@ -15,11 +15,8 @@ import binascii
 import collections
 import csv
 import gzip
-import hashlib
-import heapq
 import hmac
 import io
-import itertools
 import json
 import logging
 import math
@@ -27,8 +24,8 @@ import os
 import re
 import shutil
 import socket
-import statistics
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -38,7 +35,15 @@ from urllib.parse import urlparse
 
 from flask import Flask, request, jsonify, send_from_directory, send_file, abort
 
+import experiment   # רשם ניסוי RF וניסוי הכיול האוטומטי (הוצא בשלב ג2)
+import diag   # יומן בדיקה וייצוא לוגים — הניתוח הטהור (פענוח journald, בדיקות, summary.md)
+import acars_parse   # noqa: F401 — _FEEDS פותר "acars_parse.X" דרך globals() (ר' _fv). # נרמול ופענוח ACARS/VDL2/SATCOM (הוצא בשלב ג2)
+import appstate   # המצב השמור: load/save/_merge_state (הוצא בשלב ג2)
+import config   # הגדרות ונתוני-ברירת-מחדל טהורים (הוצא בשלב ג2)
+import recordings   # הקלטות, ★, תמלול, סשנים — קבצים בדיסק (הוצא בשלב ג2)
+import storage   # אחסון: כתיבה אטומית + JSONL (הוצא מכאן בשלב ג2)
 import adsb   # מסלול פעיל + אינדיקציית GPS מנתוני ADS-B (thread נפרד)
+import xcheck_jobs   # תור ההצלבה והעובד שלו (הוצא בשלב ג2)
 import xcheck   # הצלבת הודעות מול ADS-B + אופק רדיו (פונקציות טהורות)
 
 # stdout => journald (השירות רץ תחת systemd); journalctl -u airam-web מציג הכל
@@ -47,7 +52,6 @@ log = logging.getLogger("airam")
 
 # --- קבועים ---------------------------------------------------------------
 CONFIG_PATH = Path("/etc/rtl_airband/airband.conf")
-STATE_PATH = Path("/var/lib/airam/state.json")
 MOUNT = "live.mp3"          # שם ה-stream הקבוע ב-Icecast
 ICECAST_PORT = 8000
 SOURCE_PW = "airam"         # חייבת להיות זהה ל-SOURCE_PW ב-install.sh (נכתבת ל-Icecast שם)
@@ -61,44 +65,11 @@ DENOISE_SCRIPT = Path("/usr/local/bin/airam-denoise")
 DENOISE_RNNOISE = Path("/usr/local/bin/airam-rnnoise")
 DENOISE_SPEEXDN = Path("/usr/local/bin/airam-speexdn")
 DENOISE_ENV_PATH = Path("/etc/airam/denoise.env")   # EnvironmentFile של airam-denoise.service
-# המנועים — רשימה סגורה, ורק מה שעבר את מעבדת ההאזנה העיוורת על הקלטות אמיתיות
-# (docs/audio-comfort-design.md, 13.11.2026). RNNoise 100% + נורמליזציה (v2.29.0)
-# נפסל שם ("לא טבעי" ב-3/3) ולכן אינו אופציה. הפרמטרים עצמם בסקריפט.
-DENOISE_ENGINES = {
-    "rnmix": {"label": "RNNoise עדין"},   # 50% גולמי מיושר — airam-rnnoise --mix
-    "speex": {"label": "Speex"},          # תקרת הנחתה 15dB — airam-speexdn
-}
-DENOISE_ENGINE_DEFAULT = "rnmix"    # כבר מותקן אצל כולם (שלב 4e) — Speex דורש שלב 4f
 DENOISE_INSTALL_HINT = "cd ~/AIR-AM && git pull && sudo ./install.sh"
 SAMPLE_RATE = 2.56          # Msps - ערוץ יחיד, חלון צר מספיק
-# מסנן הערוץ (docs/voice-channel-design.md). ⚠ הערוץ *אינו* "בין FFT ברוחב 5kHz":
-# rtl_airband מכפיל כל בלוק בחלון Blackman-Harris של 7 איברים ולוקח את עוצמת
-# הבין, והחלון הזה רחב בכמה בינים. נמדד (rtl_airband v5.2.0 אמיתי, IQ סינתטי):
-# ב-fft 512 התגובה שטוחה עד 4kHz, אבל שכן חזק ב-8.33/12.5kHz *עובר* (‎+3/+1.8dB
-# מעל האות). fft גדול יותר = בין צר יותר = פחות רעש ושכנים, ומעט פחות גבוהים.
-# ‏"bandwidth" (lowpass I/Q של rtl_airband) לבדו **מסוכן**: עם שכן חזק ב-8.33kHz
-# הוא השתיק את הערוץ כולו (הסקוולץ' מודד אז את האות המסונן) — לכן רק יחד עם 1024.
-# ⚠ fft_size קטן מ-256 לא מותר ב-rtl_airband, וקצב דגימה שאינו כפולה שלמה של
-# 16kHz (למשל 1Msps) משבש את השמע (נמדד) — לכן הקצב לא משתנה כאן.
-CHAN_FILTERS = {
-    "standard": {"fft": 512, "bandwidth": 0},      # ההתנהגות ההיסטורית
-    "narrow": {"fft": 1024, "bandwidth": 0},       # נמדד: רעש ‎-4.6dB, שכן 25kHz ‎-4.4dB, ‎-1.4dB ב-3kHz
-    "narrow8k": {"fft": 1024, "bandwidth": 8000},  # נמדד: שכנים ‎-37dB, רעש ‎-6.3dB, ‎-2.6dB ב-3kHz
-}
-CHAN_FILTER_DEFAULT = "standard"
 DC_OFFSET = 0.3             # MHz - מזיזים את centerfreq מהתדר כדי להתרחק מ-spike ה-DC
-# רווח SDRplay (מודל legacy של SoapySDRPlay3): שני אלמנטים נפרדים, וקטן יותר = רווח גדול יותר.
-#   IFGR - הפחתת רווח בתדר הביניים, 20–59 dB.
-#   RFGR - מצב ה-LNA (הפחתת רווח RF), 0–9 (לא-לינארי, ~7dB לצעד).
-# כש-AGC כבוי כותבים gain = "IFGR=..,RFGR=.."; כש-AGC דלוק משמיטים את gain => AGC חומרתי.
-IFGR_MIN, IFGR_MAX = 20, 59
-RFGR_MIN, RFGR_MAX = 0, 9
-IF_GAIN_DEFAULT = 40            # IFGR - אמצע הטווח, בטוח מפני עומס יתר
-RF_GAIN_DEFAULT = 4            # RFGR - מצב LNA בינוני
 OVERLOAD_DBFS = -3.0          # סף "עומס יתר": אות ערוץ קרוב ל-full scale של ה-ADC
 SQUELCH_MODES = {"auto", "open", "manual"}
-SNR_MIN, SNR_MAX = 0.0, 60.0   # dB - תחום clamp ל-SNR ידני
-SNR_DEFAULT = 9.0              # ≈ סף ה-auto הפנימי של rtl_airband (~9.54 dB)
 STATS_PATH = Path("/run/rtl_airband_stats.txt")   # tmpfs - בלי שחיקת SD
 STATS_MAX_AGE = 5.0            # rtl_airband כותב כל ~1 שנייה; ~5 כתיבות => סובל ג'יטר אך עדיין מזהה restart
 
@@ -118,27 +89,7 @@ SIGNAL_LAST_MSG_MAX_AGE = 300.0  # מעל זה "הודעה אחרונה" מסו�
 # קבוע), ותחת AGC — כשיש נשא חזק בחלון ה-1.536MHz (ATIS של נתב"ג) — ה-AGC
 # מעלה רווח אחרי הניתוק ומוחק חלק/את כל הירידה. הניסוי המתועד שם (עם רשם
 # ה-RF למטה) יכריע; עד אז הקבוע נשאר כפי שהוא ולא "מתוקן" לפי ניחוש.
-DISCONNECT_DROP_DB = 10.0
 
-# --- רשם ניסוי RF (docs/antenna-calibration-experiment.md) -----------------
-# קובץ ה-stats של rtl_airband נדרס כל שנייה בלי היסטוריה, ובשטח אין SSH —
-# כלומר בדיוק מה שהניסוי צריך (השניות שאחרי restart, הדקה שאחרי ניתוק אנטנה)
-# לא ניתן לקריאה בעין מהטלפון. הרשם כותב שורה לכל כתיבה *חדשה* של ה-stats,
-# עם הקונפיג שבאמת רץ (airband.conf, לא state.json — בדיקת האנטנה לא כותבת
-# state), ו-mtime של שני הקבצים. ⚠ השוואת שני ה-mtime **לא** מזהה flush-יציאה
-# של התהליך הקודם: ה-flush נכתב בזמן העצירה — *אחרי* כתיבת הקונפיג — ולכן
-# stats_mtime שלו גדול מ-conf_mtime. ההבחנה האמינה היא מול זמן ההפעלה של
-# התהליך (`_rtl_airband_start_wall`), שהניסוי האוטומטי רושם אחרי כל הפעלה.
-# כבוי כברירת מחדל; thread רק כשמפעילים; כיבוי אוטומטי.
-RFLOG_PATH = Path("/var/lib/airam/rf_log.jsonl")
-RFLOG_MAX_SEC = 2 * 3600          # לא כותבים ל-SD לנצח אם שכחו לכבות
-RFLOG_POLL_SEC = 0.4              # rtl_airband כותב ~1Hz — דוגמים מהר יותר כדי לא לפספס כתיבה
-RFLOG_ROTATE_BYTES = 5_000_000    # בהפעלה: קובץ גדול מזה עובר ל-.prev (שעתיים ≈ 1.5MB)
-RFLOG_LABEL_MAX = 40
-# ה-fsync של הרשם דרך כינוי ברמת המודול — כך בדיקה שדוחסת זמן (test_experiment)
-# יכולה לנטרל *רק אותו*, בלי למקף את os.fsync הגלובלי (ר' no_sleep ב-CHANGELOG:
-# מיקוף גלובלי כבר הפך בדיקה בפרויקט לתלוית-מזל).
-_rflog_fsync = os.fsync
 
 # --- ACARS (מצב משולב: SDR אחד בהחלפה) ------------------------------------
 # מצב ACARS עוצר את rtl_airband (קול) ומריץ acarsdec על תדרי ה-ACARS. SDR אחד
@@ -155,7 +106,6 @@ ACARS2_ENV_PATH = Path("/etc/airam/acars2.env")
 VOICE_STARTUP_WAIT_SEC = 30   # עד מתי מחכים לכתיבת ה-stats הראשונה של rtl_airband
 # המרווח עצמו ביחידה (ExecStartPre=/bin/sleep 10 ב-airam-acars2.service) — כך הוא חל גם כש-
 # systemd מאתחל את שנינו יחד (PartOf=sdrplay), לא רק כשאנחנו מתזמנים. כאן רק מחכים ל-stats.
-ACARS2_STAGGER_SEC = 0
 # מצב "קול כפול" (docs/dual-sdr-feasibility.md §8): rtl_airband *שני* על המקלט המשני — תהליך לכל
 # מקלט (תהליך אחד עם שניים נכשל ב-sdrplay_api_Fail, §7.6). קונפיג, stats ו-mount משלו; ההקלטות
 # לאותה תיקייה (include_freq ⇒ שמות שונים), כך שיומן השידורים/★/תמלול חלים על שני הערוצים בחינם.
@@ -182,19 +132,6 @@ SDR_ENV_PATH = Path("/etc/airam/sdr.env")
 _SERIAL_RE = re.compile(r"^[0-9A-Za-z]{4,32}$")
 ACARS_UDP_HOST = "127.0.0.1"
 ACARS_UDP_PORT = 5556                 # חייב להתאים ל-ACARS_UDP ב-acars.env
-# בנקי תדרי ACARS: כל בנק נכנס בחלון דגימה *אחד* של acarsdec (≤ ACARS_WINDOW_MHZ).
-# העיקרון: acarsdec מפענח עד 8 ערוצים, וכולם חייבים ליפול בתוך חלון ~2MHz (chooseFc
-# בוחר center שמכסה את כולם). צביר 131.x וצביר 136.x רחוקים ~5MHz => *לעולם* לא בחלון
-# אחד => בנקים נפרדים להחלפה (כמו מתג קול/ACARS). הצבא ומטוסי התדלוק האמריקאים
-# (KC-135/KC-46) אינם משתמשים בתדר ACARS צבאי נפרד — הם פלטפורמות אזרחיות מותאמות
-# על רשת ARINC/SITA, ובפועל מופיעים על 131.550 (הראשי העולמי) ועל צביר אירופה.
-ACARS_BANKS = [
-    {"id": "eu131", "name": "אירופה + עולמי (131)",
-     "freqs": ["130.450", "131.425", "131.525", "131.550", "131.725", "131.825", "131.850"]},
-    {"id": "band136", "name": "אזור 136",
-     "freqs": ["136.700", "136.750", "136.800", "136.850", "136.900", "136.925", "136.975"]},
-]
-ACARS_FREQS_DEFAULT = ACARS_BANKS[0]["freqs"]   # בנק ברירת המחדל (131.x מורחב, span 1.4MHz)
 ACARS_GAIN_DEFAULT = -10              # ‎-10 => AGC (מוסכמת acarsdec)
 ACARS_RATEMULT_DEFAULT = 160          # 160 => 2.0 MS/s (חלון ±1MHz)
 ACARS_MAX_CHANNELS = 8               # מגבלת acarsdec — עד 8 ערוצים בו-זמנית
@@ -215,98 +152,6 @@ _FREQ_RE = re.compile(r"^\d{2,3}\.\d{1,3}$")   # ולידציית תדר ACARS (
 ACARS_LOG_PATH = Path("/var/lib/airam/acars.jsonl")
 ACARS_LOG_KEEP = 5000                 # retention על הדיסק (זנב נשמר; ייצוא לניתוח)
 
-# מילון labels נפוץ של ACARS (best-effort, חלקי בכוונה — הלא-מוכרים נופלים ל-"Label X").
-# ערך = (תיאור עברי, קבוצה). הקבוצה קובעת צבע badge ב-UI ואת עמודת category בייצוא:
-#   position(ירוק) · clearance(כחול) · oooi(ענבר) · tech(אפור) · comm(אפור) · text(ברירת מחדל)
-ACARS_LABELS = {
-    "Q0": ("בדיקת קישור (link test)", "comm"),
-    "_d": ("אישור קישור (link ack)", "comm"),
-    "SA": ("ניהול מדיה (media advisory)", "comm"),
-    "SQ": ("Squitter תחנת קרקע (SQ)", "comm"),
-    "15": ("דיווח מיקום (label 15)", "position"),
-    "54": ("מעבר לערוץ קול (voice go-ahead)", "comm"),
-    ":;": ("כוונון תדר אוטומטי (autotune)", "comm"),
-    "H1": ("הודעת מערכת/חברה (H1)", "text"),
-    "5Z": ("שירות חברה (airline)", "text"),
-    "5V": ("זמינות VHF (link mgmt)", "comm"),
-    "C1": ("הודעת חברה (C1)", "text"),
-    "3L": ("נתוני ULD/מטען (3L)", "tech"),
-    "A4": ("הודעת לו\"ז (FSM)", "comm"),
-    "WX": ("בקשת מזג אוויר (WX)", "comm"),
-    "RA": ("תקשורת אוויר/קרקע", "text"),
-    "RB": ("תקשורת אוויר/קרקע", "text"),
-    "QA": ("OOOI · יציאה (Out)", "oooi"),
-    "QB": ("OOOI · המראה (Off)", "oooi"),
-    "QC": ("OOOI · נחיתה (On)", "oooi"),
-    "QD": ("OOOI · חניה (In)", "oooi"),
-    # QP–QS: אותם ארבעה אירועים, בפורמט שנושא גם יעד (מוצא+יעד+שעה — ר' _parse_oooi_q).
-    # נצפו בקליטת 24.10.2026 (QP/QR/QS) ונפלו עד כה ל-"Label QP" הגנרי.
-    "QP": ("OOOI · יציאה (Out)", "oooi"),
-    "QQ": ("OOOI · המראה (Off)", "oooi"),
-    "QR": ("OOOI · נחיתה (On)", "oooi"),
-    "QS": ("OOOI · חניה (In)", "oooi"),
-    "80": ("OOOI · דוח OFFRP/INRP (80)", "oooi"),
-    "A9": ("ATIS · מידע שדה (A9)", "comm"),
-    "B9": ("בקשת אישור ATC", "clearance"),
-    "BA": ("אישור ATC (clearance)", "clearance"),
-    "A3": ("אישור טרום-המראה (PDC)", "clearance"),
-    # DCL (ARINC 623) בכיוון המטוס — נצפו בקליטת 24.10.2026 (‏4X-EMF, ‏IZ815): ‏B3 = בקשת
-    # אישור יציאה (‎"/LLBG.DC1/RCD …"), ‏B4 = הקריאה-החוזרת של האישור (‎"…/CDA … CLRD TO …").
-    "B3": ("בקשת אישור יציאה (DCL)", "clearance"),
-    "B4": ("קריאה חוזרת של אישור יציאה (DCL)", "clearance"),
-    "16": ("דיווח מיקום (label 16)", "text"),
-    "1L": ("דוח ניווט/דלק (1L)", "text"),
-    # ארבעת אלה נצפו בקליטת SATCOM אמיתית (Alphasat, 16 דק', 206 הודעות) —
-    # לא היו ממופים קודם ונפלו ל-fallback הגנרי "Label X". A0 מזוהה בוודאות
-    # (מכיל "AFN" בטקסט עצמו — Aircraft/Airline Network logon, ARINC 620 A0-A3).
-    # השלושה האחרים (1B/4P/2F) אינם labels אוניברסליים מתועדים — המיפוי מבוסס
-    # על תוכן ההודעה שנצפתה בפועל (כמו 16/1L למעלה), לא על מפרט רשמי.
-    "A0": ("AFN · רישום רשת (A0)", "comm"),
-    "1B": ("יזום קישור רשת (1B)", "comm"),
-    "4P": ("הודעת חברה חופשית (4P)", "text"),
-    "2F": ("בקשת מיקום (2F)", "comm"),
-}
-
-# כיוון ההודעה (best-effort, חלקי בכוונה — כמו ACARS_LABELS): downlink = מטוס→קרקע
-# (דיווח/בקשה מהמטוס), uplink = קרקע→מטוס (אישור/הודעת חברה אל המטוס). רק labels שאנו
-# בטוחים בהם; השאר נופלים ל-heuristic של header או ל-None (לא מנחשים).
-# ⚠ זו *נפילה* בלבד: מסגרת acarsdec נושאת block ID, והוא מכריע (_acars_block_dir).
-# קליטת 24.10.2026 הראתה למה: הטבלה הזו (וה-header) טעו ב-19 מתוך 614 הודעות — 14
-# בלוקים של C1 (‏loadsheet ו-NOTOC אל מדפסת הקוקפיט: uplink, לא downlink), שתי H1
-# (‏H1 דו-כיווני — הוסר מכאן), B3/B4 שה-header ‎"/LLBG.DC1/…" סיווג כ-uplink, ופריים
-# Q0 פגום אחד — ועוד 262 (בעיקר ‎_d/5V) נשארו בלי כיוון בכלל.
-# ‏3L הוסר: 12/12 הודעות 3L בייצוא היו בלי MSN (block ID אות ⇒ uplink), בניגוד לערך הקודם.
-_ACARS_DIR_BY_LABEL = {
-    "5Z": "downlink",
-    "C1": "uplink",     # הודעה למדפסת הקוקפיט (loadsheet וכו') — מהקרקע
-    "QA": "downlink", "QB": "downlink", "QC": "downlink", "QD": "downlink",
-    "QP": "downlink", "QQ": "downlink", "QR": "downlink", "QS": "downlink",
-    "80": "downlink",   # דוח OOOI (OFFRP/INRP) מהמטוס
-    "Q0": "downlink",   # link test ממטוס
-    "B9": "downlink",   # בקשת אישור מהמטוס
-    "B3": "downlink", "B4": "downlink",   # DCL: בקשה + קריאה-חוזרת מהמטוס
-    "WX": "downlink",   # בקשת METAR לשדות גיבוי מהמטוס
-    "SA": "downlink",   # media advisory — המטוס מדווח על מצב הקישורים שלו
-    "15": "downlink",   # דיווח מיקום מהמטוס
-    # ARINC 620/libacars: ‏A6/AA = ADS-C/CPDLC uplink, ‏B6/BA = ADS-C/CPDLC downlink.
-    # ⚠ גם ה-downlink מתחיל בכתובת תחנת קרקע (‎/QUKAXBA.ADS.G-ZBKM…, קליטת VHF
-    # 23.10.2026), ולכן _UPLINK_HEADER_RE סיווג אותו בטעות כ-uplink. ‏BA תוקן
-    # (בעבר "uplink", אישור מהקרקע). אומת ב-decode_acars_apps: ‏d B6 ⇒ Basic report
-    # תקין, ‏u B6 ⇒ "Malformed ADS-C message".
-    "A6": "uplink", "AA": "uplink",
-    "B6": "downlink", "BA": "downlink",
-    "A9": "uplink",     # ATIS משודר מהקרקע
-    "A4": "uplink",     # FSM / הודעת לוח-זמנים מהקרקע
-    "SQ": "uplink",     # squitter של תחנת הקרקע (תוקן: בעבר downlink בטעות)
-    "54": "uplink",     # voice go-ahead — הוראת קרקע לעבור לערוץ קול
-    "A3": "uplink",     # PDC — אישור טרום-המראה מהקרקע אל המטוס
-    "16": "downlink",   # דיווח מיקום מהמטוס
-    "1L": "downlink",   # דוח ניווט/דלק מהמטוס
-    ":;": "uplink",     # autotune — הוראת קרקע למקלט לעבור תדר
-}
-# header ניתוב של תחנת קרקע בתחילת הטקסט (למשל ‎.ATSXCXA או ‎/TLVATYA) => uplink.
-# שמרני: דורש ‎. או ‎/ בתחילת השורה ואחריו מזהה תחנה אותיות-גדולות/ספרות.
-_UPLINK_HEADER_RE = re.compile(r"^[./][A-Z][A-Z0-9]{3,7}\b")
 
 # --- VDL2 (מצב שלישי: SDR אחד בהחלפה) --------------------------------------
 # VDL Mode 2 (D8PSK, 31.5kbps) הוא הדור הבא של דאטה-לינק: רוב התעבורה בו היא
@@ -317,15 +162,6 @@ _UPLINK_HEADER_RE = re.compile(r"^[./][A-Z][A-Z0-9]{3,7}\b")
 VDL2_SERVICE = "airam-vdl2"
 VDL2_ENV_PATH = Path("/etc/airam/vdl2.env")
 VDL2_UDP_PORT = 5557                  # חייב להתאים ל-port ב-airam-vdl2.service (host: ACARS_UDP_HOST)
-# בנקי תדרי VDL2: כל התדרים בצביר 136.7–137.0 (span ‏250kHz) => תמיד חלון דגימה אחד.
-# 136.975 הוא ה-CSC (Common Signalling Channel) העולמי — כמעט כל התעבורה באזורנו שם;
-# 4 הערוצים המשניים (אירופה) מפוענחים בו-זמנית בחינם. בנק CSC-בלבד = fallback ל-CPU.
-VDL2_BANKS = [
-    {"id": "eu_csc", "name": "עולמי + אירופה (CSC+4)",
-     "freqs": ["136.725", "136.775", "136.825", "136.875", "136.975"]},
-    {"id": "csc", "name": "CSC בלבד (136.975)", "freqs": ["136.975"]},
-]
-VDL2_FREQS_DEFAULT = VDL2_BANKS[0]["freqs"]
 VDL2_MAX_CHANNELS = 8                 # תקרה שפויה (dumpvdl2 מוגבל CPU, לא ערוצים)
 VDL2_WINDOW_MHZ = 1.9                 # SoapySDR של dumpvdl2 דוגם 2.1MS/s => ~2MHz עם שוליים
 VDL2_BUF_MAX = 500                    # הודעות אחרונות בזיכרון (כמו ACARS)
@@ -341,7 +177,7 @@ VDL2_MSG_FILTER = "all,-avlc_s,-acars_nodata,-gsif,-x25_control,-idrp_keepalive,
 # Classic Aero. inmarsat-sniffer (alphafox02) מפענח את זה מה-RSP1B (אנטנת
 # L-band+LNA נפרדת, מוחלפת *ידנית* מול אנטנת ה-airband — ר' README/docs) ושולח
 # JSON ל-UDP; שדה isu.acars מסונתז ל-dict בסגנון acarsdec ומוזרם דרך
-# _normalize_acars, בדיוק כמו מסלול A של VDL2 (ר' _normalize_satcom).
+# acars_parse._normalize_acars, בדיוק כמו מסלול A של VDL2 (ר' acars_parse._normalize_satcom).
 # הלוויין (לא "תדרים") הוא הפרמטר הנבחר: geostationary => כיוון אנטנה חד-פעמי,
 # אין "בנקים" כמו ACARS/VDL2. לכן satcom_freqs (בשם, לסימטריה עם acars/vdl2 ב-
 # /api/mode) הוא רשימה בת-איבר-יחיד עם דגל הלוויין (למשל ["AF1"] = Alphasat).
@@ -359,161 +195,19 @@ SATCOM_UDP_PORT = 5558                # חייב להתאים ל-SATCOM_UDP ב-s
 # כמו Icecast (8000, גם הוא בלי אימות, מיועד לרשת פרטית מהימנה בלבד — §9).
 SATCOM_WEB_PORT = 8888
 SATCOM_HEALTH_TIMEOUT = 2.0           # שניות — נקרא ב-polling, חייב להיות מהיר
-# דגל --spectrum (options.c/web.c, אומת מהמקור) פותח שני endpoints נוספים ב-
-# dashboard: GET /api/spectrum?ch=N&bins=N (מערך mags_db + mixer/AFC) ו-
-# /api/constellation. **זה האבחון היחיד שמבחין בין "אין RF בכלל" ל"יש RF, לא
-# נעול"**: ebno/lock לבדם מראים "אין נעילה" גם כשהאנטנה מנותקת וגם כשהיא
-# מכוונת ב-5° שגיאה. רצפת רעש שמזנקת ~20-30dB כשה-LNA מוזן היא הראיה הישירה
-# היחידה שהשרשרת RF חיה בכלל (ר' §12 — משווים מול מדידה של המשתמש, לא מול סף
-# מומצא). המחיר: **אפס CPU רציף** — web_get_spectrum_by_channel קורא את מצב
-# הדמודולטור הקיים (jaero_pmsk_get_spectrum), אין ring buffer ואין FFT מתמשך;
-# העבודה מתרחשת רק כשה-UI מבקש. ⚠ המחיר האמיתי הוא אבטחתי: הדגל מוסיף גם
-# GET /api/tune?ch=N&hz=X (משנה-מצב!) לאותו פורט לא-מאומת שנקשר ל-INADDR_ANY
-# (ר' SATCOM_WEB_PORT למעלה ו-§9) — לכן זה משתנה-מצב שניתן לכבות, ולא קבוע.
-# רווח ידני: ‏inmarsat-sniffer מקבל ‎--sdrplay-gain=N ומטפל בו כך (sdrplay.c,
-# אומת מהמקור — הציטוט חשוב כי ההתנהגות **לא** מקבילה לזו של הקול):
-#     if (sdrplay_gain_val >= 0) {
-#         int grdb = sdrplay_gain_val;
-#         if (grdb < 20) grdb = 20;  if (grdb > 59) grdb = 59;
-#         chp->tunerParams.gain.gRdB = grdb;
-#         chp->tunerParams.gain.LNAstate = 0;          /* ← לא ניתן לשליטה */
-#         chp->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
-#     } else {
-#         chp->ctrlParams.agc.enable  = sdrplay_api_AGC_5HZ;
-#         chp->ctrlParams.agc.setPoint_dBfs = -30;
-#     }
-# שתי מסקנות מעשיות:
-# (1) **הטווח 20–59 זהה ל-IFGR של הקול** (IFGR_MIN/IFGR_MAX) — אותה סמנטיקה
-#     הפוכה בדיוק: הערך הוא *הפחתה*, קטן=רווח גדול. לכן משתמשים באותם קבועים.
-# (2) **אין שליטה ב-RFGR/LNAstate כמו בקול** — במצב ידני הכלי מקבע LNAstate=0,
-#     כלומר **רווח RF מקסימלי**. זה לא חיסרון ל-SATCOM אלא בדיוק מה שרוצים
-#     לאות לוויין חלש, וזו הסיבה שרווח ידני יכול לעזור דווקא כשה-AGC לא:
-#     ה-AGC מכוון ל-setpoint של ‎-30dBfs על *כל* מה שבחלון, כך שאנרגיה חזקה
-#     מחוץ לפס (סלולר סמוך ל-L-band — בדיוק מה שה-SAW של ה-LNA נועד לחתוך)
-#     יכולה לגרום לו להוריד רווח ולהחניק את הנשא של הלוויין. לכן זו אופציה,
-#     לא ברירת מחדל: AGC נשאר ברירת המחדל (None), והידני הוא כלי לשטח.
-SATCOM_GAIN_DEFAULT = None            # None = AGC של הדרייבר (‎5Hz, setpoint ‎-30dBfs)
 SATCOM_SPECTRUM_BINS = 256            # ברירת מחדל לבקשת ספקטרום (web.c: 32..1024)
 SATCOM_SPECTRUM_TIMEOUT = 3.0         # מעט יותר מ-health: מערך גדול יותר
 SATCOM_LOG_TAIL_LINES = 40            # GET /api/satcom/log — מספיק לשורות הפתיחה
-# "בנקים" של satcom = לוויינים (geostationary), לא צבירי-תדרים כמו ACARS/VDL2 —
-# כל "בנק" הוא לוויין יחיד (freqs בן-איבר-יחיד עם דגל ה---satellite=). זה מאפשר
-# ל-UI לעשות שימוש חוזר במנגנון בורר-הבנקים הקיים כבורר-לוויין, בלי קוד מיוחד.
-# דגלי הלוויין ושמותיהם מאומתים מ-`inmarsat-sniffer --list-satellites` (ר'
-# docs/satcom-feasibility.md §2). AF1 (Alphasat, +25.0E) ברירת המחדל ל-ישראל.
-SATCOM_BANKS = [
-    {"id": "AF1", "name": "Alphasat · EMEA (25°E)", "freqs": ["AF1"]},
-    {"id": "4F3", "name": "I-4 F3 · אמריקה (98°W)", "freqs": ["4F3"]},
-    {"id": "3F5", "name": "I-3 F5 · אטלנטי (54°W)", "freqs": ["3F5"]},
-    {"id": "F1", "name": "I-6 F1 · אוק' הודי/שקט (83°E)", "freqs": ["F1"]},
-]
-SATCOM_SATELLITES = {b["id"] for b in SATCOM_BANKS}  # דגלי --satellite= תקינים
-SATCOM_FREQS_DEFAULT = SATCOM_BANKS[0]["freqs"]      # ["AF1"] — Alphasat, ל-EMEA/ישראל
 # רווח ברירת מחדל = AGC (ריק, כמו ACARS/VDL2). לרווח ידני מעבירים gRdB ל-
 # write_satcom_env => --sdrplay-gain (הפחתה, קטן=רווח גדול). לא --soapy-gain (ר' שם).
 SATCOM_BUF_MAX = 500                  # הודעות אחרונות בזיכרון (כמו ACARS/VDL2)
 SATCOM_LOG_PATH = Path("/var/lib/airam/satcom.jsonl")
 SATCOM_LOG_KEEP = 5000                # retention על הדיסק (זנב נשמר; ייצוא לניתוח)
 
-# הקלטות: rtl_airband כותב קובץ MP3 לכל שידור (split_on_transmission) בשם
-# <REC_BASENAME>_YYYYMMDD_HHMMSS_<Hz>.mp3 (.tmp בזמן כתיבה, rename בסגירה
-# ~0.5ש' אחרי שהסקוולץ' נסגר). קובץ שהסתיים = אירוע ביומן השידורים.
-REC_DIR = Path("/var/lib/airam/recordings")
-REC_BASENAME = "airam"         # filename_template ב-config וגם עוגן הפרסור של השמות
-# הערוץ השני של קול כפול כותב airam2_… — אותה תיקייה, אותו יומן, ★/תמלול/סשנים בלי שינוי,
-# אבל היומן יודע מאיזה מקלט השידור (`ch`). גם שני תדרים זהים לא היו מתנגשים בשם.
-REC_BASENAME2 = REC_BASENAME + "2"
-REC_BYTES_PER_SEC = 6000       # CBR 48kbps (ה-patch ב-install.sh) => הערכת משך מגודל
-# retention (הקלטות *לא* מסומנות בלבד — ר' _sweep_recordings). ⚠ 500 ולא 200:
-# 200 שידורים ≈ 17 דק' אודיו בלבד בתדר עמוס — פחות מהחלון הרטרואקטיבי שכפתור
-# "שמור סשן" (docs/session-replay-design.md) מבטיח. 500 מוסיף ~15MB בלבד
-# (ר' §5.5 שם) ונותן ~5 שעות שעון — תנאי מקדים לפיצ'ר, לא קשור לתוכנו.
-REC_MAX_FILES = 500
-REC_MAX_BYTES = 100 * 1024 * 1024
-# הקלטות שמורות (★) — **תת-תיקייה, לא רשימה בקובץ צד.**
-# ⚠ זו הייתה טעות עיצוב שתוקנה: הגרסה הראשונה ניהלה `starred.json` עם רשימת
-# פטורים, ו-`_sweep_recordings` קרא אותה כדי לדעת מה לא למחוק. כל מנגנון-הצללה
-# כזה יוצר משפחה שלמה של כשלים: קובץ פגום ⇒ fail-open ⇒ **בדיוק ההקלטות
-# המוגנות נמחקות** (הוכח); מרוץ בין הסימון לסריקה ⇒ השרת מאשר "נשמר" והקובץ
-# נמחק (הוכח); read-modify-write בלי נעילה ⇒ איבוד עדכונים ועקיפת מכסה (הוכח).
-# ‏`REC_DIR.glob("*.mp3")` **אינו רקורסיבי**, ולכן העברה ל-`saved/` נותנת את
-# הפטור מ-retention ב*אפס* שורות לוגיקה, ו-`os.replace` הוא אטומי — אין מה
-# לסנכרן ואין מה לאבד. כל שינוי כאן: אל תחזיר מאגר-מצב מקביל לקבצים עצמם.
-SAVED_DIRNAME = "saved"
-# תקרה על השמורות — לא כדי "לנהל" אותן אלא כדי שסימון לא ימלא כרטיס SD בשקט.
-# ⚠ כשהתקרה מגיעה *מסרבים לסמן* ולא מוחקים ותיקה: מחיקת קובץ שהמשתמש הגן
-# עליו במפורש היא בדיוק מה שהפיצ'ר נועד למנוע.
-REC_STAR_MAX_FILES = 100
-REC_STAR_MAX_BYTES = 100 * 1024 * 1024
 ACTIVITY_PATH = Path("/var/lib/airam/activity.jsonl")
 ACTIVITY_KEEP = 500            # היומן שורד את מחיקת הקבצים (retention) - רק בלי נגינה
 ACTIVITY_RETURN = 50
-WATCH_INTERVAL = 10.0          # שניות בין סריקות של תיקיית ההקלטות
 
-# --- שחזור-סשן (שלב 2, docs/session-replay-design.md) -----------------------
-# תיקייה נפרדת מ-recordings/saved/ בכוונה: סשן הוא יחידה מורכבת (קליפים +
-# מסלולי ADS-B + מטא-דאטה), לא הקלטה בודדת. `_sweep_recordings` לא רואה אותה
-# מאותה סיבה בדיוק כמו saved/ — glob לא רקורסיבי.
-SESSIONS_DIR = Path("/var/lib/airam/sessions")
-SESSION_CLIPS_DIRNAME = "clips"
-# מזהה = תאריך-שעה קריא לאדם (YYYYMMDD-HHMM), עם סיומת מספרית בהתנגשות —
-# ולכן זו גם ההגנה מפני path traversal בראוטים עם <id>: אין בו נקודות/לוכסנים.
-SESSION_ID_RE = re.compile(r"^\d{8}-\d{4}(-\d+)?$")
-# ⚠ אין קבוע נפרד ל"כמה דקות אפשר לבקש" — נשען על adsb.TRACK_BUFFER_MIN
-# ישירות (בזמן הבקשה), לא על עותק מקומי שיכול להתפצל ממנו בשינוי עתידי.
-
-# --- תמלול ATC (whisper.cpp מקומי) -------------------------------------------
-# מודל ההפעלה **היברידי** (ר' §5/§12 ב-CLAUDE.md): לפי דרישה (כפתור ליד כל
-# שידור) + אוטומטי לכל הקלטה *מסומנת בכוכב* + מתג אופציונלי "תמלל הכול".
-# ⚠ הזמינות נבדקת **חיה בכל מחזור** ולא פעם אחת בעלייה: קודם ה-thread עשה
-# return כשהבינארי חסר, ולכן התקנת whisper אחרי העלייה לא הורגשה עד restart.
-# ⚠ `sudo INSTALL_WHISPER=1` ולא `INSTALL_WHISPER=1 sudo`: ל-sudo ב-Debian יש
-# `env_reset` כברירת מחדל ו-INSTALL_WHISPER אינו ב-env_keep => הצורה ההפוכה
-# בולעת את המשתנה והסקריפט מדלג על ההתקנה **בשקט**. מחרוזת אחת, כאן, כי היא
-# מוצגת ב-UI כהוראת-פעולה והעתקה עיוורת ממנה חייבת לעבוד.
-INSTALL_WHISPER_HINT = "sudo INSTALL_WHISPER=1 ./install.sh"
-WHISPER_BIN = os.environ.get("AIRAM_WHISPER_BIN", "/usr/local/bin/whisper-cli")
-# שני מודלים, לא אחד — כי שפת התמלול ניתנת לבחירה מה-UI:
-#   en => ggml-small.en (אנגלית-בלבד; מדויק יותר באנגלית ממודל רב-לשוני באותו גודל)
-#   he => ggml-small     (רב-לשוני; היחיד שמסוגל לעברית בכלל)
-# ‏ATC בנתב"ג הוא אנגלית, ולכן אנגלית נשארת ברירת המחדל ומקבלת את המודל הטוב לה.
-# ⚠ מודל `.en` **אינו יכול** לתמלל עברית — לא "פחות טוב", אלא לא נתמך מהבנייה.
-# לכן `_whisper_model(lang)` מחזיר None לעברית כשרק מודל אנגלי מותקן, והממשק
-# אומר זאת במפורש במקום להפיק ג'יבריש (§12: לא ממציאים, וגם לא מסתירים).
-WHISPER_MODEL_DIR = Path(os.environ.get("AIRAM_WHISPER_MODEL_DIR", "/opt/airam/models"))
-# לכל שפה: רשימת מועמדים לפי סדר העדפה. ההתקנות הוותיקות הורידו base.en בלבד,
-# ולכן הוא נשאר בסוף שרשרת האנגלית — שדרוג בלי הורדה מחדש עדיין עובד.
-WHISPER_MODELS = {
-    "en": ("ggml-small.en.bin", "ggml-small.bin", "ggml-base.en.bin", "ggml-base.bin"),
-    "he": ("ggml-small.bin", "ggml-base.bin"),
-}
-TX_LANGS = ("en", "he")
-TX_LANG_DEFAULT = os.environ.get("AIRAM_WHISPER_LANG", "en")
-if TX_LANG_DEFAULT not in TX_LANGS:
-    TX_LANG_DEFAULT = "en"
-# ⚠ פחות מכל הליבות **וגם** nice: ל-Pi 5 יש 4 ליבות, ו-3 מהן ב-100% אינן
-# "נסיגה" — הן 75% מהמעבד. הגבלת ה-threads לבדה לא נותנת לרדיו עדיפות; מה
-# שנותן אותה הוא התזמון. `nice -n 19` מבטיח ש-rtl_airband/acarsdec יקבלו מעבד
-# ברגע שהם צריכים אותו, ולכן התמלול באמת נסוג ולא רק "תופס פחות".
-WHISPER_THREADS = os.environ.get("AIRAM_WHISPER_THREADS", "3")
-WHISPER_NICE = "19"
-TRANSCRIBE_TIMEOUT = 300.0     # שניות לקובץ בודד (המרה + תמלול). small איטי מ-base פי ~3
-TX_MIN_SEC = 0.7               # קטע קצר מזה = לחיצת סקוולץ', לא דיבור => לא מתמללים
-TX_MAX_FAILS = 3               # ניסיונות לפני דילוג (מגן מלולאת whisper אינסופית — ר' _transcribe_worker)
-# רמז הקשר => מטה את המודל לפרזיולוגיית ATC ושמות מקומיים (משפר דיוק משמעותית).
-# ⚠ רק לאנגלית: רמז אנגלי על תמלול עברי מטה את המודל לשפה הלא-נכונה.
-WHISPER_PROMPT = ("Air traffic control radio between pilots and Ben Gurion / Tel Aviv "
-                  "tower, ground, approach. Phrases: cleared for takeoff, line up and wait, "
-                  "taxi to runway, hold short, contact tower, squawk, climb, descend, "
-                  "heading, knots, QNH, wind, runway 03 12 21 26 30.")
-# ⚠ **אין רשימת "ביטויי הזיה".** הייתה כזו, והיא הוסרה אחרי שהוכח שהיא אוכלת
-# תשדורות ATC לגיטימיות: הנרמול מחק ספרות, ולכן `"Thank you, 385"` (מסירת תדר
-# שגרתית במגדל), `"Okay, 03"` ו-`"Ok."` סוננו — והוצגו למשתמש כ"סונן כהזיה",
-# טענה שאין לנו שום בסיס לה. זו בדיוק ההמצאה ש-§12 אוסר, רק בכיוון ההפוך:
-# לא ערך מומצא אלא *פסילה* מומצאת. ‏ATC מורכב כמעט כולו מביטויים קצרים
-# וסטנדרטיים, ולכן כל blocklist מילולי כאן פוגע בתוכן אמיתי. מה שנשאר הוא
-# ‏TX_MIN_SEC — סינון לפי *גודל הקובץ*, שהוא עובדה מדידה ולא ניחוש-תוכן.
-# פלט של whisper מוצג כפי שהוא; המשתמש שומע את ההקלטה וקובע בעצמו.
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -673,72 +367,6 @@ def load_presets():
         pass   # אין קובץ / פגום => ברירת המחדל (הקובץ נכתב רק בעריכה הראשונה)
     return [dict(p) for p in DEFAULT_PRESETS]
 
-DEFAULT_STATE = {"freq": 132.500, "mod": "am", "agc": True,
-                 "if_gain": IF_GAIN_DEFAULT, "rf_gain": RF_GAIN_DEFAULT,
-                 "squelch_mode": "open", "squelch_snr": SNR_DEFAULT,  # ברירת מחדל ATIS => תמיד פתוח
-                 # "voice" (rtl_airband) | "acars" (acarsdec) | "vdl2" (dumpvdl2) |
-                 # "satcom" (inmarsat-sniffer) | "off" (standby).
-                 # ברירת המחדל ניטרלית (off): אין "מצב ראשי" — התקנה טרייה נוחתת במסך
-                 # הבית והמשתמש בוחר מצב. המצב הנבחר שורד reboot (משוחזר ע"י _boot_restore).
-                 "app_mode": "off",
-                 "acars_freqs": ACARS_FREQS_DEFAULT,
-                 "vdl2_freqs": VDL2_FREQS_DEFAULT,
-                 "satcom_freqs": SATCOM_FREQS_DEFAULT,
-                 # True = bias-T של ה-RSP1B מזין את ה-LNA (ברירת המחדל ההיסטורית).
-                 # False = המשתמש מזין את ה-LNA ממקור חיצוני (ר' _enter_satcom).
-                 "satcom_bias_tee": True,
-                 # True (ברירת מחדל) = מדלגים על דמודולטורי ה-C-channel — חוסך
-                 # ~50% CPU ובקושי עולה במידע (ר' §12 ב-CLAUDE.md ו-write_satcom_env).
-                 "satcom_skip_c": True,
-                 # True (ברירת מחדל) = --spectrum פעיל => GET /api/satcom/spectrum
-                 # עובד. זה כלי האבחון היחיד שמראה אם יש RF בכלל (ר' הערת
-                 # SATCOM_SPECTRUM_BINS). דולק כברירת מחדל כי בלי נעילה המצב חסר
-                 # ערך ממילא, ועלות ה-CPU היא אפס; ניתן לכיבוי מי שמעדיף לא לחשוף
-                 # את GET /api/tune של הכלי ברשת המקומית (§9).
-                 "satcom_spectrum": True,
-                 # None = AGC (ברירת המחדל); int 20..59 = gRdB ידני (*הפחתה*,
-                 # קטן=רווח גדול — כמו if_gain של הקול). ר' SATCOM_GAIN_DEFAULT.
-                 "satcom_gain": SATCOM_GAIN_DEFAULT,
-                 # בסיס כיול למד השדה: {"noise": dBFS, "freq": MHz, "ts": epoch} או None.
-                 # נמדד תמיד תחת אותם תנאים קבועים (AGC, /api/antenna/check) => בר-השוואה
-                 # לעצמו לאורך זמן, בלי תלות באיזה מצב פעיל עכשיו. לעולם לא ממציאים
-                 # אותו — בלי כיול מפורש של המשתמש, אין פסק דין (ר' §12).
-                 "signal_baseline": None,
-                 # מתי המשתמש ראה לאחרונה את דוח הסשן (epoch) — None עד /api/session/ack
-                 # הראשון. /api/session נופל ל"שעה אחורה" כשזה חסר (התקנה טרייה/שדרוג),
-                 # לא לכל ההיסטוריה.
-                 "last_session_view_at": None,
-                 # תמלול *כל* הקלטה אוטומטית ברקע. ⚠ ברירת המחדל **כבויה**:
-                 # מי שמתקין whisper (INSTALL_WHISPER=1) לא בהכרח רוצה שהוא ירוץ
-                 # על כל הקלטה — תמלול לפי דרישה (📝) ושל הקלטות שמורות (★)
-                 # עובדים תמיד בלי המתג הזה. המתג ב-UI הוא מקור-האמת היחיד.
-                 "transcribe_auto": False,
-                 # שפת התמלול: "en" (ATC בנתב"ג) או "he". דורש מודל רב-לשוני
-                 # לעברית — ר' WHISPER_MODELS ו-_whisper_model.
-                 "transcribe_lang": TX_LANG_DEFAULT,
-                 # תחנת הקליטה להצלבת ADS-B/אופק הרדיו: {"lat","lon","alt_m","name",
-                 # "source","set_at"} או None. ⚠ אין ברירת מחדל (לא נתב"ג): AIR-AM נייד,
-                 # ומיקום מומצא היה מייצר אופק שגוי בשקט — בלי תחנה אין פסק-דין BLOS.
-                 "station": None,
-                 # סינון רעשים חי לסטרים /clean.mp3. מתג גלובלי; כבוי כברירת מחדל.
-                 # ר' _denoise_sync. denoise_engine — מתוך DENOISE_ENGINES.
-                 "denoise": False,
-                 "denoise_engine": DENOISE_ENGINE_DEFAULT,
-                 # מסנן הערוץ של הקול (CHAN_FILTERS) — ברירת המחדל = ההתנהגות ההיסטורית.
-                 "chan_filter": CHAN_FILTER_DEFAULT,
-                 # מסנן notch לשידורי FM/MW ב-RSP1B (rfnotch_ctrl של SoapySDRPlay3).
-                 # ⚠ ההנחתה שלו בתחום 118–137MHz לא נמדדה — מתג, לא ברירת מחדל.
-                 "fm_notch": False,
-                 # serial של המקלט הראשי (docs/dual-sdr-feasibility.md §3.1). None = כמו תמיד:
-                 # "driver=sdrplay" בלי serial ⇒ המקלט הראשון שה-API מחזיר — נכון רק כשיש
-                 # מקלט אחד. עם שניים מחוברים בלי בחירה, איזה מהם נפתח נקבע במקרה.
-                 "sdr_primary": None,
-                 # המקלט המשני (קול + ACARS / קול כפול).
-                 "sdr_secondary": None,
-                 # הערוץ השני של "קול כפול" (על המשני). squelch/מסנן/notch — כמו הראשי; רווח — תמיד
-                 # AGC (מקלט אחר, ואין לו פקדי רווח משלו בממשק).
-                 "voice2_freq": 134.600, "voice2_mod": "am"}
-
 
 # --- שורת ה-squelch: מקור אמת יחיד -----------------------------------------
 def _squelch_line(squelch_mode, squelch_snr):
@@ -757,16 +385,16 @@ def _squelch_line(squelch_mode, squelch_snr):
 
 
 # --- בניית קובץ ההגדרות ל-rtl_airband ------------------------------------
-def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
-                  chan_filter=CHAN_FILTER_DEFAULT, fm_notch=False, serial=None,
+def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=config.SNR_DEFAULT,
+                  chan_filter=config.CHAN_FILTER_DEFAULT, fm_notch=False, serial=None,
                   stats_path=None, mount=None, denoise_udp=True, rec_template=None):
     """קונפיג rtl_airband. ברירות המחדל = הערוץ הראשי. הערוץ השני (קול כפול) מעביר stats_path/mount
     משלו ו-denoise_udp=False: הסינון מאזין לפורט אחד, ושני שולחים אליו היו מערבבים שני תדרים."""
     stats_path = stats_path or STATS_PATH
     mount = mount or MOUNT
-    rec_template = rec_template or REC_BASENAME
+    rec_template = rec_template or recordings.REC_BASENAME
     f = float(freq)
-    cf = CHAN_FILTERS.get(chan_filter, CHAN_FILTERS[CHAN_FILTER_DEFAULT])
+    cf = config.CHAN_FILTERS.get(chan_filter, config.CHAN_FILTERS[config.CHAN_FILTER_DEFAULT])
     # rfnotch_ctrl: הגדרת SoapySDRPlay3 שעוברת דרך ה-device_string (נקראת ע"י writeSetting
     # בבנאי, *לפני* שהזרם עולה — ב-RSP1B היא rsp1aParams.rfNotchEnable). ערך קבוע, לא קלט.
     dev = "driver=sdrplay" + _serial_arg(serial) + (",rfnotch_ctrl=true" if fm_notch else "")
@@ -774,7 +402,7 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
         "# נוצר אוטומטית ע\"י AIR-AM web tuner. שינויים ידניים נדרסים בכל כיוונון.",
         "localtime = true;   # חותמות הזמן בשמות קובצי ההקלטה בזמן מקומי",
         f'stats_filepath = "{stats_path}";   # מדדי RF (signal/noise) ל-/api/metrics',
-        f"fft_size = {cf['fft']};   # מסנן הערוץ: {chan_filter if chan_filter in CHAN_FILTERS else CHAN_FILTER_DEFAULT}",
+        f"fft_size = {cf['fft']};   # מסנן הערוץ: {chan_filter if chan_filter in config.CHAN_FILTERS else config.CHAN_FILTER_DEFAULT}",
         "devices:",
         "(",
         "  {",
@@ -833,7 +461,7 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
         lines += [
             "          {",
             '            type = "file";',
-            f'            directory = "{REC_DIR}";',
+            f'            directory = "{recordings.REC_DIR}";',
             f'            filename_template = "{rec_template}";',
             "            split_on_transmission = true;   # קובץ MP3 נפרד לכל שידור",
             "            include_freq = true;            # התדר (Hz) בשם הקובץ",
@@ -850,34 +478,7 @@ def render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch
     return "\n".join(lines)
 
 
-def _atomic_write(path, text):
-    """כתיבה אטומית (tmp + rename): rtl_airband יכול לעלות בכל רגע
-    (Restart=always / udev) ואסור שיקרא קובץ חצי-כתוב. tmp ייחודי לפר-thread
-    (pid+ident) => שתי בקשות מקבילות (PUT /api/presets וכו') לא דורסות זו את
-    קובץ ה-tmp של זו; ה-rename האחרון פשוט מנצח (last-write-wins), בלי קובץ פגום.
-    ⚠ ‏fsync (על הקובץ *ועל התיקייה*) הוא מה שהופך את זה גם לעמיד-בניתוק-חשמל,
-    לא רק אטומי-מול-קוראים: בלעדיו הנתונים יכולים לשבת ב-page cache ולהיעלם
-    בכיבוי פתאומי (תרחיש אמיתי בהפעלה מסוללה — ר' README, אזהרת ספק כוח).
-    ה-fsync על התיקייה נדרש כי בלעדיו ה-rename עצמו לא בהכרח שרד."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f"{path.suffix}.tmp{os.getpid()}-{threading.get_ident()}")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-    # התיקייה עצמה: best-effort — כשל כאן לא שווה הפלת הכתיבה שכבר הצליחה
-    try:
-        dfd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
-    except OSError:
-        pass
-
-
-# תבנית קובצי ה-tmp של _atomic_write (‎<שם>.<סיומת>.tmp<pid>-<tid>) — לניקוי
+# תבנית קובצי ה-tmp של storage.atomic_write (‎<שם>.<סיומת>.tmp<pid>-<tid>) — לניקוי
 # יתומים בעלייה. ניתוק חשמל *בין* הכתיבה ל-rename משאיר קובץ כזה מאחור.
 _TMP_GLOB = "*.tmp*"
 _TMP_ORPHAN_AGE_SEC = 3600     # שעה: זהיר בהרבה ממשך כתיבה אמיתי (מילישניות)
@@ -885,13 +486,13 @@ _TMP_ORPHAN_AGE_SEC = 3600     # שעה: זהיר בהרבה ממשך כתיבה
 
 def _cleanup_orphan_tmp(dirs=None):
     """מוחק קובצי tmp יתומים שנשארו מכתיבה שנקטעה (ניתוק חשמל באמצע
-    _atomic_write). ⚠ נקרא *רק בעלייה* ורק על קבצים ישנים מ-_TMP_ORPHAN_AGE_SEC:
+    storage.atomic_write). ⚠ נקרא *רק בעלייה* ורק על קבצים ישנים מ-_TMP_ORPHAN_AGE_SEC:
     ה-pid בשם חוזר על עצמו במערכת, ולכן אי אפשר להסיק ממנו בבטחה שהתהליך מת —
     מחיקת tmp של כתיבה *חיה* תפיל אותה. מחזיר את מספר הקבצים שנמחקו (ללוג)."""
     removed = 0
     now = time.time()
-    default_dirs = (STATE_PATH.parent, CONFIG_PATH.parent, ACARS_ENV_PATH.parent,
-                    REC_DIR, _saved_dir())
+    default_dirs = (appstate.STATE_PATH.parent, CONFIG_PATH.parent, ACARS_ENV_PATH.parent,
+                    recordings.REC_DIR, recordings._saved_dir())
     for d in (dirs if dirs is not None else default_dirs):
         try:
             candidates = list(Path(d).glob(_TMP_GLOB))
@@ -908,9 +509,9 @@ def _cleanup_orphan_tmp(dirs=None):
     return removed
 
 
-def write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=SNR_DEFAULT,
-                 chan_filter=CHAN_FILTER_DEFAULT, fm_notch=False):
-    _atomic_write(CONFIG_PATH, render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr,
+def write_config(freq, mod, agc, if_gain, rf_gain, squelch_mode="auto", squelch_snr=config.SNR_DEFAULT,
+                 chan_filter=config.CHAN_FILTER_DEFAULT, fm_notch=False):
+    storage.atomic_write(CONFIG_PATH, render_config(freq, mod, agc, if_gain, rf_gain, squelch_mode, squelch_snr,
                                              chan_filter, fm_notch, serial=_primary_serial()))
 
 
@@ -921,7 +522,7 @@ def _voice2_params(st):
         if not (0.1 <= f2 <= 1999.5):
             raise ValueError
     except (TypeError, ValueError):
-        f2 = DEFAULT_STATE["voice2_freq"]
+        f2 = appstate.DEFAULT_STATE["voice2_freq"]
     m2 = "nfm" if str(st.get("voice2_mod", "am")).lower() == "nfm" else "am"
     return f2, m2
 
@@ -929,22 +530,22 @@ def _voice2_params(st):
 def write_voice2_config(st=None):
     """קונפיג הערוץ השני (קול כפול) על המקלט המשני. נכתב לפני כל הפעלה — כמו acars2.env.
     squelch/מסנן/notch מהראשי, רווח AGC, בלי פלט UDP לסינון (ר' render_config)."""
-    st = st if st is not None else load_state()
+    st = st if st is not None else appstate.load_state()
     f2, m2 = _voice2_params(st)
     sq_mode = str(st.get("squelch_mode", "auto")).lower()
     if sq_mode not in SQUELCH_MODES:
         sq_mode = "auto"
     try:
-        sq_snr = max(SNR_MIN, min(SNR_MAX, float(st.get("squelch_snr", SNR_DEFAULT))))
+        sq_snr = max(config.SNR_MIN, min(config.SNR_MAX, float(st.get("squelch_snr", config.SNR_DEFAULT))))
     except (TypeError, ValueError):
-        sq_snr = SNR_DEFAULT
-    cf = st.get("chan_filter", CHAN_FILTER_DEFAULT)
-    if cf not in CHAN_FILTERS:
-        cf = CHAN_FILTER_DEFAULT
-    _atomic_write(VOICE2_CONFIG_PATH, render_config(
-        f2, m2, True, IF_GAIN_DEFAULT, RF_GAIN_DEFAULT, sq_mode, sq_snr, cf,
+        sq_snr = config.SNR_DEFAULT
+    cf = st.get("chan_filter", config.CHAN_FILTER_DEFAULT)
+    if cf not in config.CHAN_FILTERS:
+        cf = config.CHAN_FILTER_DEFAULT
+    storage.atomic_write(VOICE2_CONFIG_PATH, render_config(
+        f2, m2, True, config.IF_GAIN_DEFAULT, config.RF_GAIN_DEFAULT, sq_mode, sq_snr, cf,
         bool(st.get("fm_notch")), serial=_secondary_serial(),
-        stats_path=STATS2_PATH, mount=MOUNT2, denoise_udp=False, rec_template=REC_BASENAME2))
+        stats_path=STATS2_PATH, mount=MOUNT2, denoise_udp=False, rec_template=recordings.REC_BASENAME2))
 
 
 # --- תפקידי המקלטים (docs/dual-sdr-feasibility.md §3.1) -----------------------
@@ -958,7 +559,7 @@ def _sanitize_serial(v):
 def _primary_serial():
     """ה-serial של המקלט הראשי, או None ("כל מקלט" — ההתנהגות של מקלט יחיד)."""
     try:
-        return _sanitize_serial(load_state().get("sdr_primary"))
+        return _sanitize_serial(appstate.load_state().get("sdr_primary"))
     except Exception:
         return None
 
@@ -966,7 +567,7 @@ def _primary_serial():
 def _secondary_serial():
     """ה-serial של המקלט המשני (מצב קול + ACARS), או None."""
     try:
-        return _sanitize_serial(load_state().get("sdr_secondary"))
+        return _sanitize_serial(appstate.load_state().get("sdr_secondary"))
     except Exception:
         return None
 
@@ -996,74 +597,7 @@ def write_sdr_env(primary, secondary):
         "SDR_SECONDARY=" + (_sanitize_serial(secondary) or ""),
         "",
     ])
-    _atomic_write(SDR_ENV_PATH, text)
-
-
-_state_corrupt_warned = False   # חד-פעמי לאירוע פגימה, לא לכל קריאה — ר' load_state
-
-
-def load_state():
-    """קורא את המצב השמור, ממוזג על ברירות המחדל (שדות חדשים בשדרוג נכנסים לבד).
-    ⚠ מבחין בין *קובץ חסר* (תקין לגמרי — התקנה טרייה) לבין *קובץ פגום*: פגימות
-    מתרחשת בעיקר בכיבוי פתאומי (ר' _atomic_write), ובלי לוג המשתמש היה מאבד
-    תדר/gain/בנקים/satcom_bias_tee/scan_plan בשקט מוחלט ונוחת בברירות מחדל בלי
-    להבין למה. שומרים עותק .corrupt לאבחון. ⚠ הלוג+הכתיבה חד-פעמיים לאירוע פגימה
-    (flag גלובלי, מתאפס בקריאה תקינה הבאה) ולא לכל קריאה — הפונקציה נקראת גם
-    מראוטים בתדירות גבוהה (כולל /api/metrics ב-polling), ובלי ה-flag קובץ פגום
-    יחיד היה מייצר ספאם ללוג ודריסה חוזרת של .corrupt בכל בקשה."""
-    global _state_corrupt_warned
-    try:
-        raw = STATE_PATH.read_text()
-    except FileNotFoundError:
-        return dict(DEFAULT_STATE)         # התקנה טרייה — לא אירוע
-    except OSError as e:
-        log.warning("קריאת state נכשלה (%s) — ברירות מחדל", e)
-        return dict(DEFAULT_STATE)
-    try:
-        st = json.loads(raw)
-    except ValueError as e:
-        if not _state_corrupt_warned:
-            log.warning("state.json פגום (%s) — נופלים לברירות מחדל; עותק נשמר ב-%s.corrupt",
-                        e, STATE_PATH.name)
-            try:
-                STATE_PATH.with_suffix(STATE_PATH.suffix + ".corrupt").write_text(raw)
-            except OSError:
-                pass                       # אבחון בלבד — לא שווה להיכשל בגללו
-            _state_corrupt_warned = True
-        return dict(DEFAULT_STATE)
-    if not isinstance(st, dict):           # JSON תקין אך לא אובייקט (למשל "null")
-        if not _state_corrupt_warned:
-            log.warning("state.json אינו אובייקט (%s) — ברירות מחדל", type(st).__name__)
-            _state_corrupt_warned = True
-        return dict(DEFAULT_STATE)
-    _state_corrupt_warned = False          # התאוששנו — אירוע פגימה עתידי יתועד שוב
-    return {**DEFAULT_STATE, **st}
-
-
-def _reset_state_corrupt_warned():
-    """מאפס את ה-flag. נחוץ לבדיקות (מצב גלובלי דולף בין בדיקות שמשאירות
-    state.json פגום — בלי איפוס, בדיקה הבאה שמצפה ללוג הייתה מדוכאת בשקט)."""
-    global _state_corrupt_warned
-    _state_corrupt_warned = False
-
-
-def save_state(st):
-    _atomic_write(STATE_PATH, json.dumps(st))
-
-
-_STATE_LOCK = threading.Lock()
-
-
-def _merge_state(changes):
-    """read-modify-write של state.json: טוען טרי, ממזג רק את המפתחות של הקורא
-    ושומר. מחזיר את ה-state החדש.
-    ⚠ מעבר מצב/כיוונון מחזיק snapshot לאורך restart של 3–45ש'; שמירת
-    {**st, ...} מאותו snapshot דרסה שינוי מקביל (למשל "תמלל הכול" או בחירת
-    שפה באמצע מעבר) — lost update שקט. כל שמירה אחרי פעולה ארוכה עוברת כאן."""
-    with _STATE_LOCK:
-        st = {**load_state(), **changes}
-        save_state(st)
-        return st
+    storage.atomic_write(SDR_ENV_PATH, text)
 
 
 # --- הפעלה מחדש מאומתת + רולבק --------------------------------------------
@@ -1156,7 +690,7 @@ def _rollback(prev):
     try:
         write_config(prev["freq"], prev["mod"], prev["agc"], prev["if_gain"],
                      prev["rf_gain"], prev["squelch_mode"], prev["squelch_snr"],
-                     prev.get("chan_filter", CHAN_FILTER_DEFAULT), bool(prev.get("fm_notch")))
+                     prev.get("chan_filter", config.CHAN_FILTER_DEFAULT), bool(prev.get("fm_notch")))
         subprocess.run([*SUDO, "systemctl", "restart", "rtl_airband"],
                        capture_output=True, text=True, timeout=45)
     except Exception:
@@ -1168,1280 +702,30 @@ def _rollback(prev):
     return True
 
 
-# --- ACARS: listener, ring-buffer, ומעבר מצב -----------------------------
+# --- ring-buffers של שלושת הפידים (הלוגיקה: _FEEDS, למטה) ----------------------
 _acars_lock = threading.Lock()
 _acars_msgs = collections.deque(maxlen=ACARS_BUF_MAX)
 _acars_seq = 0                 # מזהה רץ גלובלי (cursor ל-UI: "תן לי הודעות חדשות מ-id")
 
-# --- VDL2: ring-buffer נפרד (אותה תבנית) -----------------------------------
+# VDL2 — ring-buffer נפרד (אותה תבנית)
 _vdl2_lock = threading.Lock()
 _vdl2_msgs = collections.deque(maxlen=VDL2_BUF_MAX)
 _vdl2_seq = 0                  # cursor נפרד ל-/api/vdl2
 _vdl2_drop_count = 0           # פריימים לא-מזוהים (סכמה לא תואמת) — נחשף בלוג תקופתי
 
-# --- SATCOM: ring-buffer נפרד (אותה תבנית) ---------------------------------
+# SATCOM — ring-buffer נפרד (אותה תבנית)
 _satcom_lock = threading.Lock()
 _satcom_msgs = collections.deque(maxlen=SATCOM_BUF_MAX)
 _satcom_seq = 0                # cursor נפרד ל-/api/satcom
 _satcom_drop_count = 0         # הודעות לא-מזוהות (סכמה לא תואמת) — נחשף בלוג תקופתי
 
 
-def _scan_latlon(obj):
-    """סורק רקורסיבית מבנה libacars אחר *זוג* lat/lon תקין (ADS-C/CPDLC).
-    מחזיר (lat, lon) או None. הגנתי לשינויי סכמה בין גרסאות — מזהה לפי שם
-    המפתח, לא מבנה.
-    ⚠ רגרסיה אמיתית שתוקנה: הגרסה הקודמת חיפשה lat ראשון ו-lon ראשון *בנפרד*
-    בכל העץ ושילבה ביניהם — שני מפתחות שנמצאים בתת-עצים לא-קשורים בכלל
-    (למשל שני tags שונים ברשימת ADS-C) הורכבו לקואורדינטה מזויפת. עכשיו lat
-    ו-lon חייבים להופיע *יחד* באותו dict. בנוסף: ADS-C יכול לשאת גם
-    "predicted_route"/"next_wpt"/"intermediate_projected_intent" עם lat/lon
-    תקינים לכל דבר — אבל אלה waypoints עתידיים/מתוכננים, לא המיקום הנוכחי;
-    "basic_report" הוא הדיווח בפועל (ר' libacars/adsc.c) ומועדף כשקיים."""
-    def pair_in(o):
-        lat = lon = None
-        for k, v in o.items():
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
-                kl = str(k).lower()
-                if kl in ("lat", "latitude"):
-                    lat = float(v)
-                elif kl in ("lon", "lng", "long", "longitude"):
-                    lon = float(v)
-        return (lat, lon) if lat is not None and lon is not None else None
-
-    def first_pair(o):
-        if isinstance(o, dict):
-            p = pair_in(o)
-            if p:
-                return p
-            for v in o.values():
-                p = first_pair(v)
-                if p:
-                    return p
-        elif isinstance(o, list):
-            for v in o:
-                p = first_pair(v)
-                if p:
-                    return p
-        return None
-
-    def find_by_key(o, key):
-        if isinstance(o, dict):
-            for k, v in o.items():
-                if str(k).lower() == key:
-                    return v
-                r = find_by_key(v, key)
-                if r is not None:
-                    return r
-        elif isinstance(o, list):
-            for v in o:
-                r = find_by_key(v, key)
-                if r is not None:
-                    return r
-        return None
-
-    basic = find_by_key(obj, "basic_report")
-    pair = first_pair(basic) if isinstance(basic, dict) else None
-    if pair is None:
-        pair = first_pair(obj)
-    if pair is None:
-        return None
-    lat, lon = pair
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
-        return None                           # 0/0 = "אין מיקום" טיפוסי, לא מרכז האוקיינוס
-    return round(lat, 5), round(lon, 5)
-
-
-# מיקום בפורמט ARINC קומפקטי בטקסט חופשי. שני פורמטים נתמכים:
-# 1. עם נקודה עשרונית (ואופציונלית פסיק בין lat ל-lon): N3206.0,E03450.0 או N3206.0 E03450.0
-# 2. ספרה עשרונית ללא נקודה (DDMMf / DDDMMf): N32042E034560 = N 32°04.2' E 034°56.0'
-# שמרני בכוונה — [0-5]\d אוכף דקות 00–59 => כמעט בלי false positives ממרצפי-ספרות מקריים.
-_TEXT_POS_RE = re.compile(
-    r"([NS])\s?(\d{2})([0-5]\d)\.(\d{1,3})[,\s]?([EW])\s?(\d{3})([0-5]\d)\.(\d{1,3})")
-# פורמט קומפקטי ללא נקודה: N32042E034560 — ספרת עשרון מחוברת ישירות אחרי הדקות.
-# מנסים אחרי הפורמט עם נקודה (עדיפות נמוכה) כי הוא מדויק פחות.
-_TEXT_POS_COMPACT_RE = re.compile(
-    r"([NS])(\d{2})([0-5]\d)(\d)([EW])(\d{3})([0-5]\d)(\d)")
-# הערה: פורמט ה-login של LLBG (`02XSTLVLLBG03200N03452E...`) *אינו* מחולץ —
-# ה-DDMM שם הוא נ"צ ה*שדה* (reference של נתב"ג שמשותף לכל מטוס שמתחבר), לא מיקום
-# המטוס. חילוצו הדביק 📍 מטעה על כל הודעת login. ראה CHANGELOG 1.7.1.
-
-# /.POS/ = תגובת מטוס ל-REQPOS (position request מהקרקע). פורמט מבני לחלוטין:
-# /.POS/TS{HHMMSS},{DDMMYY}{N}{DD}{MMf}{E}{DDD}{MMf},,{t},{?},{WPT},{ETA_WPT},,{fuel},,{spd},{alt}
-# lat/lon: DD+MMf = מעלות + דקות-עם-עשרון (3 ספרות: MM*10+f). דוגמה: 006 = 00.6'
-# הפורמט אמין גם עם error (פרוטוקול מבני, לא heuristic) ⇒ נחלץ לפני שמירת error guard.
-_POS_REPORT_RE = re.compile(
-    r"/\.POS/TS\d{6},\d{6}"        # TS timestamp + date (6 digits each)
-    r"([NS])(\d{2})([0-5]\d\d)"     # lat: NS, 2-digit deg, MMf עם דקות 00–59
-    r"([EW])(\d{3})([0-5]\d\d)"     # lon: EW, 3-digit deg, MMf עם דקות 00–59
-                                    # (כמו _L15_RE: הפורמט נחלץ גם עם error ⇒ ספרת
-                                    # דקות שהתהפכה חייבת להידחות, לא להזיז את המטוס)
-    r",,\d{6},\d+,"                 # gap fields (time2, unknown)
-    r"([A-Z][A-Z0-9]{1,7})"        # next waypoint (2–8 chars)
-    r",(\d{6})"                     # ETA to waypoint (HHMMSS)
-    r"(?:,,[^,]*,,[^,]*,([A-Z0-9]{2,6}))?"  # optional: fuel,,spd,{FL/alt code}
-)
-
-
-def _text_latlon(text):
-    """heuristic שמרני לחילוץ מיקום מטקסט חופשי (פורמט ARINC קומפקטי). מחזיר (lat, lon)
-    או None. מכוון לדיוק על פני כיסוי => מחזיר רק כשהתבנית מלאה וברורה.
-    ⚠ דורש בדיוק התאמה *אחת* בטקסט: נצפה בקליטת שטח אמיתית (SATCOM) שהודעת H1
-    עם תוכנית טיסה (‎#M3FPN/.../F:IVAKI,N32558E015065..LUMED,N34200E014420..)
-    מכילה *שרשרת* waypoints בפורמט קומפקטי זהה לפורמט מיקום — ואם היינו לוקחים
-    את ההתאמה הראשונה (כמו לפני התיקון), היינו מדביקים את נ"צ ה-waypoint
-    הראשון במסלול כאילו הוא מיקום המטוס בפועל (לקח נוסף על 1.7.1/_parse_sq:
-    לא רק "כתובת תחנה נראית כמו נ"צ", גם "מסלול מתוכנן נראה כמו דיווח מיקום
-    בודד"). דיווח מיקום אמיתי מכיל זוג קואורדינטות *אחד*; שרשרת = לא מיקום."""
-    if not text:
-        return None
-
-    def _parse(groups, compact=False):
-        try:
-            ns, la_d, la_m, la_f, ew, lo_d, lo_m, lo_f = groups
-            if compact:
-                lat = int(la_d) + (int(la_m) + int(la_f) / 10) / 60
-                lon = int(lo_d) + (int(lo_m) + int(lo_f) / 10) / 60
-            else:
-                lat = int(la_d) + float(la_m + "." + (la_f or "0")) / 60
-                lon = int(lo_d) + float(lo_m + "." + (lo_f or "0")) / 60
-        except (ValueError, TypeError):
-            return None
-        if ns == "S":
-            lat = -lat
-        if ew == "W":
-            lon = -lon
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
-            return None
-        return round(lat, 5), round(lon, 5)
-
-    matches = list(_TEXT_POS_RE.finditer(text))
-    compact = False
-    if not matches:
-        matches = list(_TEXT_POS_COMPACT_RE.finditer(text))
-        compact = True
-    if len(matches) != 1:      # 0 = אין התאמה; 2+ = שרשרת (מסלול) — לא ניחוש איזו נכונה
-        return None
-    return _parse(matches[0].groups(), compact=compact)
-
-
-def _ddmmf(deg, mmf):
-    """מעלות + דקות-עם-עשרון-מחובר (MMf: 3 ספרות — דקות (2) + עשרון (1),
-    006 = 00.6', 539 = 53.9') => מעלות עשרוניות. משותף ל-/.POS/ ול-label 15."""
-    m = int(mmf)
-    return int(deg) + (m // 10 + (m % 10) / 10) / 60
-
-
-def _parse_pos_report(text):
-    """מחלץ נ\"צ + waypoint + ETA מהודעת /.POS/ (תגובה ל-REQPOS מהקרקע).
-    מחזיר (lat, lon, decoded_str) או None.
-    אמין גם עם acarsdec error כי הפורמט מבני — אין heuristic על טקסט חופשי."""
-    if not text or "/.POS/" not in text:
-        return None
-    m = _POS_REPORT_RE.search(text)
-    if not m:
-        return None
-    ns, la_d, la_mf, ew, lo_d, lo_mf, wpt, eta, alt = m.groups()
-    try:
-        lat, lon = _ddmmf(la_d, la_mf), _ddmmf(lo_d, lo_mf)
-    except (ValueError, TypeError):
-        return None
-    if ns == "S":
-        lat = -lat
-    if ew == "W":
-        lon = -lon
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
-        return None
-    parts = [f"WPT {wpt}"]
-    if eta and len(eta) == 6:
-        parts.append(f"ETA {eta[:2]}:{eta[2:4]}z")
-    if alt:
-        parts.append(alt)
-    return round(lat, 5), round(lon, 5), " · ".join(parts)
-
-
-# מזהה-סוג פנימי של libacars (למשל "adsc_msg", "basic_report") — snake_case נקי,
-# לא טקסט אנושי. נצפה בקליטה אמיתית: "decoded" הציג "adsc_msg" כאילו זה תוכן
-# ההודעה, כי המפתח (msg_type) תואם ל-"msg" והערך הוא תג-סוג ולא תוכן.
-_LIBACARS_TAG_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-
-
-def _libacars_decode(obj):
-    """(kind, text, decode_failed) ממבנה libacars: kind ל-badge ('CPDLC'/'ADS-C'/
-    'ARINC-622'), טקסט קצר קריא (CPDLC clearance וכו') אם נמצא, ו-decode_failed
-    (bool) — האם *המפענח עצמו* (inmarsat-sniffer/libacars) ניסה לפענח את היישום
-    המקונן (CPDLC/ADS-C) והחזיר `err:true`, למרות שמעטפת ה-ACARS החיצונית עברה
-    CRC בהצלחה. אומת מקליטת שדה אמיתית: הודעת CPDLC עם `crc_ok:true` ברמת
-    המעטפת אבל `"cpdlc":{"err":true}` בפנים — כלומר יש הבדל אמיתי בין "לא ניסינו
-    לפענח" (libacars ריק/חסר) ל"ניסינו, ונכשל" (איתות שולי מדי לתוכן, לרוב
-    ב-CPDLC/ADS-C בקליטה ראשונה עם נעילה גבולית). §12: לא ממציאים טקסט-פענוח,
-    אבל *כן* חושפים את העובדה שהניסיון נכשל — זה מידע אמיתי שקיים במבנה,
-    לא ניחוש. הגנתי לשינויי סכמה."""
-    blob = json.dumps(obj, ensure_ascii=False).lower()
-    kind = ("CPDLC" if "cpdlc" in blob
-            else "ADS-C" if ("adsc" in blob or "ads-c" in blob)
-            else "ARINC-622")
-    texts = []
-    failed = [False]
-
-    def walk(o):
-        if isinstance(o, dict):
-            for k, v in o.items():
-                if str(k).lower() == "err" and v is True:
-                    failed[0] = True
-                if (isinstance(v, str) and len(v.strip()) > 3
-                        and any(t in str(k).lower() for t in ("text", "msg", "message"))
-                        and not _LIBACARS_TAG_RE.match(v.strip())):
-                    texts.append(v.strip())
-                else:
-                    walk(v)
-        elif isinstance(o, list):
-            for v in o:
-                walk(v)
-
-    walk(obj)
-    text = " · ".join(dict.fromkeys(texts))[:300] or None   # dedup בשמירת סדר
-    return kind, text, failed[0]
-
-
-# --- re-decode של ARINC-622 בכיוון הנכון (libacars CLI) ---------------------
-# ⚠ הרקע (קליטת SATCOM 14.08.2026, 12 CPDLC + 11 ADS-C, *כולן* uplink): מעטפות
-# ה-ARINC-622 היו תקינות (crc_ok=true במעטפת הפנימית) אבל רוב ההודעות הוצגו
-# כ-"לא פוענח". הסיבה לא הייתה איכות קליטה אלא ש-inmarsat-sniffer פענח את
-# היישום המקונן ב*כיוון הלא-נכון*: ASN.1 PER תלוי-כיוון (FANSATCUplinkMessage
-# מול FANSATCDownlinkMessage ב-CPDLC), ומשמעות ה-tags ב-ADS-C מתהפכת לגמרי
-# (la_adsc_uplink_tag_descriptor_table מול la_adsc_downlink_tag_descriptor_table —
-# tag 7 = "Periodic contract request" ב-uplink מול "Basic report" ב-downlink).
-# ‏AIR-AM *כן* יודע את הכיוון האמיתי משכבת ה-ISU (structural_dir), ולכן אפשר
-# לפענח מחדש מקומית בכיוון הנכון. הכיוון מגיע תמיד מ-structural_dir — **אין**
-# כלל קשיח ש-AA/A6 הם GND2AIR (בקליטה הזו כן, בעתיד ייתכן downlink).
-LIBACARS_DECODER = "decode_acars_apps"     # כלי ה-CLI הרשמי של libacars (מותקן ב-4b)
-LIBACARS_DECODE_TIMEOUT = 2.0
-LIBACARS_TEXT_MAX = 600                    # תקרת טקסט, כמו ה-300 של _libacars_decode
-LIBACARS_CACHE_MAX = 128                   # ריבוי-בלוקים/שידור חוזר => אותה הודעה שוב
-
-_ARINC622_DIRECT_LABELS = {"AA", "A6"}
-_ARINC622_IMI_RE = re.compile(r"\.(AT1|CR1|CC1|DR1|ADS|DIS)\.")
-
-_libacars_cache = collections.OrderedDict()   # (label, dir, text) -> (json, text)
-_libacars_missing_logged = [False]            # אזהרת "בינארי חסר" פעם אחת, לא לכל הודעה
-
-
-def _arinc622_kind(text):
-    """מזהה את יישום ARINC-622 מתוך ה-IMI הגולמי: 'CPDLC' / 'ADS-C' / None.
-
-    ⚠ לא מניחים AA==CPDLC ו-A6==ADS-C (בדרך כלל נכון, אבל ה-IMI בטקסט הוא מקור
-    טוב יותר). משמש כשער-כניסה בלבד (בלי IMI מוכר לא מריצים subprocess) — libacars
-    עצמו נשאר מקור-האמת היחיד לתוכן המפוענח."""
-    if not isinstance(text, str):
-        return None
-    m = _ARINC622_IMI_RE.search(text)
-    if not m:
-        return None
-    imi = m.group(1)
-    if imi in ("AT1", "CR1", "CC1", "DR1"):
-        return "CPDLC"
-    if imi in ("ADS", "DIS"):
-        return "ADS-C"
-    return None
-
-
-def _run_libacars(dir_arg, label, text, as_json):
-    """מריץ decode_acars_apps פעם אחת ומחזיר stdout (str) או None. fail-safe מוחלט.
-
-    ⚠ אבטחה: msg_text הוא תוכן רשת לא-מהימן => לעולם לא shell=True, תמיד argv נפרד."""
-    env = os.environ.copy()
-    if as_json:
-        env["LA_JSON"] = "1"
-    else:
-        env.pop("LA_JSON", None)      # ירושה מהסביבה הייתה הופכת את מסלול הטקסט ל-JSON
-    try:
-        proc = subprocess.run([LIBACARS_DECODER, dir_arg, label, text],
-                              capture_output=True, text=True,
-                              timeout=LIBACARS_DECODE_TIMEOUT, env=env, check=False)
-    except FileNotFoundError:
-        if not _libacars_missing_logged[0]:      # פעם אחת, לא להציף את היומן
-            _libacars_missing_logged[0] = True
-            log.warning("libacars: %s לא נמצא; משאיר את פענוח inmarsat-sniffer",
-                        LIBACARS_DECODER)
-        return None
-    except subprocess.TimeoutExpired:
-        log.warning("libacars: timeout בפענוח %s %s", dir_arg, label)
-        return None
-    except ValueError:
-        # ‏NUL בטקסט מהרשת => "embedded null byte" מ-subprocess. בלי זה כל ההודעה
-        # נזרקה ב-listener, בניגוד ל"כשל לא מאבד הודעה" (§9).
-        return None
-    except OSError:
-        log.exception("libacars: לא ניתן להריץ decoder")
-        return None
-    if proc.returncode != 0:
-        log.warning("libacars: decoder נכשל rc=%d label=%s dir=%s: %s",
-                    proc.returncode, label, dir_arg, (proc.stderr or "").strip()[:300])
-        return None
-    return proc.stdout or ""
-
-
-def _strip_echoed_msg(stdout, text):
-    """decode_acars_apps מדפיס קודם את ההודעה הגולמית (printf("%s\\n", txt) ב-
-    examples/decode_acars_apps.c) ורק אחריה את הפענוח — מסירים את ההד."""
-    lines = (stdout or "").splitlines()
-    if lines and lines[0].strip() == (text or "").strip():
-        lines = lines[1:]
-    return "\n".join(lines)
-
-
-def _decode_libacars_app(label, text, direction):
-    """מפענח מחדש יישום ARINC-622 עם libacars בכיוון הנכון.
-
-    direction: "uplink" -> LA_MSG_DIR_GND2AIR ('u') · "downlink" -> AIR2GND ('d').
-    מחזיר (json_dict|None, text|None) — לעולם לא זורק exception.
-
-    ⚠ שתי הרצות בכוונה, כי הן משלימות (אומת מהמקור של libacars):
-      • TEXT (בלי LA_JSON) — המקור *היחיד* לטקסט האנושי. ב-ADS-C ה-JSON מכיל רק
-        מפתחות snake_case וערכים מספריים (la_json_append_int64(…,"contract_num",…)
-        ב-adsc.c) בלי שום משפט; ב-CPDLC הטקסט קיים ב-JSON אבל תחת המפתח
-        "choice_label" (la_format_CHOICE_as_json ב-asn1-format-common.c),
-        ש-_libacars_decode לא קוצר (הוא מחפש text/msg/message בלבד).
-      • JSON — המבנה שמוזרם ל-_normalize_acars, כך שכל המנגנונים הקיימים
-        (kind, decode_failed, adsc_dir_ok, _scan_latlon) ממשיכים לעבוד ללא שינוי.
-    """
-    if label not in _ARINC622_DIRECT_LABELS:
-        return None, None
-    if not isinstance(text, str) or not text.strip():
-        return None, None
-    if direction == "uplink":
-        dir_arg = "u"
-    elif direction == "downlink":
-        dir_arg = "d"
-    else:
-        return None, None            # כיוון לא ידוע => לא מנחשים כיוון ASN.1
-    if _arinc622_kind(text) is None:
-        return None, None
-
-    key = (label, direction, text)
-    hit = _libacars_cache.get(key)
-    if hit is not None:
-        _libacars_cache.move_to_end(key)
-        return hit
-
-    decoded_json = None
-    out = _run_libacars(dir_arg, label, text, as_json=True)
-    if out is not None:
-        body = _strip_echoed_msg(out, text)
-        start = body.find("{")
-        if start < 0:
-            log.warning("libacars: לא התקבל JSON עבור label=%s dir=%s", label, direction)
-        else:
-            try:
-                parsed = json.loads(body[start:])
-            except (ValueError, TypeError):
-                log.warning("libacars: JSON לא תקין עבור label=%s dir=%s", label, direction)
-            else:
-                if isinstance(parsed, dict):
-                    decoded_json = parsed
-
-    decoded_text = None
-    out = _run_libacars(dir_arg, label, text, as_json=False)
-    if out is not None:
-        body = "\n".join(ln.rstrip() for ln in _strip_echoed_msg(out, text).splitlines()
-                         if ln.strip())
-        decoded_text = body.strip()[:LIBACARS_TEXT_MAX] or None
-
-    result = (decoded_json, decoded_text)
-    _libacars_cache[key] = result
-    while len(_libacars_cache) > LIBACARS_CACHE_MAX:
-        _libacars_cache.popitem(last=False)
-    return result
-
-
-def _acars_block_dir(block_id):
-    """כיוון *מבני* מה-block ID של מסגרת ACARS (ARINC 618): ספרה 0–9 = downlink
-    (מטוס→קרקע), אות = uplink (קרקע→מטוס). זה הכלל של acarsdec עצמו (output.c:
-    ‏IS_DOWNLINK_BLK — ולכן msgno/flight נפלטים *רק* בבלוק downlink), לא heuristic.
-    None כשאין block ID, או כשהתו אינו ספרה/אות לטינית (פריים פגום — לא מנחשים)."""
-    if not isinstance(block_id, str) or len(block_id) != 1:
-        return None
-    if "0" <= block_id <= "9":
-        return "downlink"
-    if "A" <= block_id <= "Z" or "a" <= block_id <= "z":
-        return "uplink"
-    return None
-
-
-def _acars_direction(label, text):
-    """heuristic שמרני לכיוון ההודעה כשאין block ID (ר' _acars_block_dir): 'uplink'
-    (קרקע→מטוס) / 'downlink' (מטוס→קרקע) / None. label מוכר קודם, אחרת header ניתוב
-    בטקסט => uplink. None כשלא חד-משמעי (לא מנחשים)."""
-    d = _ACARS_DIR_BY_LABEL.get(label)
-    if d:
-        return d
-    if isinstance(text, str) and _UPLINK_HEADER_RE.match(text.lstrip()):
-        return "uplink"
-    return None
-
-
-# ⚠ רגרסיה אמיתית: הגרסה הקודמת דרשה "/" בין כיוון למהירות בכל מקרה, אז קבוצת
-# רוח בתקן METAR הרגיל (dddssKT/dddssGggKT מחוברים, בלי "/" — הפורמט הנפוץ
-# ביותר בפועל) לא נתפסה בכלל. גם הענף השני (WIND ddd/ss) לא לכד יחידה/משב
-# (gust). שלושה ענפים: (1) תקן METAR מחובר, כולל gust אופציונלי; (2) ddd/ssKT
-# בלי prefix "WIND" (פורמט שכבר נצפה); (3) "WIND ddd/ss" מילולי, עכשיו כולל
-# gust ויחידה אופציונליים במקום לזרוק אותם.
-_ATIS_WIND_RE = re.compile(
-    r"\b(?P<d1>\d{3})(?P<s1>\d{2,3})(?P<g1>G\d{2,3})?KT\b"
-    r"|(?P<d2>\d{3})/(?P<sk2>\d{2,3}KT)"
-    r"|WIND\s+(?P<d3>\d+)/(?P<s3>\d+)(?P<g3>G\d+)?(?P<u3>KT)?"
-)
-_ATIS_RWY_RE = re.compile(r"R(?:WY|/W)\s?(\d{1,2}[LRC]?)", re.IGNORECASE)
-_ATIS_QNH_RE = re.compile(r"Q(?:NH\s?)?(\d{4})")
-_ACTYPE_RE = re.compile(r"\b(B7[3-9]\d|A[23][0-9]\d|E[17][0-9]\d|CRJ\d|AT[57]\d)\b")
-# זוגות OUT/OFF/ON/IN + זמן (HHMM עם/בלי :) — \b לפני הכותרת, בלי \b אחריה כי הזמן
-# עלול להיות צמוד (OUT1420). IN לא בתחילת מילה לפני ספרה אבל הפורמטים בשטח לא מופרדים.
-_OOOI_PAIR_RE = re.compile(r"\b(OUT|OFF|ON|IN)\s?(\d{2}[:.]\d{2}|\d{4})", re.IGNORECASE)
-
-# WX (בקשות מזג אוויר): מחלץ קודי ICAO מארבע אותיות. מסנן מילות-מפתח שאינן שדות תעופה.
-# ⚠ אין לנו רשימת-אמת גלובלית של prefixes אזוריים תקינים לקוד ICAO — בלי אחת,
-# הרג'קס לבד תופס *כל* מילה אנגלית בת 4 אותיות. _WX_NON_AIRPORT הוא הגנה
-# יחידה, מטבעה חלקית; הורחב אחרי שהודגם בפועל ש-TEMP/DEWP/INFO/GATE/TIME/FUEL
-# (מונחי METAR/דוח-מצב נפוצים, לא שדות) נספרו כ"alternate" (וניפחו גם את
-# הרשימה ל-2+ קודים כשמדובר במונח בודד אמיתי) — כמו ACARS_LABELS, מתעדכן רק
-# ממקרים שהודגמו, לא ניחוש מקיף.
-_WX_ICAO_RE = re.compile(r"\b([A-Z]{4})\b")
-_WX_NON_AIRPORT = frozenset({
-    "METAR", "SPECI", "SIGMET", "PIREP", "ATIS", "CAVOK", "NOSIG", "TEMPO",
-    "BECMG", "PROB", "FROM", "TILL", "WIND", "GUST", "SHRA", "TSRA", "ACFT",
-    "ACARS", "UPDT", "REQU", "RESP",
-    "TEMP", "DEWP", "INFO", "GATE", "TIME", "FUEL", "DATA", "LAST", "NEXT",
-    "RMRK", "REMK",
-})
-_HOME_AIRPORT = "LLBG"
-
-
-def _parse_atis(text):
-    """Best-effort: מחלץ wind/runway/QNH מטקסט A9 (ATIS). מחזיר string קצר או None."""
-    if not text:
-        return None
-    parts = []
-    m = _ATIS_RWY_RE.search(text)
-    if m:
-        parts.append(f"מסלול {m.group(1)}")
-    m = _ATIS_WIND_RE.search(text)
-    if m:
-        if m.group("d1"):        # תקן METAR מחובר: dddssGggKT
-            wind = m.group("d1") + "/" + m.group("s1") + (m.group("g1") or "") + "KT"
-        elif m.group("d2"):      # ddd/ssKT בלי prefix
-            wind = m.group("d2") + "/" + m.group("sk2")
-        else:                     # WIND ddd/ss[Ggg][KT] מילולי
-            # ⚠ רגרסיה שנמצאה בסבב-בדיקה עצמאי: "or 'KT'" המציא יחידה שלא
-            # הייתה בטקסט כש-KT לא נכתב במפורש — בדיוק ההפרה ש-§12 אוסר,
-            # ושהתיקון הזה עצמו אוכף מפורשות ב-loadsheet/nav_fuel. אין KT
-            # בקלט = אין KT בפלט, בדיוק כמו כל שאר השדות כאן.
-            wind = (m.group("d3") + "/" + m.group("s3")
-                   + (m.group("g3") or "") + (m.group("u3") or ""))
-        parts.append(f"רוח {wind}")
-    m = _ATIS_QNH_RE.search(text)
-    if m:
-        parts.append(f"QNH {m.group(1)}")
-    return " · ".join(parts) if parts else None
-
-
-def _parse_oooi_80(text):
-    """Best-effort: מחלץ זמני OUT/OFF/ON/IN מהודעות OFFRP/INRP (label 80)."""
-    if not text:
-        return None
-    pairs = []
-    for m in _OOOI_PAIR_RE.finditer(text):
-        k = m.group(1).upper()
-        t = m.group(2).replace(".", "").replace(":", "")
-        if len(t) == 4:
-            t = t[:2] + ":" + t[2:]
-        pairs.append(f"{k} {t}")
-    return " · ".join(pairs) if pairs else None
-
-
-# OOOI בפורמט QP–QS: מוצא(4) + יעד(4) + HHMM, במיקומים קבועים — הפריסה של acarsdec
-# עצמו (label.c: ‏label_qp/qq/qr/qs). דוגמאות מקליטת 24.10.2026: ‏QR ‎"LFPGLLBG1136…"
-# (‏F-GSQI נחת 11:36), ‏QS ‎"LFPGLLBG1145…". השאר אחרי השעה לא מתויג (לא מנחשים).
-_OOOI_Q_EVENT = {"QP": "OUT", "QQ": "OFF", "QR": "ON", "QS": "IN"}
-_OOOI_Q_RE = re.compile(r"^([A-Z]{4})([A-Z]{4})([01]\d|2[0-3])([0-5]\d)")
-
-
-def _parse_oooi_q(label, text):
-    """OOOI של QP/QQ/QR/QS: ‏"LFPG→LLBG · ON 11:36", או None כשהטקסט לא בפורמט."""
-    ev = _OOOI_Q_EVENT.get(label)
-    m = _OOOI_Q_RE.match(text.strip()) if (ev and isinstance(text, str)) else None
-    if not m:
-        return None
-    sa, da, hh, mm = m.groups()
-    return f"{sa}→{da} · {ev} {hh}:{mm}"
-
-
-def _extract_actype(label, text):
-    """Best-effort: מחלץ סוג מטוס (למשל B738, A320) מטקסט H1/C1. מחזיר string או None."""
-    if label not in ("H1", "C1") or not text:
-        return None
-    m = _ACTYPE_RE.search(text)
-    return m.group(1) if m else None
-
-
-def _parse_wx_alternates(text):
-    """מחלץ שדות alternate מהודעת WX (בקשת METAR לשדות גיבוי).
-    שני קודי ICAO+ שאינם LLBG = תכנון alternate פעיל. מחזיר decoded קצר או None."""
-    if not text:
-        return None
-    seen: set = set()
-    codes = []
-    for c in _WX_ICAO_RE.findall(text):
-        if c in seen or c in _WX_NON_AIRPORT or c == _HOME_AIRPORT:
-            continue
-        seen.add(c)
-        codes.append(c)
-    if len(codes) >= 2:
-        return "ALTERNATE: " + " · ".join(codes)
-    if codes:
-        return f"WX: {codes[0]}"
-    return None
-
-
-# --- חבילת פענוח עמוק: SA / H1 / FPN / label 15 / SQ / autotune -------------
-# כל ה-parsers מופעלים *רק* לפי label (dispatch ב-_normalize_acars) => אין סיכון
-# false-positive בין labels; בתוך ה-label — regex מעוגן-תחילה ושמרני.
-
-# media advisory (label SA): '0' + E/L (established/lost) + אות מדיה + HHMMSS +
-# רשימת מדיות זמינות. דוגמה: 0EV093425VS = קישור VHF נוצר ב-09:34:25, זמין VHF+SATCOM.
-_SA_MEDIA = {"V": "VHF", "S": "SATCOM", "H": "HF", "G": "GlobalStar", "C": "Iridium",
-             "2": "VDL-M2", "X": "Inmarsat", "I": "Iridium", "T": "טלפוני"}
-_SA_RE = re.compile(r"^0([EL])([VSHGCX2IT])([01]\d|2[0-3])([0-5]\d)([0-5]\d)([VSHGCX2IT]*)")
-
-# H1 sub-label: '#' + מזהה מקור בן 2 תווים (#DF = מקליט, #M1 = FMC...). לא תמיד
-# ממש בתחילת הטקסט: נצפה בקליטת SATCOM אמיתית (inmarsat-sniffer) שה-'#' מגיע
-# אחרי prefix כמו "- " (‎"- #MDREQPOS037B") או אחרי שורת-הדר עם \n ("...\n- #DFREQ02")
-# — ‏^#... בלבד (בלי \s) לא תפס אף הודעת H1 אמיתית אחת בקליטה של 465 הודעות/
-# 12 H1. ‏(?:^|\s) מכסה גם את הפורמט המקורי (VHF, '#' ממש בהתחלה) וגם את זה —
-# תוספתי בלבד, לא מצמצם את מה שכבר תפס.
-_H1_SUB_RE = re.compile(r"(?:^|\s)#([A-Z][A-Z0-9])")
-_H1_SUBLABELS = {
-    "DF": "מקליט נתונים (DFDAU)", "M1": "מחשב ניהול טיסה (FMC)",
-    "M2": "FMC 2", "M3": "FMC 3", "CF": "מערכת תחזוקה (CFDS)",
-    "EC": "בקר מנוע (EEC)", "EI": "דיווח מנוע", "WO": "תצפית מז\"א",
-    "PS": "דיווח מיקום", "S1": "בקשת קרקע (S1)",
-}
-_H1_POS_RE = re.compile(r".{0,2}POS")     # POS מיד אחרי ההדר (עם block char אופציונלי)
-
-# ‎/FPN/ = תוכנית טיסה בתוך H1: ‏:DA: יציאה, ‏:AA: יעד, ‏:F: נקודות מופרדות '..'
-# (לכל נקודה עשוי להיצמד נ"צ אחרי פסיק — נחתך).
-_FPN_DA_RE = re.compile(r":DA:([A-Z]{4})")
-_FPN_AA_RE = re.compile(r":AA:([A-Z]{4})")
-_FPN_F_RE = re.compile(r":F:([A-Z0-9.,]+)")
-_FPN_MAX_WPTS = 8
-
-# דיווח מיקום קלאסי (label 15): '(2' + NS+DD+MMf + EW+DDD+MMf. אותו קידוד דקות
-# של /.POS/ (_ddmmf). דקות נאכפות [0-5]\d => כמעט בלי false positives.
-# ⚠ שדה המעלות ברוחב קבוע, והאפס המוביל יכול להגיע כ*רווח* — ובפועל זה הפורמט
-# היחיד שנקלט: שלוש הודעות ה-‎"(2…" האמיתיות בייצוא (‏T7AVI ×2 אחרי ההמראה מנתב"ג
-# ב-24.10.2026, ‏MSSML ב-11.07) הן ‎"E 34499…", ו-‎\d{3} דחה את כולן (lat=null).
-# ‏int(" 34") = 34, ולכן _ddmmf לא משתנה. בחלופה המרופדת הדקות חייבות להסתיים לפני
-# ספרה נוספת — אחרת ‎"E 034499" (רווח *וגם* אפס) היה נקרא כ-‎" 03"+‎"449".
-_L15_RE = re.compile(r"^\(2([NS])( \d|\d{2})([0-5]\d\d)([EW])"
-                     r"(\d{3}|(?:  \d| \d{2})(?=[0-5]\d\d(?!\d)))([0-5]\d\d)")
-
-# squitter תחנת קרקע (label SQ): '0' + version + 2 אותיות + IATA(3) + ICAO(4) +
-# נ"צ התחנה + אות מדיה + תדר kHz + '/'. דוגמה: 02XSTLVLLBG03200N03452EV136975/
-_SQ_RE = re.compile(r"^0\d[A-Z]{2}([A-Z]{3})([A-Z]{4})")
-_SQ_FREQ_RE = re.compile(r"[A-Z](\d{6})/")
-
-# autotune (label ':;'): הוראת קרקע למקלט לעבור תדר — 6 ספרות kHz בתחום ה-air band.
-_AUTOTUNE_RE = re.compile(r"\b(1[23]\d{4})\b")
-
-
-def _parse_sa_media(text):
-    """media advisory (SA): איזה קישור נוצר/אבד, מתי, ואילו מדיות זמינות.
-    פורמט שדות-תו-בודד מעוגן. מחזיר string קצר או None."""
-    if not text:
-        return None
-    m = _SA_RE.match(text.strip())
-    if not m:
-        return None
-    ev, media, hh, mm, ss, avail = m.groups()
-    parts = [f"קישור {_SA_MEDIA.get(media, media)} " + ("נוצר" if ev == "E" else "אבד"),
-             f"{hh}:{mm}:{ss}z"]
-    if avail:
-        names = [_SA_MEDIA.get(c, c) for c in dict.fromkeys(avail)]   # dedup בשמירת סדר
-        parts.append("זמין: " + "·".join(names))
-    return " · ".join(parts)
-
-
-def _parse_fpn(text):
-    """‎/FPN/ (תוכנית טיסה ב-H1): יציאה→יעד + רשימת waypoints. מחזיר string או None.
-    ⚠ VHF: "/FPN/" (עם קו נטוי משני הצדדים). SATCOM אמיתי (inmarsat-sniffer):
-    ה-'/' הפותח נבלע ע"י ה-sub-label עצמו (‎"#M3FPN/RP:DA:..." — FPN מודבק
-    ישירות ל-M3, בלי '/' לפניו) — "FPN/" בלי הקו הנטוי הפותח הוא נפילה
-    תוספתית, לא מחליפה את "/FPN/" (שנבדק ראשון, מדויק יותר)."""
-    idx = text.find("/FPN/")
-    if idx < 0:
-        idx = text.find("FPN/")
-    if idx < 0:
-        return None
-    seg = text[idx:]
-    parts = []
-    da, aa = _FPN_DA_RE.search(seg), _FPN_AA_RE.search(seg)
-    if da and aa:
-        parts.append(f"{da.group(1)}→{aa.group(1)}")
-    elif aa:
-        parts.append(f"יעד {aa.group(1)}")
-    m = _FPN_F_RE.search(seg)
-    if m:
-        wpts = []
-        for tok in m.group(1).split(".."):
-            name = tok.split(",")[0].strip()          # חיתוך נ"צ צמוד (PURLA,N32016...)
-            if 2 <= len(name) <= 8 and name[0].isalpha():
-                wpts.append(name)
-        if wpts:
-            shown = " ".join(wpts[:_FPN_MAX_WPTS])
-            if len(wpts) > _FPN_MAX_WPTS:
-                shown += f" (+{len(wpts) - _FPN_MAX_WPTS})"
-            parts.append(shown)
-    return "תוכנית טיסה " + " · ".join(parts) if parts else None
-
-
-def _parse_h1(text):
-    """H1: זיהוי מקור ההודעה לפי sub-label (#DF/#M1/...) + פענוח /FPN/ אם קיים.
-    מחזיר string קצר או None (H1 בלי הדר '#' => אין מה להסיק, לא מנחשים).
-    ‏search (לא match): ה-'#' לא תמיד ממש בתחילת הטקסט (ר' _H1_SUB_RE)."""
-    if not text:
-        return None
-    text = text.lstrip()
-    parts = []
-    m = _H1_SUB_RE.search(text)
-    if m:
-        sub = m.group(1)
-        desc = _H1_SUBLABELS.get(sub)
-        if desc is None and sub[0] == "T" and sub[1].isdigit():
-            desc = "מסוף תא (cabin terminal)"
-        if desc:
-            parts.append(desc)
-        if _H1_POS_RE.match(text[m.end():]):
-            parts.append("דיווח מיקום")
-    fpn = _parse_fpn(text)
-    if fpn:
-        parts.append(fpn)
-    return " · ".join(parts) if parts else None
-
-
-def _parse_label15(text):
-    """נ\"צ מדיווח מיקום קלאסי (label 15). פורמט מעוגן-מבני (כמו /.POS/) =>
-    אמין גם עם error>0. מחזיר (lat, lon) או None."""
-    if not text:
-        return None
-    m = _L15_RE.match(text.lstrip())
-    if not m:
-        return None
-    ns, la_d, la_mf, ew, lo_d, lo_mf = m.groups()
-    lat, lon = _ddmmf(la_d, la_mf), _ddmmf(lo_d, lo_mf)
-    if ns == "S":
-        lat = -lat
-    if ew == "W":
-        lon = -lon
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
-        return None
-    return round(lat, 5), round(lon, 5)
-
-
-def _parse_sq(text):
-    """squitter תחנת קרקע (SQ): מזהה תחנה (IATA+ICAO) ותדר. *בלי* חילוץ נ"צ —
-    ה-DDMM בהודעה הוא מיקום התחנה, לא המטוס (לקח 1.7.1)."""
-    if not text:
-        return None
-    m = _SQ_RE.match(text.strip())
-    if not m:
-        return None
-    iata, icao = m.groups()
-    parts = [f"תחנת קרקע {iata} ({icao})"]
-    fm = _SQ_FREQ_RE.search(text)
-    if fm:
-        khz = int(fm.group(1))
-        if 118000 <= khz <= 137000:
-            parts.append(f"{khz / 1000:.3f}MHz")
-    return " · ".join(parts)
-
-
-def _parse_autotune(text):
-    """label ':;' — הוראת קרקע למקלט ה-ACARS לעבור תדר (kHz בטקסט)."""
-    if not text:
-        return None
-    m = _AUTOTUNE_RE.search(text)
-    if not m:
-        return None
-    khz = int(m.group(1))
-    if not (118000 <= khz <= 137000):
-        return None
-    return f"כוונון אוטומטי ל-{khz / 1000:.3f}MHz"
-
-
-# --- פרסרים נוספים שנבנו מקליטה אמיתית (labels C1/16/1L/A3, לא מתועדים ב-ARINC) --
-
-# Loadsheet אלקטרוני (label C1): מגיע בבלוקים נפרדים (multi-block, msgno D57A/B/C...) —
-# כל בלוק מחלץ מה שיש בו; \b לפני הקיצור מונע התאמה בתוך "MACZFW"/"LIZFW"/"MACTOW".
-# ⚠ רגרסיה אמיתית שתוקנה: (1) \d+ בלבד קטע משקלים עשרוניים (חלק מה-loadsheets
-# מדווחים ב-XX.X); (2) "kg" הודבק בכוח בקוד הישן למרות שהטקסט האמיתי (ר'
-# test_parse_loadsheet_real_capture) לא נושא שום יחידה בכלל — carrier אמריקאי
-# שמדווח ב-LB היה מקבל תווית "kg" שגויה. עכשיו קולטים יחידה אופציונלית מהטקסט
-# עצמו (KG/LB/LBS) ומציגים אותה *רק* כשהיא באמת שם — בלי יחידה בקלט = בלי
-# יחידה בפלט (§12). ⚠ רגרסיה שנמצאה בסבב-בדיקה עצמאי: \b *מחוץ* לקבוצת
-# היחידה (כלומר על השרשרת כולה) נכשל כשמספר מוצמד-בלי-רווח לסיומת לא-מוכרת
-# ("62000KGS"/"62000K") — הקבוצה נסוגה לריקה, אבל ה-\b הסוגר עדיין נבדק מול
-# התו הבא (עדיין אות), אז כל ההתאמה נכשלת ו-ZFW/TOW/TOF שלמים אבדו (בעוד
-# הקוד הישן, בלי יחידה בכלל, כן היה תופס את המספר). ה-\b עבר *לתוך* קבוצת
-# היחידה (מותנה בה בלבד) כדי שסיומת לא-מוכרת רק תדיר את היחידה, לא את המספר.
-_LOADSHEET_UNIT = r"(\d+(?:\.\d+)?)(?:\s*(KG|LBS?)\b)?"
-_LOADSHEET_ZFW_RE = re.compile(r"\bZFW\s+" + _LOADSHEET_UNIT)
-_LOADSHEET_TOW_RE = re.compile(r"\bTOW\s+" + _LOADSHEET_UNIT)
-_LOADSHEET_TOF_RE = re.compile(r"\bTOF\s+" + _LOADSHEET_UNIT)
-_LOADSHEET_PAX_RE = re.compile(r"\bCREW\s+(\d+)/(\d+)\s+PAX\s+(\d+)")
-_LOADSHEET_TTL_RE = re.compile(r"\bTTL\s+(\d+)")
-
-
-def _parse_loadsheet(text):
-    """Loadsheet אלקטרוני (label C1, 'LOADSHEET FINAL'): משקל המראה (ZFW/TOW/TOF)
-    ונוסעים/צוות. best-effort — כל בלוק מציג רק את מה שהוא נושא."""
-    if not text or "LOADSHEET" not in text:
-        return None
-    parts = []
-    for name, rx in (("ZFW", _LOADSHEET_ZFW_RE), ("TOW", _LOADSHEET_TOW_RE),
-                     ("TOF", _LOADSHEET_TOF_RE)):
-        m = rx.search(text)
-        if m:
-            parts.append(f"{name} {m.group(1)}{m.group(2) or ''}")
-    m = _LOADSHEET_PAX_RE.search(text)
-    if m:
-        parts.append(f"נוסעים {m.group(3)} · צוות {m.group(1)}/{m.group(2)}")
-    m = _LOADSHEET_TTL_RE.search(text)
-    if m:
-        parts.append(f'סה"כ {m.group(1)}')
-    return " · ".join(parts) if parts else None
-
-
-# דיווח מיקום עשרוני (label 16, לא מתועד רשמית ב-ARINC 620): נצפה בקליטה אמיתית —
-# 'WPT ,N dd.ddd,E ddd.ddd,ALT,...\TS hhmmss,ddmmyy'. שדות באמצע (בין alt ל-\TS)
-# לא ברורים דיים כדי לתייג (לא מנחשים) — מחלצים רק waypoint+נ"צ+גובה.
-_L16_RE = re.compile(
-    r"^([A-Z0-9\-]{2,8})\s*,([NS])\s*([\d.]+),([EW])\s*([\d.]+),(\d{4,5})")
-# וריאנט מופרד-'/' בלי waypoint (קליטת 24.10.2026, ‏TC-LCO/TK647):
-# ‎'/N 30.796/E 31.504/38000/2410/1124/06312/1313/' — אותם נ"צ עשרוני + גובה בראש.
-# השדות שאחרי הגובה לא מתויגים (מדגם יחיד — לא מנחשים).
-_L16_SLASH_RE = re.compile(r"^/([NS])\s*(\d{1,2}\.\d+)/([EW])\s*(\d{1,3}\.\d+)/(\d{3,5})/")
-
-
-def _parse_label16(text):
-    """label 16: נ"צ עשרוני + גובה (שני וריאנטים — ר' למעלה). פחות נוקשה-פורמט
-    מ-/.POS//label15 (שדות באורך משתנה) => לא נחלץ עם error (בניגוד לפורמטים
-    המבניים ה-DDMM)."""
-    if not text:
-        return None
-    m = _L16_RE.match(text.strip())
-    if m:
-        wpt, ns, la, ew, lo, alt = m.groups()
-        prefix = f"WPT {wpt.strip()} · "
-    else:
-        m = _L16_SLASH_RE.match(text.strip())
-        if not m:
-            return None
-        ns, la, ew, lo, alt = m.groups()
-        prefix = ""
-    try:
-        lat, lon = float(la), float(lo)
-    except ValueError:
-        return None
-    if ns == "S":
-        lat = -lat
-    if ew == "W":
-        lon = -lon
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
-        return None
-    return round(lat, 5), round(lon, 5), f"{prefix}{int(alt)}ft"
-
-
-# דיווח מיקום בפורמט POS/CAS/LAT/LON (label 11, קליטת 24.10.2026, ‏B-5930/MU224):
-# ‎'POS\nCAS 280,LAT N 32.424,LON E 31.721,ALT 34008,FOB 147000,UTC 111500,PD ----.--,…'
-# פורמט חברה ולא ARINC — acarsdec עצמו מפרש label 11 בפורמט אחר לגמרי (‏"/DS …/ETA",
-# label.c), ולכן העוגן הוא התבנית המלאה, לא ה-label לבדו. שישה שדות בשמם ובסדר קבוע
-# => מבני כמו 1L (נחלץ גם עם error). אומת על שתי ההודעות של אותה טיסה: זו עם error=1
-# (‏11:15:00z) וזו שבלי (‏11:31:01z) רחוקות 221 ק"מ ב-16 דק' — ‏~447kt, עקבי עם CAS 280
-# ב-FL340. ‏WD/WS/TAT/PD לא מתויגים (לא מנחשים), ו-FOB בלי יחידה — הטקסט לא נושא אחת.
-_L11_POS_RE = re.compile(
-    r"^POS\s+CAS\s*(\d{2,3}),LAT\s*([NS])\s*(\d{1,2}\.\d+),LON\s*([EW])\s*(\d{1,3}\.\d+),"
-    r"ALT\s*(\d{3,5}),FOB\s*(\d+),UTC\s*([01]\d|2[0-3])([0-5]\d)([0-5]\d)")
-
-
-def _parse_label11_pos(text):
-    """label 11 בפורמט POS/CAS/LAT/LON: ‏(lat, lon, decoded) או None."""
-    if not text:
-        return None
-    m = _L11_POS_RE.match(text.strip())
-    if not m:
-        return None
-    cas, ns, la, ew, lo, alt, fob, hh, mm, ss = m.groups()
-    lat, lon = float(la), float(lo)
-    if ns == "S":
-        lat = -lat
-    if ew == "W":
-        lon = -lon
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
-        return None
-    decoded = f"UTC {hh}:{mm}:{ss}z · דלק {fob} · {int(alt)}ft · CAS {cas}kt"
-    return round(lat, 5), round(lon, 5), decoded
-
-
-# דוח ניווט/דלק (label 1L, לא מתועד רשמית): נ"צ עשרוני + UTC/דלק/גובה/מהירות/ETA.
-# עוגן ארוך וספציפי (7 שדות ברצף קבוע) => מבני מספיק לחילוץ גם עם error, כמו /.POS/.
-_NAV_FUEL_RE = re.compile(
-    r"\bN\s*([\d.]+)/E\s*([\d.]+)/UTC\s*(\d{4})/FOB\s+([\d.]+)/"
-    r"ALT\s+(\d+)/CAS\s+([\d.]+)/ETA\s+(\d{4})")
-
-
-def _parse_nav_fuel(text):
-    """label 1L: נ"צ עשרוני + UTC/דלק(טון)/גובה/מהירות/ETA. מדגם מצומצם בקליטה
-    שלנו — לא כל הודעות 1L תואמות (יש גם וריאנט קצר בלי נ"צ, שנופל ל-None כאן)."""
-    if not text:
-        return None
-    m = _NAV_FUEL_RE.search(text)
-    if not m:
-        return None
-    la, lo, utc, fob, alt, cas, eta = m.groups()
-    try:
-        lat, lon = float(la), float(lo)
-    except ValueError:
-        return None
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
-        return None
-    # ⚠ רגרסיה אמיתית: "t" (טונות) הודבק בעבר בכוח על FOB למרות שהטקסט לא נושא
-    # שום יחידה עבורו (בניגוד ל-ALT/CAS, ששם ft/kt הן מוסכמות תעופה אוניברסליות
-    # כמעט-בלי-חלופה — לא כך דלק, שיכול להיות מדווח ב-kg/lb/t לפי חברה/מטוס).
-    # §12: לא ממציאים יחידה שלא הייתה בקלט.
-    decoded = (f"UTC {utc[:2]}:{utc[2:]}z · דלק {fob} · {alt}ft · "
-               f"CAS {cas}kt · ETA {eta[:2]}:{eta[2:]}z")
-    return round(lat, 5), round(lon, 5), decoded
-
-
-# PDC — Pre-Departure Clearance (label A3): אישור טרום-המראה מלא בטקסט חופשי.
-# מילות-המפתח (CLRD TO/OFF/VIA/SQUAWK/NEXT FREQ/CLIMB INIT ALT) הן סטנדרט תעשייתי
-# (FAA/EUROCONTROL DCL) ולא ספציפיות לחברה — אך מדגם יחיד בקליטה שלנו, best-effort.
-_PDC_DEST_RE = re.compile(r"\bCLRD TO ([A-Z]{4})\b")
-_PDC_RWY_RE = re.compile(r"\bOFF (\d{1,2}[LRC]?)\b")
-_PDC_SID_RE = re.compile(r"\bVIA ([A-Z0-9]{2,8})\b")
-_PDC_SQUAWK_RE = re.compile(r"\bSQUAWK (\d{4})\b")
-_PDC_FREQ_RE = re.compile(r"\bNEXT FREQ ([\d.]+)")
-_PDC_CLIMB_RE = re.compile(r"\bCLIMB INIT ALT (\d+)")
-
-
-def _parse_pdc(text, title="אישור טרום-המראה"):
-    """PDC (label A3): יעד/מסלול-המראה/SID/סקוואק/תדר הבא/גובה טיפוס ראשוני —
-    כל שדה אופציונלי, מוצגים רק אלה שנמצאו. משמש גם את B4 (הקריאה-החוזרת של
-    המטוס מצטטת את אותו אישור) — עם title אחר, כדי לא להציג downlink כאישור מהקרקע."""
-    if not text:
-        return None
-    parts = []
-    m = _PDC_DEST_RE.search(text)
-    if m:
-        parts.append(f"ל-{m.group(1)}")
-    m = _PDC_RWY_RE.search(text)
-    if m:
-        parts.append(f"המראה {m.group(1)}")
-    m = _PDC_SID_RE.search(text)
-    if m:
-        parts.append(f"SID {m.group(1)}")
-    m = _PDC_SQUAWK_RE.search(text)
-    if m:
-        parts.append(f"Squawk {m.group(1)}")
-    m = _PDC_FREQ_RE.search(text)
-    if m:
-        parts.append(f"תדר הבא {m.group(1)}")
-    m = _PDC_CLIMB_RE.search(text)
-    if m:
-        parts.append(f"טפס ל-{m.group(1)}ft")
-    return f"{title}: " + " · ".join(parts) if parts else None
-
-
-_INTEREST_LABELS = {"A3", "C1", "15", "16", "1L"}   # labels שידועים כבעלי תוכן עשיר (PDC/loadsheet/מיקום/ניווט)
-# ניהול קישור: גם כשיש להן decoded (‏SQ: תחנה+תדר; ‏SA: מצב מדיה) זו תעבורה תפעולית
-# חוזרת, לא תוכן. בקליטת 24.10.2026 ‏SQ+SA היו 138 מתוך 160 ההודעות שסומנו "מעניינת"
-# (‏86%) — והציפו את דוח הסשן ואת ההתראות.
-_LINK_MGMT_LABELS = {"SQ", "SA", "Q0", "_d", "5V"}
-
-
-def _interest_score(rec):
-    """'מעניינת' = שווה תשומת לב מעבר לרעש התפעולי (ACK ריקים/link test/squitter
-    חוזרים) — לא ציון מספרי מומצא, קריטריונים בינאריים מתוך שדות שכבר קיימים
-    בכרטיס המנורמל (ר' docs/field-station-roadmap.md, §1 "האנליסט"). כל אחד
-    מהם לבדו מספיק: קטגוריה לא-גנרית (לא comm/text), יש טקסט מפוענח, מיקום
-    מ-ADS-C (איכות המיקום הגבוהה ביותר), או label שידוע כבעל תוכן עשיר."""
-    if rec.get("group") not in (None, "comm", "text"):
-        return True
-    if rec.get("decoded") and rec.get("label") not in _LINK_MGMT_LABELS:
-        return True
-    if rec.get("pos_src") == "adsc":
-        return True
-    if rec.get("label") in _INTEREST_LABELS:
-        return True
-    return False
-
-
-def _find_key(obj, key):
-    """הערך הראשון (חיפוש לעומק) של מפתח בשם key בעץ JSON, או None."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if str(k).lower() == key:
-                return v
-            r = _find_key(v, key)
-            if r is not None:
-                return r
-    elif isinstance(obj, list):
-        for v in obj:
-            r = _find_key(v, key)
-            if r is not None:
-                return r
-    return None
-
-
-def _adsc_details(obj):
-    """פרטי ה-Basic report של ADS-C מתוך JSON של libacars, או None. המפתחות אומתו
-    מ-libacars/adsc.c: ‏basic_report = lat/lon/alt/ts_sec/pos_accuracy_nm/
-    nav_redundancy/tcas_avail; ‏earth_ref_data = true_trk_deg/gnd_spd_kts/vspd_ftmin.
-    ‏ts_sec = "שניות מתחילת השעה" (רזולוציה 0.125ש') — הזמן שבו המיקום *נמדד*
-    במטוס, שונה מזמן הקליטה. ‏pos_accuracy_nm: ‏-1.0 = "אין יכולת ניווט" (קוד 0)."""
-    br = _find_key(obj, "basic_report")
-    if not isinstance(br, dict):
-        return None
-
-    def num(d, k):
-        v = d.get(k) if isinstance(d, dict) else None
-        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
-
-    out = {"alt_ft": num(br, "alt"), "ts_sec": num(br, "ts_sec"),
-           "accuracy_nm": num(br, "pos_accuracy_nm"),
-           "nav_redundancy": br.get("nav_redundancy") if isinstance(br.get("nav_redundancy"), bool) else None,
-           "tcas_avail": br.get("tcas_avail") if isinstance(br.get("tcas_avail"), bool) else None}
-    er = _find_key(obj, "earth_ref_data")
-    if isinstance(er, dict):
-        out["true_trk_deg"] = num(er, "true_trk_deg") if er.get("true_trk_valid", True) else None
-        out["gnd_spd_kts"] = num(er, "gnd_spd_kts")
-        out["vspd_ftmin"] = num(er, "vspd_ftmin")
-    return out
-
-
-def _clean_ident(v):
-    """tail/flight עם תו בקרה (‎< 0x20 או DEL) => None. ‏ACARS הוא 7-bit ותו כזה לא
-    יכול להיות חלק מרישום/טיסה — זה פריים שתוקן חלקית: בקליטת 24.10.2026 ‎'4L-B\\x01T'
-    (‏error=3, המקסימום ש-acarsdec מתקן) יצר מטוס מזויף ברוסטר לצד ‏4L-GIT האמיתי.
-    לא "מנקים" את התו (‎'4L-BT' היה רישום מומצא) — הזהות פשוט לא ידועה; הטקסט נשמר."""
-    if isinstance(v, str) and any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in v):
-        return None
-    return v
-
-
-def _normalize_acars(m):
-    """מצמצם הודעת acarsdec JSON לשדות שה-UI מציג, בפורמט *אחיד* לכל סוגי ההודעות:
-    קטגוריה קריאה (label => תיאור), קבוצה (לצבע), ומיקום (lat/lon) כשזמין. עמיד
-    לשדות חסרים (הרבה הודעות ACARS הן ACK ריק בלי tail/flight/text).
-    מדדי איכות קליטה: "level" (dBFS) מגיע ישירות מהמפענח — נשמר כמות שהוא, בלי
-    עיבוד. "snr" מחושב רק כש-"noise" (רצפת רעש) קיים בקלט — acarsdec עצמו *לא*
-    מספק רצפת רעש לכל הודעה (בניגוד ל-dumpvdl2), אז בהודעות ACARS אמיתיות snr
-    יהיה None תמיד; רק VDL2 (מסלול A, שמזרים raw דרך הפונקציה הזו) מזין "noise"
-    ומקבל SNR אמיתי. לעולם לא מעריכים ערך משוער — אם אין נתון אמין, השדה חסר."""
-    def g(*keys):
-        for k in keys:
-            v = m.get(k)
-            if v not in (None, ""):
-                return v
-        return None
-
-    level = g("level")
-    noise = g("noise")
-    snr = round(level - noise, 1) if (level is not None and noise is not None) else None
-
-    text = g("text")
-    if isinstance(text, str):
-        text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-
-    label = g("label")
-    desc, group = ACARS_LABELS.get(label, (None, "text")) if label else (None, "comm")
-    category = desc or (f"Label {label}" if label else "הודעה")
-
-    # תג-tail שנראה כמו כתובת תחנת-קרקע (‎.TCARC/‎.CNTMM וכו', אותו דפוס בדיוק
-    # כמו _UPLINK_HEADER_RE שכבר משמש לזיהוי הדר-ניתוב בטקסט) לא יכול לקבל
-    # מיקום מ-heuristic טקסטואלי: תחנת קרקע לא "טסה", וכל נ"צ שיימצא בהודעה
-    # שלה (למשל בתוך תוכן שהיא משדרת/מעבירה) הוא לא מיקומה. מגביל *רק* את
-    # הנתיבים ה-heuristic (text_latlon/label16) — הנתיבים המבניים (/.POS/,
-    # label15, ADS-C) לא רלוונטיים לתחנת-קרקע מלכתחילה (אלה פורמטים שרק
-    # מטוס-בפועל משדר), אז אין צורך לגדר אותם.
-    # ⚠ רגרסיה אמיתית: acarsdec מרפד גם רישומי מטוס קצרים בנקודה מובילה עד
-    # לאורך קבוע (ר' adsb.norm_reg: ‎'.4X-EHD') — אותו דפוס *בדיוק* כמו כתובת
-    # תחנת-קרקע. בלי הגבלה נוספת, _UPLINK_HEADER_RE לבד תפס גם רישומים אמיתיים
-    # שמתחילים באות ומרופדים בנקודה (למשל ‎.N806NN האמריקאי, ‎.JA801A היפני,
-    # ‎.HL7783 הקוריאני) ודיכא את מיקומם האמיתי — 4X-/C-/G- לא נפגעו כי המקף
-    # שבהם שובר את הרצף התווי הנדרש ע"י הרג'קס (ר' ‎.4X-EHD/‎.C-GHKX למטה),
-    # ולכן זה לא נתפס בקליטה המקומית. ההבחנה שכן שורדת: כתובות תחנת-קרקע
-    # שנצפו בפועל (‎.TCARC/‎.CNTMM) הן אותיות בלבד בלי ספרה, בעוד שרישומי מטוס
-    # אמיתיים כמעט תמיד מכילים ספרה — לכן ספרה כלשהי בתג פוסלת את הסיווג
-    # כתחנת-קרקע, גם אם הצורה הכללית תואמת את הרג'קס.
-    tail_val = _clean_ident(g("tail", "registration"))
-    tail_is_station = (bool(tail_val) and bool(_UPLINK_HEADER_RE.match(str(tail_val)))
-                       and not any(ch.isdigit() for ch in str(tail_val)))
-
-    # פענוח ARINC-622 (libacars): kind => badge וקבוצה, וטקסט קריא אם יש.
-    lat = lon = pos_src = decoded = adsc_info = None
-    libacars = m.get("libacars")
-    if libacars:
-        kind, dtext, decode_failed = _libacars_decode(libacars)
-        category = kind
-        # ⚠ עדיפות ה-decoded: (1) טקסט אנושי מ-re-decode מקומי בכיוון הנכון
-        # (_libacars_text, ר' _decode_libacars_app) — הוא היחיד שמפיק משפטים
-        # קריאים כמו "CONFIRM ASSIGNED ROUTE"; ה-JSON שממנו חושב kind/decode_failed
-        # למעלה לא מכיל אותם (ADS-C: רק מפתחות מספריים; CPDLC: תחת "choice_label"
-        # ש-_libacars_decode לא קוצר). (2) dtext — מה ש-_libacars_decode עצמו כבר
-        # חילץ מה-JSON (בעיקר למקרים שאין בהם re-decode, כמו arinc622 גנרי).
-        # (3) הודעת-כישלון מפורשת, רק אם decode_failed. "לא ניסינו" ≠ "ניסינו
-        # ונכשלנו" — לא ממציאים תוכן, אבל *כן* אומרים למשתמש שהיה ניסיון.
-        lib_text = m.get("_libacars_text")
-        decoded = lib_text or dtext or (
-            "לא פוענח — libacars החזיר שגיאת פענוח; הטקסט הגולמי נשמר"
-            if decode_failed else None)
-        # ⚠ "position" רק כשיהיה בפועל lat/lon (ר' ההערה למטה) — אחרת כרטיס
-        # ADS-C-שנכשל-פענוח היה מסונן תחת "📍 מיקום" ב-UI בלי שום מיקום אמיתי.
-        # CPDLC נשאר "clearance" גם בלי decoded — סוג ההודעה ידוע מהמעטפת עצמה,
-        # רק התוכן נכשל (בניגוד למיקום, שם "position" *הוא* טענת-תוכן).
-        # ⚠ ADS-C: אותו tag מספרי פירושו *הפוך* לגמרי לפי כיוון ההודעה (מאומת
-        # ישירות מ-libacars/adsc.c במקור: la_adsc_uplink_tag_descriptor_table
-        # מול la_adsc_downlink_tag_descriptor_table — tag 7 = "Periodic contract
-        # request" ב-uplink (קרקע→מטוס, בקשה — *אין* בה מיקום מטוס) מול "Basic
-        # report" ב-downlink (מטוס→קרקע, דיווח מיקום אמיתי). אם המפענח (או
-        # קריאה שגויה אליו) יישם את טבלת-הכיוון הלא-נכונה, הפענוח "מצליח" מבחינה
-        # מבנית (בלי err) אבל שולף נ"צ מבייטים שהם בכלל פרמטרי-בקשה, לא מיקום —
-        # ‏decode_failed=False לא עוזר כאן, כי אין שום שגיאה שהתגלתה. נצפה בפועל:
-        # A7-BBB (dir=uplink!) "קיבל" 18.34/2.11 באותה קליטה בדיוק שבה C-GHKX
-        # (גם uplink) קיבל 5.69/2.11 — שני "מיקומים" ממסרים-בקשה, לא ממטוסים.
-        # ‏structural_dir מגיע מ-`_structural_dir` שהקורא (SATCOM/VDL2) ממלא
-        # *לפני* הקריאה הזו מתוך src/dst.type המבני (לא heuristic) — key חסר
-        # (ACARS רגיל, שלא צפוי להפיק ADS-C בכלל — ר' §12) לא חוסם, כדי לא
-        # לשנות התנהגות קיימת שם; אבל "uplink" מפורש כן חוסם תמיד.
-        structural_dir = m.get("_structural_dir")
-        adsc_dir_ok = structural_dir != "uplink"
-        group = ("clearance" if kind == "CPDLC"
-                 else "position" if (kind == "ADS-C" and not decode_failed and adsc_dir_ok)
-                 else group)
-        # מיקום *רק* מ-ADS-C דו-הגנתי: (1) decode_failed=True לא מנע בעבר
-        # מ-_scan_latlon לרוץ בכל זאת — סריקה רקורסיבית על מבנה שהמפענח סימן
-        # כ"נכשל" עלולה לתפוס שריד-מפענוח-חלקי בשם lat/lon (נצפה: C-GHKX קיבל
-        # 5.69,2.11 באלפי ק"מ מהאמיתי, על הודעה עם decoded="לא פוענח"). (2)
-        # כיוון שגוי (למעלה) — CPDLC (או ARINC-622 גנרי אחר) עלול גם הוא לשאת
-        # נ"צ מוטבע (waypoint ב-clearance) שאינו מיקום המטוס — לכן גם kind
-        # מסונן ל-ADS-C בלבד, לא כל libacars (אותה הגנה כמו VDL2 מסלול B).
-        if kind == "ADS-C" and not decode_failed and adsc_dir_ok:
-            pos = _scan_latlon(libacars)
-            if pos:
-                lat, lon, pos_src = pos[0], pos[1], "adsc"
-                adsc_info = _adsc_details(libacars)
-
-    # /.POS/ = תגובת REQPOS: פרוטוקול מבני (לא heuristic) => אמין גם עם error.
-    # נחלץ לפני בדיקת error כי ספרה שהתהפכה ב-prefix שגרם ל-error לא פוגמת את הקואורדינטה.
-    if lat is None and text:
-        pos = _parse_pos_report(text)
-        if pos:
-            lat, lon, pos_src = pos[0], pos[1], "pos-report"
-            if decoded is None and pos[2]:
-                decoded = pos[2]                  # WPT · ETA · alt code
-
-    # label 15 (דיווח מיקום קלאסי): פורמט מעוגן-מבני כמו /.POS/ => לפני שומר ה-error.
-    if lat is None and label == "15" and text:
-        pos = _parse_label15(text)
-        if pos:
-            lat, lon, pos_src = pos[0], pos[1], "label15"
-
-    # label 1L (דוח ניווט/דלק): עוגן ארוך וספציפי (7 שדות ברצף) => מבני כמו /.POS/.
-    if lat is None and label == "1L" and text:
-        pos = _parse_nav_fuel(text)
-        if pos:
-            lat, lon, pos_src = pos[0], pos[1], "nav-fuel"
-            if decoded is None:
-                decoded = pos[2]
-
-    # label 11 בפורמט POS/CAS/LAT/LON: שישה שדות בשמם ברצף קבוע => מבני כמו 1L.
-    if lat is None and label == "11" and text:
-        pos = _parse_label11_pos(text)
-        if pos:
-            lat, lon, pos_src = pos[0], pos[1], "label11"
-            if decoded is None:
-                decoded = pos[2]
-
-    # נפילה: מיקום מקודד בטקסט חופשי — אבל *רק* מ-frame נקי. acarsdec error>0 = ביטים
-    # שתוקנו/לא-תוקנו; ספרה אחת שהתהפכה בקואורדינטה => מטוס במקום שגוי על המפה. ADS-C
-    # (libacars) לעיל מוגן-CRC ולכן נשמר גם עם error; ה-heuristic הטקסטואלי לא — לכן מגודר.
-    # ‏tail_is_station: תחנת-קרקע (ר' למעלה) לא מקבלת מיקום מ-heuristic טקסטואלי בכלל.
-    if lat is None and not m.get("error") and not tail_is_station:
-        pos = _text_latlon(text)
-        if pos:
-            lat, lon, pos_src = pos[0], pos[1], "text"
-
-    # label 16 (דיווח מיקום עשרוני): פורמט פחות נוקשה מ-DDMM המבני => מגודר כמו heuristic.
-    if lat is None and label == "16" and text and not m.get("error") and not tail_is_station:
-        pos = _parse_label16(text)
-        if pos:
-            lat, lon, pos_src = pos[0], pos[1], "label16"
-            if decoded is None:
-                decoded = pos[2]
-
-    if lat is not None:
-        group = "position"                    # יש מיקום => תמיד ירוק (קבוצת position)
-
-    # פענוח מבנה label-ספציפי (רק אם libacars לא סיפק decoded כבר)
-    if decoded is None:
-        if label == "80":
-            decoded = _parse_oooi_80(text)
-        elif label == "A9":
-            decoded = _parse_atis(text)
-        elif label == "WX":
-            decoded = _parse_wx_alternates(text)
-        elif label == "SA":
-            decoded = _parse_sa_media(text)
-        elif label == "H1":
-            decoded = _parse_h1(text)
-        elif label == "SQ":
-            decoded = _parse_sq(text)
-        elif label == ":;":
-            decoded = _parse_autotune(text)
-        elif label == "C1":
-            decoded = _parse_loadsheet(text)
-        elif label == "A3":
-            decoded = _parse_pdc(text)
-        elif label == "B4":
-            decoded = _parse_pdc(text, title="קריאה חוזרת של האישור")
-        elif label in _OOOI_Q_EVENT:
-            decoded = _parse_oooi_q(label, text)
-
-    block_id = g("block_id")
-    rec = {
-        "t": g("timestamp") or time.time(),   # epoch seconds (float) מ-acarsdec (חסר => עכשיו)
-        "freq": g("freq"),                    # MHz
-        "level": level,                       # dBFS — מקורי מהמפענח, לא מעובד
-        "snr": snr,                           # dB — רק כש-noise זמין (ר' docstring); אחרת None
-        "label": label,
-        "category": category,                 # תיאור קריא אחיד (label/ARINC-622)
-        "group": group,                       # קבוצה לצבע ב-UI / עמודה בייצוא
-        "tail": tail_val,
-        "flight": _clean_ident(g("flight", "fid")),
-        "mode": g("mode"),
-        "msgno": g("msgno"),
-        "block_id": block_id,                 # תו ה-block ID הגולמי (ARINC 618) — מקור הכיוון
-        # כיוון: block ID מבני קודם (כל מסגרת acarsdec); בלעדיו — label/header best-effort
-        # (‏VDL2/SATCOM המסונתזים אינם נושאים block ID ודורסים בכיוון מבני משלהם).
-        "dir": _acars_block_dir(block_id) or _acars_direction(label, text),
-        "lat": lat,
-        "lon": lon,
-        "pos_src": pos_src,                   # "adsc" | "pos-report" | "label15" | "nav-fuel"
-                                               # | "label11" | "label16" | "text" | None
-        "decoded": decoded,                   # טקסט מפוענח קצר (CPDLC/ATIS/OOOI וכו') או None
-        "text": text,
-        "error": m.get("error"),
-        "actype": _extract_actype(label, text),  # סוג מטוס best-effort (H1/C1) או None
-        # מוזרם החוצה (לא רק שדה-עזר פנימי) כדי ש-_aircraft_identity/_build_roster
-        # לא יתייחסו לכתובת תחנת-קרקע כאילו היא רישום מטוס — בלעדיו הרוסטר
-        # המאוחד הציג בעבר תחנות קרקע (SQ squitters וכו') כשורות "מטוס" משלהן.
-        "tail_is_station": tail_is_station,
-        # פרטי דוח ה-ADS-C (גובה, חותמת-זמן "שניות מתחילת השעה", דיוק) — רק כשהמיקום
-        # בא מ-ADS-C. משמש את ההצלבה מול ADS-B (xcheck); None בכל השאר.
-        "adsc": adsc_info,
-    }
-    rec["notable"] = _interest_score(rec)     # לדוח הסשן + סינון/התראות ב-UI (ר' §1 "האנליסט")
-    return rec
-
-
-def _jsonl_records(lines):
-    """מפרסר שורות JSONL לרשומות — **רק אובייקטים**. משותף לכל הקוראים
-    (ייצוא, ארכיון, וטעינת ההיסטוריה באתחול).
-
-    ⚠ למה בדיקת ה-dict קריטית ולא קוסמטית: הקוראים ניגשים מיד ל-`r.get("t")`.
-    שורה שהיא JSON *תקין* אך אינה אובייקט (‏`null`, ‏`0`, מחרוזת, מערך — שריד
-    אפשרי של בלוק פגום אחרי כיבוי פתאומי, בדיוק התרחיש ש-_atomic_write נבנה
-    בשבילו) הפילה את הקוראים ב-AttributeError. ‏json.loads הצליח עליה, ולכן
-    ה-`except ValueError` הקיים *לא* תפס אותה.
-    החומרה: `_load_*_history` נקראות ב-__main__ **בלי try** לפני `app.run()`,
-    כך ששורה אחת כזאת מנעה מ-airam-web לעלות בכלל — וזה המתזמר שמשחזר את מצב
-    ה-SDR (‏`_boot_restore`). עם `Restart=always` זו לולאת קריסה: התחנה כולה
-    מתה, ובשטח אין SSH כדי לאבחן (ר' §9/§12 ב-CLAUDE.md)."""
-    out = []
-    for ln in lines:
-        try:
-            rec = json.loads(ln)
-        except ValueError:
-            continue                          # שורה פגומה (כתיבה חלקית) => דילוג
-        if isinstance(rec, dict):
-            out.append(rec)
-    return out
-
-
-def _read_log_lines(path):
-    """שורות קובץ לוג append-only (JSONL), **סובלני ל-UTF-8 שבור**. זורק OSError
-    בלבד (קובץ חסר/הרשאה) — כמו read_text, כך שהקוראים לא משתנים.
-    ⚠ למה errors="replace" קריטי ולא קוסמטי: הרשומות נכתבות עם
-    ensure_ascii=False ומכילות עברית (קטגוריה, decoded). כיבוי פתאומי באמצע
-    כתיבה יכול לחתוך תו עברי באמצע (2 בייטים ב-UTF-8), ואז read_text קפדני
-    זורק UnicodeDecodeError — שהוא ValueError, לא OSError, ולכן ה-except
-    הקיים לא תפס אותו. ‏_load_*_history נקראות ב-__main__ לפני app.run(), כך
-    שזה מנע מ-airam-web (המתזמר) לעלות בכלל: לולאת קריסה עם Restart=always,
-    והתחנה כולה מתה עד תיקון ידני ב-SSH. הוכח ב-tests/test_corrupt_logs.py.
-    עם replace השארית הופכת לשורה פגומה אחת, ש-_jsonl_records ממילא מדלג עליה."""
-    return path.read_text(encoding="utf-8", errors="replace").splitlines()
-
-
-def _append_line_on_boundary(f, data):
-    """כותב data (bytes שמסתיים ב-\\n) לקובץ שנפתח ב-"a+b", ומוודא שהוא מתחיל
-    בשורה חדשה. ⚠ כיבוי פתאומי משאיר את הקובץ בלי \\n בסוף — שורה קטועה, או
-    זנב של בייטי NUL ש-ext4 משאיר אחרי delayed allocation. append רגיל היה
-    מדביק את הרשומה הבאה לשארית הזאת, והקוראים מדלגים על השורה המשולבת כולה:
-    **הרשומה הראשונה אחרי כל כיבוי פתאומי אבדה**. עם \\n משלים השארית נשארת
-    שורה פגומה בודדת, והרשומה החדשה שלמה. ב-"a+b" הכתיבה תמיד לסוף (O_APPEND),
-    כך שה-seek לקריאת הבייט האחרון לא משנה לאן נכתב."""
-    f.seek(0, os.SEEK_END)
-    if f.tell() > 0:
-        f.seek(-1, os.SEEK_END)
-        if f.read(1) != b"\n":
-            data = b"\n" + data
-    f.write(data)
-
-
-def _append_jsonl_log(path, rec):
-    """מוסיף הודעה מנורמלת לקובץ JSONL (append; thread ה-listener הוא הכותב היחיד).
-    נכשל בשקט (דיסק מלא וכו') => הפיד החי ממשיך לפעול. משותף ל-ACARS ול-VDL2."""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a+b") as f:
-            _append_line_on_boundary(
-                f, (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8"))
-    except OSError:
-        log.exception("jsonl log append (%s)", path)
-
-
-def _trim_jsonl_log(path, keep):
-    """קיצוץ ל-keep שורות (rewrite אטומי). נקרא מדי פעם מ-thread ה-listener
-    (הכותב היחיד => אין מרוץ). קוראים (ייצוא) סובלים שורה אחרונה חלקית."""
-    try:
-        lines = _read_log_lines(path)
-    except OSError:
-        return
-    if len(lines) > keep:
-        # ⚠ נקרא מחוץ ל-try של ה-listener: OSError (דיסק מלא) היה הורג את thread
-        # ה-ACARS/VDL2/SATCOM, והפיד מת עד restart של airam-web.
-        try:
-            _atomic_write(path, "\n".join(lines[-keep:]) + "\n")
-        except OSError:
-            log.warning("קיצוץ %s נכשל", path, exc_info=True)
-
-
 def _append_acars_log(rec):
-    _append_jsonl_log(ACARS_LOG_PATH, rec)
+    storage.append_jsonl_log(ACARS_LOG_PATH, rec)
 
 
 def _trim_acars_log():
-    _trim_jsonl_log(ACARS_LOG_PATH, ACARS_LOG_KEEP)
+    storage.trim_jsonl_log(ACARS_LOG_PATH, ACARS_LOG_KEEP)
 
 
 def _today_start():
@@ -2468,528 +752,209 @@ def _day_bounds(date_str):
     return start, end
 
 
-def _load_acars_history():
-    """טוען את זנב acars.jsonl ל-ring buffer בעלייה => הודעות *היום* שורדות restart,
-    ממוינות לפי זמן (t עולה) עם id רץ. נקרא *לפני* הפעלת thread ה-listener (אין מרוץ).
-    רק הודעות מהיום נטענות לזיכרון (ההיסטוריה המלאה נשמרת בדיסק)."""
-    global _acars_seq
+# --- שלושת פידי הדאטה (ACARS / VDL2 / SATCOM): מימוש אחד -------------------
+# אותו מחזור חיים לשלושתם: UDP מהמפענח ⇒ נרמול ⇒ dedup של שידורים חוזרים ⇒ jsonl ⇒ ring
+# buffer עם id רץ ⇒ תור ההצלבה; וטעינת "היום" מהדיסק בעלייה. עד v2.37 זה היה כתוב שלוש פעמים.
+# ⚠ ערכי המפרט הם *שמות* של משתנים גלובליים, ונפתרים בזמן הקריאה (_fv): הבדיקות מחליפות
+# app.ACARS_LOG_PATH / app.ACARS_UDP_PORT / app._acars_seq = 0 ישירות, וכך זה ממשיך לעבוד.
+_FEEDS = {
+    "acars": {"label": "ACARS", "port": "ACARS_UDP_PORT", "log": "ACARS_LOG_PATH", "keep": "ACARS_LOG_KEEP",
+              "buf": "ACARS_BUF_MAX", "lock": "_acars_lock", "msgs": "_acars_msgs", "seq": "_acars_seq",
+              "drop": None, "normalize": "acars_parse._normalize_acars", "ident": ("tail",),
+              "services": ("ACARS_SERVICE", "ACARS2_SERVICE"), "freqs_key": "acars_freqs",
+              "freqs_default": "config.ACARS_FREQS_DEFAULT", "adsb": "_acars_adsb"},
+    "vdl2": {"label": "VDL2", "port": "VDL2_UDP_PORT", "log": "VDL2_LOG_PATH", "keep": "VDL2_LOG_KEEP",
+             "buf": "VDL2_BUF_MAX", "lock": "_vdl2_lock", "msgs": "_vdl2_msgs", "seq": "_vdl2_seq",
+             "drop": "_vdl2_drop_count", "normalize": "acars_parse._normalize_vdl2", "ident": ("tail", "icao"),
+             "services": ("VDL2_SERVICE", "VDL2B_SERVICE"), "freqs_key": "vdl2_freqs",
+             "freqs_default": "config.VDL2_FREQS_DEFAULT", "adsb": "_vdl2_adsb"},
+    # SATCOM: זהות = tail בלבד (רוב ה-ACARS הלוויני נושא רישום); בלי שדה adsb בתשובה
+    "satcom": {"label": "SATCOM", "port": "SATCOM_UDP_PORT", "log": "SATCOM_LOG_PATH", "keep": "SATCOM_LOG_KEEP",
+               "buf": "SATCOM_BUF_MAX", "lock": "_satcom_lock", "msgs": "_satcom_msgs", "seq": "_satcom_seq",
+               "drop": "_satcom_drop_count", "normalize": "acars_parse._normalize_satcom", "ident": ("tail",),
+               "services": ("SATCOM_SERVICE",), "freqs_key": "satcom_freqs",
+               "freqs_default": "config.SATCOM_FREQS_DEFAULT", "adsb": None},
+}
+FEED_DEDUP_SEC = 90      # שידור חוזר (אין ACK מהקרקע — המטוס שולח שוב, עד 7 פעמים) ⇒ retry_count, לא כרטיס
+FEED_DEDUP_MAX = 500     # מעל זה מנקים ערכים ישנים ממפת ה-dedup (מניעת דליפת זיכרון)
+FEED_TRIM_EVERY = 200    # קיצוץ תקופתי של ה-jsonl (ה-listener הוא הכותב היחיד)
+
+
+def _fv(feed, key):
+    """ערך מהמפרט של פיד, נפתר מ-globals() *עכשיו* (ר' ההערה מעל _FEEDS). שם מנוקד
+    ("acars_parse._normalize_acars") ⇒ מאפיין של מודול — גם הוא נפתר בזמן הקריאה."""
+    name = _FEEDS[feed][key]
+    if "." in name:
+        mod, attr = name.split(".", 1)
+        return getattr(globals()[mod], attr)
+    return globals()[name]
+
+
+def _feed_push(feed, rec):
+    """id רץ + הכנסה ל-ring buffer. ⚠ רק תחת הנעילה של הפיד."""
+    name = _FEEDS[feed]["seq"]
+    globals()[name] += 1
+    rec["id"] = globals()[name]
+    _fv(feed, "msgs").append(rec)
+
+
+def _load_feed_history(feed):
+    """טוען את זנב ה-jsonl ל-ring buffer בעלייה => הודעות *היום* שורדות restart, ממוינות
+    לפי זמן (t עולה) עם id רץ. נקרא *לפני* הפעלת thread ה-listener (אין מרוץ). רק הודעות
+    מהיום נטענות לזיכרון (ההיסטוריה המלאה נשמרת בדיסק)."""
     try:
-        lines = _read_log_lines(ACARS_LOG_PATH)
+        lines = storage.read_log_lines(_fv(feed, "log"))
     except OSError:
         return
-    recs = _jsonl_records(lines[-ACARS_BUF_MAX:])
+    recs = storage.jsonl_records(lines[-_fv(feed, "buf"):])
     floor = _today_start()
     recs = [r for r in recs if (r.get("t") or 0) >= floor]   # היום בלבד (הדיסק נשמר)
     recs.sort(key=lambda r: r.get("t") or 0)
-    with _acars_lock:
+    with _fv(feed, "lock"):
         for r in recs:
-            _acars_seq += 1
-            r["id"] = _acars_seq
-            _acars_msgs.append(r)
+            _feed_push(feed, r)
     if recs:
-        log.info("ACARS: נטענו %d הודעות מההיסטוריה", len(recs))
+        log.info("%s: נטענו %d הודעות מההיסטוריה", _FEEDS[feed]["label"], len(recs))
+
+
+def _feed_listener(feed):
+    """thread רקע: מאזין ל-UDP מהמפענח, שומר ל-jsonl ומכניס ל-ring buffer. רץ תמיד (גם
+    כשהמצב אחר) — פשוט לא מגיעות דאטהגרמות כשהמפענח כבוי."""
+    spec = _FEEDS[feed]
+    label = spec["label"]
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    port = _fv(feed, "port")
+    try:
+        sock.bind((ACARS_UDP_HOST, port))
+    except OSError:
+        log.warning("%s listener: port %d busy - /api/%s יחזיר ריק", label, port, feed)
+        return
+    normalize = _fv(feed, "normalize")
+    seen = 0
+    # dedup: (זהות, label, text[:80]) → (timestamp, rec). retry_count מצטבר על הכרטיס המקורי
+    # בזיכרון; ה-jsonl נשמר נקי מחזרות.
+    dedup: dict = {}
+    while True:
+        try:
+            data, _ = sock.recvfrom(65535)
+        except OSError:
+            continue
+        try:
+            msg = json.loads(data.decode("utf-8", "replace"))
+        except (ValueError, UnicodeError):
+            continue                          # דאטהגרם לא-JSON => מתעלמים
+        try:
+            rec = normalize(msg)
+        except Exception:
+            # שדה עם טיפוס בלתי-צפוי (label כרשימה, level כמחרוזת וכו') לא יפיל את
+            # ה-thread לצמיתות — הפיד ימשיך לזרום להודעות הבאות.
+            log.exception("%s: נרמול נכשל על דאטהגרם — מדולג", label)
+            continue
+        if rec is None:
+            # לא בר-הצגה (סכמה לא תואמת וכו') — לוג תקופתי, כדי להבדיל "אין תעבורה"
+            # מ"המפענח שינה סכמה" בלי לקרוא קוד.
+            if spec["drop"]:
+                globals()[spec["drop"]] += 1
+                n = globals()[spec["drop"]]
+                if n % 200 == 1:
+                    log.warning("%s: הודעה לא זוהתה (סכמה לא תואמת?) — %d עד כה", label, n)
+            continue
+
+        ident = next((rec.get(k) for k in spec["ident"] if rec.get(k)), None)
+        text = rec.get("text") or ""
+        ts = rec.get("t") or time.time()
+        if ident and text:                    # רק הודעות עם זהות+טקסט (ACK ריקים אינם מוחזרים)
+            key = (ident, rec.get("label"), text[:80])
+            prev_ts, prev_rec = dedup.get(key, (0, None))
+            if prev_rec is not None and ts - prev_ts < FEED_DEDUP_SEC:
+                # prev_rec חי גם ב-buffer שקוראים ממנו routes => מוטציה רק תחת הנעילה
+                with _fv(feed, "lock"):
+                    prev_rec["retry_count"] = prev_rec.get("retry_count", 1) + 1
+                continue
+            dedup[key] = (ts, rec)
+            if len(dedup) > FEED_DEDUP_MAX:
+                cutoff = ts - FEED_DEDUP_SEC
+                for k in [k for k, (t0, _) in dedup.items() if t0 < cutoff]:
+                    del dedup[k]
+
+        storage.append_jsonl_log(_fv(feed, "log"), rec)   # התמדה לפני הקצאת id (הקובץ נקי מ-id)
+        with _fv(feed, "lock"):
+            _feed_push(feed, rec)
+        xcheck_jobs._xc_submit(feed, rec)                 # הצלבת ADS-B — תור לא-חוסם, thread נפרד
+        seen += 1
+        if seen % FEED_TRIM_EVERY == 0:
+            storage.trim_jsonl_log(_fv(feed, "log"), _fv(feed, "keep"))
+
+
+def _feed_response(feed):
+    """הלב של /api/acars, /api/vdl2, /api/satcom. ?since=<id> => רק חדשות מאותו cursor.
+    כברירת מחדל רק הודעות *היום* (שעון ה-Pi) => סשן חדש לא מוצף בתעבורת ימים קודמים;
+    ?all=1 => כל מה שבזיכרון. ?day=YYYY-MM-DD => ארכיון: קורא מהדיסק (לא מהזיכרון) את
+    כל הודעות אותו יום מקומי — מצב סטטי, בלי cursor/adsb, עצמאי מהפיד החי."""
+    spec = _FEEDS[feed]
+    day = request.args.get("day")
+    if day:
+        bounds = _day_bounds(day)
+        if bounds is None:
+            return jsonify(ok=False, error="תאריך לא תקין (פורמט: YYYY-MM-DD)"), 400
+        start, end = bounds
+        msgs = [r for r in storage.read_jsonl_log(_fv(feed, "log")) if start <= (r.get("t") or 0) < end]
+        return jsonify(ok=True, day=day, messages=msgs)
+    try:
+        since = int(request.args.get("since", 0))
+    except (TypeError, ValueError):
+        since = 0
+    show_all = request.args.get("all") in ("1", "true", "yes")
+    floor = 0 if show_all else _today_start()
+    with _fv(feed, "lock"):
+        # עותקים (לא references): jsonify מסדרל אחרי שחרור הנעילה, ו-retry_count עלול
+        # להתעדכן ע"י ה-listener באמצע האיטרציה של ה-encoder
+        msgs = [dict(m) for m in _fv(feed, "msgs") if m["id"] > since and (m.get("t") or 0) >= floor]
+        cursor = _fv(feed, "seq")
+    extra = {"adsb": _fv(feed, "adsb")()} if spec["adsb"] else {}
+    return jsonify(ok=True, active=any(_is_active(globals()[n]) for n in spec["services"]),
+                   freqs=appstate.load_state().get(spec["freqs_key"], _fv(feed, "freqs_default")),
+                   cursor=cursor, messages=msgs, **extra, **_xc_feed_payload(feed))
+
+
+def _load_acars_history():
+    _load_feed_history("acars")
 
 
 def _acars_listener():
-    """thread רקע: מאזין ל-UDP מ-acarsdec (-j), שומר ל-acars.jsonl, ומכניס ל-ring
-    buffer. רץ תמיד (גם במצב קול) — פשוט לא יגיעו דאטהגרמות כש-acarsdec כבוי."""
-    global _acars_seq
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.bind((ACARS_UDP_HOST, ACARS_UDP_PORT))
-    except OSError:
-        log.warning("ACARS listener: port %d busy - /api/acars יחזיר ריק", ACARS_UDP_PORT)
-        return
-    seen = 0
-    # dedup: (tail, label, text[:80]) → (timestamp, rec_dict). מונע כפילות מ-ACARS retries
-    # (כש-ground station לא שולח ACK, המטוס שולח שוב — עד 7 פעמים ב-APU fault של OO-ACF).
-    # retry_count מצטבר על הכרטיס המקורי בזיכרון; ה-JSONL נשמר נקי מחזרות.
-    _dedup: dict = {}
-    while True:
-        try:
-            data, _ = sock.recvfrom(65535)
-        except OSError:
-            continue
-        try:
-            msg = json.loads(data.decode("utf-8", "replace"))
-        except (ValueError, UnicodeError):
-            continue                          # דאטהגרם לא-JSON => מתעלמים
-        try:
-            rec = _normalize_acars(msg)
-        except Exception:
-            # שדה עם טיפוס בלתי-צפוי (label כרשימה, level כמחרוזת וכו') לא יפיל
-            # את ה-thread לצמיתות — הפיד ימשיך לזרום להודעות הבאות.
-            log.exception("ACARS: נרמול נכשל על דאטהגרם — מדולג")
-            continue
-
-        # בדיקת dedup: רק להודעות עם tail+text (ACK ריקים אינם מוחזרים)
-        tail, label, text = rec.get("tail"), rec.get("label"), rec.get("text") or ""
-        ts = rec.get("t") or time.time()
-        if tail and text:
-            dedup_key = (tail, label, text[:80])
-            prev_ts, prev_rec = _dedup.get(dedup_key, (0, None))
-            if prev_rec is not None and ts - prev_ts < 90:
-                # prev_rec חי גם ב-_acars_msgs שקוראים ממנו routes => מוטציה רק תחת הנעילה
-                with _acars_lock:
-                    prev_rec["retry_count"] = prev_rec.get("retry_count", 1) + 1
-                continue                      # retry — לא מוסיפים כרטיס חדש
-            _dedup[dedup_key] = (ts, rec)
-            if len(_dedup) > 500:             # ניקוי ערכים ישנים (מניעת דליפת זיכרון)
-                cutoff = ts - 90
-                for k in [k for k, (t, _) in _dedup.items() if t < cutoff]:
-                    del _dedup[k]
-
-        _append_acars_log(rec)                # התמדה לפני הקצאת id הזמני (הקובץ נקי מ-id)
-        with _acars_lock:
-            _acars_seq += 1
-            rec["id"] = _acars_seq
-            _acars_msgs.append(rec)
-        _xc_submit("acars", rec)              # הצלבת ADS-B — תור לא-חוסם, thread נפרד
-        seen += 1
-        if seen % 200 == 0:                   # קיצוץ תקופתי (הכותב היחיד)
-            _trim_acars_log()
-
-
-# --- VDL2: נרמול, התמדה ו-listener ------------------------------------------
-# סכמת dumpvdl2 v2.6.0 (אומתה מהמקור): ‏{"vdl2": {"t": {"sec","usec"}, "freq" (Hz),
-# "sig_level", "avlc": {"src"/"dst": {"addr","type","status"}, "frame_type",
-# "acars": {err,crc_ok,reg,mode,label,blk_id,ack,flight,msg_num,msg_num_seq,msg_text,
-#           + יישומים מפוענחים *מקוננים בפנים* (arinc622/adsc/cpdlc/miam...)},
-# או "xid": {type,type_descr,...} או "x25": {pkt_type_name, + clnp/cotp מקוננים}}}
-_VDL2_ACARS_FIELDS = frozenset({
-    "err", "crc_ok", "more", "reg", "mode", "label", "blk_id", "ack",
-    "flight", "msg_num", "msg_num_seq", "sublabel", "mfi", "msg_text",
-})
-
-
-def _normalize_vdl2(m):
-    """ממיר פריים dumpvdl2 JSON לאותה סכמת כרטיס אחידה של _normalize_acars, בתוספת
-    שדה icao (כתובת ICAO 24-bit של צד-המטוס — זהות לפריימים בלי tail). מחזיר None
-    לפריים שאינו בר-הצגה (בלי שכבת AVLC). שני מסלולים:
-      A. ‏avlc.acars קיים => מסנתזים dict בסגנון acarsdec ומזרימים דרך _normalize_acars
-         — כל הפרסרים (ATIS/OOOI/PDC/15/16/1L/H1...) והקטגוריות חלים כמות שהם.
-      B. אחרת => כרטיס גנרי בסיסי: CPDLC/ADS-C (תקציר libacars) / XID / X.25."""
-    v = m.get("vdl2")
-    if not isinstance(v, dict):
-        return None
-    avlc = v.get("avlc")
-    if not isinstance(avlc, dict):
-        return None                           # פריים בלי AVLC (שגיאת פענוח) => מדלגים
-
-    t_obj = v.get("t") or {}
-    try:
-        t = float(t_obj.get("sec") or 0) + float(t_obj.get("usec") or 0) / 1e6
-    except (TypeError, ValueError):
-        t = 0
-    t = t or time.time()
-    try:
-        freq_mhz = round(float(v.get("freq")) / 1e6, 3) if v.get("freq") else None
-    except (TypeError, ValueError):
-        freq_mhz = None
-    level = v.get("sig_level")             # dBFS — מקורי מהמפענח
-    noise = v.get("noise_level")           # dBFS — רצפת רעש; dumpvdl2 מודד בעצמו (בניגוד ל-acarsdec)
-    snr = round(level - noise, 1) if (level is not None and noise is not None) else None
-
-    # זהות + כיוון מבניים משכבת ה-AVLC: src=Aircraft => downlink (עובדה פיזית,
-    # אמינה יותר מכל heuristic של label/טקסט => דורסת את _acars_direction בסוף).
-    src, dst = avlc.get("src") or {}, avlc.get("dst") or {}
-    icao = direction = None
-    if str(src.get("type") or "").lower() == "aircraft":
-        icao, direction = src.get("addr"), "downlink"
-    elif str(dst.get("type") or "").lower() == "aircraft":
-        icao = dst.get("addr")
-        if str(src.get("type") or "").lower().startswith("ground"):
-            direction = "uplink"
-    icao = str(icao).upper() if icao else None
-
-    acars = avlc.get("acars")
-    if isinstance(acars, dict):
-        # מסלול A: יישומים מפוענחים (arinc622 וכו') מקוננים בתוך אובייקט ה-acars
-        # (libacars סוגר את ההורה אחרי הצאצא) => כל מפתח מבני לא-מוכר הוא יישום.
-        apps = {k: val for k, val in acars.items()
-                if k not in _VDL2_ACARS_FIELDS and isinstance(val, (dict, list))}
-        raw = {
-            "timestamp": t,
-            "freq": freq_mhz,
-            "level": level,
-            "noise": noise,                   # מוזן ל-_normalize_acars => snr אמיתי (לא הודעה משוערת)
-            "mode": acars.get("mode"),
-            "label": acars.get("label"),
-            "tail": acars.get("reg"),         # יתכן '.' מוביל — כמו acarsdec (norm_reg מטפל)
-            "flight": acars.get("flight"),
-            # msg_num/msg_num_seq עלולים להגיע כ-int (dumpvdl2 לא מבטיח str) —
-            # str() לפני החיבור, אחרת TypeError מפיל את כל הפריים ב-_vdl2_listener.
-            "msgno": (str(acars.get("msg_num") or "") + str(acars.get("msg_num_seq") or "")) or None,
-            "text": acars.get("msg_text"),
-            # err=פריים פגום / crc_ok=False => כמו acarsdec error>0 (מגדר heuristics של טקסט)
-            "error": 0 if (not acars.get("err") and acars.get("crc_ok", True)) else 1,
-            # ⚠ בלי זה, חסם ה-ADS-C-uplink (adsc_dir_ok ב-_normalize_acars) לא
-            # חל בכלל במסלול הזה — הוא היחיד מבין שלושת המסלולים (כאן/VDL2
-            # מסלול B/SATCOM) שלא העביר את הכיוון המבני, בדיוק המסלול הכי סביר
-            # לשאת ADS-C אמיתי (ACARS-over-AVLC). אותו קלאס-באג שתועד ותוקן
-            # פעמיים ב-§12 — כאן פשוט לא יושם על המסלול השלישי.
-            "_structural_dir": direction,
-        }
-        if apps:
-            raw["libacars"] = apps
-        card = _normalize_acars(raw)
-    else:
-        # מסלול B: כרטיס גנרי (החלטת עיצוב: בלי פרסרים ייעודיים ל-ATN בשלב זה)
-        category, group, decoded = "VDL2", "comm", None
-        lat = lon = pos_src = None
-        x25, xid = avlc.get("x25"), avlc.get("xid")
-        if isinstance(x25, dict):
-            blob = json.dumps(x25, ensure_ascii=False).lower()
-            is_adsc = "adsc" in blob or "ads-c" in blob
-            # תקציר טקסט קריא אם קיים במבנה; decode_failed => אותה הבחנה כמו ב-SATCOM
-            # (ר' _libacars_decode) — "ניסינו ונכשלנו" מול "אין נתון" בכלל. מחושב
-            # *לפני* קביעת group כדי ש-"position" יינתן רק כשיהיה בפועל lat/lon
-            # (ר' ההערה למטה + המקבילה ב-_normalize_acars) — אחרת כרטיס ADS-C
-            # שנכשל פענוח היה מסונן תחת "📍 מיקום" בלי שום מיקום אמיתי.
-            _, dtext, decode_failed = _libacars_decode(x25)
-            decoded = dtext if dtext else (
-                "לא פוענח — libacars החזיר שגיאת פענוח; הטקסט הגולמי נשמר"
-                if decode_failed else None)
-            # ⚠ tag ADS-C מספרי פירושו הפוך לגמרי בין uplink/downlink ב-libacars
-            # (מאומת מ-adsc.c: la_adsc_uplink_tag_descriptor_table מול
-            # ...downlink...; tag 7 = "בקשה" ב-uplink מול "דיווח מיקום אמיתי"
-            # ב-downlink — ר' ההערה המלאה ב-_normalize_acars ליד adsc_dir_ok).
-            # ‏direction כאן כבר חושב למעלה (AVLC src/dst.type, עובדה מבנית) —
-            # לא heuristic, ולא תלוי ב-decode_failed (שם אין שום err שמתגלה).
-            adsc_dir_ok = direction != "uplink"
-            if "cpdlc" in blob:
-                category, group = "CPDLC (VDL2)", "clearance"
-            elif is_adsc:
-                category = "ADS-C (VDL2)"
-                group = "position" if (not decode_failed and adsc_dir_ok) else group
-            else:
-                category = "VDL2 · X.25"
-            # מיקום *רק* מ-ADS-C: CPDLC עלול לשאת נ"צ מוטבע (waypoint ב-clearance)
-            # שאינו מיקום המטוס עצמו — לא מייחסים אותו כמיקום כדי לא להטעות במפה.
-            # ⚠ רגרסיה אמיתית: is_adsc הוא בדיקת-substring גולמית על *כל* ה-blob
-            # (לא exclusive מול "cpdlc" בו) — בלוק ה-if/elif למעלה כן exclusive
-            # (cpdlc זוכה קודם), אבל הבדיקה כאן חזרה על is_adsc הגולמי במקום על
-            # התוצאה שכבר הוכרעה, אז הודעת CPDLC שגם מכילה את המחרוזת "adsc"
-            # במקום כלשהו (למשל free_text שמזכיר ADSC, או waypoint מקונן) עדיין
-            # עברה את התנאי הזה וייחסה נ"צ-clearance כמיקום מטוס — גם כש-category
-            # כבר "CPDLC (VDL2)". גייטינג לפי category (לא is_adsc הגולמי) מחזיר
-            # את ה-exclusivity: מיקום רק כשההודעה *בפועל* סווגה כ-ADS-C למעלה.
-            # ⚠ אותה הגנה כמו SATCOM (ר' ההערה המקבילה ב-_normalize_acars): CRC
-            # תקין ב-AVLC ≠ פענוח-יישום מוצלח — decode_failed=True חוסם גם כאן,
-            # וכיוון שגוי (adsc_dir_ok) חוסם גם כשאין שום err (ר' ההערה למעלה).
-            if category == "ADS-C (VDL2)" and not decode_failed and adsc_dir_ok:
-                pos = _scan_latlon(x25)          # מוגן-CRC בשכבת AVLC + decode_failed + כיוון
-                if pos:
-                    lat, lon, pos_src, group = pos[0], pos[1], "adsc", "position"
-        elif isinstance(xid, dict):
-            category = "VDL2 · XID (ניהול קישור)"
-            decoded = xid.get("type_descr") or xid.get("type")
-        else:
-            ft = avlc.get("frame_type")
-            category = f"VDL2 · {ft}" if ft else "VDL2"
-        card = {
-            "t": t, "freq": freq_mhz, "level": level, "snr": snr,
-            "label": None, "category": category, "group": group,
-            "tail": None, "flight": None, "mode": None, "msgno": None,
-            "dir": None, "lat": lat, "lon": lon, "pos_src": pos_src,
-            "decoded": decoded, "text": None, "error": 0, "actype": None,
-        }
-
-    card["icao"] = icao
-    if direction:
-        card["dir"] = direction
-    return card
+    _feed_listener("acars")
 
 
 def _append_vdl2_log(rec):
-    _append_jsonl_log(VDL2_LOG_PATH, rec)
+    storage.append_jsonl_log(VDL2_LOG_PATH, rec)
 
 
 def _trim_vdl2_log():
-    _trim_jsonl_log(VDL2_LOG_PATH, VDL2_LOG_KEEP)
+    storage.trim_jsonl_log(VDL2_LOG_PATH, VDL2_LOG_KEEP)
 
 
 def _load_vdl2_history():
-    """טוען את זנב vdl2.jsonl ל-ring buffer בעלייה (היום בלבד, כמו ACARS).
-    נקרא *לפני* הפעלת thread ה-listener (אין מרוץ)."""
-    global _vdl2_seq
-    try:
-        lines = _read_log_lines(VDL2_LOG_PATH)
-    except OSError:
-        return
-    recs = _jsonl_records(lines[-VDL2_BUF_MAX:])
-    floor = _today_start()
-    recs = [r for r in recs if (r.get("t") or 0) >= floor]
-    recs.sort(key=lambda r: r.get("t") or 0)
-    with _vdl2_lock:
-        for r in recs:
-            _vdl2_seq += 1
-            r["id"] = _vdl2_seq
-            _vdl2_msgs.append(r)
-    if recs:
-        log.info("VDL2: נטענו %d הודעות מההיסטוריה", len(recs))
+    _load_feed_history("vdl2")
 
 
 def _vdl2_listener():
-    """thread רקע: מאזין ל-UDP מ-dumpvdl2, שומר ל-vdl2.jsonl ומכניס ל-ring buffer.
-    רץ תמיד (גם כשהמצב אחר) — פשוט לא מגיעות דאטהגרמות כש-dumpvdl2 כבוי.
-    dedup כמו ב-ACARS: זהות = tail או icao (לפריימים בלי רישום)."""
-    global _vdl2_seq, _vdl2_drop_count
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.bind((ACARS_UDP_HOST, VDL2_UDP_PORT))
-    except OSError:
-        log.warning("VDL2 listener: port %d busy - /api/vdl2 יחזיר ריק", VDL2_UDP_PORT)
-        return
-    seen = 0
-    _dedup: dict = {}
-    while True:
-        try:
-            data, _ = sock.recvfrom(65535)
-        except OSError:
-            continue
-        try:
-            msg = json.loads(data.decode("utf-8", "replace"))
-        except (ValueError, UnicodeError):
-            continue                          # דאטהגרם לא-JSON => מתעלמים
-        try:
-            rec = _normalize_vdl2(msg)
-        except Exception:
-            # שדה עם טיפוס בלתי-צפוי לא יפיל את ה-thread לצמיתות (כמו ב-ACARS).
-            log.exception("VDL2: נרמול נכשל על דאטהגרם — מדולג")
-            continue
-        if rec is None:
-            # פריים לא בר-הצגה (בלי AVLC, סכמה לא תואמת וכו') — לוג תקופתי (לא רועש)
-            # כדי להבדיל "אין תעבורה" מ"dumpvdl2 שינה סכמה" בלי לקרוא קוד.
-            _vdl2_drop_count += 1
-            if _vdl2_drop_count % 200 == 1:
-                log.warning("VDL2: פריים לא זוהה (סכמה לא תואמת?) — %d עד כה", _vdl2_drop_count)
-            continue
-
-        ident = rec.get("tail") or rec.get("icao")
-        text = rec.get("text") or ""
-        ts = rec.get("t") or time.time()
-        if ident and text:
-            dedup_key = (ident, rec.get("label"), text[:80])
-            prev_ts, prev_rec = _dedup.get(dedup_key, (0, None))
-            if prev_rec is not None and ts - prev_ts < 90:
-                with _vdl2_lock:              # prev_rec חי גם ב-_vdl2_msgs => מוטציה תחת נעילה
-                    prev_rec["retry_count"] = prev_rec.get("retry_count", 1) + 1
-                continue
-            _dedup[dedup_key] = (ts, rec)
-            if len(_dedup) > 500:
-                cutoff = ts - 90
-                for k in [k for k, (t0, _) in _dedup.items() if t0 < cutoff]:
-                    del _dedup[k]
-
-        _append_vdl2_log(rec)                 # התמדה לפני הקצאת id (הקובץ נקי מ-id)
-        with _vdl2_lock:
-            _vdl2_seq += 1
-            rec["id"] = _vdl2_seq
-            _vdl2_msgs.append(rec)
-        _xc_submit("vdl2", rec)
-        seen += 1
-        if seen % 200 == 0:
-            _trim_vdl2_log()
-
-
-# --- SATCOM: normalize + listener (מסלול יחיד, בניגוד ל-VDL2) ----------------
-def _normalize_satcom(m):
-    """ממיר הודעת inmarsat-sniffer JSON (סכמת JAERO JSONdump, כפי שנפלטת מ-
-    feed_aero_message ב-inmarsat-sniffer/feed.c — אומתה מהמקור, *לא* מ-README)
-    לאותה סכמת כרטיס אחידה של _normalize_acars. מסלול יחיד (לא A/B כמו VDL2):
-    הכלי (במצב --mode=aero, היחיד הנתמך כרגע) מפיק *רק* הודעות ACARS מפוענחות.
-    מחזיר None להודעה לא בת-הצגה (בלי isu.acars — למשל STD-C/EGC, שלא מופעל).
-    ⚠ בשונה מ-acarsdec/dumpvdl2: אין level/noise/freq ברמת ההודעה (המפענח לא
-    חושף אותם ב---feed/--udp) — level/snr תמיד None, בלי המצאת ערך (ר' §12
-    ב-CLAUDE.md: "לעולם לא ממציאים ערך"). מיקום מגיע רק מטקסט ההודעה (כמו
-    ACARS רגיל) או מ-arinc622 (ADS-C) המקונן תחת isu.acars.arinc622 — כמו VDL2
-    מסלול A, כך שכל הפרסרים הקיימים (כולל ADS-C) חלים בחינם. ⚠ בשונה מ-VDL2:
-    inmarsat-sniffer עוטף שם מחדש את *כל* עץ ה-ACARS (main.c:889-897 מפעיל
-    la_proto_tree_format_json על ה-tree המושרש בצומת ה-ACARS עצמו, לא רק
-    ביישום המקונן) — כלומר isu.acars.arinc622 הוא בפועל
-    {"acars": {mode/label/reg/msg_text/... שוב, "arinc622": {תוכן האמיתי}}},
-    לא היישום ישירות. מפרקים שכבה אחת עם _VDL2_ACARS_FIELDS (כמו מסלול A של
-    VDL2) לפני שמעבירים ל-_normalize_acars — אחרת _libacars_decode/_scan_latlon
-    "מוצאים" את msg_text המשוכפל בתוך המעטפת כאילו הוא תוכן מפוענח.
-    src/dst.type ("Aircraft Earth Station"/"Ground Earth Station") הם עובדה
-    מבנית של הכלי (לא heuristic) => דורסים את _acars_direction, כמו ה-icao/dir
-    המבניים של VDL2. ⚠ בניגוד להנחה קודמת: AES **כן** מטופל ע"י inmarsat-sniffer
-    עצמו כ-hex זהה ל-ICAO (aircraft_db_lookup_by_aes מפרמט %06X ומחפש באותה
-    טבלת icao_hex/tar1090-db — אומת מהמקור, aircraft_db.c/.h). אנחנו עדיין
-    *לא* ממפים אותו ל-card["icao"] — לא כי הם "לא זהים", אלא כדי לא לבלבל את
-    זהות הרוסטר עם מרחב-הכתובות של VDL2 (icao שם מגיע מ-AVLC אמיתי, לא-לוויני;
-    ערבוב השניים תחת אותו מפתח roster היה יוצר זהויות-שווא)."""
-    isu = m.get("isu")
-    if not isinstance(isu, dict):
-        return None
-    acars = isu.get("acars")
-    if not isinstance(acars, dict):
-        return None
-    t_obj = m.get("t") or {}
-    try:
-        t = float(t_obj.get("sec") or 0) + float(t_obj.get("usec") or 0) / 1e6
-    except (TypeError, ValueError):
-        t = 0
-    t = t or time.time()
-    # ⚠ מחושב *לפני* הקריאה ל-_normalize_acars (לא רק אחריה, כמו בעבר) — הכיוון
-    # המבני חייב להיות ידוע ל-_normalize_acars *לפני* חילוץ מיקום מ-ADS-C, כי
-    # tag 7 פירושו הפוך לגמרי בין uplink/downlink ב-libacars (ר' ההערה המלאה
-    # ליד adsc_dir_ok ב-_normalize_acars). src/dst.type הם עובדה מבנית של הכלי.
-    src_type = str((isu.get("src") or {}).get("type") or "").lower()
-    dst_type = str((isu.get("dst") or {}).get("type") or "").lower()
-    structural_dir = ("downlink" if "aircraft" in src_type
-                      else "uplink" if "aircraft" in dst_type else None)
-    raw = {
-        "timestamp": t,
-        "mode": acars.get("mode"),
-        "label": acars.get("label"),
-        "tail": acars.get("reg"),
-        "flight": acars.get("flight"),
-        "_structural_dir": structural_dir,   # ר' adsc_dir_ok ב-_normalize_acars
-        # msgno (MSN של ACARS) לא נחשף ע"י inmarsat-sniffer: isu.refno/qno הם
-        # מספרי-רצף של שכבת הלוויין (uint8), *לא* ה-MSN הקלאסי — לא ממפים אותם
-        # ל-msgno כדי לא להטעות (ר' §12 ב-CLAUDE.md: לא מזייפים/ממפים-שגוי ערך).
-        "text": acars.get("msg_text"),
-        # ⚠ isu.acars החיצוני (feed_aero_message ב-feed.c) *לעולם* לא כולל
-        # err/crc_ok — אומת מהמקור: הפונקציה בונה את ה-JSON ידנית בלי השדות
-        # האלה בכלל. הגייט היחיד לפני feed הוא reasm_status+err (main.c:830) —
-        # לא crc_ok (שדה נפרד ב-libacars, acars.c:31-32/299) — כלומר הודעה עם
-        # CRC כושל עדיין יכולה להגיע. err/crc_ok *אמיתיים* קיימים רק במעטפת
-        # הפנימית הכפולה (isu.acars.arinc622.acars, ר' למטה) וגם זה רק כשיש
-        # יישום ARINC-622/ADS-C/CPDLC מקונן. לרוב הודעות הטקסט הרגילות (בלי
-        # arinc622) אין לנו שום איתות CRC — error נשאר 0 (לא מומצא: פשוט לא ידוע).
-        "error": 0,
-    }
-    # ⚠ re-decode מקומי בכיוון המבני הנכון (ר' התיעוד המלא ליד _decode_libacars_app) —
-    # לפני שנוגעים בפענוח arinc622 שכבר הגיע (אולי שגוי-כיוון) מ-inmarsat-sniffer.
-    # error (CRC המעטפת הפנימית, למטה) הוא ערוץ נפרד לגמרי מהצלחת פענוח היישום —
-    # re-decode מוצלח מחליף רק את תוצאת ה-application decode, לעולם לא "מתקן" CRC כושל.
-    corrected_json, corrected_text = _decode_libacars_app(
-        acars.get("label"), acars.get("msg_text"), structural_dir)
-
-    apps = acars.get("arinc622")
-    if isinstance(apps, dict):
-        # מפרקים את מעטפת ה-ACARS הכפולה (ר' התיעוד למעלה) — inner הוא היישום
-        # המקונן האמיתי (ADS-C/CPDLC), לא ACARS שוב. אם הצורה לא כצפוי (שינוי
-        # גרסה אצל inmarsat-sniffer) נופלים חזרה ל-apps כמות שהוא ולא קורסים.
-        inner = apps.get("acars")
-        if isinstance(inner, dict):
-            # רק כאן יש err/crc_ok אמיתיים (הסריאליזציה הגנרית של libacars,
-            # acars.c:299/560) — בדיוק אותה נוסחה כמו VDL2 מסלול A (app.py
-            # למעלה, ליד _VDL2_ACARS_FIELDS).
-            raw["error"] = 0 if (not inner.get("err") and inner.get("crc_ok", True)) else 1
-        apps = ({k: v for k, v in inner.items()
-                if k not in _VDL2_ACARS_FIELDS and isinstance(v, (dict, list))}
-                if isinstance(inner, dict) else apps)
-        if apps:
-            raw["libacars"] = apps
-    # עדיפות: re-decode מתוקן > הפענוח המקורי מ-inmarsat-sniffer > טקסט גולמי בלבד.
-    # כשל ב-helper (בינארי חסר/timeout/JSON פגום) לא מאבד את הפענוח הישן שכבר יש.
-    if corrected_json:
-        raw["libacars"] = corrected_json
-    if corrected_text:
-        raw["_libacars_text"] = corrected_text
-    card = _normalize_acars(raw)
-    if structural_dir:      # כבר חושב למעלה, לפני הקריאה (ר' ההערה שם) — לא כפול
-        card["dir"] = structural_dir
-    # כתובת ה-AES של צד-המטוס (= ICAO 24-bit, ר' ה-docstring) — בשדה *נפרד* מ-icao
-    # (הרוסטר לא מתערבב עם VDL2), לשימוש ההצלבה מול ADS-B בלבד (xcheck).
-    aes = (isu.get("src") or {}).get("addr") if "aircraft" in src_type else (
-        (isu.get("dst") or {}).get("addr") if "aircraft" in dst_type else None)
-    card["aes"] = adsb.norm_hex(aes)
-    return card
+    _feed_listener("vdl2")
 
 
 def _append_satcom_log(rec):
-    _append_jsonl_log(SATCOM_LOG_PATH, rec)
+    storage.append_jsonl_log(SATCOM_LOG_PATH, rec)
 
 
 def _trim_satcom_log():
-    _trim_jsonl_log(SATCOM_LOG_PATH, SATCOM_LOG_KEEP)
+    storage.trim_jsonl_log(SATCOM_LOG_PATH, SATCOM_LOG_KEEP)
 
 
 def _load_satcom_history():
-    """טוען את זנב satcom.jsonl ל-ring buffer בעלייה (היום בלבד, כמו ACARS/VDL2).
-    נקרא *לפני* הפעלת thread ה-listener (אין מרוץ)."""
-    global _satcom_seq
-    try:
-        lines = _read_log_lines(SATCOM_LOG_PATH)
-    except OSError:
-        return
-    recs = _jsonl_records(lines[-SATCOM_BUF_MAX:])
-    floor = _today_start()
-    recs = [r for r in recs if (r.get("t") or 0) >= floor]
-    recs.sort(key=lambda r: r.get("t") or 0)
-    with _satcom_lock:
-        for r in recs:
-            _satcom_seq += 1
-            r["id"] = _satcom_seq
-            _satcom_msgs.append(r)
-    if recs:
-        log.info("SATCOM: נטענו %d הודעות מההיסטוריה", len(recs))
+    _load_feed_history("satcom")
 
 
 def _satcom_listener():
-    """thread רקע: מאזין ל-UDP מ-inmarsat-sniffer (‎--udp=127.0.0.1:5558), שומר
-    ל-satcom.jsonl ומכניס ל-ring buffer. רץ תמיד (גם כשהמצב אחר) — פשוט לא
-    מגיעות דאטהגרמות כש-inmarsat-sniffer כבוי. dedup כמו ב-ACARS/VDL2: זהות =
-    tail (רוב הודעות ה-ACARS הלוויני נושאות רישום, בניגוד ל-icao ב-VDL2)."""
-    global _satcom_seq, _satcom_drop_count
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.bind((ACARS_UDP_HOST, SATCOM_UDP_PORT))
-    except OSError:
-        log.warning("SATCOM listener: port %d busy - /api/satcom יחזיר ריק", SATCOM_UDP_PORT)
-        return
-    seen = 0
-    _dedup: dict = {}
-    while True:
-        try:
-            data, _ = sock.recvfrom(65535)
-        except OSError:
-            continue
-        try:
-            msg = json.loads(data.decode("utf-8", "replace"))
-        except (ValueError, UnicodeError):
-            continue                          # דאטהגרם לא-JSON => מתעלמים
-        try:
-            rec = _normalize_satcom(msg)
-        except Exception:
-            # שדה עם טיפוס בלתי-צפוי לא יפיל את ה-thread לצמיתות (כמו ב-ACARS/VDL2)
-            log.exception("SATCOM: נרמול נכשל על דאטהגרם — מדולג")
-            continue
-        if rec is None:
-            _satcom_drop_count += 1
-            if _satcom_drop_count % 200 == 1:
-                log.warning("SATCOM: הודעה לא זוהתה (סכמה לא תואמת?) — %d עד כה", _satcom_drop_count)
-            continue
-
-        ident = rec.get("tail")
-        text = rec.get("text") or ""
-        ts = rec.get("t") or time.time()
-        if ident and text:
-            dedup_key = (ident, rec.get("label"), text[:80])
-            prev_ts, prev_rec = _dedup.get(dedup_key, (0, None))
-            if prev_rec is not None and ts - prev_ts < 90:
-                with _satcom_lock:             # prev_rec חי גם ב-_satcom_msgs => מוטציה תחת נעילה
-                    prev_rec["retry_count"] = prev_rec.get("retry_count", 1) + 1
-                continue
-            _dedup[dedup_key] = (ts, rec)
-            if len(_dedup) > 500:
-                cutoff = ts - 90
-                for k in [k for k, (t0, _) in _dedup.items() if t0 < cutoff]:
-                    del _dedup[k]
-
-        _append_satcom_log(rec)               # התמדה לפני הקצאת id (הקובץ נקי מ-id)
-        with _satcom_lock:
-            _satcom_seq += 1
-            rec["id"] = _satcom_seq
-            _satcom_msgs.append(rec)
-        _xc_submit("satcom", rec)
-        seen += 1
-        if seen % 200 == 0:
-            _trim_satcom_log()
+    _feed_listener("satcom")
 
 
 HEALTH_SERVICES = ("rtl_airband", "icecast2", "sdrplay",
@@ -3040,7 +1005,7 @@ def _sanitize_freqs(freqs, default=None):
     שאין הזרקה: רק ספרות ונקודה (אף ש-systemd מנתח בבטחה, שמירה על קלט נקי).
     ‏default => רשימת הנפילה כשלא נשאר כלום (ברירת מחדל: תדרי ה-ACARS)."""
     out = [str(f).strip() for f in (freqs or []) if _FREQ_RE.match(str(f).strip())]
-    return out or list(default if default is not None else ACARS_FREQS_DEFAULT)
+    return out or list(default if default is not None else config.ACARS_FREQS_DEFAULT)
 
 
 def _window_error(freqs, max_channels, window_mhz, decoder):
@@ -3086,7 +1051,7 @@ def _sanitize_satellite(freqs, default=None):
     מחזיר תמיד רשימה בת-איבר-יחיד (geostationary => לוויין אחד, לא בנק)."""
     out = [str(f).strip().upper() for f in (freqs or [])
            if _SAT_RE.match(str(f).strip().upper())]
-    return out[:1] or list(default if default is not None else SATCOM_FREQS_DEFAULT)
+    return out[:1] or list(default if default is not None else config.SATCOM_FREQS_DEFAULT)
 
 
 def _sanitize_satcom_gain(value, default=None):
@@ -3104,7 +1069,7 @@ def _sanitize_satcom_gain(value, default=None):
     if value is None or (isinstance(value, str) and value.strip().lower() in ("", "agc", "auto")):
         return None
     try:
-        return max(IFGR_MIN, min(IFGR_MAX, int(float(value))))
+        return max(config.IFGR_MIN, min(config.IFGR_MAX, int(float(value))))
     except (TypeError, ValueError):
         return default
 
@@ -3118,8 +1083,8 @@ def _satcom_window_error(freqs):
         return "לא נבחר לוויין"
     if len(vals) > 1:
         return "ניתן לבחור לוויין אחד בלבד (geostationary — לא בנק ערוצים)"
-    if vals[0] not in SATCOM_SATELLITES:
-        return "לוויין לא מוכר: %s (אפשרויות: %s)" % (vals[0], ", ".join(sorted(SATCOM_SATELLITES)))
+    if vals[0] not in config.SATCOM_SATELLITES:
+        return "לוויין לא מוכר: %s (אפשרויות: %s)" % (vals[0], ", ".join(sorted(config.SATCOM_SATELLITES)))
     return None
 
 
@@ -3143,7 +1108,7 @@ def write_acars_env(freqs, gain=ACARS_GAIN_DEFAULT, ratemult=ACARS_RATEMULT_DEFA
         "ACARS_SERIAL=" + _serial_arg(serial if path else _primary_serial()),
         "",
     ])
-    _atomic_write(path or ACARS_ENV_PATH, text)
+    storage.atomic_write(path or ACARS_ENV_PATH, text)
 
 
 def write_vdl2_env(freqs, ifgr=None, rfgr=None, path=None, serial=None):
@@ -3152,7 +1117,7 @@ def write_vdl2_env(freqs, ifgr=None, rfgr=None, path=None, serial=None):
     ‏VDL2_GAIN מכיל את הדגל *כולו* (או ריק): ‏$VDL2_GAIN לא-מצוטט ב-ExecStart נעלם
     לגמרי כשהערך ריק => ברירת המחדל היא AGC של הדרייבר (כמו rtl_airband בלי שורת gain).
     האפליקציה כותבת רק מחרוזת ריקה או ints מפורמטים => אין משטח הזרקה."""
-    mhz = _sanitize_freqs(freqs, VDL2_FREQS_DEFAULT)
+    mhz = _sanitize_freqs(freqs, config.VDL2_FREQS_DEFAULT)
     hz = " ".join(str(int(round(float(f) * 1e6))) for f in mhz)
     gain = ""
     if ifgr is not None and rfgr is not None:
@@ -3166,7 +1131,7 @@ def write_vdl2_env(freqs, ifgr=None, rfgr=None, path=None, serial=None):
         "VDL2_SERIAL=" + _serial_arg(serial if path else _primary_serial()),
         "",
     ])
-    _atomic_write(path or VDL2_ENV_PATH, text)
+    storage.atomic_write(path or VDL2_ENV_PATH, text)
 
 
 def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True, spectrum=True):
@@ -3206,55 +1171,54 @@ def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True, spectrum=True
         "SATCOM_SERIAL=" + _serial_arg(_primary_serial(), sep="-"),
         "",
     ])
-    _atomic_write(SATCOM_ENV_PATH, text)
+    storage.atomic_write(SATCOM_ENV_PATH, text)
+
+
+def _stop_services(services, timeout=30):
+    """עצירה best-effort, לפי הסדר שנשלח. Conflicts ביחידות עוצר ממילא — עוצרים מפורשות
+    קודם כדי לשחרר את ה-SDR לפני שהצרכן הבא פותח אותו (מונע מרוץ על המכשיר)."""
+    for svc in services:
+        try:
+            _sysctl("stop", svc, timeout=timeout)
+        except Exception:
+            pass
+
+
+def _restart_verified(service, stuck_msg, failed_msg, default_err):
+    """restart לצרכן SDR + אימות שהוא *נשאר* למעלה. מחזיר (error, detail).
+    השירות יכול לעלות ואז לקרוס (SDR תפוס/חסר) ⇒ פולינג ~3.5ש' ולא בדיקה בודדת.
+    ⚠ לא לבלבל עם _restart_and_verify של הקול (רולבק, SDR נוכח) — נפרד בכוונה."""
+    try:
+        r = _sysctl("restart", service, timeout=45)
+    except subprocess.TimeoutExpired:
+        return stuck_msg, None
+    if r.returncode != 0:
+        return (r.stderr or default_err).strip(), _journal_tail(service)
+    for _ in range(7):
+        time.sleep(0.5)
+        if not _is_active(service):
+            return failed_msg, _journal_tail(service)
+    return None, None
 
 
 def _enter_vdl2(freqs):
     """עוצר את שני צרכני ה-SDR האחרים ומריץ dumpvdl2. מחזיר (error, detail).
     Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות תחילה כדי לשחרר את
     ה-SDR לפני ש-dumpvdl2 פותח אותו (מונע מרוץ על המכשיר)."""
-    for svc in ("rtl_airband", ACARS_SERVICE, *SECONDARY_SERVICES, SATCOM_SERVICE):
-        try:
-            _sysctl("stop", svc, timeout=30)
-        except Exception:
-            pass
+    _stop_services(("rtl_airband", ACARS_SERVICE, *SECONDARY_SERVICES, SATCOM_SERVICE))
     write_vdl2_env(freqs)
-    try:
-        r = _sysctl("restart", VDL2_SERVICE, timeout=45)
-    except subprocess.TimeoutExpired:
-        return "הפעלת VDL2 נתקעה — בדוק שה-SDR מחובר", None
-    if r.returncode != 0:
-        return (r.stderr or "dumpvdl2 failed").strip(), _journal_tail(VDL2_SERVICE)
-    # כמו ב-acarsdec: השירות יכול לעלות ואז לקרוס => פולינג ולא בדיקה בודדת
-    for _ in range(7):
-        time.sleep(0.5)
-        if not _is_active(VDL2_SERVICE):
-            return "dumpvdl2 נכשל לעלות — בדוק journalctl -u airam-vdl2", _journal_tail(VDL2_SERVICE)
-    return None, None
+    return _restart_verified(VDL2_SERVICE, "הפעלת VDL2 נתקעה — בדוק שה-SDR מחובר",
+                             "dumpvdl2 נכשל לעלות — בדוק journalctl -u airam-vdl2", "dumpvdl2 failed")
 
 
 def _enter_acars(freqs):
     """עוצר את שאר צרכני ה-SDR ומריץ acarsdec. מחזיר (error, detail).
     Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות תחילה כדי לשחרר את
     ה-SDR לפני ש-acarsdec פותח אותו (מונע מרוץ על המכשיר)."""
-    for svc in ("rtl_airband", *SECONDARY_SERVICES, VDL2_SERVICE, SATCOM_SERVICE):
-        try:
-            _sysctl("stop", svc, timeout=30)
-        except Exception:
-            pass
+    _stop_services(("rtl_airband", *SECONDARY_SERVICES, VDL2_SERVICE, SATCOM_SERVICE))
     write_acars_env(freqs)
-    try:
-        r = _sysctl("restart", ACARS_SERVICE, timeout=45)
-    except subprocess.TimeoutExpired:
-        return "הפעלת ACARS נתקעה — בדוק שה-SDR מחובר", None
-    if r.returncode != 0:
-        return (r.stderr or "acarsdec failed").strip(), _journal_tail(ACARS_SERVICE)
-    # כמו ב-rtl_airband: השירות יכול לעלות ואז לקרוס => פולינג ולא בדיקה בודדת
-    for _ in range(7):
-        time.sleep(0.5)
-        if not _is_active(ACARS_SERVICE):
-            return "acarsdec נכשל לעלות — בדוק journalctl -u airam-acars", _journal_tail(ACARS_SERVICE)
-    return None, None
+    return _restart_verified(ACARS_SERVICE, "הפעלת ACARS נתקעה — בדוק שה-SDR מחובר",
+                             "acarsdec נכשל לעלות — בדוק journalctl -u airam-acars", "acarsdec failed")
 
 
 def _enter_satcom(freqs, bias_tee=True, skip_c=True, spectrum=True, gain=None):
@@ -3276,11 +1240,7 @@ def _enter_satcom(freqs, bias_tee=True, skip_c=True, spectrum=True, gain=None):
     ‏gain=None (ברירת מחדל) => AGC של הדרייבר; int 20..59 => gRdB ידני עם
     LNAstate מקובע ל-0 (רווח RF מקסימלי) — ר' SATCOM_GAIN_DEFAULT למה זה
     דווקא *עוזר* לאות לוויין חלש כשה-AGC נחנק מאנרגיה מחוץ לפס."""
-    for svc in ("rtl_airband", ACARS_SERVICE, *SECONDARY_SERVICES, VDL2_SERVICE):
-        try:
-            _sysctl("stop", svc, timeout=30)
-        except Exception:
-            pass
+    _stop_services(("rtl_airband", ACARS_SERVICE, *SECONDARY_SERVICES, VDL2_SERVICE))
     write_satcom_env(freqs, gain=gain, bias_tee=bias_tee, skip_c=skip_c, spectrum=spectrum)
     try:
         # airam-satcom.service (בשונה משאר צרכני ה-SDR) מוגדר עם StartLimitBurst
@@ -3290,19 +1250,9 @@ def _enter_satcom(freqs, bias_tee=True, skip_c=True, spectrum=True, gain=None):
         _sysctl("reset-failed", SATCOM_SERVICE, timeout=10)
     except Exception:
         pass
-    try:
-        r = _sysctl("restart", SATCOM_SERVICE, timeout=45)
-    except subprocess.TimeoutExpired:
-        return "הפעלת SATCOM נתקעה — בדוק שה-SDR מחובר", None
-    if r.returncode != 0:
-        return (r.stderr or "inmarsat-sniffer failed").strip(), _journal_tail(SATCOM_SERVICE)
-    # כמו ב-acarsdec/dumpvdl2: השירות יכול לעלות ואז לקרוס => פולינג ולא בדיקה בודדת
-    for _ in range(7):
-        time.sleep(0.5)
-        if not _is_active(SATCOM_SERVICE):
-            return ("inmarsat-sniffer נכשל לעלות — בדוק journalctl -u airam-satcom",
-                    _journal_tail(SATCOM_SERVICE))
-    return None, None
+    return _restart_verified(SATCOM_SERVICE, "הפעלת SATCOM נתקעה — בדוק שה-SDR מחובר",
+                             "inmarsat-sniffer נכשל לעלות — בדוק journalctl -u airam-satcom",
+                             "inmarsat-sniffer failed")
 
 
 def _enter_standby():
@@ -3313,11 +1263,7 @@ def _enter_standby():
     ממילא אינו מתיר לעצור אותו. מחזיר (error, detail). serialized תחת TUNE_LOCK
     ע"י הקורא."""
     consumers = (ACARS_SERVICE, *SECONDARY_SERVICES, VDL2_SERVICE, SATCOM_SERVICE, "rtl_airband")
-    for svc in consumers:
-        try:
-            _sysctl("stop", svc, timeout=30)
-        except Exception:
-            pass
+    _stop_services(consumers)
     stuck = []
     for _ in range(7):
         time.sleep(0.3)
@@ -3361,26 +1307,17 @@ def _enter_voice(params, keep_secondary=False):
     # מפורשות לפני שמרימים את rtl_airband (Conflicts גיבוי, אבל זה משחרר את
     # המכשיר מיד).
     # keep_secondary: כיוונון קול בתוך "קול + ACARS" — acarsdec על המקלט השני ממשיך.
-    for svc in (ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE):
-        if _is_active(svc):
-            try:
-                _sysctl("stop", svc, timeout=30)
-            except Exception:
-                pass
+    _stop_services([svc for svc in (ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE) if _is_active(svc)])
     # ⚠ צרכני המשני נעצרים *בלי* תנאי is-active: אין להם Conflicts מול rtl_airband, אז זה
     # המקום היחיד שעוצר אותם — ומשני ב-"activating" (השער / sleep 10 / RestartSec) היה
     # שורד את היציאה מהמצב הכפול, עולה אחר כך, ומציג מצב כפול "תקין" שהמשתמש עזב.
     if not keep_secondary:
-        for svc in SECONDARY_SERVICES:
-            try:
-                _sysctl("stop", svc, timeout=30)
-            except Exception:
-                pass
+        _stop_services(SECONDARY_SERVICES)
     # chan_filter/fm_notch אופציונליים: בדיקת האנטנה והניסוי (_probe_params/_exp_voice_params)
     # לא מעבירים אותם ⇒ רצים תמיד בתנאים הקבועים (standard, בלי notch) — בר-השוואה לבסיס.
     write_config(params["freq"], params["mod"], params["agc"], params["if_gain"],
                  params["rf_gain"], params["squelch_mode"], params["squelch_snr"],
-                 params.get("chan_filter", CHAN_FILTER_DEFAULT), bool(params.get("fm_notch")))
+                 params.get("chan_filter", config.CHAN_FILTER_DEFAULT), bool(params.get("fm_notch")))
     res = _restart_and_verify()
     if res[0] is None:
         # אחרי ש-rtl_airband אומת בלבד, וב-best-effort: כשל בסינון לעולם לא
@@ -3391,8 +1328,8 @@ def _enter_voice(params, keep_secondary=False):
 
 
 def _wait_voice_settled(since):
-    """פתיחה מדורגת: מחכה ש-rtl_airband יכתוב stats *אחרי* `since` (סיים לעלות), ועוד
-    ACARS2_STAGGER_SEC. לא נכשל — אחרי VOICE_STARTUP_WAIT_SEC ממשיכים בכל מקרה (ה-stats
+    """פתיחה מדורגת: מחכה ש-rtl_airband יכתוב stats *אחרי* `since` (סיים לעלות); המרווח
+    הנוסף יושב ביחידה (ExecStartPre=/bin/sleep 10). לא נכשל — אחרי VOICE_STARTUP_WAIT_SEC ממשיכים בכל מקרה (ה-stats
     הם סימן, לא תנאי; הקול כבר אומת ע"י _restart_and_verify)."""
     end = time.monotonic() + VOICE_STARTUP_WAIT_SEC
     while time.monotonic() < end:
@@ -3402,58 +1339,30 @@ def _wait_voice_settled(since):
         except OSError:
             pass
         time.sleep(0.5)
-    time.sleep(ACARS2_STAGGER_SEC)
 
 
 def _start_acars2(freqs):
     """acarsdec על המקלט המשני. מחזיר (error, detail)."""
     write_acars2_env(freqs)
-    try:
-        r = _sysctl("restart", ACARS2_SERVICE, timeout=45)
-    except subprocess.TimeoutExpired:
-        return "הפעלת ACARS על המקלט המשני נתקעה — בדוק שהוא מחובר", None
-    if r.returncode != 0:
-        return (r.stderr or "acarsdec failed").strip(), _journal_tail(ACARS2_SERVICE)
-    for _ in range(7):
-        time.sleep(0.5)
-        if not _is_active(ACARS2_SERVICE):
-            return ("ACARS על המקלט המשני נכשל לעלות — בדוק journalctl -u " + ACARS2_SERVICE,
-                    _journal_tail(ACARS2_SERVICE))
-    return None, None
+    return _restart_verified(ACARS2_SERVICE, "הפעלת ACARS על המקלט המשני נתקעה — בדוק שהוא מחובר",
+                             "ACARS על המקלט המשני נכשל לעלות — בדוק journalctl -u " + ACARS2_SERVICE,
+                             "acarsdec failed")
 
 
 def _start_voice2(st=None):
     """rtl_airband שני על המקלט המשני (קול כפול). מחזיר (error, detail)."""
     write_voice2_config(st)
-    try:
-        r = _sysctl("restart", VOICE2_SERVICE, timeout=45)
-    except subprocess.TimeoutExpired:
-        return "הפעלת הערוץ השני נתקעה — בדוק שהמקלט המשני מחובר", None
-    if r.returncode != 0:
-        return (r.stderr or "rtl_airband2 failed").strip(), _journal_tail(VOICE2_SERVICE)
-    for _ in range(7):
-        time.sleep(0.5)
-        if not _is_active(VOICE2_SERVICE):
-            return ("הערוץ השני נכשל לעלות — בדוק תדר/חיבור, journalctl -u " + VOICE2_SERVICE,
-                    _journal_tail(VOICE2_SERVICE))
-    return None, None
+    return _restart_verified(VOICE2_SERVICE, "הפעלת הערוץ השני נתקעה — בדוק שהמקלט המשני מחובר",
+                             "הערוץ השני נכשל לעלות — בדוק תדר/חיבור, journalctl -u " + VOICE2_SERVICE,
+                             "rtl_airband2 failed")
 
 
 def _start_vdl2b(freqs):
     """dumpvdl2 על המקלט המשני (קול + VDL2). מחזיר (error, detail)."""
     write_vdl2_env(freqs, path=VDL2B_ENV_PATH, serial=_secondary_serial())
-    try:
-        r = _sysctl("restart", VDL2B_SERVICE, timeout=45)
-    except subprocess.TimeoutExpired:
-        return "הפעלת VDL2 על המקלט המשני נתקעה — בדוק שהוא מחובר", None
-    if r.returncode != 0:
-        return (r.stderr or "dumpvdl2 failed").strip(), _journal_tail(VDL2B_SERVICE)
-    for _ in range(7):
-        time.sleep(0.5)
-        if not _is_active(VDL2B_SERVICE):
-            return ("VDL2 על המקלט המשני נכשל לעלות — בדוק journalctl -u " + VDL2B_SERVICE,
-                    _journal_tail(VDL2B_SERVICE))
-    return None, None
+    return _restart_verified(VDL2B_SERVICE, "הפעלת VDL2 על המקלט המשני נתקעה — בדוק שהוא מחובר",
+                             "VDL2 על המקלט המשני נכשל לעלות — בדוק journalctl -u " + VDL2B_SERVICE,
+                             "dumpvdl2 failed")
 
 
 def _start_secondary(mode, st):
@@ -3477,11 +1386,7 @@ def _enter_composite(mode, params, st):
     rerr = _roles_error(mode)
     if rerr:
         return rerr, None, False
-    for svc in (ACARS_SERVICE, *SECONDARY_SERVICES, VDL2_SERVICE, SATCOM_SERVICE):
-        try:
-            _sysctl("stop", svc, timeout=30)
-        except Exception:
-            pass
+    _stop_services((ACARS_SERVICE, *SECONDARY_SERVICES, VDL2_SERVICE, SATCOM_SERVICE))
     since = time.time()
     err, detail, sdr_down = _enter_voice(params, keep_secondary=True)
     if err:
@@ -3522,7 +1427,7 @@ def _enter_voice_acars(params, freqs):
 
 def _enter_voice2(params, st=None):
     """מצב "קול כפול" (שני מקלטים) — ר' _enter_composite."""
-    return _enter_composite("voice2", params, st if st is not None else load_state())
+    return _enter_composite("voice2", params, st if st is not None else appstate.load_state())
 
 
 def _enter_voice_vdl2(params, freqs):
@@ -3556,15 +1461,15 @@ _ICE_STATUS_LOCK = threading.Lock()
 
 def _denoise_engine(st=None):
     """המנוע השמור, תמיד מתוך הרשימה הסגורה (state ישן/פגום ⇒ ברירת המחדל)."""
-    e = (st if st is not None else load_state()).get("denoise_engine")
-    return e if e in DENOISE_ENGINES else DENOISE_ENGINE_DEFAULT
+    e = (st if st is not None else appstate.load_state()).get("denoise_engine")
+    return e if e in config.DENOISE_ENGINES else config.DENOISE_ENGINE_DEFAULT
 
 
 def _denoise_missing(engine=None):
     """רכיבים חסרים לסינון במנוע הנתון (ברירת מחדל: השמור). רשימה ריקה = מותקן.
     נבדק *חי* בכל קריאה ולא פעם אחת בעלייה — אותו לקח כמו whisper (§12): התקנה
     מאוחרת חייבת להיות מורגשת בלי restart, ו"לא מותקן" חייב להיות מדווח."""
-    if engine not in DENOISE_ENGINES:
+    if engine not in config.DENOISE_ENGINES:
         engine = _denoise_engine()
     missing = [] if shutil.which("ffmpeg") else ["ffmpeg"]
     binary = DENOISE_RNNOISE if engine == "rnmix" else DENOISE_SPEEXDN
@@ -3575,9 +1480,9 @@ def _denoise_missing(engine=None):
 def write_denoise_env(engine):
     """/etc/airam/denoise.env — EnvironmentFile של airam-denoise.service (systemd,
     לא shell). הערך תמיד מהרשימה הסגורה; הסקריפט גם הוא מסרב לכל דבר אחר."""
-    if engine not in DENOISE_ENGINES:
-        engine = DENOISE_ENGINE_DEFAULT
-    _atomic_write(DENOISE_ENV_PATH, "# נכתב אוטומטית ע\"י AIR-AM (סינון רעשים). שינויים ידניים נדרסים.\n"
+    if engine not in config.DENOISE_ENGINES:
+        engine = config.DENOISE_ENGINE_DEFAULT
+    storage.atomic_write(DENOISE_ENV_PATH, "# נכתב אוטומטית ע\"י AIR-AM (סינון רעשים). שינויים ידניים נדרסים.\n"
                                     f"AIRAM_DENOISE_ENGINE={engine}\n")
 
 
@@ -3630,7 +1535,7 @@ def _denoise_state(enabled, missing, voice_on, service, live):
 def _denoise_status(services=None):
     """מצב הסינון ל-/api/denoise ול-/api/health. services — מפה מוכנה מ-
     _services_status (‏/api/health כבר מחזיק אותה => בלי fork נוסף)."""
-    st = load_state()
+    st = appstate.load_state()
     enabled = bool(st.get("denoise"))
     engine = _denoise_engine(st)
     missing = _denoise_missing(engine)
@@ -3644,7 +1549,7 @@ def _denoise_status(services=None):
         mounts = _icecast_live_mounts()
         live = None if mounts is None else (DENOISE_MOUNT in mounts)
     engines = []
-    for eid, e in DENOISE_ENGINES.items():
+    for eid, e in config.DENOISE_ENGINES.items():
         m = missing if eid == engine else _denoise_missing(eid)
         engines.append({"id": eid, "label": e["label"], "available": not m, "missing": m})
     return {"enabled": enabled, "engine": engine, "engines": engines,
@@ -3660,7 +1565,7 @@ def _denoise_sync():
     ברדיו: גם כשל מלא כאן משאיר את /live.mp3 ואת ההקלטות בדיוק כמו שהיו.
     לא מחזיק TUNE_LOCK (נקרא גם מתוך _enter_voice שכבר מחזיק אותו)."""
     try:
-        st = load_state()
+        st = appstate.load_state()
         engine = _denoise_engine(st)
         want = (bool(st.get("denoise")) and not _denoise_missing(engine)
                 and _is_active("rtl_airband"))
@@ -3683,7 +1588,7 @@ def _denoise_after_voice():
     """וו אחרי כניסה מוצלחת לקול. בלי מתג דלוק — אפס פעולות (אף fork): הנתיב
     הזה רץ בכל כיוונון, והמתג הכבוי הוא ברירת המחדל."""
     try:
-        if load_state().get("denoise"):
+        if appstate.load_state().get("denoise"):
             _denoise_sync()
     except Exception:
         log.exception("denoise after voice נכשל (מתעלמים)")
@@ -3698,7 +1603,7 @@ def _fail_to_off(st, err, detail, log_prefix):
         _enter_standby()   # שגיאה משנית לא מעניינת — ממילא מדווחים על המקורית
     except Exception:
         pass
-    new_state = _merge_state({"app_mode": "off", "prev_mode": st.get("app_mode", "off")})
+    new_state = appstate._merge_state({"app_mode": "off", "prev_mode": st.get("app_mode", "off")})
     return {"ok": False, "error": err, "detail": detail,
             "app_mode": "off", "state": new_state}, 500
 
@@ -3769,7 +1674,7 @@ def _validate_scan_plan(raw):
                 return None
             clean["active_from"], clean["active_to"] = frm, to
         if mode in ("acars", "vdl2") and leg.get("freqs"):
-            default = ACARS_FREQS_DEFAULT if mode == "acars" else VDL2_FREQS_DEFAULT
+            default = config.ACARS_FREQS_DEFAULT if mode == "acars" else config.VDL2_FREQS_DEFAULT
             wcheck = _acars_window_error if mode == "acars" else _vdl2_window_error
             freqs = _sanitize_freqs(leg.get("freqs"), default)
             if wcheck(freqs):
@@ -3784,15 +1689,15 @@ def _scan_enter_leg(leg):
     (עקבי עם _enter_voice/_enter_acars/_enter_vdl2). מחזיר (error, detail)."""
     mode = leg["mode"]
     if mode == "voice":
-        params, perr = _parse_tune(load_state())
+        params, perr = _parse_tune(appstate.load_state())
         if perr:
-            params, _ = _parse_tune(DEFAULT_STATE)
+            params, _ = _parse_tune(appstate.DEFAULT_STATE)
         err, detail, _sdr_down = _enter_voice(params)
         return err, detail
     key = "acars_freqs" if mode == "acars" else "vdl2_freqs"
-    default = ACARS_FREQS_DEFAULT if mode == "acars" else VDL2_FREQS_DEFAULT
+    default = config.ACARS_FREQS_DEFAULT if mode == "acars" else config.VDL2_FREQS_DEFAULT
     enter = _enter_acars if mode == "acars" else _enter_vdl2
-    freqs = leg.get("freqs") or load_state().get(key) or default
+    freqs = leg.get("freqs") or appstate.load_state().get(key) or default
     return enter(freqs)
 
 
@@ -3960,7 +1865,7 @@ def _scan_loop_body(stop_evt, plan, start_idx, first_dwell, consumer_active=Fals
                     _enter_standby()
                     if stop_evt.is_set():
                         return   # מעבר מצב אחר כבר תפס פיקוד בינתיים — לא דורסים את ה-state שלו
-                    _merge_state({"app_mode": "off", "prev_mode": "scan"})
+                    appstate._merge_state({"app_mode": "off", "prev_mode": "scan"})
                 finally:
                     TUNE_LOCK.release()
                 with _scan_lock:
@@ -4056,7 +1961,7 @@ def live_playlist():
     host = request.host.split(":", 1)[0]          # רק ה-hostname, בלי פורט ה-web
     # המתג גלובלי => גם הנגן החיצוני מקבל את המסונן כשהוא דלוק. בטוח גם כשהסינון
     # לא חי: Icecast מגיש את /live.mp3 למבקשי /clean.mp3 (fallback-mount).
-    mount = DENOISE_MOUNT if load_state().get("denoise") else MOUNT
+    mount = DENOISE_MOUNT if appstate.load_state().get("denoise") else MOUNT
     url = f"http://{host}:{ICECAST_PORT}/{mount}"
     body = "#EXTM3U\n#EXTINF:-1,AIR-AM live\n" + url + "\n"
     return app.response_class(body, mimetype="audio/x-mpegurl")
@@ -4118,7 +2023,7 @@ def root_asset(fname):
 
 @app.route("/api/state")
 def api_state():
-    st = load_state()
+    st = appstate.load_state()
     # מקור-אמת למצב = המציאות (השירות הפעיל), ובאין צרכן פעיל — הכוונה השמורה.
     # אין ברירת-מחדל לקול: מצב שמור שאמור לרוץ אבל לא רץ מדווח כתקלה (mode_ok)
     # במקום להעמיד פנים שאנחנו בקול. _live_mode בודק את rtl_airband ראשון
@@ -4148,7 +2053,7 @@ def api_state():
     st.update(presets=load_presets(), mount=MOUNT, port=ICECAST_PORT, version=VERSION,
               denoise_mount=DENOISE_MOUNT, denoise_available=not _denoise_missing(),
               denoise_engine=_denoise_engine(st),
-              acars_banks=ACARS_BANKS, vdl2_banks=VDL2_BANKS, satcom_banks=SATCOM_BANKS)
+              acars_banks=config.ACARS_BANKS, vdl2_banks=config.VDL2_BANKS, satcom_banks=config.SATCOM_BANKS)
     return jsonify(st)
 
 
@@ -4161,7 +2066,7 @@ def api_presets():
     ok, cleaned = _validate_presets(data)
     if not ok:
         return jsonify(ok=False, error="רשימת פריסטים לא תקינה", presets=load_presets()), 400
-    _atomic_write(PRESETS_PATH, json.dumps(cleaned, ensure_ascii=False))
+    storage.atomic_write(PRESETS_PATH, json.dumps(cleaned, ensure_ascii=False))
     log.info("presets updated (%d items, from %s)", len(cleaned), request.remote_addr)
     return jsonify(ok=True, presets=cleaned)
 
@@ -4384,7 +2289,7 @@ def api_sdr():
 def api_sdr_devices():
     """המקלטים שה-API מציע עכשיו + התפקידים השמורים. ⚠ מקלט שצרכן (שלנו או זר)
     מחזיק לא מופיע ב-find — לכן `held` מסמן שהרשימה חלקית, לא שהוא "לא קיים"."""
-    st = load_state()
+    st = appstate.load_state()
     held, _ = _sdr_holder(_services_status(SDR_CONSUMERS))
     try:
         r = subprocess.run(["SoapySDRUtil", "--find=driver=sdrplay"],
@@ -4427,7 +2332,7 @@ def api_sdr_roles():
     if not TUNE_LOCK.acquire(blocking=False):
         return jsonify({"ok": False, "error": "פעולה אחרת מתבצעת — נסה שוב בעוד רגע"}), 409
     try:
-        st = load_state()
+        st = appstate.load_state()
         if st.get("app_mode") in COMPOSITE_SECONDARY or any(_is_active(s2) for s2 in SECONDARY_SERVICES):
             return jsonify({"ok": False, "error": "מצב של שני מקלטים פעיל — עבור לקול רגיל או לכיבוי "
                             "לפני שינוי תפקידי המקלטים"}), 409
@@ -4435,7 +2340,7 @@ def api_sdr_roles():
         sec = changes.get("sdr_secondary", st.get("sdr_secondary"))
         if prim and sec and prim == sec:
             return jsonify({"ok": False, "error": "אותו מקלט לא יכול להיות גם ראשי וגם משני"}), 400
-        new = _merge_state(changes)
+        new = appstate._merge_state(changes)
         try:
             write_sdr_env(new.get("sdr_primary"), new.get("sdr_secondary"))
         except OSError as e:
@@ -4451,6 +2356,11 @@ def api_sdr_roles():
 @app.route("/api/health")
 def api_health():
     """סטטוס המערכת — מאפשר ל-UI להבדיל בין "אין שידור" ל"משהו נפל"."""
+    return jsonify(_health_snapshot())
+
+
+def _health_snapshot():
+    """הלב של /api/health כ-dict — משותף גם ליומן הבדיקה (_diag_sample) ולייצוא."""
     services = _services_status(HEALTH_SERVICES)
     try:
         stats_age = round(time.time() - STATS_PATH.stat().st_mtime, 1)
@@ -4468,7 +2378,7 @@ def api_health():
     vdl2b_on = services.get(VDL2B_SERVICE) == "active"
     # standby מכוון: כל הצרכנים כבויים ו-state מסומן off => תקין, *לא* תקלה (אחרת
     # מצב הכיבוי שביקש המשתמש היה נראה כקריסה). sdrplay נשאר active במפה.
-    saved_state = load_state()
+    saved_state = appstate.load_state()
     saved = saved_state.get("app_mode", "off")
     off_ok = (saved == "off"
               and services["rtl_airband"] != "active"
@@ -4499,9 +2409,9 @@ def api_health():
               else vdl2_ok if mode == "vdl2" else satcom_ok if mode == "satcom" else off_ok)
     # הסינון לא נכנס ל-ok בכוונה: כשל בו לא פוגע ברדיו (Icecast מגיש /live.mp3
     # למבקשי /clean.mp3), ו"תקלה" אדומה במסך הבית בגללו הייתה שולחת לבדוק SDR.
-    return jsonify(ok=ok, app_mode=mode,
-                   services=services, sdr_present=_sdr_present(), stats_age=stats_age,
-                   denoise=_denoise_status(services))
+    return dict(ok=ok, app_mode=mode,
+                services=services, sdr_present=_sdr_present(), stats_age=stats_age,
+                denoise=_denoise_status(services))
 
 
 @app.route("/api/denoise", methods=["GET", "POST"])
@@ -4516,10 +2426,10 @@ def api_denoise():
         data = request.get_json(silent=True)
         if (not isinstance(data, dict) or not ({"enabled", "engine"} & data.keys())
                 or ("enabled" in data and not isinstance(data["enabled"], bool))
-                or ("engine" in data and data["engine"] not in DENOISE_ENGINES)):
+                or ("engine" in data and data["engine"] not in config.DENOISE_ENGINES)):
             return jsonify(ok=False, error="נדרש {\"enabled\": true|false} ו/או {\"engine\": "
-                           + "|".join(DENOISE_ENGINES) + "}"), 400
-        st = load_state()
+                           + "|".join(config.DENOISE_ENGINES) + "}"), 400
+        st = appstate.load_state()
         enabled = data.get("enabled", bool(st.get("denoise")))
         engine = data.get("engine", _denoise_engine(st))
         missing = _denoise_missing(engine)
@@ -4528,7 +2438,7 @@ def api_denoise():
             return jsonify(ok=False, error="סינון הרעשים לא מותקן (חסר: " + ", ".join(missing) + ")",
                            **_denoise_status()), 501
         changed_engine = engine != _denoise_engine(st)
-        _merge_state({"denoise": enabled, "denoise_engine": engine})
+        appstate._merge_state({"denoise": enabled, "denoise_engine": engine})
         log.info("denoise %s engine=%s (from %s)", "on" if enabled else "off", engine,
                  request.remote_addr)
         if changed_engine:
@@ -4572,15 +2482,6 @@ def parse_stats(text, want_freq):
 
 
 # --- יומן שידורים והקלטות ---------------------------------------------------
-_REC_NAME_RE = re.compile(rf"^{re.escape(REC_BASENAME)}(?:2)?_\d{{8}}_\d{{6}}_(\d+)\.mp3$")
-
-
-def _rec_freq_mhz(name):
-    """airam_20260611_203455_134600000.mp3 => 134.600 (MHz). אחר => None."""
-    m = _REC_NAME_RE.match(name)
-    return round(int(m.group(1)) / 1e6, 3) if m else None
-
-
 def _append_activity(rows):
     """append + קיצוץ. הקובץ מוגבל (מאות שורות) => קריאה מלאה זולה, וכתיבה
     אטומית כדי ש-/api/activity לא יקרא קובץ חצי-כתוב."""
@@ -4591,7 +2492,7 @@ def _append_activity(rows):
     lines += [json.dumps(r, ensure_ascii=False) for r in rows]
     if len(lines) > ACTIVITY_KEEP * 2:   # קיצוץ בהיסטרזיס - לא משכתבים בכל append
         lines = lines[-ACTIVITY_KEEP:]
-    _atomic_write(ACTIVITY_PATH, "\n".join(lines) + "\n")
+    storage.atomic_write(ACTIVITY_PATH, "\n".join(lines) + "\n")
 
 
 def _last_logged_ts():
@@ -4607,437 +2508,29 @@ def _last_logged_ts():
     return 0.0
 
 
-# --- הקלטות שמורות (★) ------------------------------------------------------
-# ר' הערת SAVED_DIRNAME: הפטור מ-retention הוא *מיקום הקובץ*, לא רשומה במאגר.
-_STAR_LOCK = threading.Lock()   # מסדר סימונים מקבילים (Flask threaded=True)
-
-
-def _saved_dir():
-    return REC_DIR / SAVED_DIRNAME
-
-
-def _rec_path(name):
-    """הנתיב לקובץ הקלטה — בתיקייה החיה או בשמורות. None אם איננו."""
-    for p in (REC_DIR / name, _saved_dir() / name):
-        if p.is_file():
-            return p
-    return None
-
-
-def _is_saved(name):
-    return (_saved_dir() / name).is_file()
-
-
-def _rec_event(p):
-    """רשומת אירוע יומן הנגזרת **מהקובץ עצמו**. מקור-אמת יחיד: משמש גם את
-    _scan_new_recordings (יומן חי) וגם את ?starred=1 (שמורות) => אין שתי
-    גרסאות של אותה שורה שיכולות להיפרד."""
-    st = p.stat()
-    return {"ts": round(st.st_mtime, 1), "freq": _rec_freq_mhz(p.name),
-            "file": p.name, "dur": round(st.st_size / REC_BYTES_PER_SEC, 1),
-            "ch": 2 if p.name.startswith(REC_BASENAME2 + "_") else 1}
-
-
-def _saved_usage():
-    """(count, bytes) של תיקיית השמורות — לאכיפת התקרה."""
-    count = total = 0
-    try:
-        entries = list(_saved_dir().glob("*.mp3"))
-    except OSError:
-        return 0, 0
-    for p in entries:
-        try:
-            total += p.stat().st_size
-            count += 1
-        except OSError:
-            pass
-    return count, total
-
-
-# --- תמלול ATC --------------------------------------------------------------
-# ⚠ ה-sidecar הוא JSON ולא טקסט-חשוף, כי טקסט לבד לא יכול לבטא את ההבדל בין
-# "לא ניסינו", "ניסינו ולא יצא כלום" ו-"ניסינו ונכשלנו" — בדיוק ההבחנה ש-§12
-# מחייב, ושבגללה הפיצ'ר הישן נראה למשתמש כאילו הוא פשוט לא קיים (שורה בלי
-# טקסט, זהה לחלוטין בארבעת המצבים). קובץ .txt ישן עדיין נקרא (תאימות לאחור).
-def _transcript_path(mp3):
-    """ה-sidecar הישן (טקסט בלבד): airam_....mp3 => airam_....mp3.txt.
-    נשמר לקריאה בלבד — התקנות שכבר תמללו לא מאבדות את מה שיש להן."""
-    return mp3.parent / (mp3.name + ".txt")
-
-
-def _tx_path(mp3):
-    """ה-sidecar הנוכחי: airam_....mp3 => airam_....mp3.tx.json."""
-    return mp3.parent / (mp3.name + ".tx.json")
-
-
-def _tx_sidecars(mp3):
-    """שני ה-sidecars של הקלטה (חדש+ישן) — למחיקה משותפת ב-retention."""
-    return (_tx_path(mp3), _transcript_path(mp3))
-
-
-def _read_tx(mp3):
-    """מצב התמלול של הקלטה, כמילון מוכן ל-API:
-      {"state": "ok"|"empty"|"failed"|"pending"|"none", "text": str|None, ...}
-    ‏'none' = מעולם לא ניסינו (אין sidecar) — **לא** אותו דבר כמו 'empty'.
-    ⚠ כל קריאת קובץ כאן חייבת לתפוס גם ValueError: קובץ .txt ישן עם בייט
-    UTF-8 פגום זרק UnicodeDecodeError (תת-מחלקה של ValueError) שטיפס עד
-    ‏/api/activity והפיל אותו ב-500 **כל 15 שניות** (הוכח). errors='replace'
-    מבטיח שגם תוכן פגום יוצג ולא יפיל את היומן כולו."""
-    try:
-        d = json.loads(_tx_path(mp3).read_text(errors="replace"))
-        if isinstance(d, dict) and d.get("state"):
-            return d
-    except (OSError, ValueError):
-        pass
-    try:   # תאימות לאחור: sidecar טקסט ישן. ריק שם = "נוסה ולא יצא" (empty).
-        old = _transcript_path(mp3).read_text(errors="replace").strip()
-        return {"state": "ok" if old else "empty", "text": old or None}
-    except (OSError, ValueError):
-        return {"state": "none", "text": None}
-
-
-def _write_tx(mp3, state, text=None, err=None, lang=None):
-    rec = {"state": state, "text": text}
-    if not mp3.parent.is_dir():
-        # ‏_atomic_write יוצר תיקיות-אב: סשן שנמחק בזמן שה-worker מתמלל קליפ
-        # שלו היה "קם לתחייה" כתיקייה עם sidecar בודד ובלי meta.json.
-        return rec
-    if err:
-        rec["err"] = err
-    if lang:
-        rec["lang"] = lang
-    _atomic_write(_tx_path(mp3), json.dumps(rec, ensure_ascii=False))
-    return rec
-
-
-def _whisper_model(lang="en"):
-    """נתיב המודל לשפה המבוקשת, או None אם אין מתאים.
-    ⚠ עברית דורשת מודל **רב-לשוני**: `ggml-small.en` לא "פחות טוב" בעברית —
-    הוא לא תומך בה מהבנייה. מחזירים None ומדווחים, במקום להריץ ולקבל ג'יבריש."""
-    for name in WHISPER_MODELS.get(lang, ()):
-        p = WHISPER_MODEL_DIR / name
-        if p.exists():
-            return str(p)
-    return None
-
-
-def _whisper_ready(lang="en"):
-    """(bin_ok, model_path) — נבדק **חי** בכל שימוש, לא פעם אחת בעלייה."""
-    return Path(WHISPER_BIN).exists(), _whisper_model(lang)
-
-
-# מה מתמלל *ברגע זה* — כדי ש-ה-UI יבחין בין "רץ עכשיו" ל"ממתין בתור".
-# ⚠ זה כל מה שנשאר בזיכרון. התור עצמו הוא **sidecar עם state="pending"** על
-# הדיסק, ולא רשימה בזיכרון כמו בגרסה הקודמת: restart של airam-web איבד שם
-# בקשות ממתינות, והשורה חזרה להיראות "לא ניסינו" — בדיוק הכשל ש-§12 מדבר
-# עליו, בקוד שנכתב כדי לתקן אותו.
-_TX_BUSY = {"file": None}
-_TX_LOCK = threading.Lock()
-_TX_FAILS = {}                  # שם קובץ -> כשלונות רצופים בכתיבת ה-sidecar
-
-
-def _tx_busy_file():
-    with _TX_LOCK:
-        return _TX_BUSY["file"]
-
-
 def _tx_status():
     """מצב מנגנון התמלול כולו — הבסיס לשורת הסטטוס ב-UI. ⚠ הערך שהופך את
     הפיצ'ר לגלוי: בלעדיו 'whisper לא מותקן' נראה בדיוק כמו 'אין מה לתמלל'."""
-    st = load_state()
-    lang = st.get("transcribe_lang") or TX_LANG_DEFAULT
-    bin_ok = Path(WHISPER_BIN).exists()
-    model = _whisper_model(lang)
-    langs = {ln: bool(_whisper_model(ln)) for ln in TX_LANGS}
+    st = appstate.load_state()
+    lang = st.get("transcribe_lang") or recordings.TX_LANG_DEFAULT
+    bin_ok = Path(recordings.WHISPER_BIN).exists()
+    model = recordings._whisper_model(lang)
+    langs = {ln: bool(recordings._whisper_model(ln)) for ln in recordings.TX_LANGS}
     return {"available": bool(bin_ok and model), "bin_ok": bin_ok,
             "model_name": Path(model).name if model else None,
             "lang": lang, "langs": langs,
             "auto": bool(st.get("transcribe_auto")),
-            "queue": _tx_queue_len(), "busy": _tx_busy_file(),
-            "install_hint": INSTALL_WHISPER_HINT}
-
-
-def _tx_queue_len():
-    """כמה הקלטות מסומנות pending על הדיסק (כולל זו שרצה כרגע)."""
-    n = 0
-    for d in (REC_DIR, _saved_dir()):
-        try:
-            entries = list(d.glob("*.mp3.tx.json"))
-        except OSError:
-            continue
-        for p in entries:
-            try:
-                if json.loads(p.read_text(errors="replace")).get("state") == "pending":
-                    n += 1
-            except (OSError, ValueError):
-                pass
-    return n
-
-
-def _transcribe_file(mp3, lang="en"):
-    """ממיר MP3 ל-WAV 16kHz מונו (ffmpeg) ומריץ whisper.cpp.
-    מחזיר (state, text, err) — ולא רק טקסט/None: המידע *למה* אין טקסט הוא
-    בדיוק מה שהמשתמש היה צריך ולא קיבל (§12)."""
-    model = _whisper_model(lang)
-    if not model or not Path(WHISPER_BIN).exists():
-        return "failed", None, ("אין מודל תמלול לעברית — נדרש מודל רב-לשוני"
-                                if lang == "he" else "whisper לא מותקן")
-    wav = mp3.parent / (mp3.name + ".wav.tmp")
-    # nice: התמלול חייב להיסוג מפני הרדיו. ר' הערת WHISPER_NICE.
-    cmd = ["nice", "-n", WHISPER_NICE, WHISPER_BIN, "-m", model, "-f", str(wav),
-           "-l", lang, "-nt", "-t", str(WHISPER_THREADS)]
-    if lang == "en":               # רמז ATC אנגלי — לא מטים בו תמלול עברי
-        cmd += ["--prompt", WHISPER_PROMPT]
-    try:
-        # ⚠ `-f wav` **חובה**: ffmpeg בוחר מכל (muxer) לפי *סיומת שם הקובץ*, לא
-        # לפי תוכן. שם הקובץ הזמני מסתיים ב-`.tmp` (`<name>.mp3.wav.tmp` —
-        # ר' `wav` למעלה), כך שבלי הדגל ffmpeg נכשל תמיד עם "Unable to choose
-        # an output format" — על *כל* הקלטה, בלי קשר לתוכן שלה (נצפה בשטח:
-        # ‏rc=234 מ-ffmpeg, לא מ-whisper-cli כפי שההודעה "Error opening..."
-        # הטעתה להניח בהתחלה). `-f wav` עוקף לגמרי את הניחוש-לפי-סיומת.
-        subprocess.run(["nice", "-n", WHISPER_NICE, "ffmpeg", "-nostdin", "-y",
-                        "-i", str(mp3), "-ar", "16000", "-ac", "1", "-f", "wav",
-                        str(wav)],
-                       capture_output=True, timeout=TRANSCRIBE_TIMEOUT, check=True)
-        out = subprocess.run(cmd, capture_output=True, text=True,
-                             timeout=TRANSCRIBE_TIMEOUT, check=True)
-    except subprocess.TimeoutExpired:
-        log.warning("transcribe %s — timeout אחרי %.0f שניות", mp3.name, TRANSCRIBE_TIMEOUT)
-        return "failed", None, f"חריגת זמן ({TRANSCRIBE_TIMEOUT:.0f}ש')"
-    except FileNotFoundError as e:
-        return "failed", None, f"כלי חסר: {e.filename or e}"
-    except subprocess.CalledProcessError as e:
-        err = (e.stderr or b"")
-        if isinstance(err, bytes):
-            err = err.decode("utf-8", "replace")
-        log.warning("transcribe %s נכשל (rc=%s)", mp3.name, e.returncode)
-        return "failed", None, " ".join(err.split())[-200:] or f"rc={e.returncode}"
-    except Exception as e:
-        log.exception("transcribe %s", mp3.name)
-        return "failed", None, str(e)[:200]
-    finally:
-        try:
-            wav.unlink()
-        except OSError:
-            pass
-    # הפלט מוצג כפי שהוא — אין סינון-תוכן (ר' הערת WHISPER_PROMPT למעלה).
-    text = " ".join(out.stdout.split()).strip()
-    return ("ok", text, None) if text else ("empty", None, None)
-
-
-def _iter_recordings():
-    """כל ההקלטות (חיות + שמורות), חדש=>ישן. ⚠ ה-key עמיד לכשל stat על פריט
-    בודד: הגרסה הקודמת עטפה את כל ה-sorted ב-try/except והחזירה — כך ש-symlink
-    שבור אחד היה מבטל את התמלול (ואת ה-retention) **לגמרי ובשקט**."""
-    out = []
-    for d in (REC_DIR, _saved_dir()):
-        try:
-            out += list(d.glob("*.mp3"))
-        except OSError:
-            continue
-
-    def mtime(p):
-        try:
-            return p.stat().st_mtime
-        except OSError:
-            return 0.0
-    return sorted(out, key=mtime, reverse=True)
-
-
-def _tx_untouched(p):
-    """אין sidecar כלל (לא ניסינו) — לא כולל 'pending' שכבר ממתין."""
-    return not _tx_path(p).exists() and not _transcript_path(p).exists()
-
-
-def _session_clip_paths():
-    """קליפי האודיו של *כל* הסשנים השמורים (`sessions/<id>/clips/*.mp3`).
-    ⚠ **בכוונה לא חלק מ-`_iter_recordings()`** — זו לא החמצה: `_iter_recordings`
-    משמש גם את `api_sessions` כדי לבחור אילו הקלטות להעביר לסשן *חדש*, ולכן
-    הוספת קליפי-סשן לשם הייתה גורמת לשמירת סשן חדש **לגנוב קליפים מסשנים
-    קיימים**. הפרדה מפורשת במקום שיתוף מפתה.
-    הסיבה שהפונקציה קיימת בכלל: קליפ ש*הועבר* לסשן יצא מ-`_iter_recordings`,
-    ולכן `_tx_next_target` לא היה מוצא אותו לעולם — כלומר שמירת סשן הוציאה
-    את ההקלטות שלו מתור התמלול לצמיתות, ו"התמלול תחת הנגן" היה ריק תמיד."""
-    out = []
-    try:
-        dirs = sorted(SESSIONS_DIR.iterdir())
-    except OSError:
-        return out
-    for d in dirs:
-        if not SESSION_ID_RE.match(d.name):
-            continue
-        try:
-            out += list((d / SESSION_CLIPS_DIRNAME).glob("*.mp3"))
-        except OSError:
-            continue
-    return out
-
-
-def _tx_next_target(auto):
-    """ההקלטה הבאה לתמלול, לפי סדר העדיפויות:
-      1. `state="pending"` (המשתמש לחץ 📝 ומחכה — שורד restart)
-      2. הקלטות שמורות (★) **וקליפים בסשן שמור** שלא נוגעו
-      3. הכול (רק אם auto)
-    הקלטה עם sidecar קיים (כולל 'נכשל') לא נבחרת שוב לבד — ניסיון חוזר הוא
-    תמיד פעולה מפורשת של המשתמש, שנרשמת כ-pending.
-    ⚠ קליפי-סשן באותה עדיפות כמו ★ **מאותו נימוק בדיוק**: שניהם תוכן שהמשתמש
-    הגן עליו במפורש (לחץ ★ / לחץ "שמור סשן"), בניגוד להקלטה חולפת ביומן."""
-    recs = _iter_recordings()
-    sess = _session_clip_paths()
-    for p in recs + sess:
-        if _TX_FAILS.get(p.name, 0) >= TX_MAX_FAILS:
-            continue              # poison: הכתיבה נכשלת שוב ושוב (דיסק מלא)
-        if _read_tx(p).get("state") == "pending":
-            return p
-    for p in recs:                # שמורות: מתומללות אוטומטית תמיד
-        if (_TX_FAILS.get(p.name, 0) < TX_MAX_FAILS
-                and _is_saved(p.name) and _tx_untouched(p)):
-            return p
-    for p in sess:                # קליפי סשן: אותה עדיפות, ר' ה-docstring
-        if _TX_FAILS.get(p.name, 0) < TX_MAX_FAILS and _tx_untouched(p):
-            return p
-    if not auto:
-        return None
-    for p in recs:
-        if _TX_FAILS.get(p.name, 0) < TX_MAX_FAILS and _tx_untouched(p):
-            return p
-    return None
+            "queue": recordings._tx_queue_len(), "busy": recordings._tx_busy_file(),
+            "install_hint": recordings.INSTALL_WHISPER_HINT}
 
 
 def _transcribe_worker():
-    """לולאת רקע יחידה (whisper לוקח את ה-CPU => לא מקבילים אותו).
-    ⚠ ה-thread **לא מת** כשwhisper חסר: הוא ממשיך לישון ולבדוק זמינות, כך
-    שהתקנת whisper בזמן ריצה נתפסת בלי restart לשירות."""
-    warned = False
-    while True:
-        try:
-            st = load_state()
-            lang = st.get("transcribe_lang") or TX_LANG_DEFAULT
-            bin_ok, model = _whisper_ready(lang)
-            if not (bin_ok and model):
-                if not warned:
-                    log.info("תמלול: אין כלי/מודל זמין (%s, שפה=%s) — ממתין; "
-                             "להתקנה: %s", WHISPER_BIN, lang, INSTALL_WHISPER_HINT)
-                    warned = True
-                time.sleep(WATCH_INTERVAL)
-                continue
-            if warned:
-                log.info("תמלול: whisper זוהה (model=%s)", Path(model).name)
-                warned = False
-            mp3 = _tx_next_target(bool(st.get("transcribe_auto")))
-            if mp3 is None:
-                time.sleep(WATCH_INTERVAL)
-                continue
-            with _TX_LOCK:
-                _TX_BUSY["file"] = mp3.name
-            try:
-                try:
-                    size = mp3.stat().st_size
-                except OSError:
-                    continue          # נמחק בינתיים (retention)
-                # קטע קצר מדי = פתיחת סקוולץ' בלי דיבור. מדווחים 'empty' במפורש
-                # (ולא "לא ניסינו") כדי שלא ננסה אותו שוב בכל מחזור.
-                if size < TX_MIN_SEC * REC_BYTES_PER_SEC:
-                    _write_tx(mp3, "empty", err="קצר מדי לתמלול")
-                else:
-                    state, text, err = _transcribe_file(mp3, lang)
-                    _write_tx(mp3, state, text=text, err=err, lang=lang)
-                _TX_FAILS.pop(mp3.name, None)
-            except OSError as e:
-                # ⚠ כתיבת ה-sidecar נכשלה (ENOSPC — כרטיס SD מלא). בלי המונה
-                # הזה, _tx_next_target היה בוחר *את אותו קובץ* בכל מחזור
-                # ומריץ עליו את whisper לנצח, בדיוק כשהמערכת כבר במצוקה (הוכח).
-                _TX_FAILS[mp3.name] = _TX_FAILS.get(mp3.name, 0) + 1
-                log.warning("תמלול: כתיבת התמלול של %s נכשלה (%s) — ניסיון %d/%d",
-                            mp3.name, e, _TX_FAILS[mp3.name], TX_MAX_FAILS)
-                time.sleep(WATCH_INTERVAL)
-            finally:
-                with _TX_LOCK:
-                    _TX_BUSY["file"] = None
-            continue                  # יש עוד עבודה? נטפל בה מיד, בלי sleep
-        except Exception:
-            log.exception("transcribe worker")
-        time.sleep(WATCH_INTERVAL)
-
-
-def _sweep_recordings():
-    """retention: עד REC_MAX_FILES / REC_MAX_BYTES (חדש=>ישן), ו-.tmp נטושים
-    (שידור שנקטע בקריסה משאיר .tmp שלעולם לא ייסגר ל-mp3). קובצי-הצד של התמלול
-    נמחקים יחד עם ההקלטה שלהם.
-    ⚠ הקלטות שמורות (★) לא מטופלות כאן **בכלל** — הן יושבות ב-`saved/`,
-    ו-`glob("*.mp3")` אינו רקורסיבי. זה כל מנגנון הפטור: אין רשימה לקרוא,
-    אין מה לסנכרן, ואין מצב שבו קובץ פגום גורם למחיקת מה שהמשתמש שמר."""
-    def mtime(p):
-        # ⚠ עמיד לכשל על פריט בודד: כשה-key היה `p.stat().st_mtime` והכול
-        # עטוף ב-try/except חיצוני, symlink שבור/EACCES על קובץ אחד ביטל את
-        # ה-retention **כולו** — הכרטיס היה מתמלא בשקט (הוכח).
-        try:
-            return p.stat().st_mtime
-        except OSError:
-            return 0.0
-    try:
-        recs = sorted(REC_DIR.glob("*.mp3"), key=mtime, reverse=True)
-    except OSError:
-        return
-    total = kept = 0
-    for p in recs:
-        try:
-            total += p.stat().st_size
-            kept += 1
-            if kept > REC_MAX_FILES or total > REC_MAX_BYTES:
-                p.unlink()
-                for s in _tx_sidecars(p):
-                    s.unlink(missing_ok=True)
-        except OSError:
-            pass
-    now = time.time()
-    for p in REC_DIR.glob("*.tmp"):
-        try:
-            if now - p.stat().st_mtime > 3600:
-                p.unlink()
-        except OSError:
-            pass
-    # sidecar יתום (בלי mp3 תואם) — יכול להיווצר כשה-thread המתמלל (ריצה עצמאית,
-    # ר' _transcribe_worker) מסיים לתמלל mp3 שנגזם ע"י הרצה מקבילה/קודמת של
-    # הפונקציה הזו בדיוק לפני שהתמלול הספיק לכתוב; הלולאה למעלה מוחקת sidecar רק
-    # יחד עם ה-.mp3 שעדיין ברשימה, ולא רואה קובץ שכבר נעדר ממנה.
-    for d in (REC_DIR, _saved_dir()):
-        for pat, strip in (("*.txt", ".txt"), ("*.tx.json", ".tx.json")):
-            try:
-                orphans = list(d.glob(pat))
-            except OSError:
-                continue
-            for p in orphans:
-                try:
-                    if not (p.parent / p.name[:-len(strip)]).exists():
-                        p.unlink()
-                except OSError:
-                    pass
-
-
-def _scan_new_recordings(last_seen):
-    """(rows, newest) - הקלטות שה-mtime שלהן מאוחר מ-last_seen, חדש=>ישן לפי mtime.
-    ה-ts מעוגל *לפני* ההשוואה - אותו עיגול שנכתב ליומן (ושחוזר מ-_last_logged_ts)
-    => סריקה חוזרת אחרי restart לא תייצר שורות כפולות."""
-    rows, newest = [], last_seen
-    def mtime(p):
-        try:
-            return p.stat().st_mtime
-        except OSError:
-            return 0.0            # עמיד לכשל על פריט בודד — ר' _sweep_recordings
-    try:
-        recs = sorted(REC_DIR.glob("*.mp3"), key=mtime)
-    except OSError:
-        recs = []
-    for p in recs:
-        try:
-            ev = _rec_event(p)    # מקור-אמת יחיד לשורה (משותף עם ?starred=1)
-        except OSError:
-            continue   # נמחק בינתיים (retention) => מדלגים
-        if ev["ts"] > last_seen:
-            rows.append(ev)
-            newest = max(newest, ev["ts"])
-    return rows, newest
+    """wrapper דק: הלולאה עצמה ב-recordings.transcribe_worker; כאן רק קריאת ה-state."""
+    def cfg():
+        st = appstate.load_state()
+        return (st.get("transcribe_lang") or recordings.TX_LANG_DEFAULT,
+                bool(st.get("transcribe_auto")))
+    recordings.transcribe_worker(cfg)
 
 
 def _activity_watcher():
@@ -5046,32 +2539,14 @@ def _activity_watcher():
     last_seen = _last_logged_ts()
     while True:
         try:
-            rows, newest = _scan_new_recordings(last_seen)
+            rows, newest = recordings._scan_new_recordings(last_seen)
             if rows:
                 _append_activity(rows)
                 last_seen = newest   # מקדמים רק אחרי כתיבה מוצלחת => כישלון append לא מאבד אירועים
-            _sweep_recordings()
+            recordings._sweep_recordings()
         except Exception:
             log.exception("activity watcher")
-        time.sleep(WATCH_INTERVAL)
-
-
-def _decorate_event(ev):
-    """מוסיף לאירוע יומן את שדות ההקלטה: קיום, שמירה (★), ומצב התמלול.
-    ⚠ `tx.state` הוא הלב של תיקון התמלול: 'none' (לא ניסינו) / 'pending'
-    (ממתין או מתמלל כרגע) / 'ok' / 'empty' (נוסה, אין דיבור) / 'failed'
-    (נוסה ונכשל) הם חמישה מצבים שנראו למשתמש זהים לחלוטין קודם — שורה בלי
-    טקסט. `text` נשמר לתאימות לאחור עם קליינטים ישנים."""
-    name = str(ev.get("file") or "")
-    mp3 = _rec_path(name) if name else None
-    ev["exists"] = mp3 is not None
-    ev["starred"] = bool(name) and _is_saved(name)
-    tx = dict(_read_tx(mp3)) if mp3 else {"state": "none", "text": None}
-    if tx.get("state") == "pending":
-        tx["running"] = (name == _tx_busy_file())   # "מתמלל" מול "ממתין בתור"
-    ev["tx"] = tx
-    ev["text"] = tx.get("text")
-    return ev
+        time.sleep(recordings.WATCH_INTERVAL)
 
 
 @app.route("/api/activity")
@@ -5080,16 +2555,16 @@ def api_activity():
     ‏?starred=1 => רק ההקלטות השמורות, **נסרקות מ-`saved/`** ולא מהיומן — כך הן
     נשארות נגישות גם אחרי שהשורה שלהן קוצצה מ-activity.jsonl (ACTIVITY_KEEP),
     בלי מאגר-מצב מקביל שאפשר לאבד/לפגום (ר' הערת SAVED_DIRNAME)."""
-    count, used = _saved_usage()
-    meta = {"starred_count": count, "starred_max": REC_STAR_MAX_FILES,
-            "starred_bytes": used, "starred_max_bytes": REC_STAR_MAX_BYTES}
+    count, used = recordings._saved_usage()
+    meta = {"starred_count": count, "starred_max": recordings.REC_STAR_MAX_FILES,
+            "starred_bytes": used, "starred_max_bytes": recordings.REC_STAR_MAX_BYTES}
     if request.args.get("starred") in ("1", "true", "yes"):
         events = []
-        for p in _iter_recordings():
-            if not _is_saved(p.name):
+        for p in recordings._iter_recordings():
+            if not recordings._is_saved(p.name):
                 continue
             try:
-                events.append(_decorate_event(_rec_event(p)))
+                events.append(recordings._decorate_event(recordings._rec_event(p)))
             except OSError:
                 continue          # נעלם בין ה-glob ל-stat
         return jsonify(ok=True, events=events, starred_only=True, **meta)
@@ -5105,13 +2580,13 @@ def api_activity():
             ev = json.loads(ln)
         except ValueError:
             continue
-        # ⚠ אותה משפחת באג כמו ב-_jsonl_records: שורת JSON תקין שאינה אובייקט
+        # ⚠ אותה משפחת באג כמו ב-storage.jsonl_records: שורת JSON תקין שאינה אובייקט
         # (‏null/מספר/מערך — שריד בלוק פגום אחרי כיבוי פתאומי) עברה את
         # ה-except ValueError ואז הפילה את הראוט ב-TypeError. ‏/api/activity
         # נקרא בפולינג כל 15 שניות במצב קול, כך שזה 500 חוזר ולא תקלה חד-פעמית.
         if not isinstance(ev, dict):
             continue
-        events.append(_decorate_event(ev))
+        events.append(recordings._decorate_event(ev))
     return jsonify(ok=True, events=events, **meta)
 
 
@@ -5121,22 +2596,9 @@ def _rec_name_arg():
     בדיוק airam_<תאריך>_<שעה>_<Hz>.mp3, כך שאין בו לוכסנים/נקודות-נקודה בכלל."""
     data = request.get_json(silent=True) or {}
     name = str(data.get("file") or "")
-    if not _REC_NAME_RE.match(name):
+    if not recordings._REC_NAME_RE.match(name):
         return None, (jsonify(ok=False, error="שם הקלטה לא תקין"), 400)
     return name, None
-
-
-def _move_recording(src, dst_dir):
-    """מעביר הקלטה + קובצי-הצד שלה. ⚠ `os.replace` אטומי בתוך אותו filesystem
-    => אין רגע שבו הקובץ לא קיים באף צד, ואין מה לסנכרן עם רשומת-מצב."""
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    for s in _tx_sidecars(src):
-        if s.exists():
-            try:
-                os.replace(s, dst_dir / s.name)
-            except OSError:
-                pass          # ה-sidecar אינו קריטי; ה-mp3 הוא מה שחשוב
-    os.replace(src, dst_dir / src.name)
 
 
 @app.route("/api/recordings/star", methods=["POST"])
@@ -5150,41 +2612,41 @@ def api_star():
     if err:
         return err
     want = bool((request.get_json(silent=True) or {}).get("starred", True))
-    with _STAR_LOCK:
-        live, saved = REC_DIR / name, _saved_dir() / name
+    with recordings._STAR_LOCK:
+        live, saved = recordings.REC_DIR / name, recordings._saved_dir() / name
         if not want:
             if saved.is_file():
                 try:
-                    _move_recording(saved, REC_DIR)
+                    recordings._move_recording(saved, recordings.REC_DIR)
                 except OSError as e:
                     return jsonify(ok=False, error=f"ביטול השמירה נכשל: {e}"), 500
-            count, used = _saved_usage()
+            count, used = recordings._saved_usage()
             return jsonify(ok=True, file=name, starred=False,
-                           starred_count=count, starred_max=REC_STAR_MAX_FILES)
+                           starred_count=count, starred_max=recordings.REC_STAR_MAX_FILES)
         if saved.is_file():
-            count, used = _saved_usage()          # כבר שמורה — idempotent
+            count, used = recordings._saved_usage()          # כבר שמורה — idempotent
             return jsonify(ok=True, file=name, starred=True,
-                           starred_count=count, starred_max=REC_STAR_MAX_FILES)
+                           starred_count=count, starred_max=recordings.REC_STAR_MAX_FILES)
         if not live.is_file():
             return jsonify(ok=False, error="ההקלטה כבר לא קיימת"), 404
-        count, used = _saved_usage()
+        count, used = recordings._saved_usage()
         try:
             size = live.stat().st_size
         except OSError:
             return jsonify(ok=False, error="ההקלטה כבר לא קיימת"), 404
         # ⚠ מסרבים, לא מוחקים ותיקה: המשתמש הגן על שתיהן במפורש, והבחירה מי
         # מהן להסיר היא שלו.
-        if count >= REC_STAR_MAX_FILES or used + size > REC_STAR_MAX_BYTES:
-            return jsonify(ok=False, starred_count=count, starred_max=REC_STAR_MAX_FILES,
-                           error=(f"אין מקום לשמירה נוספת ({count}/{REC_STAR_MAX_FILES}) — "
+        if count >= recordings.REC_STAR_MAX_FILES or used + size > recordings.REC_STAR_MAX_BYTES:
+            return jsonify(ok=False, starred_count=count, starred_max=recordings.REC_STAR_MAX_FILES,
+                           error=(f"אין מקום לשמירה נוספת ({count}/{recordings.REC_STAR_MAX_FILES}) — "
                                   "בטל שמירה של הקלטה אחרת")), 409
         try:
-            _move_recording(live, _saved_dir())
+            recordings._move_recording(live, recordings._saved_dir())
         except OSError as e:
             return jsonify(ok=False, error=f"השמירה נכשלה: {e}"), 500
-        count, used = _saved_usage()
+        count, used = recordings._saved_usage()
     return jsonify(ok=True, file=name, starred=True,
-                   starred_count=count, starred_max=REC_STAR_MAX_FILES)
+                   starred_count=count, starred_max=recordings.REC_STAR_MAX_FILES)
 
 
 @app.route("/api/recordings/transcribe", methods=["POST"])
@@ -5197,28 +2659,28 @@ def api_transcribe_one():
     name, err = _rec_name_arg()
     if err:
         return err
-    mp3 = _rec_path(name)
+    mp3 = recordings._rec_path(name)
     if mp3 is None:
         return jsonify(ok=False, error="ההקלטה כבר לא קיימת"), 404
     data = request.get_json(silent=True) or {}
-    lang = data.get("lang") or load_state().get("transcribe_lang") or TX_LANG_DEFAULT
-    if lang not in TX_LANGS:
+    lang = data.get("lang") or appstate.load_state().get("transcribe_lang") or recordings.TX_LANG_DEFAULT
+    if lang not in recordings.TX_LANGS:
         return jsonify(ok=False, error="שפה לא נתמכת"), 400
-    bin_ok, model = _whisper_ready(lang)
+    bin_ok, model = recordings._whisper_ready(lang)
     if not (bin_ok and model):
         return jsonify(ok=False, tx=_tx_status(),
                        error=(("אין מודל תמלול לעברית — נדרש מודל רב-לשוני. הרץ על ה-Pi: "
                                if lang == "he" else "תמלול לא מותקן — הרץ על ה-Pi: ")
-                              + INSTALL_WHISPER_HINT)), 501
-    cur = _read_tx(mp3)
+                              + recordings.INSTALL_WHISPER_HINT)), 501
+    cur = recordings._read_tx(mp3)
     if cur.get("state") == "pending":
-        return jsonify(ok=True, file=name, tx=cur, queue=_tx_queue_len())
+        return jsonify(ok=True, file=name, tx=cur, queue=recordings._tx_queue_len())
     # לחיצה מפורשת של המשתמש היא **תמיד** ניסיון חוזר — גם על 'empty'.
     # ⚠ קודם `force` נשלח רק ב-'failed', ולכן לחיצה על שורת "לא זוהה דיבור"
     # החזירה את אותו sidecar ולא עשתה כלום: הכפתור נראה שבור.
-    _write_tx(mp3, "pending", lang=lang)
-    _TX_FAILS.pop(name, None)
-    return jsonify(ok=True, file=name, queue=_tx_queue_len(),
+    recordings._write_tx(mp3, "pending", lang=lang)
+    recordings._TX_FAILS.pop(name, None)
+    return jsonify(ok=True, file=name, queue=recordings._tx_queue_len(),
                    tx={"state": "pending", "text": None, "lang": lang})
 
 
@@ -5235,10 +2697,10 @@ def api_transcribe():
         if "auto" in data:
             changes["transcribe_auto"] = bool(data.get("auto"))
         if "lang" in data:
-            if data.get("lang") not in TX_LANGS:
+            if data.get("lang") not in recordings.TX_LANGS:
                 return jsonify(ok=False, error="שפה לא נתמכת"), 400
             changes["transcribe_lang"] = data["lang"]
-        _merge_state(changes)
+        appstate._merge_state(changes)
     return jsonify(ok=True, tx=_tx_status())
 
 
@@ -5250,7 +2712,7 @@ def api_starred_zip():
     נכתב לקובץ זמני ולא ל-BytesIO: עד REC_STAR_MAX_BYTES בזיכרון על מכונה עם
     4GB, בזמן שהרדיו רץ, זה בדיוק מה שאסור."""
     import zipfile
-    files = sorted(_saved_dir().glob("*.mp3")) if _saved_dir().is_dir() else []
+    files = sorted(recordings._saved_dir().glob("*.mp3")) if recordings._saved_dir().is_dir() else []
     if not files:
         return jsonify(ok=False, error="אין הקלטות שמורות לייצוא"), 404
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
@@ -5261,7 +2723,7 @@ def api_starred_zip():
                     z.write(p, p.name)
                 except OSError:
                     continue      # נעלם בינתיים — לא מפילים את הייצוא כולו
-                tx = _read_tx(p)
+                tx = recordings._read_tx(p)
                 if tx.get("text"):
                     z.writestr(p.name + ".txt", tx["text"] + "\n")
         tmp.close()
@@ -5278,26 +2740,6 @@ def api_starred_zip():
 
 # --- שחזור-סשן (שלב 2, docs/session-replay-design.md §4.3/§8) ----------------
 
-def _new_session_id():
-    """מזהה קריא-לאדם (YYYYMMDD-HHMM), עם סיומת מספרית בהתנגשות (שני שמירות
-    באותה דקה) — ראו SESSION_ID_RE להסבר למה זה גם ההגנה מפני path traversal."""
-    base = time.strftime("%Y%m%d-%H%M")
-    if not (SESSIONS_DIR / base).exists():
-        return base
-    n = 2
-    while (SESSIONS_DIR / f"{base}-{n}").exists():
-        n += 1
-    return f"{base}-{n}"
-
-
-def _session_dir(session_id):
-    """תיקיית הסשן, או None אם המזהה לא תקין (path traversal) או שהסשן לא קיים."""
-    if not SESSION_ID_RE.match(session_id or ""):
-        return None
-    d = SESSIONS_DIR / session_id
-    return d if d.is_dir() else None
-
-
 @app.route("/api/sessions", methods=["GET", "POST"])
 def api_sessions():
     """GET — רשימת סשנים שמורים (חדש→ישן, ממוין לפי created_at ב-meta.json —
@@ -5306,9 +2748,9 @@ def api_sessions():
     (adsb.read_track_slice) + את ההקלטות שבחלון הזמן הזה. דרך _guard."""
     if request.method == "GET":
         sessions = []
-        if SESSIONS_DIR.is_dir():
-            for d in SESSIONS_DIR.iterdir():
-                if not d.is_dir() or not SESSION_ID_RE.match(d.name):
+        if recordings.SESSIONS_DIR.is_dir():
+            for d in recordings.SESSIONS_DIR.iterdir():
+                if not d.is_dir() or not recordings.SESSION_ID_RE.match(d.name):
                     continue
                 try:
                     meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
@@ -5336,9 +2778,9 @@ def api_sessions():
         return jsonify(ok=False, error="אין נתוני מסלול בטווח המבוקש — "
                                         "ה-buffer ריק או שהחלון ישן מדי"), 400
 
-    session_id = _new_session_id()
-    sdir = SESSIONS_DIR / session_id
-    clips_dir = sdir / SESSION_CLIPS_DIRNAME
+    session_id = recordings._new_session_id()
+    sdir = recordings.SESSIONS_DIR / session_id
+    clips_dir = sdir / recordings.SESSION_CLIPS_DIRNAME
     clips_dir.mkdir(parents=True, exist_ok=True)
 
     # ⚠ המסלול נכתב *לפני* העברת הקליפים: קודם הקליפים הלא-שמורים הועברו
@@ -5361,18 +2803,18 @@ def api_sessions():
     clips = []
     moved = []          # לא-שמורות שהועברו — מוחזרות לתיקייה החיה אם השמירה נכשלת
     skipped = 0
-    for p in _iter_recordings():
+    for p in recordings._iter_recordings():
         try:
             mtime = p.stat().st_mtime
             if not (t_start <= mtime <= t_end):
                 continue
-            ev = _rec_event(p)
+            ev = recordings._rec_event(p)
         except OSError:
             continue
-        if _is_saved(p.name):
+        if recordings._is_saved(p.name):
             try:
                 shutil.copy2(p, clips_dir / p.name)
-                for sc in _tx_sidecars(p):
+                for sc in recordings._tx_sidecars(p):
                     if sc.exists():
                         shutil.copy2(sc, clips_dir / sc.name)
             except OSError:
@@ -5380,7 +2822,7 @@ def api_sessions():
                 continue
         else:
             try:
-                _move_recording(p, clips_dir)
+                recordings._move_recording(p, clips_dir)
             except OSError:
                 skipped += 1
                 continue
@@ -5395,7 +2837,7 @@ def api_sessions():
     # אין ב-AIR-AM יומן מעברי-מצב (ר' docs/session-replay-design.md §4.3 —
     # `modes` שם היה תכנון-אידיאלי; לממש אותו דורש מנגנון חדש לגמרי, לא רק
     # קריאת state קיים). מתועד כאן כסטייה מכוונת, לא כשגיאה.
-    st = load_state()
+    st = appstate.load_state()
     meta = {
         "id": session_id,
         "t_start": t_start,
@@ -5410,11 +2852,11 @@ def api_sessions():
         "counts": {"clips": len(clips), "aircraft": len(aircraft), "samples": len(rows)},
     }
     try:
-        _atomic_write(sdir / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
+        storage.atomic_write(sdir / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
     except OSError as e:
         for name in moved:
             try:
-                _move_recording(clips_dir / name, REC_DIR)
+                recordings._move_recording(clips_dir / name, recordings.REC_DIR)
             except OSError:
                 log.warning("שמירת סשן: החזרת %s לתיקייה החיה נכשלה", name)
                 return jsonify(ok=False, error=f"שמירת מטא-דאטה נכשלה: {e}; "
@@ -5432,7 +2874,7 @@ def api_session_detail(session_id):
     """GET — meta.json. DELETE — מחיקת הסשן כולו (קליפים+מסלול+מטא-דאטה).
     ⚠ DELETE על סשן ששמר קליפ *לא-שמור* לא מחזיר אותו לחיים — הוא נמחק
     יחד עם התיקייה, בדיוק כמו שמחיקת הקלטה רגילה בלתי-הפיכה."""
-    sdir = _session_dir(session_id)
+    sdir = recordings._session_dir(session_id)
     if sdir is None:
         return jsonify(ok=False, error="סשן לא נמצא"), 404
     if request.method == "DELETE":
@@ -5449,10 +2891,10 @@ def api_session_detail(session_id):
     # קליפ יכול להתמלל *אחרי* שהסשן נשמר (התור מבוסס-sidecar, ר' §12), וערך
     # שהוקפא בשמירה היה נשאר "אין תמלול" לנצח — בדיוק סוג ההקפאה שהפרויקט
     # למד להימנע ממנה (`starred.json`). meta.json נשאר כפי שנכתב.
-    clips_dir = sdir / SESSION_CLIPS_DIRNAME
+    clips_dir = sdir / recordings.SESSION_CLIPS_DIRNAME
     for c in meta.get("clips") or []:
         if isinstance(c, dict) and c.get("file"):
-            c["tx"] = _read_tx(clips_dir / c["file"])
+            c["tx"] = recordings._read_tx(clips_dir / c["file"])
     return jsonify(ok=True, session=meta)
 
 
@@ -5460,7 +2902,7 @@ def api_session_detail(session_id):
 def api_session_track(session_id):
     """מסלול ה-ADS-B של הסשן, מפוענח מ-track.jsonl.gz ל-JSON (שורות ac+gap
     כמו שהן ב-adsb.read_track_slice — ה-UI מקבל אותו סכימה משני המקורות)."""
-    sdir = _session_dir(session_id)
+    sdir = recordings._session_dir(session_id)
     if sdir is None:
         return jsonify(ok=False, error="סשן לא נמצא"), 404
     try:
@@ -5475,10 +2917,10 @@ def api_session_track(session_id):
 def api_session_clip(session_id, name):
     """קליפ אודיו של סשן — route ייעודי (לא /recordings/<name>) כדי לא להוסיף
     עוד מסלול-חיפוש לכל בקשת הקלטה רגילה, ר' docs/session-replay-design.md §4.4."""
-    sdir = _session_dir(session_id)
-    if sdir is None or not _REC_NAME_RE.match(name):
+    sdir = recordings._session_dir(session_id)
+    if sdir is None or not recordings._REC_NAME_RE.match(name):
         return jsonify(ok=False, error="לא נמצא"), 404
-    return send_from_directory(str(sdir / SESSION_CLIPS_DIRNAME), name)
+    return send_from_directory(str(sdir / recordings.SESSION_CLIPS_DIRNAME), name)
 
 
 @app.route("/api/sessions/<session_id>/export.zip")
@@ -5486,7 +2928,7 @@ def api_session_export(session_id):
     """ייצוא סשן שלם (מטא-דאטה + מסלול + כל הקליפים) כ-ZIP — אותו דפוס בדיוק
     כמו api_starred_zip (ZIP_STORED, קובץ זמני ולא BytesIO, ניקוי ב-call_on_close)."""
     import zipfile
-    sdir = _session_dir(session_id)
+    sdir = recordings._session_dir(session_id)
     if sdir is None:
         return jsonify(ok=False, error="סשן לא נמצא"), 404
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
@@ -5498,17 +2940,17 @@ def api_session_export(session_id):
             track_p = sdir / "track.jsonl.gz"
             if track_p.is_file():
                 z.write(track_p, "track.jsonl.gz")
-            clips_dir = sdir / SESSION_CLIPS_DIRNAME
+            clips_dir = sdir / recordings.SESSION_CLIPS_DIRNAME
             if clips_dir.is_dir():
                 for p in sorted(clips_dir.glob("*.mp3")):
                     try:
-                        z.write(p, f"{SESSION_CLIPS_DIRNAME}/{p.name}")
+                        z.write(p, f"{recordings.SESSION_CLIPS_DIRNAME}/{p.name}")
                     except OSError:
                         continue
                     # התמלול לצד הקליפ, כמו ב-starred.zip — נקרא חי מה-sidecar
-                    tx = _read_tx(p)
+                    tx = recordings._read_tx(p)
                     if tx.get("text"):
-                        z.writestr(f"{SESSION_CLIPS_DIRNAME}/{p.name}.txt", tx["text"] + "\n")
+                        z.writestr(f"{recordings.SESSION_CLIPS_DIRNAME}/{p.name}.txt", tx["text"] + "\n")
         tmp.close()
         resp = send_file(tmp.name, mimetype="application/zip", as_attachment=True,
                          download_name=f"airam-session-{session_id}.zip")
@@ -5521,10 +2963,10 @@ def api_session_export(session_id):
 
 
 @app.route("/recordings/<name>")
-def recordings(name):
+def recording_file(name):
     # send_from_directory חוסם path traversal; ‏<name> (לא <path:>) חוסם תתי-תיקיות.
     # שמורה יושבת ב-saved/ => מנסים שם כשאיננה בתיקייה החיה.
-    d = REC_DIR if (REC_DIR / name).is_file() else _saved_dir()
+    d = recordings.REC_DIR if (recordings.REC_DIR / name).is_file() else recordings._saved_dir()
     return send_from_directory(str(d), name)
 
 
@@ -5574,7 +3016,7 @@ def _read_voice_metrics(ch=1):
         return {"fresh": False, "age": None, "signal": None, "noise": None,
                 "snr": None, "overload": False, "squelch_opens": None}
 
-    st = load_state()
+    st = appstate.load_state()
     want = f"{(_voice2_params(st)[0] if ch == 2 else st['freq']):.3f}"   # מתויגים freq=MHz ב-3 ספרות
     vals = parse_stats(text, want)
 
@@ -5603,7 +3045,7 @@ def _signal_verdict(noise, baseline):
         return "unknown"
     if not baseline or baseline.get("noise") is None:
         return "no_baseline"
-    return "below_baseline" if (baseline["noise"] - noise) >= DISCONNECT_DROP_DB else "ok"
+    return "below_baseline" if (baseline["noise"] - noise) >= config.DISCONNECT_DROP_DB else "ok"
 
 
 @app.route("/api/signal")
@@ -5619,7 +3061,7 @@ def api_signal():
                בדיקת אנטנה יזומה (שמשתמשת בקול) מייצרת מדידה בת-השוואה.
       satcom — יש לו כלי ייעודי (/api/satcom/health); כאן רק מפנים אליו.
       off/אין מצב חי — kind="none"."""
-    st = load_state()
+    st = appstate.load_state()
     mode = _live_mode()
     baseline = st.get("signal_baseline")
     payload = {"ok": True, "mode": mode or "off"}
@@ -5703,11 +3145,11 @@ def _restore_after_probe(prev_state, prev_live):
         return
     try:
         if prev_live == "acars":
-            _enter_acars(prev_state.get("acars_freqs", ACARS_FREQS_DEFAULT))
+            _enter_acars(prev_state.get("acars_freqs", config.ACARS_FREQS_DEFAULT))
         elif prev_live == "vdl2":
-            _enter_vdl2(prev_state.get("vdl2_freqs", VDL2_FREQS_DEFAULT))
+            _enter_vdl2(prev_state.get("vdl2_freqs", config.VDL2_FREQS_DEFAULT))
         elif prev_live == "satcom":
-            _enter_satcom(prev_state.get("satcom_freqs", SATCOM_FREQS_DEFAULT),
+            _enter_satcom(prev_state.get("satcom_freqs", config.SATCOM_FREQS_DEFAULT),
                           bias_tee=prev_state.get("satcom_bias_tee", True),
                           skip_c=prev_state.get("satcom_skip_c", True),
                           spectrum=prev_state.get("satcom_spectrum", True),
@@ -5718,7 +3160,7 @@ def _restore_after_probe(prev_state, prev_live):
                          "rf_gain": prev_state["rf_gain"],
                          "squelch_mode": prev_state["squelch_mode"],
                          "squelch_snr": prev_state["squelch_snr"],
-                         "chan_filter": prev_state.get("chan_filter", CHAN_FILTER_DEFAULT),
+                         "chan_filter": prev_state.get("chan_filter", config.CHAN_FILTER_DEFAULT),
                          "fm_notch": bool(prev_state.get("fm_notch"))})
         else:
             _enter_standby()
@@ -5729,8 +3171,8 @@ def _restore_after_probe(prev_state, prev_live):
 def _probe_params(freq):
     """תנאי המדידה של בדיקת האנטנה (AGC, סקוולץ' פתוח, AM) — מקור-אמת יחיד
     ל-/api/antenna/check ולניסוי האוטומטי, כדי שהניסוי יבדוק *את* המסלול של המוצר."""
-    return {"freq": freq, "mod": "am", "agc": True, "if_gain": IF_GAIN_DEFAULT,
-            "rf_gain": RF_GAIN_DEFAULT, "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}
+    return {"freq": freq, "mod": "am", "agc": True, "if_gain": config.IF_GAIN_DEFAULT,
+            "rf_gain": config.RF_GAIN_DEFAULT, "squelch_mode": "open", "squelch_snr": config.SNR_DEFAULT}
 
 
 @app.route("/api/antenna/check", methods=["POST"])
@@ -5743,13 +3185,13 @@ def api_antenna_check():
     serialized תחת TUNE_LOCK כמו כל שינוי חומרה אחר — אם כיוונון/מעבר מצב
     אחר כבר רץ, מחזיר 409 במקום לתקוע את שניהם."""
     data = request.get_json(silent=True) or {}
-    prev = load_state()
+    prev = appstate.load_state()
     try:
         freq = float(data.get("freq"))
         if not (0.1 <= freq <= 1999.5):
             raise ValueError
     except (TypeError, ValueError):
-        freq = prev.get("freq", DEFAULT_STATE["freq"])
+        freq = prev.get("freq", appstate.DEFAULT_STATE["freq"])
     calibrate = bool(data.get("calibrate"))
 
     if not TUNE_LOCK.acquire(blocking=False):
@@ -5791,17 +3233,17 @@ def api_antenna_check():
             _restore_after_probe(prev, prev_live)
 
         if result is None:
-            _rflog_event({"ev": "probe", "freq": freq, "calibrate": calibrate,
+            experiment._rflog_event({"ev": "probe", "freq": freq, "calibrate": calibrate,
                           "already_voice": already_voice, "error": "no_fresh_stats"})
             return jsonify(ok=False, error="לא התקבלו מדדים מה-SDR בזמן — נסה שוב"), 504
 
         if calibrate:
             baseline = {"noise": result["noise"], "freq": freq, "ts": time.time()}
-            _merge_state({"signal_baseline": baseline})
+            appstate._merge_state({"signal_baseline": baseline})
         else:
             baseline = prev.get("signal_baseline")
         verdict = _signal_verdict(result["noise"], baseline)
-        _rflog_event({"ev": "probe", "freq": freq, "calibrate": calibrate,
+        experiment._rflog_event({"ev": "probe", "freq": freq, "calibrate": calibrate,
                       "already_voice": already_voice, "noise": result["noise"],
                       "signal": result["signal"], "verdict": verdict,
                       "baseline_noise": (baseline or {}).get("noise")})
@@ -5811,183 +3253,21 @@ def api_antenna_check():
         TUNE_LOCK.release()
 
 
-# --- רשם ניסוי RF ------------------------------------------------------------
-_rflog_lock = threading.Lock()
-_rflog = {"active": False, "started_at": None, "until": None, "rows": 0,
-          "marks": 0, "write_errors": 0, "thread": None, "stop": None}
-
-_CONF_FREQ_RE = re.compile(r"^\s*freq\s*=\s*([0-9.]+)\s*;", re.M)          # לא centerfreq
-_CONF_GAIN_RE = re.compile(r'^\s*gain\s*=\s*"IFGR=(\d+),RFGR=(\d+)"', re.M)
-_CONF_SQ_RE = re.compile(r"^\s*squelch_snr_threshold\s*=\s*(-?[0-9.]+)\s*;", re.M)
-_CONF_MOD_RE = re.compile(r'^\s*modulation\s*=\s*"(\w+)"', re.M)
-
-
-def _parse_airband_conf(text):
-    """הקונפיג *שבאמת רץ* מתוך airband.conf שכתב render_config. בלי שורת gain
-    = AGC (כך render_config מבקש אותו — ר' שם); squelch=None = אוטומטי."""
-    out = {}
-    m = _CONF_FREQ_RE.search(text)
-    if m:
-        try:
-            out["freq"] = float(m.group(1))
-        except ValueError:
-            pass
-    g = _CONF_GAIN_RE.search(text)
-    out["agc"] = g is None
-    out["ifgr"] = int(g.group(1)) if g else None
-    out["rfgr"] = int(g.group(2)) if g else None
-    q = _CONF_SQ_RE.search(text)
-    out["squelch_snr"] = float(q.group(1)) if q else None
-    mm = _CONF_MOD_RE.search(text)
-    out["mod"] = mm.group(1) if mm else None
-    return out
-
-
-def _rflog_sample(prev_sig):
-    """דגימה אחת: מחזיר (row, sig). row=None כשאין כתיבה חדשה של ה-stats או של
-    הקונפיג (אותה חתימת mtime) — כך כל שורה בקובץ היא מדידה חדשה, ובמצבים
-    שאינם קול (stats קפוא) לא נכתב כלום."""
-    try:
-        st = STATS_PATH.stat()
-        text = STATS_PATH.read_text()
-    except OSError:
-        return None, prev_sig
-    try:
-        cst = CONFIG_PATH.stat()
-        conf = _parse_airband_conf(CONFIG_PATH.read_text())
-    except OSError:
-        cst, conf = None, {}
-    sig = (st.st_mtime, cst.st_mtime if cst else None)
-    if sig == prev_sig:
-        return None, prev_sig
-    # ⚠ המדדים מתויגים לפי תדר: stats של תהליך קודם על תדר אחר => None, לא
-    # ערך "קרוב" (§12). על *אותו* תדר הערך נכתב — וההבחנה אם הוא של התהליך
-    # הקודם נעשית בניתוח, מול proc_start (ר' _experiment_summary), לא כאן.
-    vals = parse_stats(text, f"{conf['freq']:.3f}") if conf.get("freq") is not None else {}
-    row = {"t": round(time.time(), 2), "stats_mtime": round(st.st_mtime, 2),
-           "conf_mtime": round(cst.st_mtime, 2) if cst else None, **conf,
-           "signal": vals.get("channel_dbfs_signal_level"),
-           "noise": vals.get("channel_dbfs_noise_level")}
-    return row, sig
-
-
-def _rflog_write(obj):
-    """append + fsync. בניגוד ל-track.jsonl (buffer אפמרי, בלי fsync) — כאן זו
-    תוצאת ניסוי שדה, והתרחיש הסביר לאבדן הוא בדיוק power bank שקוטע (§12).
-    ⚠ לעולם לא זורק: כשל כתיבה (כרטיס SD מלא, הרשאה) נספר ב-write_errors
-    ומוחזר False. בגרסה הראשונה הוא זרק — ובתוך ה-finally של _experiment_run
-    זה דילג על סימון הסיום, כך שהניסוי נשאר "רץ" לנצח וסירב להתחיל מחדש."""
-    line = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-    with _rflog_lock:
-        try:
-            RFLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with open(RFLOG_PATH, "a+b") as f:
-                _append_line_on_boundary(f, line)   # ר' שם: שורה קטועה מכיבוי קודם
-                f.flush()
-                _rflog_fsync(f.fileno())
-        except OSError as e:
-            _rflog["write_errors"] += 1
-            if _rflog["write_errors"] in (1, 100):      # לא מציפים את היומן בכל שנייה
-                log.warning("רשם RF: כתיבה ל-%s נכשלה: %s", RFLOG_PATH, e)
-            return False
-        _rflog["rows"] += 1
-    return True
-
-
-def _rflog_stop(reason):
-    """עוצר את הרשם (idempotent). לא עושה join כשנקרא מתוך ה-worker עצמו."""
-    with _rflog_lock:
-        if not _rflog["active"]:
-            return False
-        _rflog["active"] = False
-        evt, th = _rflog["stop"], _rflog["thread"]
-    if evt:
-        evt.set()
-    _rflog_write({"ev": "stop", "t": round(time.time(), 2), "reason": reason})
-    if th and th is not threading.current_thread():
-        th.join(timeout=2)
-    return True
-
-
-def _rflog_worker(stop_evt):
-    prev = None
-    while not stop_evt.is_set():
-        with _rflog_lock:
-            until = _rflog["until"]
-        with _exp_lock:
-            exp_running = _exp["running"]
-        # לא נכבים באמצע ניסוי כיול: רשם שהופעל ידנית לפני ~שעתיים היה נעצר
-        # באמצע, והניסוי (על שתי הפעולות הפיזיות שלו) היה מסתיים בלי נתונים.
-        if until is not None and time.time() >= until and not exp_running:
-            _rflog_stop("timeout")
-            return
-        try:
-            row, prev = _rflog_sample(prev)
-            if row:
-                _rflog_write(row)
-        except Exception:
-            log.warning("רשם RF: דגימה נכשלה", exc_info=True)   # לא מפילים את ה-thread על שורה אחת
-        stop_evt.wait(RFLOG_POLL_SEC)
-
-
-def _rflog_start():
-    with _rflog_lock:
-        if _rflog["active"]:
-            return False
-        try:
-            if RFLOG_PATH.exists() and RFLOG_PATH.stat().st_size > RFLOG_ROTATE_BYTES:
-                os.replace(RFLOG_PATH, RFLOG_PATH.with_suffix(".jsonl.prev"))
-        except OSError:
-            pass
-        now = time.time()
-        evt = threading.Event()
-        _rflog.update(active=True, started_at=now, until=now + RFLOG_MAX_SEC,
-                      rows=0, marks=0, write_errors=0, stop=evt, thread=None)
-    _rflog_write({"ev": "start", "t": round(now, 2), "version": VERSION,
-                  "max_sec": RFLOG_MAX_SEC})
-    th = threading.Thread(target=_rflog_worker, args=(evt,), daemon=True)
-    with _rflog_lock:
-        _rflog["thread"] = th
-    th.start()
-    return True
-
-
-def _rflog_event(obj):
-    """אירוע מתויג (סימון משתמש / תוצאת בדיקת אנטנה) — רק כשהרשם פעיל."""
-    with _rflog_lock:
-        active = _rflog["active"]
-    if active:
-        _rflog_write({"t": round(time.time(), 2), **obj})
-    return active
-
-
-def _rflog_status():
-    with _rflog_lock:
-        st = {k: _rflog[k] for k in ("active", "started_at", "until", "rows", "marks", "write_errors")}
-    # "נותרו" מחושב כאן ולא בטלפון: שעון הטלפון ושעון ה-Pi לא בהכרח מסונכרנים בשטח
-    st["remaining"] = max(0, round(st["until"] - time.time())) if st["active"] and st["until"] else None
-    try:
-        st["size"] = RFLOG_PATH.stat().st_size
-    except OSError:
-        st["size"] = 0
-    return st
-
-
 @app.route("/api/rflog", methods=["GET", "POST"])
 def api_rflog():
     """GET: מצב הרשם. POST {active: bool}: הפעלה/כיבוי (idempotent). דרך _guard."""
     if request.method == "POST":
         data = request.get_json(silent=True) or {}
         if bool(data.get("active")):
-            _rflog_start()
+            experiment._rflog_start()
         else:
-            with _exp_lock:
-                exp_running = _exp["running"]
+            with experiment._exp_lock:
+                exp_running = experiment._exp["running"]
             if exp_running:
                 return jsonify(ok=False, error="הניסוי האוטומטי רץ ומשתמש ברשם — עצור את הניסוי קודם",
-                               **_rflog_status()), 409
-            _rflog_stop("user")
-    return jsonify(ok=True, **_rflog_status())
+                               **experiment._rflog_status()), 409
+            experiment._rflog_stop("user")
+    return jsonify(ok=True, **experiment._rflog_status())
 
 
 @app.route("/api/rflog/mark", methods=["POST"])
@@ -5995,62 +3275,503 @@ def api_rflog_mark():
     """{label} — סימון אירוע פיזי ("מחובר"/"מנותק"/"מסיים 50Ω"). 409 כשהרשם כבוי:
     סימון שלא נרשם לא יכול להיראות כאילו נרשם."""
     data = request.get_json(silent=True) or {}
-    label = str(data.get("label") or "").strip()[:RFLOG_LABEL_MAX]
+    label = str(data.get("label") or "").strip()[:experiment.RFLOG_LABEL_MAX]
     if not label:
         return jsonify(ok=False, error="חסרה תווית"), 400
-    if not _rflog_event({"ev": "mark", "label": label}):
+    if not experiment._rflog_event({"ev": "mark", "label": label}):
         return jsonify(ok=False, error="הרשם כבוי — הפעל אותו קודם"), 409
-    with _rflog_lock:
-        _rflog["marks"] += 1
-    return jsonify(ok=True, label=label, **_rflog_status())
+    with experiment._rflog_lock:
+        experiment._rflog["marks"] += 1
+    return jsonify(ok=True, label=label, **experiment._rflog_status())
 
 
 @app.route("/api/rflog/export")
 def api_rflog_export():
-    if not RFLOG_PATH.exists():
+    if not experiment.RFLOG_PATH.exists():
         return jsonify(ok=False, error="אין הקלטה עדיין"), 404
-    return send_file(str(RFLOG_PATH), mimetype="application/x-ndjson", as_attachment=True,
+    return send_file(str(experiment.RFLOG_PATH), mimetype="application/x-ndjson", as_attachment=True,
                      download_name=f"airam-rflog-{time.strftime('%Y%m%d-%H%M')}.jsonl")
 
 
-# --- ניסוי כיול אוטומטי (docs/antenna-calibration-experiment.md) -----------
-# ה-Pi מריץ לבד את כל התנאים (תדר × רווח קבוע/AGC × בדיקת-האנטנה של המוצר)
-# פעם עם אנטנה מחוברת ופעם מנותקת. המשתמש מבצע **שתי פעולות פיזיות בלבד**
-# (לנתק, לחבר) — במקום ניתוק/חיבור לכל תנאי. הנתונים נרשמים ברשם ה-RF,
-# והסיכום מחושב על ה-Pi (_experiment_summary). הניסוי מחזיק את TUNE_LOCK לכל
-# אורכו: כוונון/מעבר-מצב מהטלפון מקבלים 409, ו-_mode_reconcile_once מדלג.
-EXP_ATIS_FREQ = 132.5        # ה-ATIS עצמו: אימות שהניתוק/החיבור באמת קרו (הנשא נעלם/חוזר)
-EXP_CLEAN_FREQ = 122.6       # חלון 122.13–123.67: אף תדר של נתב"ג בחלון ה-AGC
-EXP_ATISWIN_FREQ = 132.0     # חלון 131.53–133.07: ה-ATIS 0.2MHz ממרכזו
-EXP_FIXED_GAINS = ((20, 0), (35, 0))   # (IFGR, RFGR): מקסימום ("AGC על המסילה"), ועוד אחד לזיהוי רוויה
-EXP_REF_SEC = 30
-EXP_FIXED_SEC = 45           # רווח קבוע: גשש-הרעש מתכנס תוך ~0.2ש' (אין הליכת AGC)
-EXP_AGC_SEC = 90             # AGC: כל restart מתחיל מ-gRdB=50 — צריך זמן לראות אם/איך מתכנס
-EXP_AFTER_PROMPT_SEC = 90    # אחרי ניתוק/חיבור: הזחילה האיטית של הגשש (משטר C)
-EXP_FINAL_AGC_SEC = 60
-EXP_PROMPT_TIMEOUT_SEC = 600
-EXP_RESTART_EST_SEC = 6      # הערכה ל-ETA בלבד, לא ללוגיקה
-# חלונות הניתוח (ר' _experiment_summary)
-EXP_FIXED_SETTLE_SEC = 10
-EXP_AGC_TAIL_SEC = 30
-EXP_EARLY_SEC = 3            # "מה שבדיקת האנטנה רואה": 3 השניות שאחרי שה-restart אומת
-EXP_CREEP_HEAD_SEC = 5
-EXP_CREEP_TAIL_SEC = 15
-EXP_REF_SETTLE_SEC = 5       # ATIS: מדלגים על השניות הראשונות אחרי ה-restart
-EXP_STALE_WINDOW_SEC = 5     # כמה זמן אחרי restart מחפשים כתיבה של התהליך הקודם
-# mtime של הקרנל נלקח משעון גס (מפגר מילישניות אחרי time.time()) ו-stats_mtime
-# מעוגל ל-10ms. בין flush-היציאה של התהליך הקודם להפעלת החדש עוברות לפחות מאות
-# מילישניות (עצירה + airam-wait-sdrplay), כך ש-50ms הם מרווח בטוח לשני הכיוונים.
-EXP_MTIME_TOL_SEC = 0.05
-# ⚠ יוריסטיקת-שלמות *של הניסוי*, לא פסק-דין של המוצר: נשא ATIS חזק שלא ירד
-# לפחות בזה בניתוק => כנראה שהאנטנה לא נותקה בפועל (או שדולף הרבה). מוצג
-# עם המספר הגולמי, כדי שאפשר יהיה לשפוט אחרת.
-EXP_ATIS_GONE_DB = 20.0
+# --- יומן בדיקה + ייצוא לוגים (webtune/diag.py — הניתוח הטהור) ---------------
+# כשבודקים משהו (מצב חדש, כבל, ספק כוח) רוצים אחר כך קובץ *אחד* שעונה "האם הכול
+# היה בסדר": מה המשתמש עשה (פעולות + סימונים), מה המערכת עשתה (דגימה כל 5ש' של
+# המצב/השירותים/המתח), ומה היומנים אמרו (journald של כל היחידות + הקרנל). הדגימה
+# רצה רק בזמן "בדיקה" פעילה; הייצוא עובד תמיד (חלון זמן). ⚠ אין בחבילה
+# /etc/airam/airam.env (PIN, סודות OpenSky), ונ"צ התחנה מעוגל ל-~1 ק"מ.
+DIAG_PATH = Path("/var/lib/airam/diag.jsonl")
+DIAG_SAMPLE_SEC = 5
+DIAG_MAX_SEC = 4 * 3600            # לא כותבים ל-SD לנצח אם שכחו לעצור
+DIAG_ROTATE_BYTES = 5_000_000      # בהתחלת בדיקה: קובץ גדול מזה עובר ל-.prev
+DIAG_LABEL_MAX = 80
+DIAG_BODY_MAX = 300
+DIAG_BODY_SKIP = ("trace_b64",)    # קובץ trace מיובא — גדול, ולא מעניין בציר הזמן
+DIAG_EXPORT_DEFAULT_MIN = 60
+DIAG_EXPORT_MAX_MIN = 24 * 60
+DIAG_JOURNAL_MAX = 20000           # רשומות journald לכל שאילתה (שירותים / קרנל)
+DIAG_MSG_SAMPLE = 20               # כמה הודעות אחרונות מכל מקור נכנסות לחבילה
+DIAG_PRE_SEC = 60                  # חלון "מאז תחילת הבדיקה" מתחיל דקה לפניה
+_diag_fsync = os.fsync
+_diag_lock = threading.Lock()
+_diag = {"active": False, "started_at": None, "until": None, "label": "", "samples": 0,
+         "marks": 0, "requests": 0, "write_errors": 0, "thread": None, "stop": None,
+         "last_run": None}
 
-_exp_lock = threading.Lock()
-_exp = {"running": False, "id": None, "started_at": None, "finished_at": None,
-        "plan": [], "i": -1, "step_started_at": None, "waiting": None, "error": None,
-        "result": None, "stop": None, "confirm": None, "thread": None}
+
+def _diag_units():
+    return ("airam-web", SDR_API_SERVICE, *SDR_CONSUMERS, DENOISE_SERVICE, "icecast2")
+
+
+def _diag_config_files():
+    """הקונפיג שהאפליקציה כותבת (לא airam.env!). פונקציה ולא קבוע — הבדיקות מחליפות נתיבים."""
+    return (CONFIG_PATH, VOICE2_CONFIG_PATH, ACARS_ENV_PATH, ACARS2_ENV_PATH, VDL2_ENV_PATH,
+            VDL2B_ENV_PATH, SATCOM_ENV_PATH, SDR_ENV_PATH, DENOISE_ENV_PATH)
+
+
+def _diag_cmd(args, timeout=15):
+    """(stdout, stderr, rc) — או (None, שגיאה, None) כשהפקודה חסרה/נתקעה. לא זורק."""
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return r.stdout, r.stderr, r.returncode
+    except FileNotFoundError:
+        return None, f"{args[0]} לא מותקן", None
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return None, f"{args[0]}: {e}", None
+
+
+def _diag_write(obj):
+    """append + fsync (כמו _rflog_write: תוצאת בדיקה, ו-power bank שקוטע הוא בדיוק
+    מה שבודקים). לעולם לא זורק — כשל נספר ב-write_errors."""
+    line = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+    with _diag_lock:
+        try:
+            DIAG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(DIAG_PATH, "a+b") as f:
+                storage.append_line_on_boundary(f, line)
+                f.flush()
+                _diag_fsync(f.fileno())
+        except OSError as e:
+            _diag["write_errors"] += 1
+            if _diag["write_errors"] in (1, 100):
+                log.warning("יומן בדיקה: כתיבה ל-%s נכשלה: %s", DIAG_PATH, e)
+            return False
+    return True
+
+
+def _meminfo_mb(key):
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith(key + ":"):
+                return round(int(line.split()[1]) / 1024)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _diag_sample():
+    """דגימה אחת: המצב (אותו חישוב כמו /api/health), מתח/טמפ', עומס, זיכרון."""
+    h = _health_snapshot()
+    p = _power_cached() or {}
+    try:
+        load1 = round(os.getloadavg()[0], 2)
+    except OSError:
+        load1 = None
+    return {"ev": "sample", "t": round(time.time(), 2), "mode": h["app_mode"], "ok": h["ok"],
+            "services": h["services"], "sdr_present": h["sdr_present"], "stats_age": h["stats_age"],
+            "denoise": (h.get("denoise") or {}).get("state"),
+            "power": {k: p.get(k) for k in ("throttled", "undervolt_now", "throttle_now",
+                                            "volts_in", "temp")} if p else None,
+            "load1": load1, "mem_avail_mb": _meminfo_mb("MemAvailable")}
+
+
+def _diag_stop(reason):
+    """עוצר את הבדיקה (idempotent). לא עושה join כשנקרא מתוך ה-worker עצמו."""
+    now = time.time()
+    with _diag_lock:
+        if not _diag["active"]:
+            return False
+        _diag["active"] = False
+        evt, th = _diag["stop"], _diag["thread"]
+        _diag["last_run"] = {"started_at": _diag["started_at"], "ended_at": now, "label": _diag["label"]}
+    if evt:
+        evt.set()
+    _diag_write({"ev": "stop", "t": round(now, 2), "reason": reason})
+    if th and th is not threading.current_thread():
+        th.join(timeout=2)
+    return True
+
+
+def _diag_worker(stop_evt):
+    while not stop_evt.is_set():
+        with _diag_lock:
+            until = _diag["until"]
+        if until is not None and time.time() >= until:
+            _diag_stop("timeout")
+            return
+        try:
+            if _diag_write(_diag_sample()):
+                with _diag_lock:
+                    _diag["samples"] += 1
+        except Exception:
+            log.warning("יומן בדיקה: דגימה נכשלה", exc_info=True)   # לא מפילים את ה-thread
+        stop_evt.wait(DIAG_SAMPLE_SEC)
+
+
+def _diag_launch(started_at, label, first_event):
+    evt = threading.Event()
+    with _diag_lock:
+        _diag.update(active=True, started_at=started_at, until=started_at + DIAG_MAX_SEC,
+                     label=label, samples=0, marks=0, requests=0, write_errors=0,
+                     stop=evt, thread=None, last_run=None)
+    _diag_write(first_event)
+    th = threading.Thread(target=_diag_worker, args=(evt,), name="diag", daemon=True)
+    with _diag_lock:
+        _diag["thread"] = th
+    th.start()
+
+
+def _diag_start(label):
+    with _diag_lock:
+        if _diag["active"]:
+            return False
+    try:
+        if DIAG_PATH.exists() and DIAG_PATH.stat().st_size > DIAG_ROTATE_BYTES:
+            os.replace(DIAG_PATH, DIAG_PATH.with_suffix(".jsonl.prev"))
+    except OSError:
+        pass
+    now = time.time()
+    _diag_launch(now, label, {"ev": "start", "t": round(now, 2), "label": label,
+                              "version": VERSION, "max_sec": DIAG_MAX_SEC})
+    log.info("יומן בדיקה: התחלה '%s' (from %s)", label, request.remote_addr if request else "-")
+    return True
+
+
+def _diag_event(obj):
+    """אירוע (סימון / פעולה) — רק כשבדיקה פעילה. מחזיר אם נרשם."""
+    with _diag_lock:
+        active = _diag["active"]
+    return active and _diag_write({"t": round(time.time(), 2), **obj})
+
+
+def _diag_status():
+    with _diag_lock:
+        st = {k: _diag[k] for k in ("active", "started_at", "until", "label", "samples",
+                                    "marks", "requests", "write_errors", "last_run")}
+    st["remaining"] = max(0, round(st["until"] - time.time())) if st["active"] and st["until"] else None
+    try:
+        st["size"] = DIAG_PATH.stat().st_size
+    except OSError:
+        st["size"] = 0
+    return st
+
+
+def _diag_read_rows():
+    try:
+        return storage.jsonl_records(storage.read_log_lines(DIAG_PATH))
+    except OSError:
+        return []
+
+
+def _diag_boot():
+    """בעלייה: בדיקה שלא נעצרה (airam-web/ה-Pi אותחלו באמצעה — לרוב *בדיוק* מה
+    שבודקים) ממשיכה, עם שורת resume; אחרת רק משחזרים את "הבדיקה האחרונה" לייצוא."""
+    rows = _diag_read_rows()
+    start = None
+    for r in rows:
+        if r.get("ev") == "start":
+            start = r
+    if not start:
+        return
+    after = [r for r in rows if (r.get("t") or 0) >= start.get("t", 0)]
+    stopped = next((r for r in after if r.get("ev") == "stop"), None)
+    t0 = start.get("t") or 0
+    if stopped is None and time.time() < t0 + DIAG_MAX_SEC:
+        _diag_launch(t0, start.get("label") or "", {"ev": "resume", "t": round(time.time(), 2),
+                                                     "reason": "airam-web עלה מחדש", "version": VERSION})
+        log.info("יומן בדיקה: ממשיך את '%s' אחרי עלייה", start.get("label"))
+        return
+    end = stopped["t"] if stopped else max((r.get("t") or 0) for r in after)
+    with _diag_lock:
+        _diag["last_run"] = {"started_at": t0, "ended_at": end, "label": start.get("label") or ""}
+
+
+@app.before_request
+def _diag_t0():
+    request.environ["airam.t0"] = time.monotonic()
+
+
+@app.after_request
+def _diag_after_request(resp):
+    """בזמן בדיקה: כל פעולה משנת-מצב מהטלפון נכנסת לציר הזמן — מה נשלח, מה חזר,
+    ושגיאה אם הייתה. ⚠ לא כותבים headers (‏PIN), ו-trace מיובא מוחלף בגודלו."""
+    try:
+        if (request.method in ("POST", "PUT", "DELETE") and request.path.startswith("/api/")
+                and not request.path.startswith("/api/diag")):
+            with _diag_lock:
+                active = _diag["active"]
+            if active:
+                body = request.get_json(silent=True)
+                if isinstance(body, dict):
+                    body = {k: (f"<{len(str(v))} תווים>" if k in DIAG_BODY_SKIP else v)
+                            for k, v in body.items()}
+                txt = json.dumps(body, ensure_ascii=False) if body is not None else ""
+                err = None
+                if resp.status_code >= 400 and resp.is_json:
+                    err = (resp.get_json(silent=True) or {}).get("error")
+                t0 = request.environ.get("airam.t0")
+                if _diag_event({"ev": "request", "method": request.method, "path": request.path,
+                                "status": resp.status_code, "body": txt[:DIAG_BODY_MAX],
+                                "error": err, "ms": round((time.monotonic() - t0) * 1000) if t0 else None}):
+                    with _diag_lock:
+                        _diag["requests"] += 1
+    except Exception:
+        log.warning("יומן בדיקה: רישום בקשה נכשל", exc_info=True)   # לעולם לא מפילים את התשובה
+    return resp
+
+
+@app.route("/api/diag", methods=["GET", "POST"])
+def api_diag():
+    """GET: מצב יומן הבדיקה. POST {action: start|stop, label?}. דרך _guard."""
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        action = data.get("action")
+        if action == "start":
+            label = str(data.get("label") or "").strip()[:DIAG_LABEL_MAX]
+            if not _diag_start(label):
+                return jsonify(ok=False, error="בדיקה כבר רצה — עצור אותה קודם", **_diag_status()), 409
+        elif action == "stop":
+            _diag_stop("user")
+        else:
+            return jsonify(ok=False, error="נדרש action: start|stop"), 400
+    return jsonify(ok=True, **_diag_status())
+
+
+@app.route("/api/diag/mark", methods=["POST"])
+def api_diag_mark():
+    """{label} — "עכשיו ניתקתי את המשני" וכו'. 409 כשאין בדיקה: סימון שלא נרשם
+    לא יכול להיראות כאילו נרשם."""
+    data = request.get_json(silent=True) or {}
+    label = str(data.get("label") or "").strip()[:DIAG_LABEL_MAX]
+    if not label:
+        return jsonify(ok=False, error="חסרה תווית"), 400
+    if not _diag_event({"ev": "mark", "label": label}):
+        return jsonify(ok=False, error="אין בדיקה פעילה — התחל בדיקה קודם"), 409
+    with _diag_lock:
+        _diag["marks"] += 1
+    return jsonify(ok=True, mark=label, **_diag_status())
+
+
+def _diag_window(args):
+    """(start, end, test_info). ‏?minutes=N ⇒ N הדקות האחרונות; אחרת הבדיקה
+    הפעילה/האחרונה (מדקה לפניה); ואם לא הייתה — DIAG_EXPORT_DEFAULT_MIN."""
+    now = time.time()
+    st = _diag_status()
+    if not args.get("minutes"):
+        if st["active"]:
+            return st["started_at"] - DIAG_PRE_SEC, now, {"label": st["label"], "active": True}
+        if st["last_run"]:
+            lr = st["last_run"]
+            return (lr["started_at"] - DIAG_PRE_SEC, min(now, lr["ended_at"] + DIAG_PRE_SEC),
+                    {"label": lr["label"], "active": False})
+    try:
+        minutes = int(args.get("minutes") or DIAG_EXPORT_DEFAULT_MIN)
+    except (TypeError, ValueError):
+        minutes = DIAG_EXPORT_DEFAULT_MIN
+    minutes = min(DIAG_EXPORT_MAX_MIN, max(1, minutes))
+    return now - minutes * 60, now, None
+
+
+def _diag_journal(start, end, match):
+    """journald כ-JSON בחלון. מחזיר (recs, error) — error כשאין הרשאה/אין journalctl."""
+    out, err, rc = _diag_cmd(["journalctl", "-o", "json", "--no-pager", "-n", str(DIAG_JOURNAL_MAX),
+                              "--since", f"@{int(start)}", "--until", f"@{int(end) + 1}", *match])
+    if out is None:
+        return [], err
+    note = None
+    if err and re.search(r"insufficient permissions|not seeing messages", err, re.I):
+        note = "אין הרשאה מלאה ליומן (המשתמש airam צריך להיות בקבוצה systemd-journal)"
+    elif rc not in (0, None) and not out:
+        note = (err or "").strip()[:200] or f"journalctl rc={rc}"
+    return diag.parse_journal_json(out), note
+
+
+def _diag_redacted_state():
+    st = appstate.load_state()
+    station = st.get("station")
+    if isinstance(station, dict):
+        st["station"] = {**station, **{k: round(station[k], 2) for k in ("lat", "lon")
+                                       if isinstance(station.get(k), (int, float))}}
+    return st
+
+
+def _diag_boot_time():
+    try:
+        for line in Path("/proc/stat").read_text().splitlines():
+            if line.startswith("btime "):
+                return float(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _diag_system_text(units_show):
+    L = []
+    try:
+        u = os.uname()
+        L.append(f"uname: {u.sysname} {u.release} {u.machine}")
+    except AttributeError:
+        pass
+    try:
+        for line in Path("/etc/os-release").read_text().splitlines():
+            if line.startswith("PRETTY_NAME="):
+                L.append("os: " + line.split("=", 1)[1].strip('"'))
+    except OSError:
+        pass
+    L.append(f"python: {sys.version.split()[0]} · airam: {VERSION}")
+    try:
+        L.append(f"uptime: {float(Path('/proc/uptime').read_text().split()[0]) / 3600:.2f} שעות")
+        L.append("loadavg: " + Path("/proc/loadavg").read_text().strip())
+    except (OSError, ValueError, IndexError):
+        pass
+    L.append(f"memory: total={_meminfo_mb('MemTotal')}MB available={_meminfo_mb('MemAvailable')}MB")
+    try:
+        du = shutil.disk_usage(appstate.STATE_PATH.parent)
+        L.append(f"disk {appstate.STATE_PATH.parent}: free={du.free // 2**20}MB / total={du.total // 2**20}MB")
+    except OSError:
+        pass
+    for args in (["lsusb"], ["lsusb", "-t"]):
+        out, err, _rc = _diag_cmd(args, timeout=5)
+        L += ["", "$ " + " ".join(args), (out or err or "").rstrip()]
+    L += ["", "$ systemctl show (יחידות)"]
+    for unit, props in units_show.items():
+        L.append(f"[{unit}] " + " ".join(f"{k}={v}" for k, v in props.items() if k != "Id"))
+    return "\n".join(L) + "\n"
+
+
+def _diag_collect(start, end, test):
+    """אוסף הכול לחבילה. מחזיר (summary_md, files[(name, text, desc)]). לעולם לא
+    זורק בגלל מקור בודד — כשל נרשם ב-collect_errors ומופיע בדוח."""
+    d, files, errors = {"collect_errors": []}, [], []
+
+    def guard(name, fn):
+        try:
+            return fn()
+        except Exception as e:     # מקור אחד שנכשל לא מבטל את כל החבילה
+            log.warning("ייצוא לוגים: %s נכשל", name, exc_info=True)
+            errors.append(f"{name}: {e}")
+            return None
+
+    health = guard("health", _health_snapshot)
+    d["health"] = health
+    snapshot = {
+        "version": VERSION, "created": time.time(), "window": [start, end], "health": health,
+        "state": guard("state", _diag_redacted_state), "sdr": guard("sdr", _sdr_status),
+        "power": guard("power", _read_power), "transcribe": guard("transcribe", _tx_status),
+        "rflog": guard("rflog", experiment._rflog_status), "diag": guard("diag", _diag_status),
+        "scan": guard("scan", lambda: {**_scan_status, "alive": _scan_thread_alive()}),
+        "xcheck": guard("xcheck", lambda: dict(xcheck_jobs._xc_stats)),
+        "adsb_net": guard("adsb", adsb.net_status),
+    }
+    d["sdr"], d["power"] = snapshot["sdr"], snapshot["power"]
+
+    out, err, _rc = _diag_cmd(["systemctl", "show", "-p", "Id,ActiveState,SubState,Result,NRestarts,"
+                               "ActiveEnterTimestamp,InactiveEnterTimestamp,ExecMainStatus",
+                               *[u + ".service" for u in _diag_units()]])
+    d["units"] = diag.parse_systemctl_show(out) if out is not None else {}
+    if out is None:
+        errors.append(f"systemctl show: {err}")
+    snapshot["units"] = d["units"]
+
+    match = [a for u in _diag_units() for a in ("-u", u)]
+    recs, d["units_error"] = _diag_journal(start, end, match)
+    d["unit_events"], unit_tl = diag.unit_events(recs)
+    files.append(("logs/services.log", diag.format_journal(recs),
+                  "כל היחידות יחד, לפי הזמן (journald)"))
+    for unit in _diag_units():
+        mine = [r for r in recs if r["unit"] == unit]
+        if mine:
+            files.append((f"logs/{unit}.log", diag.format_journal(mine), f"journald של {unit}"))
+    krecs, d["kernel_error"] = _diag_journal(start, end, ["_TRANSPORT=kernel"])
+    d["kernel_events"] = None if (d["kernel_error"] and not krecs) else diag.kernel_events(krecs)
+    files.append(("logs/kernel.log", diag.format_journal(krecs), "הקרנל: מתח, USB, זיכרון"))
+
+    rows = [r for r in _diag_read_rows() if start <= (r.get("t") or 0) <= end]
+    d["samples"] = [r for r in rows if r.get("ev") == "sample"]
+    files.append(("test-log.jsonl", "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+                  "יומן הבדיקה: דגימה כל 5ש', סימונים ופעולות מהטלפון"))
+
+    msgs, sample = {}, {}
+    for src, path in (("acars", ACARS_LOG_PATH), ("vdl2", VDL2_LOG_PATH), ("satcom", SATCOM_LOG_PATH)):
+        recs_m = [r for r in storage.read_jsonl_log(path) if start <= (r.get("t") or 0) <= end]
+        msgs[src] = len(recs_m)
+        sample[src] = recs_m[-DIAG_MSG_SAMPLE:]
+    act = [r for r in storage.jsonl_records(guard("activity", lambda: storage.read_log_lines(ACTIVITY_PATH)
+                                           if ACTIVITY_PATH.exists() else []) or [])
+           if start <= (r.get("ts") or 0) <= end]
+    msgs["שידורי קול"] = len(act)
+    sample["activity"] = act[-DIAG_MSG_SAMPLE:]
+    d["messages"] = msgs
+    files.append(("messages.json", json.dumps({"counts": msgs, "last": sample}, ensure_ascii=False,
+                                              indent=1, default=str), "ספירה + ההודעות האחרונות בחלון"))
+
+    for p in _diag_config_files():
+        try:
+            files.append((f"config/{p.name}", p.read_text(errors="replace"), f"תוכן {p}"))
+        except OSError:
+            continue
+
+    boot = _diag_boot_time()
+    d["boot_time"], d["boot_in_window"] = boot, bool(boot and start <= boot <= end)
+    files.append(("system.txt", guard("system", lambda: _diag_system_text(d["units"])) or "",
+                  "מערכת: גרסאות, זיכרון, דיסק, USB, יחידות"))
+    d["collect_errors"] = errors
+    snapshot["collect_errors"] = errors
+    files.append(("snapshot.json", json.dumps(snapshot, ensure_ascii=False, indent=1, default=str),
+                  "המצב ברגע הייצוא: state, health, SDR, מתח, תמלול, סריקה, הצלבה"))
+
+    checks = diag.analyze(d)
+    timeline, dropped = diag.build_timeline(rows, unit_tl, d["kernel_events"])
+    meta = {"version": VERSION, "start": start, "end": end, "created": time.time(),
+            "app_mode": (health or {}).get("app_mode"), "boot_time": boot,
+            "test_label": test["label"] if test else None,
+            "test_active": bool(test and test["active"])}
+    listing = [("summary.md", "הדוח הזה")] + [(n, desc) for n, _t, desc in files]
+    return diag.render_summary(meta, checks, timeline, dropped, listing), files, checks
+
+
+@app.route("/api/diag/export")
+def api_diag_export():
+    """ZIP אחד לבדיקה: summary.md (בדיקות + ציר זמן) ראשון, ואחריו היומנים המלאים.
+    ‏?minutes=N — N הדקות האחרונות; בלי — הבדיקה הפעילה/האחרונה (ר' _diag_window)."""
+    import zipfile
+    start, end, test = _diag_window(request.args)
+    summary, files, _checks = _diag_collect(start, end, test)
+    stamp = time.strftime("%Y%m%d-%H%M")
+    root = f"airam-diag-{stamp}"
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(f"{root}/summary.md", summary)
+            for name, text, _desc in files:
+                z.writestr(f"{root}/{name}", text)
+        tmp.close()
+        resp = send_file(tmp.name, mimetype="application/zip", as_attachment=True,
+                         download_name=f"{root}.zip")
+    except Exception:
+        tmp.close()
+        os.unlink(tmp.name)
+        raise
+    resp.call_on_close(lambda: os.path.exists(tmp.name) and os.unlink(tmp.name))
+    return resp
+
+
+@app.route("/api/diag/summary")
+def api_diag_summary():
+    """אותו ניתוח בלי ה-ZIP — לתצוגה בטלפון (רשימת הבדיקות + הטקסט המלא)."""
+    start, end, test = _diag_window(request.args)
+    summary, _files, checks = _diag_collect(start, end, test)
+    return jsonify(ok=True, start=start, end=end, overall=diag.worst(c["level"] for c in checks),
+                   checks=checks, summary=summary)
 
 
 def _rtl_airband_start_wall():
@@ -6069,387 +3790,30 @@ def _rtl_airband_start_wall():
     return round(time.time() - (time.monotonic() - us / 1e6), 2)
 
 
-def _experiment_plan(probe_freq):
-    """תוכנית הניסוי: מחזור מלא עם אנטנה מחוברת, בקשת ניתוק, אותו מחזור מנותק,
-    בקשת חיבור, ומחזור קצר לאימות. כל מחזור מסתיים על 132.000 AGC מתכנס — כך
-    הניתוק/החיבור קורים בדיוק במצב שבו ה-AGC אמור להסתיר (משטר B), והדקה שאחריהם
-    מתעדת את הזחילה (משטר C)."""
-    def dwell(phase, key, label, freq, agc, gains=(None, None), sec=None):
-        return {"kind": "dwell", "phase": phase, "key": key, "label": label, "freq": freq,
-                "agc": agc, "ifgr": gains[0], "rfgr": gains[1],
-                "sec": sec if sec is not None else (EXP_AGC_SEC if agc else EXP_FIXED_SEC)}
-
-    def probe(phase, key, label, freq):
-        return {"kind": "probe", "phase": phase, "key": key, "label": label, "freq": freq}
-
-    def cycle(phase):
-        steps = [dwell(phase, "atis", "ATIS 132.500 — אימות", EXP_ATIS_FREQ, True, sec=EXP_REF_SEC)]
-        for freq, fk, fl in ((EXP_CLEAN_FREQ, "clean", "122.600 · אין נתב\"ג בחלון"),
-                             (EXP_ATISWIN_FREQ, "atiswin", "132.000 · ATIS בחלון")):
-            for ifgr, rfgr in EXP_FIXED_GAINS:
-                steps.append(dwell(phase, f"{fk}_f{ifgr}", f"{fl} · רווח קבוע IFGR {ifgr}",
-                                   freq, False, (ifgr, rfgr)))
-            if fk == "atiswin":
-                steps.append(probe(phase, "probe_product", f"בדיקת האנטנה של המוצר · {probe_freq:.3f}",
-                                   probe_freq))
-                steps.append(probe(phase, "probe_atiswin", "בדיקת האנטנה · 132.000", EXP_ATISWIN_FREQ))
-            steps.append(dwell(phase, f"{fk}_agc", f"{fl} · AGC", freq, True))
-        return steps
-
-    plan = cycle(1)
-    plan.append({"kind": "prompt", "phase": 2, "key": "after_disconnect", "action": "disconnect",
-                 "label": "נתק את האנטנה בכניסת ה-SDR", "sec": EXP_AFTER_PROMPT_SEC})
-    plan += cycle(2)
-    plan.append({"kind": "prompt", "phase": 3, "key": "after_reconnect", "action": "reconnect",
-                 "label": "חבר חזרה את האנטנה", "sec": EXP_AFTER_PROMPT_SEC})
-    plan.append(dwell(3, "atis", "ATIS 132.500 — אימות", EXP_ATIS_FREQ, True, sec=EXP_REF_SEC))
-    plan.append(dwell(3, "clean_agc", "122.600 · אין נתב\"ג בחלון · AGC", EXP_CLEAN_FREQ, True,
-                      sec=EXP_FINAL_AGC_SEC))
-    for i, st in enumerate(plan):
-        st["i"] = i
-    return plan
-
-
-def _exp_step_est(st):
-    if st["kind"] == "dwell":
-        return st["sec"] + EXP_RESTART_EST_SEC
-    if st["kind"] == "probe":
-        return EXP_RESTART_EST_SEC + ANTENNA_CHECK_SAMPLE_SEC
-    return st["sec"]          # prompt: רק ההקלטה שאחרי האישור (זמן התגובה שלך לא ידוע)
-
-
-def _experiment_status():
-    with _exp_lock:
-        e = dict(_exp)
-    plan, i = e["plan"], e["i"]
-    st = {k: e[k] for k in ("running", "id", "started_at", "finished_at", "error", "result")}
-    st["steps_total"] = len(plan)
-    st["step_index"] = i
-    st["waiting"] = e["waiting"]
-    cur = plan[i] if 0 <= i < len(plan) else None
-    st["step"] = ({k: cur.get(k) for k in ("kind", "phase", "key", "label", "freq", "agc", "ifgr", "action")}
-                  if cur else None)
-    eta = eta_prompt = None
-    if e["running"] and plan:
-        elapsed = time.time() - e["step_started_at"] if e["step_started_at"] else 0
-        cur_left = max(0.0, _exp_step_est(cur) - elapsed) if cur and not e["waiting"] else 0.0
-        rest = plan[i + 1:] if i >= 0 else plan
-        eta = round(cur_left + sum(_exp_step_est(s) for s in rest))
-        nxt = next((s for s in rest if s["kind"] == "prompt"), None)
-        if cur and cur["kind"] == "prompt" and e["waiting"]:
-            eta_prompt = 0
-        elif nxt is not None:
-            eta_prompt = round(cur_left + sum(_exp_step_est(s) for s in rest[:rest.index(nxt)]))
-    st["eta_sec"] = eta
-    st["eta_prompt_sec"] = eta_prompt
-    return st
-
-
-def _exp_voice_params(st):
-    return {"freq": st["freq"], "mod": "am", "agc": st["agc"],
-            "if_gain": st["ifgr"] if st["ifgr"] is not None else IF_GAIN_DEFAULT,
-            "rf_gain": st["rfgr"] if st["rfgr"] is not None else RF_GAIN_DEFAULT,
-            "squelch_mode": "open", "squelch_snr": SNR_DEFAULT}
-
-
-def _exp_meta(st):
-    return {k: st.get(k) for k in ("i", "kind", "phase", "key", "label", "freq", "agc",
-                                    "ifgr", "rfgr", "sec", "action")}
-
-
-def _experiment_run(run_id, prev, prev_live, plan, stop_evt, confirm_evt, own_rflog):
-    """ה-thread של הניסוי. מחזיק את TUNE_LOCK (נתפס ב-_experiment_start) ומשחרר
-    אותו תמיד ב-finally, אחרי שחזור המצב הקודם — בדיוק כמו /api/antenna/check."""
-    err = None
-    proc_start = None
-    try:
-        for st in plan:
-            if stop_evt.is_set():
-                err = "הניסוי בוטל"
-                break
-            with _exp_lock:
-                _exp["i"] = st["i"]
-                _exp["step_started_at"] = time.time()
-            if st["kind"] in ("dwell", "probe"):
-                t_enter = time.time()
-                params = _exp_voice_params(st) if st["kind"] == "dwell" else _probe_params(st["freq"])
-                e, _detail, _down = _enter_voice(params)
-                t_ready = time.time()
-                proc_start = _rtl_airband_start_wall()
-                if e:
-                    _rflog_event({"ev": "step", "exp": run_id, **_exp_meta(st), "t_enter": t_enter,
-                                  "t_ready": t_ready, "proc_start": proc_start, "error": e})
-                    err = f"המעבר לקול נכשל ({st['label']}): {e}"
-                    break
-                if st["kind"] == "dwell":
-                    _rflog_event({"ev": "step", "exp": run_id, **_exp_meta(st), "t_enter": t_enter,
-                                  "t_ready": t_ready, "proc_start": proc_start})
-                    if stop_evt.wait(st["sec"]):
-                        err = "הניסוי בוטל"
-                        break
-                    _rflog_event({"ev": "step_end", "exp": run_id, "i": st["i"]})
-                else:
-                    res = _sample_probe_stats(st["freq"], ANTENNA_CHECK_SAMPLE_SEC)
-                    _rflog_event({"ev": "probe", "exp": run_id, **_exp_meta(st), "t_enter": t_enter,
-                                  "t_ready": t_ready, "proc_start": proc_start,
-                                  "noise": (res or {}).get("noise"), "signal": (res or {}).get("signal"),
-                                  "stats_mtime": (res or {}).get("stats_mtime"),
-                                  "error": None if res else "no_fresh_stats"})
-            else:   # prompt: פעולה פיזית — ממתינים לאישור מהטלפון, בלי לשנות קונפיג
-                confirm_evt.clear()
-                with _exp_lock:
-                    _exp["waiting"] = {"action": st["action"], "label": st["label"], "since": time.time()}
-                _rflog_event({"ev": "prompt", "exp": run_id, **_exp_meta(st)})
-                deadline = time.time() + EXP_PROMPT_TIMEOUT_SEC
-                confirmed = False
-                while not stop_evt.is_set() and time.time() < deadline:
-                    if confirm_evt.wait(0.5):
-                        confirmed = True
-                        break
-                with _exp_lock:
-                    _exp["waiting"] = None
-                    _exp["step_started_at"] = time.time()
-                if not confirmed:
-                    err = ("הניסוי בוטל" if stop_evt.is_set()
-                           else f"לא התקבל אישור לפעולה הפיזית תוך {EXP_PROMPT_TIMEOUT_SEC // 60} דקות — הניסוי נעצר")
-                    break
-                t_c = time.time()
-                _rflog_event({"ev": "mark", "exp": run_id, "label":
-                              "מנותק" if st["action"] == "disconnect" else "מחובר", "prompted": True})
-                _rflog_event({"ev": "step", "exp": run_id, **_exp_meta(st), "kind": "after_prompt",
-                              "freq": EXP_ATISWIN_FREQ, "agc": True, "ifgr": None,
-                              "t_enter": t_c, "t_ready": t_c, "proc_start": proc_start})
-                if stop_evt.wait(st["sec"]):
-                    err = "הניסוי בוטל"
-                    break
-                _rflog_event({"ev": "step_end", "exp": run_id, "i": st["i"]})
-    except Exception as ex:                       # לא משאירים את ה-SDR תקוע בגלל באג בניסוי
-        log.warning("ניסוי כיול: שגיאה פנימית", exc_info=True)
-        err = f"שגיאה פנימית: {ex}"
-    finally:
-        try:
-            _restore_after_probe(prev, prev_live)
-        except Exception:
-            log.warning("ניסוי כיול: שחזור המצב הקודם נכשל", exc_info=True)
-        TUNE_LOCK.release()
-        _rflog_event({"ev": "exp_end", "exp": run_id, "error": err})
-        result = None
-        try:
-            result = _experiment_summary(_read_rflog_run(run_id))
-            _rflog_event({"ev": "summary", "exp": run_id, "result": result})
-        except Exception:
-            log.warning("ניסוי כיול: חישוב הסיכום נכשל", exc_info=True)
-        if own_rflog:
-            _rflog_stop("experiment")
-        with _exp_lock:
-            _exp.update(running=False, finished_at=time.time(), error=err, result=result,
-                        waiting=None, stop=None, confirm=None)
-
-
-def _experiment_start():
-    """מחזיר (payload, status)."""
-    with _exp_lock:
-        if _exp["running"]:
-            return {"ok": False, "error": "הניסוי כבר רץ"}, 409
-    with _scan_lock:
-        scanning = _scan_thread is not None and _scan_thread.is_alive()
-    if scanning:
-        return {"ok": False, "error": "עצור את הסריקה לפני הניסוי"}, 409
-    prev_live = _live_mode()
-    if prev_live in COMPOSITE_SECONDARY:
-        return {"ok": False, "error": "לא זמין במצב " + COMPOSITE_LABEL[prev_live] + " — עבור לקול בלבד"}, 409
-    if prev_live == "satcom":
-        return {"ok": False, "error": "SATCOM פעיל — עצור אותו וחבר את אנטנת ה-VHF לפני הניסוי"}, 409
-    if not TUNE_LOCK.acquire(blocking=False):
-        return {"ok": False, "error": "פעולה אחרת מתבצעת כרגע — נסה שוב בעוד רגע"}, 409
-    try:
-        prev = load_state()
-        acars = prev.get("acars_freqs") or ACARS_FREQS_DEFAULT
-        try:
-            probe_freq = float(acars[0])
-        except (TypeError, ValueError, IndexError):
-            probe_freq = float(ACARS_FREQS_DEFAULT[0])
-        plan = _experiment_plan(probe_freq)
-        own_rflog = _rflog_start()          # False => המשתמש כבר הקליט; לא נכבה אותו בסוף
-        run_id = time.strftime("%Y%m%d-%H%M%S")
-        stop_evt, confirm_evt = threading.Event(), threading.Event()
-        with _exp_lock:
-            _exp.update(running=True, id=run_id, started_at=time.time(), finished_at=None,
-                        plan=plan, i=-1, step_started_at=None, waiting=None, error=None,
-                        result=None, stop=stop_evt, confirm=confirm_evt)
-        _rflog_event({"ev": "exp_start", "exp": run_id, "version": VERSION, "prev_live": prev_live,
-                      "probe_freq": probe_freq, "steps": len(plan)})
-        th = threading.Thread(target=_experiment_run, daemon=True,
-                              args=(run_id, prev, prev_live, plan, stop_evt, confirm_evt, own_rflog))
-        with _exp_lock:
-            _exp["thread"] = th
-        th.start()
-    except Exception:
-        TUNE_LOCK.release()
-        with _exp_lock:
-            _exp["running"] = False
-        raise
-    return {"ok": True, **_experiment_status()}, 200
-
-
-def _read_rflog_run(run_id):
-    """כל שורות הרשם בין exp_start ל-exp_end של ריצה מסוימת (שורה פגומה מדולגת)."""
-    rows, inside = [], False
-    try:
-        lines = _read_log_lines(RFLOG_PATH)
-    except OSError:
-        return rows
-    for line in lines:
-        try:
-            r = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(r, dict):
-            continue
-        if r.get("ev") == "exp_start" and r.get("exp") == run_id:
-            inside = True
-        if inside:
-            rows.append(r)
-        if r.get("ev") == "exp_end" and r.get("exp") == run_id:
-            break
-    return rows
-
-
-def _med(vals):
-    vals = [v for v in vals if isinstance(v, (int, float))]
-    return round(statistics.median(vals), 1) if vals else None
-
-
-def _experiment_summary(rows):
-    """מספרים גולמיים בלבד (§12): חציוני רצפת-רעש לכל תנאי, מחובר מול מנותק.
-    'detects' = האם *הסף של המוצר עצמו* (DISCONNECT_DROP_DB) היה מזהה את הניתוק
-    בתנאי הזה — לא סף חדש. None בכל מקום שאין מספיק נתונים, לא ניחוש."""
-    data = [r for r in rows if "ev" not in r and "noise" in r]
-    steps, ends = {}, {}
-    for r in rows:
-        if r.get("ev") == "step":
-            steps[r["i"]] = r
-        elif r.get("ev") == "step_end":
-            ends[r["i"]] = r["t"]
-
-    def match(st, r):
-        if r.get("freq") is None or abs(r["freq"] - st["freq"]) > 5e-4:
-            return False
-        if bool(r.get("agc")) != bool(st.get("agc")):
-            return False
-        if not st.get("agc") and r.get("ifgr") != st.get("ifgr"):
-            return False
-        ps = st.get("proc_start")
-        # רק כתיבות של התהליך הנוכחי — flush-יציאה של הקודם נספר בנפרד (stale)
-        return ps is None or (r.get("stats_mtime") or 0) >= ps - EXP_MTIME_TOL_SEC
-
-    def vals(st, a, b, key="noise"):
-        return [r[key] for r in data if a <= r["t"] <= b and match(st, r) and r.get(key) is not None]
-
-    cond, atis, prompts = {}, {}, {}
-    stale_rows = 0
-    for i, st in steps.items():
-        t_end = ends.get(i)
-        if t_end is None:
-            continue                      # צעד שלא הושלם (ביטול) — לא מנתחים חלקי
-        ps = st.get("proc_start")
-        if ps is not None:
-            stale_rows += sum(1 for r in data
-                              if st["t_enter"] <= r["t"] <= st["t_ready"] + EXP_STALE_WINDOW_SEC
-                              and r.get("freq") is not None and abs(r["freq"] - st["freq"]) <= 5e-4
-                              and r.get("noise") is not None
-                              and (r.get("stats_mtime") or 0) < ps - EXP_MTIME_TOL_SEC)
-        if st["kind"] == "after_prompt":
-            head = vals(st, st["t_ready"], st["t_ready"] + EXP_CREEP_HEAD_SEC)
-            tail = vals(st, t_end - EXP_CREEP_TAIL_SEC, t_end)
-            inst = round(min(head), 1) if head else None
-            after = _med(tail)
-            prompts[st["key"]] = {"instant": inst, "after": after,
-                                  "rise": round(after - inst, 1) if after is not None and inst is not None else None}
-            continue
-        if st["kind"] != "dwell":
-            continue
-        if st["key"] == "atis":
-            atis[st["phase"]] = _med(vals(st, st["t_ready"] + EXP_REF_SETTLE_SEC, t_end, "signal"))
-            continue
-        if st["agc"]:
-            steady = vals(st, t_end - EXP_AGC_TAIL_SEC, t_end)
-        else:
-            steady = vals(st, st["t_ready"] + EXP_FIXED_SETTLE_SEC, t_end)
-        early = vals(st, st["t_ready"], st["t_ready"] + EXP_EARLY_SEC)
-        c = cond.setdefault(st["key"], {"key": st["key"], "label": st["label"], "freq": st["freq"],
-                                        "agc": st["agc"], "ifgr": st.get("ifgr")})
-        c[f"p{st['phase']}"] = {"steady": _med(steady), "early": _med(early), "n": len(steady)}
-
-    def drop(a, b):
-        return round(a - b, 1) if a is not None and b is not None else None
-
-    conditions = []
-    for c in cond.values():
-        p1, p2 = c.get("p1", {}), c.get("p2", {})
-        d = drop(p1.get("steady"), p2.get("steady"))
-        c["drop"] = d
-        c["drop_early"] = drop(p1.get("early"), p2.get("early"))
-        c["detects"] = None if d is None else d >= DISCONNECT_DROP_DB
-        conditions.append(c)
-
-    probes = {}
-    stale_probes = 0
-    for r in rows:
-        if r.get("ev") != "probe":
-            continue
-        p = probes.setdefault(r["key"], {"key": r["key"], "label": r["label"], "freq": r["freq"]})
-        stale = (r.get("stats_mtime") is not None and r.get("proc_start") is not None
-                 and r["stats_mtime"] < r["proc_start"] - EXP_MTIME_TOL_SEC)
-        stale_probes += int(stale)
-        p[f"p{r['phase']}"] = {"noise": r.get("noise"), "stale": stale, "error": r.get("error")}
-    for p in probes.values():
-        d = drop((p.get("p1") or {}).get("noise"), (p.get("p2") or {}).get("noise"))
-        p["drop"] = d
-        p["detects"] = None if d is None else d >= DISCONNECT_DROP_DB
-
-    atis_drop = drop(atis.get(1), atis.get(2))
-    clean_agc = cond.get("clean_agc", {})
-    p3 = clean_agc.get("p3") or {}
-    return {
-        "threshold_db": DISCONNECT_DROP_DB,
-        "conditions": conditions,
-        "probes": list(probes.values()),
-        "atis": {"p1": atis.get(1), "p2": atis.get(2), "p3": atis.get(3), "drop": atis_drop,
-                 "gone": None if atis_drop is None else atis_drop >= EXP_ATIS_GONE_DB,
-                 "back": drop(atis.get(3), atis.get(1))},
-        "after_disconnect": prompts.get("after_disconnect"),
-        "after_reconnect": prompts.get("after_reconnect"),
-        "drift_clean_agc": drop(p3.get("steady"), (clean_agc.get("p1") or {}).get("steady")),
-        "stale_rows": stale_rows,
-        "stale_probes": stale_probes,
-    }
-
-
 @app.route("/api/experiment", methods=["GET", "POST"])
 def api_experiment():
     """GET: מצב הניסוי (+ result כשהסתיים). POST {action}: start / confirm (הפעולה
     הפיזית בוצעה) / abort. דרך _guard (POST)."""
     if request.method == "GET":
-        return jsonify(ok=True, **_experiment_status())
+        return jsonify(ok=True, **experiment._experiment_status())
     action = (request.get_json(silent=True) or {}).get("action")
     if action == "start":
-        payload, code = _experiment_start()
+        payload, code = experiment._experiment_start()
         return jsonify(**payload), code
-    with _exp_lock:
-        running, stop_evt, confirm_evt, waiting = (_exp["running"], _exp["stop"],
-                                                   _exp["confirm"], _exp["waiting"])
+    with experiment._exp_lock:
+        running, stop_evt, confirm_evt, waiting = (experiment._exp["running"], experiment._exp["stop"],
+                                                   experiment._exp["confirm"], experiment._exp["waiting"])
     if action == "confirm":
         if not running or not waiting:
             # ⚠ הסטטוס כבר מכיל error (של הריצה האחרונה) — מיזוג, לא kwargs כפולים
-            return jsonify({**_experiment_status(), "ok": False,
+            return jsonify({**experiment._experiment_status(), "ok": False,
                             "error": "אין פעולה שממתינה לאישור כרגע"}), 409
         confirm_evt.set()
-        return jsonify(ok=True, **_experiment_status())
+        return jsonify(ok=True, **experiment._experiment_status())
     if action == "abort":
         if running and stop_evt:
             stop_evt.set()
-        return jsonify(ok=True, **_experiment_status())
+        return jsonify(ok=True, **experiment._experiment_status())
     return jsonify(ok=False, error="action לא מוכר"), 400
 
 
@@ -6470,7 +3834,7 @@ def api_replay_buffer():
     buf = adsb.read_track_buffer()
     clips_available = False
     if buf["t_oldest"] is not None:
-        for p in _iter_recordings():
+        for p in recordings._iter_recordings():
             try:
                 if p.stat().st_mtime >= buf["t_oldest"]:
                     clips_available = True
@@ -6537,6 +3901,17 @@ def _read_power():
             "volts_in": volts_in, "temp": temp}
 
 
+def _power_cached():
+    """_read_power דרך ה-cache (ר' _POWER_TTL) — משותף ל-/api/power וליומן הבדיקה."""
+    now = time.time()
+    with _POWER_LOCK:
+        if _power_cache["payload"] is not None and now - _power_cache["at"] < _POWER_TTL:
+            return _power_cache["payload"]
+        cached = _read_power()
+        _power_cache["at"], _power_cache["payload"] = now, cached
+        return cached
+
+
 @app.route("/api/power")
 def api_power():
     """מצב אספקת המתח ל-Pi (שימושי במיוחד עם סוללה ניידת):
@@ -6546,13 +3921,7 @@ def api_power():
     ביטים של get_throttled: 0=under-volt עכשיו · 2=throttled עכשיו ·
     16=under-volt קרה מאז אתחול · 18=throttling קרה.
     מוגש מ-cache בן _POWER_TTL שניות (ר' שם) — מכווץ טאבים מקבילים לדגימה אחת."""
-    now = time.time()
-    with _POWER_LOCK:
-        if _power_cache["payload"] is not None and now - _power_cache["at"] < _POWER_TTL:
-            cached = _power_cache["payload"]
-        else:
-            cached = _read_power()
-            _power_cache["at"], _power_cache["payload"] = now, cached
+    cached = _power_cached()
     if cached is None:
         return jsonify(ok=False)
     return jsonify(**cached)
@@ -6572,34 +3941,34 @@ def _parse_tune(data):
     agc_raw = data.get("agc", True)   # עמיד גם ל-"false" טקסטואלי (curl), לא רק bool
     agc = agc_raw if isinstance(agc_raw, bool) else str(agc_raw).lower() not in ("false", "0", "off", "no")
     try:
-        if_gain = max(IFGR_MIN, min(IFGR_MAX, int(data.get("if_gain", IF_GAIN_DEFAULT))))
+        if_gain = max(config.IFGR_MIN, min(config.IFGR_MAX, int(data.get("if_gain", config.IF_GAIN_DEFAULT))))
     except (TypeError, ValueError):
-        if_gain = IF_GAIN_DEFAULT
+        if_gain = config.IF_GAIN_DEFAULT
     try:
-        rf_gain = max(RFGR_MIN, min(RFGR_MAX, int(data.get("rf_gain", RF_GAIN_DEFAULT))))
+        rf_gain = max(config.RFGR_MIN, min(config.RFGR_MAX, int(data.get("rf_gain", config.RF_GAIN_DEFAULT))))
     except (TypeError, ValueError):
-        rf_gain = RF_GAIN_DEFAULT
+        rf_gain = config.RF_GAIN_DEFAULT
 
     squelch_mode = str(data.get("squelch_mode", "auto")).lower()
     if squelch_mode not in SQUELCH_MODES:
         squelch_mode = "auto"
     try:
-        squelch_snr = float(data.get("squelch_snr", SNR_DEFAULT))
+        squelch_snr = float(data.get("squelch_snr", config.SNR_DEFAULT))
     except (TypeError, ValueError):
-        squelch_snr = SNR_DEFAULT
-    squelch_snr = max(SNR_MIN, min(SNR_MAX, squelch_snr))
+        squelch_snr = config.SNR_DEFAULT
+    squelch_snr = max(config.SNR_MIN, min(config.SNR_MAX, squelch_snr))
 
     # הגדרות "חומרה" קבועות (לא חלק מכיוונון רגעי): מפתח שלא נשלח ⇒ הערך השמור, לא
     # ברירת המחדל — אחרת כל קורא שבונה פרמטרים בעצמו ("האזן למגדל", curl, ‏/api/mode
     # עם freq) היה מאפס בשקט את מסנן הערוץ ואת ה-notch שהמשתמש בחר.
     saved = None
     if "chan_filter" not in data or "fm_notch" not in data:
-        saved = load_state()
+        saved = appstate.load_state()
     # רשימה סגורה => שום ערך מהלקוח לא נכתב לקונפיג כמות שהוא
     chan_filter = str(data["chan_filter"] if "chan_filter" in data
-                      else saved.get("chan_filter", CHAN_FILTER_DEFAULT))
-    if chan_filter not in CHAN_FILTERS:
-        chan_filter = CHAN_FILTER_DEFAULT
+                      else saved.get("chan_filter", config.CHAN_FILTER_DEFAULT))
+    if chan_filter not in config.CHAN_FILTERS:
+        chan_filter = config.CHAN_FILTER_DEFAULT
     notch_raw = data["fm_notch"] if "fm_notch" in data else saved.get("fm_notch", False)
     fm_notch = notch_raw if isinstance(notch_raw, bool) else str(notch_raw).lower() in ("true", "1", "on", "yes")
 
@@ -6616,14 +3985,14 @@ def _voice_tune(params, keep_secondary=None):
     if not TUNE_LOCK.acquire(blocking=False):
         # state בתשובה => ה-UI מיישר את התצוגה האופטימית חזרה למציאות
         return {"ok": False, "error": "כיוונון אחר מתבצע כרגע — המתן שנייה ונסה שוב",
-                "state": load_state()}, 409
+                "state": appstate.load_state()}, 409
     try:
         # תפסנו את הנעילה — הבקשה תקינה, עוצרים סבב קודם (אם יש), בדיוק כמו
         # שאר המצבים ב-/api/mode (ר' ההערה שם): *לא* לפני הנעילה, אחרת ניסיון
         # כיוונון שנכשל לתפוס נעילה (409, למשל בדיקת אנטנה מקבילה) היה עוצר
         # סבב תקין "בחינם" ומשאיר "scan זומבי" — צרכן רץ בלי thread שממשיך אותו.
         _scan_stop_thread()
-        prev = load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
+        prev = appstate.load_state()   # ההגדרות האחרונות שעבדו, לרולבק במקרה כישלון
         pm = prev.get("app_mode")
         if keep_secondary is None:
             # ⚠ לפי הכוונה השמורה, לא לפי is-active של המשני: משני ב-"activating" (sleep המדורג,
@@ -6652,7 +4021,7 @@ def _voice_tune(params, keep_secondary=None):
                 # ה-SDR מנותק: רולבק ייתקע באותה המתנה בדיוק, אז מדלגים עליו.
                 # הקונפיג החדש נשאר על הדיסק וייקלט כשהמכשיר יחובר (udev מרים
                 # את השירותים) => שומרים state תואם לדיסק, לא את הקודם.
-                new_state = _merge_state({**params, "app_mode": vmode})
+                new_state = appstate._merge_state({**params, "app_mode": vmode})
                 return {"ok": False, "detail": detail, "state": new_state,
                         "error": err + " — התדר יוחל אוטומטית כשה-SDR יחובר"}, 500
             # config רע => מנסים את קונפיג הקול האחרון שעבד (retry בתוך קול, לא
@@ -6664,7 +4033,7 @@ def _voice_tune(params, keep_secondary=None):
                                 detail, "voice tune")
 
         # נשמר רק אחרי שאומת שהשירות חי => state תמיד משקף הגדרות שעובדות
-        new_state = _merge_state({**params, "app_mode": vmode})
+        new_state = appstate._merge_state({**params, "app_mode": vmode})
         return {"ok": True, **new_state}, 200
     finally:
         TUNE_LOCK.release()
@@ -6714,9 +4083,9 @@ def api_tune2():
     data = request.get_json(silent=True) or {}
     if not TUNE_LOCK.acquire(blocking=False):
         return jsonify(ok=False, error="כיוונון אחר מתבצע כרגע — המתן שנייה ונסה שוב",
-                       state=load_state()), 409
+                       state=appstate.load_state()), 409
     try:
-        st = load_state()
+        st = appstate.load_state()
         if st.get("app_mode") != "voice2":
             return jsonify(ok=False, error="הערוץ השני פעיל רק במצב קול כפול", state=st), 409
         v2, verr = _parse_voice2(data, st)
@@ -6729,8 +4098,8 @@ def api_tune2():
             log.warning("tune2 %.3f failed: %s — חוזר לתדר הקודם", v2["voice2_freq"], err)
             back, _d = _start_voice2(st)
             msg = err + (" (חזרתי לתדר הקודם)" if back is None else " — וגם החזרה לתדר הקודם נכשלה")
-            return jsonify(ok=False, error=msg, detail=detail, state=load_state()), 500
-        new = _merge_state(v2)
+            return jsonify(ok=False, error=msg, detail=detail, state=appstate.load_state()), 500
+        new = appstate._merge_state(v2)
         return jsonify(ok=True, voice2_freq=new["voice2_freq"], voice2_mod=new["voice2_mod"])
     finally:
         TUNE_LOCK.release()
@@ -6747,35 +4116,8 @@ def _acars_adsb():
 
 @app.route("/api/acars")
 def api_acars():
-    """הודעות ACARS אחרונות. ?since=<id> => רק חדשות מאותו cursor (פולינג יעיל).
-    כברירת מחדל מוחזרות רק הודעות *היום* (שעון ה-Pi) => סשן חדש לא מוצף בתעבורת
-    ימים קודמים. ?all=1 => כל מה שבזיכרון; ההיסטוריה המלאה תמיד זמינה בייצוא.
-    ?day=YYYY-MM-DD => ארכיון: קורא מהדיסק (acars.jsonl, לא מהזיכרון) ומחזיר
-    את כל הודעות אותו יום מקומי — מצב סטטי (בלי cursor/adsb), עצמאי מהפיד החי."""
-    day = request.args.get("day")
-    if day:
-        bounds = _day_bounds(day)
-        if bounds is None:
-            return jsonify(ok=False, error="תאריך לא תקין (פורמט: YYYY-MM-DD)"), 400
-        start, end = bounds
-        msgs = [r for r in _read_acars_log() if start <= (r.get("t") or 0) < end]
-        return jsonify(ok=True, day=day, messages=msgs)
-    try:
-        since = int(request.args.get("since", 0))
-    except (TypeError, ValueError):
-        since = 0
-    show_all = request.args.get("all") in ("1", "true", "yes")
-    floor = 0 if show_all else _today_start()
-    with _acars_lock:
-        # עותקים (לא references): jsonify מסדרל אחרי שחרור הנעילה, ו-retry_count
-        # עלול להתעדכן ע"י ה-listener באמצע האיטרציה של ה-encoder
-        msgs = [dict(m) for m in _acars_msgs
-                if m["id"] > since and (m.get("t") or 0) >= floor]
-        cursor = _acars_seq
-    return jsonify(ok=True, active=_is_active(ACARS_SERVICE) or _is_active(ACARS2_SERVICE),
-                   freqs=load_state().get("acars_freqs", ACARS_FREQS_DEFAULT),
-                   cursor=cursor, messages=msgs, adsb=_acars_adsb(),
-                   **_xc_feed_payload("acars"))
+    """ר' _feed_response."""
+    return _feed_response("acars")
 
 
 ACARS_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "snr", "mode", "label",
@@ -6787,37 +4129,12 @@ VDL2_EXPORT_COLS = ["time_iso", "timestamp", "freq", "level", "snr", "mode", "la
                     "error", "lat", "lon", "pos_src", "text"]
 
 
-def _read_jsonl_log(path):
-    """כל ההודעות מקובץ JSONL, ממוינות לפי זמן (t עולה). סובל שורות פגומות
-    (כתיבה חלקית של ההודעה האחרונה בזמן הקריאה). משותף ל-ACARS ול-VDL2."""
-    try:
-        lines = _read_log_lines(path)
-    except OSError:
-        return []
-    out = _jsonl_records(lines)
-    out.sort(key=lambda r: r.get("t") or 0)
-    return out
-
-
 def _read_acars_log():
-    return _read_jsonl_log(ACARS_LOG_PATH)
+    return storage.read_jsonl_log(ACARS_LOG_PATH)
 
 
 def _read_vdl2_log():
-    return _read_jsonl_log(VDL2_LOG_PATH)
-
-
-_CSV_FORMULA_CHARS = ("=", "+", "-", "@", "\t", "\r")
-
-
-def _csv_safe(v):
-    """מונע הזרקת נוסחה ב-Excel/LibreOffice/Sheets: תא שמתחיל ב-=/+/-/@/Tab/CR
-    מתפרש כנוסחה (או DDE/HYPERLINK חי) עם פתיחת הקובץ. תוכן ה-text/decoded/
-    tail מגיע משידור רדיו — לא נתון סטטי-מהימן — אז לא מניחים שהוא 'בטוח' רק
-    כי הוא טקסט. מוסיף ' מוביל (המוסכמה הסטנדרטית לניטרול) רק כשצריך."""
-    if isinstance(v, str) and v[:1] in _CSV_FORMULA_CHARS:
-        return "'" + v
-    return v
+    return storage.read_jsonl_log(VDL2_LOG_PATH)
 
 
 def _export_response(recs, cols, basename):
@@ -6842,9 +4159,9 @@ def _export_response(recs, cols, basename):
                 elif c == "timestamp":
                     row.append(t)
                 elif c == "text":
-                    row.append(_csv_safe((r.get("text") or "").replace("\r", " ").replace("\n", " ")))
+                    row.append(storage.csv_safe((r.get("text") or "").replace("\r", " ").replace("\n", " ")))
                 else:
-                    row.append(_csv_safe(r.get(c)))
+                    row.append(storage.csv_safe(r.get(c)))
             w.writerow(row)
         # BOM => Excel מזהה UTF-8 ומציג עברית (category) נכון
         resp = app.response_class("﻿" + buf.getvalue(),
@@ -6873,32 +4190,8 @@ def _vdl2_adsb():
 
 @app.route("/api/vdl2")
 def api_vdl2():
-    """הודעות VDL2 אחרונות. ?since=<id> => רק חדשות מאותו cursor (פולינג יעיל).
-    כברירת מחדל רק הודעות *היום*; ?all=1 => כל מה שבזיכרון (כמו /api/acars).
-    ?day=YYYY-MM-DD => ארכיון מהדיסק (vdl2.jsonl), כמו ב-/api/acars."""
-    day = request.args.get("day")
-    if day:
-        bounds = _day_bounds(day)
-        if bounds is None:
-            return jsonify(ok=False, error="תאריך לא תקין (פורמט: YYYY-MM-DD)"), 400
-        start, end = bounds
-        msgs = [r for r in _read_vdl2_log() if start <= (r.get("t") or 0) < end]
-        return jsonify(ok=True, day=day, messages=msgs)
-    try:
-        since = int(request.args.get("since", 0))
-    except (TypeError, ValueError):
-        since = 0
-    show_all = request.args.get("all") in ("1", "true", "yes")
-    floor = 0 if show_all else _today_start()
-    with _vdl2_lock:
-        # עותקים (לא references): retry_count עלול להתעדכן ע"י ה-listener תוך כדי סדרול
-        msgs = [dict(m) for m in _vdl2_msgs
-                if m["id"] > since and (m.get("t") or 0) >= floor]
-        cursor = _vdl2_seq
-    return jsonify(ok=True, active=_is_active(VDL2_SERVICE) or _is_active(VDL2B_SERVICE),
-                   freqs=load_state().get("vdl2_freqs", VDL2_FREQS_DEFAULT),
-                   cursor=cursor, messages=msgs, adsb=_vdl2_adsb(),
-                   **_xc_feed_payload("vdl2"))
+    """ר' _feed_response."""
+    return _feed_response("vdl2")
 
 
 @app.route("/api/vdl2/export")
@@ -6908,38 +4201,16 @@ def api_vdl2_export():
 
 
 def _read_satcom_log():
-    return _read_jsonl_log(SATCOM_LOG_PATH)
+    return storage.read_jsonl_log(SATCOM_LOG_PATH)
 
 
-SATCOM_EXPORT_COLS = ACARS_EXPORT_COLS   # אותה סכמת כרטיס בדיוק (בלי icao — ר' _normalize_satcom)
+SATCOM_EXPORT_COLS = ACARS_EXPORT_COLS   # אותה סכמת כרטיס בדיוק (בלי icao — ר' acars_parse._normalize_satcom)
 
 
 @app.route("/api/satcom")
 def api_satcom():
-    """הודעות SATCOM (Inmarsat, inmarsat-sniffer) אחרונות. ?since=<id> => רק
-    חדשות מאותו cursor. כברירת מחדל רק הודעות *היום*; ?all=1 => כל מה שבזיכרון
-    (כמו /api/acars). ?day=YYYY-MM-DD => ארכיון מהדיסק (satcom.jsonl)."""
-    day = request.args.get("day")
-    if day:
-        bounds = _day_bounds(day)
-        if bounds is None:
-            return jsonify(ok=False, error="תאריך לא תקין (פורמט: YYYY-MM-DD)"), 400
-        start, end = bounds
-        msgs = [r for r in _read_satcom_log() if start <= (r.get("t") or 0) < end]
-        return jsonify(ok=True, day=day, messages=msgs)
-    try:
-        since = int(request.args.get("since", 0))
-    except (TypeError, ValueError):
-        since = 0
-    show_all = request.args.get("all") in ("1", "true", "yes")
-    floor = 0 if show_all else _today_start()
-    with _satcom_lock:
-        msgs = [dict(m) for m in _satcom_msgs
-                if m["id"] > since and (m.get("t") or 0) >= floor]
-        cursor = _satcom_seq
-    return jsonify(ok=True, active=_is_active(SATCOM_SERVICE),
-                   freqs=load_state().get("satcom_freqs", SATCOM_FREQS_DEFAULT),
-                   cursor=cursor, messages=msgs, **_xc_feed_payload("satcom"))
+    """ר' _feed_response."""
+    return _feed_response("satcom")
 
 
 @app.route("/api/satcom/export")
@@ -7066,7 +4337,7 @@ ROSTER_MAX = 200   # תקרת גודל תגובה — הישנים ביותר נ
 def _aircraft_identity(m):
     """מפתח זהות מטוס מהודעה מנורמלת (ACARS/VDL2/SATCOM): רישום מנורמל קודם
     (חוצה ACARS↔VDL2↔SATCOM↔ADS-B), אחרת icao (פריימי VDL2 בלי tail), אחרת
-    מספר טיסה. ⚠ tail_is_station (ר' _normalize_acars) מדיר את ה-tail מהזהות —
+    מספר טיסה. ⚠ tail_is_station (ר' acars_parse._normalize_acars) מדיר את ה-tail מהזהות —
     בלעדיו הודעת squitter של תחנת-קרקע (SQ וכו') הייתה יוצרת שורת "מטוס" מזויפת
     ברוסטר המאוחד מכתובת התחנה עצמה."""
     reg = None if m.get("tail_is_station") else adsb.norm_reg(m.get("tail"))
@@ -7188,7 +4459,7 @@ def api_session():
     מיד אחרי restart. idempotent (לא מקדם סמן) — /api/session/ack עושה זאת
     במפורש. ‏?since=<epoch> אופציונלי לדריסת הסמן השמור (למשל מה-UI, לצפייה
     חוזרת)."""
-    st = load_state()
+    st = appstate.load_state()
     now = time.time()
     since = None
     raw_since = request.args.get("since")
@@ -7263,32 +4534,10 @@ def api_session_ack():
     ‏_merge_state (מפתח יחיד, תחת _STATE_LOCK) מספיק נגד lost update: גם מעברי
     המצב שומרים עכשיו דרכו. קודם זה היה תחת TUNE_LOCK, ולכן "✓ הבנתי" קיבל 409
     לאורך כל ניסוי כיול (~20 דק') וכל מעבר רגל בסריקה."""
-    _merge_state({"last_session_view_at": time.time()})
+    appstate._merge_state({"last_session_view_at": time.time()})
     return jsonify(ok=True)
 
 
-# --- הצלבת ADS-B + אופק רדיו / BLOS (docs/adsb-crosscheck-design.md) ---------
-# שלוש שכבות: adsb.py (נתונים: snapshot/buffer/lookup/trace), xcheck.py (ניתוח
-# טהור), וכאן — תזמור, התמדת ראיות ו-API.
-# ⚠ בידוד הרדיו (§12): ה-listeners רק *מכניסים לתור* (_xc_submit — heap בזיכרון,
-# נעילה לרגע, בלי רשת ובלי I/O); כל ה-HTTP רץ ב-thread ה-worker או בבקשת "אמת"
-# של המשתמש. ADS-B לא זמין => ההצלבה מדווחת "אין נתונים", הקליטה ממשיכה כרגיל.
-XC_EVENTS_PATH = Path("/var/lib/airam/xcheck_events.jsonl")
-XC_EVENTS_KEEP = 2000            # ראיות — שומרים הרבה (~5–10KB לאירוע)
-XC_QUEUE_MAX = 400               # מעבר לזה הודעות לא מוצלבות (נספר ב-dropped) — הקליטה לא נפגעת
-XC_RESULTS_MAX = 1500            # תקצירים לפיד (בזיכרון בלבד)
-# שלב 2: ~40ש' אחרי הקליטה ה-poll (כל 15ש') כבר הניב נקודה *אחרי* הקליטה —
-# ובזכותה אינטרפולציה במקום "הנקודה האחרונה לפני". לא שאלת איכות — תזמון ה-poll.
-XC_RECHECK_SEC = 40.0
-XC_LIVE_MAX_AGE_SEC = 120.0      # הודעה "חיה": snapshot/lookup חי עוד רלוונטיים לזמן הקליטה
-XC_TRACK_WINDOW_SEC = 900.0      # מסלול למפה: ±15 דק' סביב הקליטה
-XC_TRACK_MAX_POINTS = 400
-XC_EVIDENCE_WINDOW_SEC = 300.0   # נקודות ADS-B "מקוריות" שנשמרות עם הראיה: ±5 דק'
-XC_EVIDENCE_MAX_POINTS = 60
-XC_VERIFY_BUDGET_SEC = 30.0      # "אמת": אחרי זה לא פותחים בקשת רשת נוספת (ה-UI מחכה ≤60ש')
-XC_AUTO_LOOKUP = True            # ה-worker רשאי ל-lookup ממוקד כשהמטוס לא ב-snapshot
-XC_EVENT_ID_RE = re.compile(r"^[0-9a-f]{16}$")
-XC_SOURCES = ("acars", "vdl2", "satcom")
 STATION_ALT_MIN_M, STATION_ALT_MAX_M = -450.0, 9000.0   # ים המלח .. מעבר לכל תורן סביר
 STATION_NAME_MAX = 40
 
@@ -7320,349 +4569,6 @@ def _xc_buffers(src):
             "satcom": (_satcom_lock, _satcom_msgs, SATCOM_LOG_PATH)}.get(src)
 
 
-def _xc_has_identity(rec):
-    return bool((rec.get("tail") and not rec.get("tail_is_station")) or rec.get("flight")
-                or rec.get("icao") or rec.get("aes"))
-
-
-def _xc_event_id(src, rec):
-    ident = rec.get("tail") or rec.get("icao") or rec.get("aes") or rec.get("flight") or ""
-    key = f"{src}|{float(rec.get('t') or 0):.3f}|{ident}|{rec.get('label') or ''}"
-    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
-
-
-def _xc_direction(src, rec):
-    """(direction, basis). VDL2/SATCOM — הכיוון המבני שנשמר (AVLC/ISU). ACARS —
-    מחושב *מחדש*: block ID שנשמר (מ-v2.31.0), אחרת MSN (acarsdec מוסיף msgno *רק*
-    לבלוק downlink — ר' _acars_block_dir), ורק אז הכללים לפי label/header. הודעה
-    שנשמרה לפני תיקון (B6 שסווג uplink עד v2.26.0; ‏C1/B3/B4 עד v2.30.0) מקבלת את
-    הכיוון הנכון, והשינוי מתועד ב-basis. ⚠ קריטי להצלבה: uplink שסווג downlink
-    (‏loadsheet של C1) היה נבחן כשידור *מהמטוס* מול אופק הרדיו."""
-    if src == "vdl2" and rec.get("icao") and rec.get("dir"):
-        return rec["dir"], "מבני — כתובת AVLC"
-    if src == "satcom" and rec.get("aes") and rec.get("dir"):
-        return rec["dir"], "מבני — שכבת ISU"
-    label, text = rec.get("label"), rec.get("text")
-    d = _acars_block_dir(rec.get("block_id")) if src == "acars" else None
-    if d:
-        basis = "מבני — block ID של המסגרת"
-    elif src == "acars" and rec.get("msgno"):
-        d, basis = "downlink", "מבני — יש מספר הודעה (MSN), שנשלח רק מהמטוס"
-    elif label in _ACARS_DIR_BY_LABEL:
-        d, basis = _ACARS_DIR_BY_LABEL[label], f"לפי label {label}"
-    else:
-        d = _acars_direction(label, text)
-        basis = "לפי כותרת ניתוב (heuristic)" if d else None
-    if d and rec.get("dir") and rec["dir"] != d:
-        basis += f"; נשמר בעבר כ-{rec['dir']} — חושב מחדש"
-    return d, basis
-
-
-def _xc_adsc(rec, direction):
-    """פרטי דוח ה-ADS-C (ר' _adsc_details) + זמן מוחלט של הדוח. הודעה שנשמרה לפני
-    שהשדה נוסף — re-decode מקומי ב-decode_acars_apps (כלי libacars הרשמי, מקור-האמת
-    לתוכן; אותו מסלול כמו _decode_libacars_app) בכיוון שחושב. אין => None."""
-    d, how = rec.get("adsc"), "message"
-    if (not d and rec.get("pos_src") == "adsc" and direction in ("uplink", "downlink")
-            and rec.get("label") and isinstance(rec.get("text"), str)):
-        out = _run_libacars("d" if direction == "downlink" else "u", rec["label"], rec["text"],
-                            as_json=True)
-        body = _strip_echoed_msg(out, rec["text"]) if out else ""
-        i = body.find("{")
-        if i >= 0:
-            try:
-                d, how = _adsc_details(json.loads(body[i:])), "redecode"
-            except ValueError:
-                d = None
-    if not d:
-        return None
-    return {**d, "t": xcheck.adsc_report_time(d.get("ts_sec"), rec.get("t")), "source": how}
-
-
-def _xc_point(rec, provider, origin, t_fallback):
-    """נקודת ADS-B מרשומת snapshot/lookup. רשומה משובשת (מיקום מדוכא) נשארת
-    כנקודה בלי מיקום — כדי ש-position_at ידווח "מזויף" ולא "אין נתונים"."""
-    t = rec.get("t_pos") if rec.get("t_pos") is not None else t_fallback
-    return adsb.make_point(t, rec.get("lat"), rec.get("lon"), alt_baro=rec.get("alt_baro"),
-                           alt_geom=rec.get("alt_geom"), gs=rec.get("gs"), track=rec.get("track"),
-                           src_type=rec.get("src_type"), nic=rec.get("nic"), nac_p=rec.get("nac_p"),
-                           provider=provider, origin=origin)
-
-
-_XC_BY_RANK = {"hex": 3, "reg": 2, "flight": 1, None: 0}
-
-
-def _xc_collect(rec, ident, *, network, full, prior=None, deadline=None, imported=None):
-    """אוסף נקודות ADS-B סביב זמן הקליטה: snapshot חי → buffer מקומי → lookup
-    ממוקד → (full בלבד) trace היסטורי → OpenSky. כל מקור מתועד ב-sources —
-    כולל מה *לא* נמצא ולמה ("לא ניסינו" ≠ "ניסינו ולא נמצא", §12)."""
-    t = float(rec.get("t") or time.time())
-    now = time.time()
-    pts, sources = list(prior or []), []
-    best = {"by": None, "conflict": None, "meta": None, "conflict_src": None}
-
-    def budget_ok():
-        return deadline is None or time.monotonic() < deadline
-
-    def consider(name, cand, weak=False):
-        """מתאים רשומת ADS-B לזהות. מחזיר by או None; מעדכן את ההתאמה הטובה ביותר.
-        ⚠ סתירה נרשמת רק כשהמועמד נמצא לפי מזהה *חזק* (weak=False): מטוס אחר עם
-        אותו מספר טיסה הוא "לא זה", לא "סתירת זהות"."""
-        by, conflict = xcheck.match_record(ident, cand)
-        if weak and conflict:
-            return None
-        if by and _XC_BY_RANK[by] > _XC_BY_RANK[best["by"]]:
-            best.update(by=by, meta={k: cand.get(k) for k in ("hex", "reg", "flight", "type")
-                                     if cand.get(k)})
-        if conflict in ("hex_mismatch", "reg_mismatch") and not best["conflict"]:
-            best.update(conflict=conflict, conflict_src=name)
-        if by and not ident["hex"] and adsb.norm_hex(cand.get("hex")):
-            ident.update(hex=adsb.norm_hex(cand["hex"]),
-                         hex_src="adsb_db" if by in ("hex", "reg") else "flight_lookup")
-        return by
-
-    recent = abs(now - t) <= XC_LIVE_MAX_AGE_SEC
-    if recent:
-        cand, weak = adsb.local_aircraft(ident["hex"], ident["reg"]), False
-        if cand is None and ident["flight_key"]:
-            cand, weak = next((a for a in adsb.all_aircraft()
-                               if xcheck.flight_key(a.get("flight")) == ident["flight_key"]), None), True
-        by = consider("snapshot", cand, weak) if cand else None
-        snapshot_matched = bool(by)
-        if by:
-            pts.append(_xc_point(cand, "poll", "live", now - (cand.get("age") or 0)))
-        sources.append({"name": "snapshot", "status": "ok" if by else "miss"})
-    else:
-        snapshot_matched = False
-        sources.append({"name": "snapshot", "status": "skipped", "detail": "ההודעה ישנה מ-2 דק'"})
-
-    if not full:
-        # ⚠ ה-worker לא קורא את track.jsonl (עד ~5MB ב-300 מטוסים × 90 דק') על כל
-        # הודעה — זה CPU (ו-GIL ליד ה-listeners) בלי צורך: נקודות ה-snapshot/lookup
-        # של שלב 1 עוברות לשלב 2 (prior) ונותנות את שני צידי הקליטה.
-        sources.append({"name": "buffer", "status": "skipped",
-                        "detail": "מצב חי — נקודות snapshot/lookup משני שלבי הבדיקה"})
-    elif now - t <= adsb.TRACK_BUFFER_MIN * 60.0 + XC_TRACK_WINDOW_SEC:
-        bp, gaps = adsb.local_track_points(t - XC_TRACK_WINDOW_SEC, t + XC_TRACK_WINDOW_SEC,
-                                           reg=ident["reg"], hex_=ident["hex"])
-        near_gaps = [g for g in gaps if isinstance(g.get("t"), (int, float)) and abs(g["t"] - t) <= 120]
-        if bp:
-            pts += bp
-            by = "reg" if ident["reg"] else "hex"
-            if _XC_BY_RANK[by] > _XC_BY_RANK[best["by"]]:
-                best.update(by=by, meta=best["meta"] or {"reg": ident["reg"]})
-        sources.append({"name": "buffer", "status": "ok" if bp else "miss", "points": len(bp),
-                        "detail": f"{len(near_gaps)} פערי קליטת ADS-B סביב זמן הקליטה" if near_gaps else None})
-    else:
-        sources.append({"name": "buffer", "status": "skipped",
-                        "detail": f"מחוץ לחלון ה-buffer ({adsb.TRACK_BUFFER_MIN:g} דק')"})
-
-    if not ident["hex"] and ident["reg"]:
-        hx = adsb.reg_to_hex(ident["reg"])
-        if hx:
-            ident.update(hex=hx, hex_src="adsb_db")
-
-    # lookup ממוקד רק כשצריך: הודעה חיה שהמטוס שלה לא ב-snapshot (מחוץ לרדיוס
-    # ה-poll), או "אמת" מלא בלי hex (לזיהוי ה-hex עבור ה-trace). בשלב 2 של ה-worker
-    # זה lookup *נוסף* — נקודה אחרי הקליטה (ה-cache של שלב 1 כבר פג, LOOKUP_TTL_HIT).
-    want_lookup = network and ((recent and not snapshot_matched) or (full and not ident["hex"]))
-    if want_lookup and budget_ok():
-        if ident["hex"]:
-            kind, val = "hex", ident["hex"]
-        elif ident["reg"]:
-            kind, val = "reg", rec.get("tail")
-        else:
-            kind, val = "callsign", ident["flight_key"]
-        if val:
-            res = adsb.lookup(kind, val)
-            got = 0
-            for a in res.get("aircraft") or []:
-                if consider("lookup", a, weak=kind == "callsign") and recent:
-                    pts.append(_xc_point(a, a.get("provider"), "lookup", a.get("fetched_at") or now))
-                    got += 1
-            sources.append({"name": "lookup", "status": res.get("status"), "kind": kind,
-                            "provider": res.get("provider"), "points": got,
-                            "detail": "; ".join(res.get("errors") or []) or None})
-
-    if imported is not None:
-        # trace שהמשתמש העלה (adsb.import_trace). ⚠ הקובץ חייב לזהות את *המטוס הזה*
-        # לפי ה-icao/r שבו — קובץ של מטוס אחר שנבחר בטעות לא הופך לראיה. hex שנלמד
-        # מכאן מסומן "import": זיהוי לפי רישום תואם, לא hex מבני מההודעה.
-        meta = imported.get("meta") or {}
-        f_hex, f_reg = adsb.norm_hex(meta.get("icao")), adsb.norm_reg(meta.get("r"))
-        status, by = imported.get("status"), None
-        if status == "ok":
-            if ident["hex"] and f_hex and f_hex != ident["hex"]:
-                status = "conflict"
-                if not best["conflict"] and ident.get("hex_src") in ("message", "user"):
-                    best.update(conflict="hex_mismatch", conflict_src="import")
-            elif ident["reg"] and f_reg and f_reg != ident["reg"]:
-                status = "conflict"
-                if not best["conflict"]:
-                    best.update(conflict="reg_mismatch", conflict_src="import")
-            elif ident["hex"] and f_hex == ident["hex"]:
-                by = "hex" if ident.get("hex_src") in ("message", "user") else "reg"
-            elif ident["reg"] and f_reg == ident["reg"]:
-                by = "reg"
-            else:
-                status = "unmatched"            # אין בקובץ מזהה שאפשר להשוות להודעה
-        if by:
-            pts += imported["points"]
-            if not ident["hex"] and f_hex:
-                ident.update(hex=f_hex, hex_src="import")
-            if _XC_BY_RANK[by] > _XC_BY_RANK[best["by"]]:
-                best.update(by=by, meta={"hex": f_hex, "reg": meta.get("r"), "type": meta.get("t")})
-        covers = (imported.get("t_first") is not None
-                  and imported["t_first"] <= t <= imported["t_last"])
-        sources.append({"name": "import", "status": "ok" if by else status,
-                        "file": imported.get("name"), "points": len(imported["points"]) if by else 0,
-                        "covers": covers if by else None,
-                        "detail": imported.get("error") or (
-                            "הקובץ לא מזהה את המטוס שבהודעה" if status == "unmatched" else None)})
-    if full and network and imported is None:
-        if ident["hex"] and budget_ok():
-            tr = adsb.fetch_trace(ident["hex"], t)
-            use = tr.get("status") == "ok"
-            meta_reg = adsb.norm_reg((tr.get("meta") or {}).get("r"))
-            if use and ident["reg"] and meta_reg and meta_reg != ident["reg"]:
-                use = False                     # ה-trace של hex אחר מהרישום שבהודעה
-                if not best["conflict"] and ident.get("hex_src") in ("message", "user"):
-                    best.update(conflict="reg_mismatch", conflict_src="trace")
-            if use:
-                pts += tr["points"]
-                by = "hex" if ident.get("hex_src") in ("message", "user") else (
-                    "reg" if ident.get("hex_src") == "adsb_db" else "flight")
-                if _XC_BY_RANK[by] > _XC_BY_RANK[best["by"]]:
-                    best.update(by=by, meta={"hex": ident["hex"], "reg": (tr.get("meta") or {}).get("r"),
-                                             "type": (tr.get("meta") or {}).get("t")})
-            sources.append({"name": "trace", "status": tr.get("status") if use or tr.get("status") != "ok"
-                            else "conflict", "provider": tr.get("provider"), "url": tr.get("url"),
-                            "points": len(tr.get("points") or []) if use else 0,
-                            "covers": tr.get("covers"),
-                            "detail": "; ".join(tr.get("errors") or []) or None})
-            if not (use and tr.get("covers")) and budget_ok():
-                os_ = adsb.fetch_opensky_track(ident["hex"], t)
-                if os_.get("status") == "ok":
-                    pts += os_["points"]
-                sources.append({"name": "opensky", "status": os_.get("status"),
-                                "points": len(os_.get("points") or []), "covers": os_.get("covers"),
-                                "detail": "; ".join(os_.get("errors") or []) or None})
-        elif not ident["hex"]:
-            sources.append({"name": "trace", "status": "no_hex",
-                            "detail": "כתובת ICAO לא ידועה (אפשר להזין ידנית)"})
-        else:
-            sources.append({"name": "trace", "status": "skipped", "detail": "חרגנו מתקציב הזמן"})
-
-    # dedup: אותה נקודה משני מקורות (buffer+snapshot) לא נספרת פעמיים
-    seen, uniq = set(), []
-    for p in sorted((p for p in pts if p.get("t") is not None), key=lambda p: p["t"]):
-        k = (round(p["t"], 1), p.get("lat"), p.get("lon"))
-        if k not in seen:
-            seen.add(k)
-            uniq.append(p)
-    by = best["by"]
-    if by == "hex" and ident.get("hex_src") == "adsb_db":
-        by = "reg"                               # ה-hex נגזר מהרישום — ההתאמה היא לפי רישום
-    return {"points": uniq, "sources": sources,
-            "match": {"by": by, "conflict": best["conflict"], "conflict_src": best["conflict_src"],
-                      "hex": ident["hex"], "hex_src": ident.get("hex_src"), "adsb": best["meta"]}}
-
-
-def _xc_track(points, t):
-    """מסלול למפה: נקודות עם מיקום בטווח ±XC_TRACK_WINDOW_SEC, מדולל ל-XC_TRACK_MAX_POINTS."""
-    pts = [p for p in points if p.get("lat") is not None and p.get("lon") is not None
-           and abs(p["t"] - t) <= XC_TRACK_WINDOW_SEC]
-    step = max(1, math.ceil(len(pts) / XC_TRACK_MAX_POINTS))
-    return [{"t": p["t"], "lat": p["lat"], "lon": p["lon"],
-             "alt": p.get("alt_geom") if p.get("alt_geom") is not None else p.get("alt_baro"),
-             "src_type": p.get("src_type"), "origin": p.get("origin")} for p in pts[::step]]
-
-
-def _xc_evidence_points(points, t):
-    near = [p for p in points if abs(p["t"] - t) <= XC_EVIDENCE_WINDOW_SEC]
-    near.sort(key=lambda p: abs(p["t"] - t))
-    return sorted(near[:XC_EVIDENCE_MAX_POINTS], key=lambda p: p["t"])
-
-
-def _xc_evaluate(src, rec, *, network, full, hex_override=None, station=None, prior=None,
-                 deadline=None, imported=None):
-    """הצלבה מלאה להודעה אחת => (תוצאה, נקודות). התוצאה = xcheck.assess + כל מה
-    שנדרש כדי לחקור אותה אחר כך (ההודעה המקורית, הזהות, מקורות שנוסו, נקודות
-    ADS-B מקוריות, מסלול, התחנה שבשימוש, גרסת התוכנה)."""
-    t = float(rec.get("t") or time.time())
-    ident = xcheck.message_identity(rec, hex_override)
-    direction, basis = _xc_direction(src, rec)
-    adsc = _xc_adsc(rec, direction)
-    col = _xc_collect(rec, ident, network=network, full=full, prior=prior, deadline=deadline,
-                      imported=imported)
-    pts = col["points"]
-    rx_at = xcheck.position_at(pts, t)
-    pos_at = (xcheck.position_at(pts, adsc["t"])
-              if adsc and adsc.get("t") is not None and xcheck.valid_latlon(rec.get("lat"), rec.get("lon"))
-              else None)
-    st = station if station is not None else load_state().get("station")
-    res = xcheck.assess(src, rec, direction, st, col["match"], rx_at, pos_at, adsc,
-                        direction_basis=basis)
-    res.update({
-        "event_id": _xc_event_id(src, rec), "src": src, "t_rx": t,
-        "msg": {k: v for k, v in rec.items() if k != "id"},
-        "identity": ident, "match": col["match"], "sources": col["sources"],
-        "rx_at": rx_at, "pos_at": pos_at,
-        "adsb_points": _xc_evidence_points(pts, t), "track": _xc_track(pts, t),
-        "mode": "full" if full else "live", "computed_at": round(time.time(), 1),
-        "version": VERSION,
-    })
-    return res, pts
-
-
-# --- worker: תור עם השהיה (שלב 1 מיד, שלב 2 אחרי XC_RECHECK_SEC) -----------------
-_xc_cv = threading.Condition()
-_xc_heap = []                          # (due_mono, tie, job)
-_xc_tie = itertools.count()
-_xc_stats = {"submitted": 0, "dropped": 0, "done": 0, "errors": 0, "events_saved": 0}
-_xc_res_lock = threading.Lock()
-_xc_results = collections.OrderedDict()    # (src, id) -> (seq, summary)
-_xc_seq = 0
-_XC_EVENTS_LOCK = threading.Lock()
-
-
-def _xc_push(due, job):
-    with _xc_cv:
-        if len(_xc_heap) >= XC_QUEUE_MAX:
-            _xc_stats["dropped"] += 1
-            return False
-        heapq.heappush(_xc_heap, (due, next(_xc_tie), job))
-        _xc_cv.notify()
-        return True
-
-
-def _xc_submit(src, rec):
-    """נקרא מ-thread ה-listener אחרי ההתמדה: הכנסה לתור בלבד — בלי רשת, בלי דיסק,
-    נעילה לרגע. ⚠ לעולם לא זורק: שום דבר בהצלבה לא רשאי לעצור את קליטת הרדיו."""
-    try:
-        if not _xc_has_identity(rec):
-            return
-        if _xc_push(time.monotonic(), {"src": src, "rec": dict(rec), "stage": 1, "prior": []}):
-            with _xc_cv:
-                _xc_stats["submitted"] += 1
-    except Exception:
-        log.exception("xcheck: הכנסה לתור נכשלה — ההודעה לא תוצלב")
-
-
-def _xc_store(src, msg_id, res):
-    global _xc_seq
-    if msg_id is None:
-        return
-    summ = xcheck.summary(res)
-    with _xc_res_lock:
-        _xc_seq += 1
-        key = (src, msg_id)
-        _xc_results[key] = (_xc_seq, summ)
-        _xc_results.move_to_end(key)
-        while len(_xc_results) > XC_RESULTS_MAX:
-            _xc_results.popitem(last=False)
-
-
 def _xc_feed_payload(src):
     """תקצירי הצלבה חדשים (מאז ?xseq=) לתצוגת המקור — נוסף לתשובת /api/<src>
     הקיימת, בלי בקשה נוספת מהדפדפן."""
@@ -7670,161 +4576,17 @@ def _xc_feed_payload(src):
         since = int(request.args.get("xseq", 0))
     except (TypeError, ValueError):
         since = 0
-    with _xc_res_lock:
-        items = {str(mid): summ for (s, mid), (seq, summ) in _xc_results.items()
+    with xcheck_jobs._xc_res_lock:
+        items = {str(mid): summ for (s, mid), (seq, summ) in xcheck_jobs._xc_results.items()
                  if s == src and seq > since}
-        cursor = _xc_seq
+        cursor = xcheck_jobs._xc_seq
     return {"xcheck": items, "xcheck_cursor": cursor}
-
-
-def _xc_run_job(job):
-    src, rec = job["src"], job["rec"]
-    res, pts = _xc_evaluate(src, rec, network=XC_AUTO_LOOKUP, full=False, prior=job["prior"])
-    _xc_store(src, rec.get("id"), res)
-    rx = res.get("rx_at") or {}
-    improvable = (rx.get("status") not in ("measured", "interpolated")
-                  or rx.get("status") == "measured" and abs(rx.get("dt_s") or 0) > 5)
-    if job["stage"] == 1 and res["match"]["by"] and improvable:
-        # שלב 2: נקודה *אחרי* הקליטה תאפשר אינטרפולציה. נקודות snapshot/lookup של
-        # שלב 1 עוברות הלאה — הן הצד ה"לפני" (ה-snapshot מתחלף ב-poll הבא).
-        delay = max(0.0, float(rec.get("t") or time.time()) + XC_RECHECK_SEC - time.time())
-        if delay > 0 and _xc_push(time.monotonic() + delay,
-                                  {"src": src, "rec": rec, "stage": 2,
-                                   "prior": [p for p in pts if p.get("origin") in ("live", "lookup")]}):
-            return
-    if xcheck.is_anomalous(res):
-        _xc_save_event(res, "auto")
-
-
-def _xc_worker():
-    """thread יחיד: מוציא משימות שזמנן הגיע. חריגה במשימה לא מפילה את ה-thread."""
-    while True:
-        with _xc_cv:
-            while True:
-                now = time.monotonic()
-                if _xc_heap and _xc_heap[0][0] <= now:
-                    _due, _tie, job = heapq.heappop(_xc_heap)
-                    break
-                _xc_cv.wait(None if not _xc_heap else max(0.05, _xc_heap[0][0] - now))
-        try:
-            _xc_run_job(job)
-            with _xc_cv:
-                _xc_stats["done"] += 1
-        except Exception:
-            with _xc_cv:
-                _xc_stats["errors"] += 1
-            log.exception("xcheck: הצלבה נכשלה (%s)", job.get("src"))
-
-
-# --- ראיות: אירועים חריגים (xcheck_events.jsonl) --------------------------------
-def _xc_save_event(res, reason):
-    """שורה לאירוע (append + fsync — ראיה מניסוי שטח, כמו rf_log). אותו אירוע
-    שנשמר שוב (אימות חוזר) — "האחרון מנצח" בקריאה. מחזיר את ה-id או None."""
-    rec = {**res, "id": res["event_id"], "saved_at": round(time.time(), 1), "reason": reason}
-    data = (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8")
-    with _XC_EVENTS_LOCK:
-        try:
-            XC_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with XC_EVENTS_PATH.open("a+b") as f:
-                _append_line_on_boundary(f, data)
-                f.flush()
-                os.fsync(f.fileno())
-        except OSError:
-            log.exception("xcheck: שמירת ראיה נכשלה")
-            return None
-        with _xc_cv:
-            _xc_stats["events_saved"] += 1
-            n = _xc_stats["events_saved"]
-        if n % 50 == 0:
-            _trim_jsonl_log(XC_EVENTS_PATH, XC_EVENTS_KEEP)
-    return rec["id"]
-
-
-def _xc_read_events():
-    """כל האירועים, הגרסה האחרונה לכל id, מהחדש לישן (לפי זמן הקליטה)."""
-    try:
-        lines = _read_log_lines(XC_EVENTS_PATH)
-    except OSError:
-        return []
-    latest = {}
-    for r in _jsonl_records(lines):
-        if isinstance(r.get("id"), str):
-            latest[r["id"]] = r
-    return sorted(latest.values(), key=lambda r: r.get("t_rx") or 0, reverse=True)
-
-
-def _xc_event_row(e):
-    """שורת סיכום שטוחה לאירוע — לרשימה ב-UI ולייצוא CSV."""
-    m, hz = e.get("msg") or {}, e.get("horizon") or {}
-    rx, pc = e.get("rx_at") or {}, e.get("position_check") or {}
-    st, mt = e.get("station") or {}, e.get("match") or {}
-    return {
-        "id": e.get("id"), "t": e.get("t_rx"), "src": e.get("src"), "tail": m.get("tail"),
-        "flight": m.get("flight"), "hex": mt.get("hex"), "match_by": mt.get("by"),
-        "freq": m.get("freq"), "signal_dbfs": m.get("level"), "error": m.get("error"),
-        "label": m.get("label"), "dir": e.get("direction"),
-        "msg_lat": m.get("lat"), "msg_lon": m.get("lon"), "pos_src": m.get("pos_src"),
-        "adsb_status": rx.get("status"), "adsb_lat": rx.get("lat"), "adsb_lon": rx.get("lon"),
-        "adsb_dt_s": json.dumps(rx.get("dt_s")) if isinstance(rx.get("dt_s"), list) else rx.get("dt_s"),
-        "adsb_provider": rx.get("provider"), "adsb_src_type": rx.get("src_type"),
-        "adsb_uncert_km": rx.get("uncert_km"),
-        "pos_diff_km": pc.get("distance_km"), "pos_agree": pc.get("agree"),
-        "station_lat": st.get("lat"), "station_lon": st.get("lon"), "station_alt_m": st.get("alt_m"),
-        "distance_km": hz.get("distance_km"), "radio_horizon_km": hz.get("radio_km"),
-        "geometric_horizon_km": hz.get("geometric_km"), "excess_km": hz.get("excess_km"),
-        "aircraft_alt_ft": hz.get("aircraft_alt_ft"),
-        "verdict": e.get("verdict"), "verdict_text": e.get("verdict_text"),
-        "evidence_level": e.get("level"), "reason": e.get("reason"), "saved_at": e.get("saved_at"),
-        "text": m.get("text"),
-    }
-
-
-XC_EXPORT_COLS = ["time_iso", "timestamp", "id", "src", "tail", "flight", "hex", "match_by",
-                  "freq", "signal_dbfs", "error", "label", "dir", "msg_lat", "msg_lon", "pos_src",
-                  "adsb_status", "adsb_lat", "adsb_lon", "adsb_dt_s", "adsb_provider",
-                  "adsb_src_type", "adsb_uncert_km", "pos_diff_km", "pos_agree", "station_lat",
-                  "station_lon", "station_alt_m", "distance_km", "radio_horizon_km",
-                  "geometric_horizon_km", "excess_km", "aircraft_alt_ft", "verdict",
-                  "verdict_text", "evidence_level", "reason", "saved_at", "text"]
-
-
-def _xc_filter(events, args):
-    """סינון לפי ?min_km=&max_km=&min_dbfs=&max_dbfs=&day=YYYY-MM-DD&evidence=&verdict=."""
-    def fnum(k):
-        try:
-            return float(args.get(k)) if args.get(k) not in (None, "") else None
-        except (TypeError, ValueError):
-            return None
-    min_km, max_km, min_db, max_db = fnum("min_km"), fnum("max_km"), fnum("min_dbfs"), fnum("max_dbfs")
-    bounds = _day_bounds(args["day"]) if args.get("day") else None
-    levels = set(filter(None, (args.get("evidence") or "").split(",")))
-    verdicts = set(filter(None, (args.get("verdict") or "").split(",")))
-    out = []
-    for e in events:
-        d = (e.get("horizon") or {}).get("distance_km")
-        lv = (e.get("msg") or {}).get("level")
-        if min_km is not None and (d is None or d < min_km):
-            continue
-        if max_km is not None and (d is None or d > max_km):
-            continue
-        if min_db is not None and (lv is None or lv < min_db):
-            continue
-        if max_db is not None and (lv is None or lv > max_db):
-            continue
-        if bounds and not bounds[0] <= (e.get("t_rx") or 0) < bounds[1]:
-            continue
-        if levels and e.get("level") not in levels:
-            continue
-        if verdicts and e.get("verdict") not in verdicts:
-            continue
-        out.append(e)
-    return out
 
 
 def _xc_export(events, basename):
     """JSON = הראיות המלאות (כל השדות); CSV = שורת סיכום לכל אירוע (עם BOM)."""
     if (request.args.get("format") or "json").lower() == "csv":
-        return _export_response([_xc_event_row(e) for e in events], XC_EXPORT_COLS, basename)
+        return _export_response([xcheck_jobs._xc_event_row(e) for e in events], xcheck_jobs.XC_EXPORT_COLS, basename)
     resp = app.response_class(json.dumps(events, ensure_ascii=False, indent=1),
                               mimetype="application/json")
     resp.headers["Content-Disposition"] = (
@@ -7833,48 +4595,29 @@ def _xc_export(events, basename):
     return resp
 
 
-def _xc_find_message(src, t, tail=None, label=None):
-    """ההודעה המקורית — מהזיכרון, ואם אינה שם (ארכיון/אחרי restart) — מה-jsonl.
-    ⚠ הראיה נבנית תמיד מהעותק *שבשרת*, לא ממה שהדפדפן שלח."""
-    lock, msgs, path = _xc_buffers(src)
-
-    def ok(r):
-        return (abs(float(r.get("t") or 0) - t) < 1e-3
-                and (tail is None or r.get("tail") == tail)
-                and (label is None or r.get("label") == label))
-    with lock:
-        for m in reversed(msgs):
-            if ok(m):
-                return dict(m)
-    for r in reversed(_read_jsonl_log(path)):
-        if ok(r):
-            return r
-    return None
-
-
 @app.route("/api/station", methods=["GET", "POST"])
 def api_station():
     """תחנת הקליטה (מיקום + גובה אנטנה מעל פני הים) להצלבת ADS-B/אופק. POST
     ‏{lat, lon, alt_m, name?, source?} או {clear:true}. דרך _guard (POST)."""
     if request.method == "GET":
-        return jsonify(ok=True, station=load_state().get("station"))
+        return jsonify(ok=True, station=appstate.load_state().get("station"))
     data = request.get_json(silent=True) or {}
     if data.get("clear"):
-        _merge_state({"station": None})
+        appstate._merge_state({"station": None})
         return jsonify(ok=True, station=None)
     st, err = _sanitize_station(data)
     if err:
         return jsonify(ok=False, error=err), 400
     st["set_at"] = round(time.time(), 1)
-    _merge_state({"station": st})
+    appstate._merge_state({"station": st})
     return jsonify(ok=True, station=st)
 
 
 @app.route("/api/xcheck/status")
 def api_xcheck_status():
-    with _xc_cv:
-        queued, stats = len(_xc_heap), dict(_xc_stats)
-    return jsonify(ok=True, station=load_state().get("station"), auto_lookup=XC_AUTO_LOOKUP,
+    with xcheck_jobs._xc_cv:
+        queued, stats = len(xcheck_jobs._xc_heap), dict(xcheck_jobs._xc_stats)
+    return jsonify(ok=True, station=appstate.load_state().get("station"), auto_lookup=xcheck_jobs.XC_AUTO_LOOKUP,
                    queue=queued, stats=stats, net=adsb.net_status())
 
 
@@ -7887,7 +4630,7 @@ def api_xcheck_verify():
     מחוץ לנתיב הרדיו. דרך _guard."""
     data = request.get_json(silent=True) or {}
     src = data.get("src")
-    if src not in XC_SOURCES:
+    if src not in xcheck_jobs.XC_SOURCES:
         return jsonify(ok=False, error="src לא תקין"), 400
     try:
         t = float(data.get("t"))
@@ -7915,50 +4658,50 @@ def api_xcheck_verify():
         imported = adsb.import_trace(raw, data.get("trace_name"))
         if imported["status"] != "ok":
             return jsonify(ok=False, error="קובץ ה-trace לא תקין: " + (imported.get("error") or "")), 400
-    rec = _xc_find_message(src, t, data.get("tail"), data.get("label"))
+    rec = xcheck_jobs._xc_find_message(src, t, data.get("tail"), data.get("label"))
     if rec is None:
         return jsonify(ok=False, error="ההודעה לא נמצאה (לא בזיכרון ולא ביומן)"), 404
-    res, _pts = _xc_evaluate(src, rec, network=True, full=True, hex_override=hex_override,
-                             station=station, deadline=time.monotonic() + XC_VERIFY_BUDGET_SEC,
+    res, _pts = xcheck_jobs._xc_evaluate(src, rec, network=True, full=True, hex_override=hex_override,
+                             station=station, deadline=time.monotonic() + xcheck_jobs.XC_VERIFY_BUDGET_SEC,
                              imported=imported)
-    _xc_store(src, rec.get("id"), res)
+    xcheck_jobs._xc_store(src, rec.get("id"), res)
     saved = None
     if data.get("save") or xcheck.is_anomalous(res):
-        saved = _xc_save_event(res, "user" if data.get("save") else "auto")
+        saved = xcheck_jobs._xc_save_event(res, "user" if data.get("save") else "auto")
     return jsonify(ok=True, result=res, saved=saved)
 
 
 @app.route("/api/xcheck/events")
 def api_xcheck_events():
     """אירועים חריגים שמורים (תקציר), מסוננים — ר' _xc_filter."""
-    events = _xc_filter(_xc_read_events(), request.args)
-    return jsonify(ok=True, events=[_xc_event_row(e) for e in events], total=len(events))
+    events = xcheck_jobs._xc_filter(xcheck_jobs._xc_read_events(), request.args)
+    return jsonify(ok=True, events=[xcheck_jobs._xc_event_row(e) for e in events], total=len(events))
 
 
 @app.route("/api/xcheck/events/export")
 def api_xcheck_events_export():
-    return _xc_export(_xc_filter(_xc_read_events(), request.args), "airam-xcheck")
+    return _xc_export(xcheck_jobs._xc_filter(xcheck_jobs._xc_read_events(), request.args), "airam-xcheck")
 
 
 @app.route("/api/xcheck/events/<event_id>", methods=["GET", "DELETE"])
 def api_xcheck_event(event_id):
-    if not XC_EVENT_ID_RE.match(event_id or ""):
+    if not xcheck_jobs.XC_EVENT_ID_RE.match(event_id or ""):
         abort(404)
-    events = _xc_read_events()
+    events = xcheck_jobs._xc_read_events()
     ev = next((e for e in events if e.get("id") == event_id), None)
     if ev is None:
         return jsonify(ok=False, error="אירוע לא נמצא"), 404
     if request.method == "GET":
         return jsonify(ok=True, event=ev)
-    with _XC_EVENTS_LOCK:                        # DELETE (דרך _guard): כתיבה מחדש אטומית
+    with xcheck_jobs._XC_EVENTS_LOCK:                        # DELETE (דרך _guard): כתיבה מחדש אטומית
         try:
-            lines = _read_log_lines(XC_EVENTS_PATH)
+            lines = storage.read_log_lines(xcheck_jobs.XC_EVENTS_PATH)
         except OSError:
             lines = []
-        keep = [ln for ln, r in ((ln, _jsonl_records([ln])) for ln in lines)
+        keep = [ln for ln, r in ((ln, storage.jsonl_records([ln])) for ln in lines)
                 if not (r and r[0].get("id") == event_id)]
         try:
-            _atomic_write(XC_EVENTS_PATH, "\n".join(keep) + ("\n" if keep else ""))
+            storage.atomic_write(xcheck_jobs.XC_EVENTS_PATH, "\n".join(keep) + ("\n" if keep else ""))
         except OSError:
             return jsonify(ok=False, error="המחיקה נכשלה (דיסק?)"), 500
     return jsonify(ok=True)
@@ -7966,9 +4709,9 @@ def api_xcheck_event(event_id):
 
 @app.route("/api/xcheck/events/<event_id>/export")
 def api_xcheck_event_export(event_id):
-    if not XC_EVENT_ID_RE.match(event_id or ""):
+    if not xcheck_jobs.XC_EVENT_ID_RE.match(event_id or ""):
         abort(404)
-    ev = next((e for e in _xc_read_events() if e.get("id") == event_id), None)
+    ev = next((e for e in xcheck_jobs._xc_read_events() if e.get("id") == event_id), None)
     if ev is None:
         abort(404)
     return _xc_export([ev], f"airam-xcheck-{event_id}")
@@ -7996,14 +4739,14 @@ def api_mode():
     # ולא ניתקל ב-409 שקרי בגלל תחרות-עצמית עם הסבב. timeout קטן (לא 0) סופג
     # בדיוק את החלון הקצר הזה; רק חסימה ממושכת אמיתית (פעולה אחרת) עדיין
     # מחזירה 409 — ובלי לגעת בסבב כלל.
-    st = load_state()
+    st = appstate.load_state()
 
     if mode == "voice":
         # קול = כיוונון להגדרות השמורות האחרונות (או מפורשות). _voice_tune מחזיק
         # את ה-TUNE_LOCK בעצמו => לא לוקחים אותו כאן (deadlock).
         params, perr = _parse_tune(data if "freq" in data else st)
         if perr:   # state פגום => נופלים לברירת מחדל
-            params, _ = _parse_tune(DEFAULT_STATE)
+            params, _ = _parse_tune(appstate.DEFAULT_STATE)
         # _scan_stop_thread נקרא בתוך _voice_tune עצמו, אחרי שהוא תופס את
         # TUNE_LOCK — לא כאן (ר' ההערה בתוך _voice_tune; אותה סיבה בדיוק
         # שהמצבים האחרים למטה קוראים לו רק אחרי הנעילה).
@@ -8020,19 +4763,19 @@ def api_mode():
         if rerr:
             return jsonify(ok=False, error=rerr, state=st), 400
         freqs = _sanitize_freqs(data.get("freqs") or st.get(key),
-                                VDL2_FREQS_DEFAULT if is_vdl2 else ACARS_FREQS_DEFAULT)
+                                config.VDL2_FREQS_DEFAULT if is_vdl2 else config.ACARS_FREQS_DEFAULT)
         werr = _vdl2_window_error(freqs) if is_vdl2 else _acars_window_error(freqs)
         if werr:
             return jsonify(ok=False, error=werr, state=st), 400
         start = _start_vdl2b if is_vdl2 else _start_acars2
         params, perr = _parse_tune(st)
         if perr:
-            params, _ = _parse_tune(DEFAULT_STATE)
+            params, _ = _parse_tune(appstate.DEFAULT_STATE)
         if not TUNE_LOCK.acquire(timeout=0.5):
-            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב", state=load_state()), 409
+            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב", state=appstate.load_state()), 409
         try:
             _scan_stop_thread()
-            st = load_state()
+            st = appstate.load_state()
             if _composite_secondary_only(mode, st):
                 # כבר במצב (או הקול חי והמשני נפל): החלפת תדרי הדאטה ⇒ רק המשני מאותחל, הקול לא נוגע
                 if freqs == st.get(key) and _secondary_starting_or_up(mode):
@@ -8046,8 +4789,8 @@ def api_mode():
                     back, _d = start(st.get(key))
                     return jsonify(ok=False, error=err + (" — הקול על הראשי ממשיך" if back is None else
                                                           " — וגם החזרה לבנק הקודם נכשלה; הקול ממשיך"),
-                                   detail=detail, state=load_state()), 500
-                _merge_state({key: freqs})
+                                   detail=detail, state=appstate.load_state()), 500
+                appstate._merge_state({key: freqs})
                 return jsonify(ok=True, app_mode=mode, **{key: freqs}, secondary_only=True)
             log.info("mode -> %s freq=%.3f %s=%s (from %s)",
                      mode, params["freq"], label, freqs, request.remote_addr)
@@ -8055,7 +4798,7 @@ def api_mode():
             if err:
                 payload, status = _fail_to_off(st, err, detail, "enter " + mode)
                 return jsonify(payload), status
-            _merge_state({"app_mode": mode, key: freqs})
+            appstate._merge_state({"app_mode": mode, key: freqs})
             return jsonify(ok=True, app_mode=mode, **{key: freqs})
         finally:
             TUNE_LOCK.release()
@@ -8070,15 +4813,15 @@ def api_mode():
             return jsonify(ok=False, error=verr, state=st), 400
         params, perr = _parse_tune(st)
         if perr:
-            params, _ = _parse_tune(DEFAULT_STATE)
+            params, _ = _parse_tune(appstate.DEFAULT_STATE)
         if not TUNE_LOCK.acquire(timeout=0.5):
-            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב", state=load_state()), 409
+            return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב", state=appstate.load_state()), 409
         try:
             _scan_stop_thread()
-            st = {**load_state(), **v2}
+            st = {**appstate.load_state(), **v2}
             if _composite_secondary_only("voice2", st):
                 # כבר בקול כפול: רק הערוץ השני מאותחל (כמו /api/tune2), הראשי לא נוגע
-                old = load_state()
+                old = appstate.load_state()
                 if (_voice2_params(old) == (v2["voice2_freq"], v2["voice2_mod"])
                         and _secondary_starting_or_up("voice2")):
                     return jsonify(ok=True, app_mode="voice2", voice2_freq=v2["voice2_freq"],
@@ -8088,8 +4831,8 @@ def api_mode():
                     back, _d = _start_voice2(old)     # ר' voice_acars למעלה
                     return jsonify(ok=False, error=err + (" — הערוץ הראשי ממשיך" if back is None else
                                                           " — וגם החזרה לתדר הקודם נכשלה; הראשי ממשיך"),
-                                   detail=detail, state=load_state()), 500
-                new = _merge_state(v2)
+                                   detail=detail, state=appstate.load_state()), 500
+                new = appstate._merge_state(v2)
                 return jsonify(ok=True, app_mode="voice2", voice2_freq=new["voice2_freq"],
                                voice2_mod=new["voice2_mod"], secondary_only=True)
             log.info("mode -> VOICE2 freq=%.3f freq2=%.3f (from %s)",
@@ -8098,7 +4841,7 @@ def api_mode():
             if err:
                 payload, status = _fail_to_off(st, err, detail, "enter voice2")
                 return jsonify(payload), status
-            new = _merge_state({"app_mode": "voice2", **v2})
+            new = appstate._merge_state({"app_mode": "voice2", **v2})
             return jsonify(ok=True, app_mode="voice2", voice2_freq=new["voice2_freq"],
                            voice2_mod=new["voice2_mod"])
         finally:
@@ -8114,11 +4857,11 @@ def api_mode():
         # satcom משתלב באותו זנב גנרי: "freqs" הוא כאן דגל לוויין בן-איבר-יחיד
         # (geostationary, לא בנק ערוצים) — ר' _sanitize_satellite/_satcom_window_error.
         key, default, sanitize, wcheck, enter = {
-            "acars": ("acars_freqs", ACARS_FREQS_DEFAULT, _sanitize_freqs,
+            "acars": ("acars_freqs", config.ACARS_FREQS_DEFAULT, _sanitize_freqs,
                       _acars_window_error, _enter_acars),
-            "vdl2": ("vdl2_freqs", VDL2_FREQS_DEFAULT, _sanitize_freqs,
+            "vdl2": ("vdl2_freqs", config.VDL2_FREQS_DEFAULT, _sanitize_freqs,
                      _vdl2_window_error, _enter_vdl2),
-            "satcom": ("satcom_freqs", SATCOM_FREQS_DEFAULT, _sanitize_satellite,
+            "satcom": ("satcom_freqs", config.SATCOM_FREQS_DEFAULT, _sanitize_satellite,
                        _satcom_window_error, _enter_satcom),
         }[mode]
         freqs = sanitize(data.get("freqs") or st.get(key), default)
@@ -8147,10 +4890,10 @@ def api_mode():
 
     if not TUNE_LOCK.acquire(timeout=0.5):
         return jsonify(ok=False, error="פעולה אחרת מתבצעת — נסה שוב",
-                       state=load_state()), 409
+                       state=appstate.load_state()), 409
     try:
         _scan_stop_thread()   # תפסנו את הנעילה — הבקשה תקינה, עוצרים סבב קודם (אם יש)
-        st = load_state()     # רענון אחרי stop_thread — לא לדרוס שינוי מקביל
+        st = appstate.load_state()     # רענון אחרי stop_thread — לא לדרוס שינוי מקביל
         if mode == "off":
             # כיבוי (standby): עוצר את כל צרכני ה-SDR ומשחרר את ה-RSP1B ליישום
             # אחר. airam-web/הדף נשארים פעילים => אפשר להדליק שוב מה-UI בכל רגע.
@@ -8164,7 +4907,7 @@ def api_mode():
             # דורסים prev_mode ב-"off" עצמו; שומרים את prev_mode הקודם כדי
             # שכפתור ההדלקה עדיין יזכור את המצב האמיתי האחרון שהיה פעיל.
             cur_mode = st.get("app_mode", "off")
-            _merge_state({"app_mode": "off",
+            appstate._merge_state({"app_mode": "off",
                           "prev_mode": (cur_mode if cur_mode != "off"
                                         else st.get("prev_mode", "off"))})
             return jsonify(ok=True, app_mode="off")
@@ -8175,7 +4918,7 @@ def api_mode():
             if err:
                 payload, status = _fail_to_off(st, err, detail, "enter scan (leg 0)")
                 return jsonify(payload), status
-            _merge_state({"app_mode": "scan", "scan_plan": plan})
+            appstate._merge_state({"app_mode": "scan", "scan_plan": plan})
             return jsonify(ok=True, app_mode="scan", scan_plan=plan)
 
         # acars / vdl2 / satcom — מסלול דאטה סימטרי (satcom מקבל גם bias_tee/skip_c/spectrum)
@@ -8188,7 +4931,7 @@ def api_mode():
         extra = ({"satcom_bias_tee": bias_tee, "satcom_skip_c": skip_c,
                   "satcom_spectrum": spectrum, "satcom_gain": gain}
                  if mode == "satcom" else {})
-        _merge_state({"app_mode": mode, key: freqs, **extra})
+        appstate._merge_state({"app_mode": mode, key: freqs, **extra})
         return jsonify(ok=True, app_mode=mode, **{key: freqs}, **extra)
     finally:
         TUNE_LOCK.release()
@@ -8230,7 +4973,7 @@ def _boot_restore():
     רץ ב-thread daemon => לא חוסם את app.run; כל כישלון => off + לוג, לעולם לא
     מפיל את שרת הווב."""
     try:
-        st = load_state()
+        st = appstate.load_state()
         mode = st.get("app_mode", "off")
         live = _live_mode()
         # scan: live הוא תמיד voice/acars/vdl2/None, לעולם לא "scan" עצמו (זו
@@ -8264,7 +5007,7 @@ def _boot_restore():
             # שניות (המתנה ל-SDR) — אם המשתמש הספיק לבחור מצב אחר מה-UI *ואותה
             # בחירה כבר הסתיימה* (הנעילה שוב פנויה), st הישן היה דורס אותה.
             # קוראים מחדש ומוותרים על השחזור אם המצב השמור השתנה בינתיים.
-            st2 = load_state()
+            st2 = appstate.load_state()
             if st2.get("app_mode", "off") != mode:
                 log.info("boot restore: המצב השמור השתנה בזמן ההמתנה ל-SDR (%s) — מוותרים על השחזור",
                          st2.get("app_mode"))
@@ -8273,7 +5016,7 @@ def _boot_restore():
             if mode == "voice":
                 params, perr = _parse_tune(st)
                 if perr:   # state פגום => ברירת מחדל
-                    params, _ = _parse_tune(DEFAULT_STATE)
+                    params, _ = _parse_tune(appstate.DEFAULT_STATE)
                 err, detail, sdr_down = _enter_voice(params)
                 if err and sdr_down:
                     # הכוונה נשמרת: Restart=always של היחידה ימשיך לנסות,
@@ -8283,7 +5026,7 @@ def _boot_restore():
             elif mode in COMPOSITE_SECONDARY:
                 params, perr = _parse_tune(st)
                 if perr:
-                    params, _ = _parse_tune(DEFAULT_STATE)
+                    params, _ = _parse_tune(appstate.DEFAULT_STATE)
                 err, _detail, sdr_down = _enter_composite_saved(mode, params, st)
                 if err and sdr_down:
                     log.warning("boot restore: SDR לא נוכח — %s יעלה כשיחובר", mode)
@@ -8326,7 +5069,7 @@ def _boot_restore():
             if err:
                 log.warning("boot restore -> %s failed: %s — falling to off", mode, err)
                 _enter_standby()
-                _merge_state({"app_mode": "off", "prev_mode": mode})
+                appstate._merge_state({"app_mode": "off", "prev_mode": mode})
             else:
                 log.info("boot restore -> %s", mode)
         finally:
@@ -8352,7 +5095,7 @@ def _mode_reconcile_once():
     satcom שלא משוחזר אוטומטית בכוונה, ר' §12) אבל אף צרכן לא רץ בפועל, ומנסה
     כניסה מחדש. best-effort: כשל לא נופל ל-off (כדי לא להילחם עם המשתמש שאולי
     כבר מתקן ידנית) — פשוט מנסה שוב במחזור הבא."""
-    st = load_state()
+    st = appstate.load_state()
     mode = st.get("app_mode", "off")
     if mode not in ("voice", "acars", "vdl2", *COMPOSITE_SECONDARY):
         return                          # off/scan/satcom — לא בטיפול הפוליסה הזו
@@ -8375,7 +5118,7 @@ def _mode_reconcile_once():
     if not TUNE_LOCK.acquire(blocking=False):
         return                          # פעולה אחרת כרגע — לא מתחרים, ננסה שוב במחזור הבא
     try:
-        st2 = load_state()
+        st2 = appstate.load_state()
         live = _live_mode()
         if st2.get("app_mode") != mode or (live is not None and not (composite and live == "voice")):
             return                      # השתנה בזמן שחיכינו לנעילה
@@ -8390,7 +5133,7 @@ def _mode_reconcile_once():
         if mode in ("voice", *COMPOSITE_SECONDARY):
             params, perr = _parse_tune(st2)
             if perr:
-                params, _ = _parse_tune(DEFAULT_STATE)
+                params, _ = _parse_tune(appstate.DEFAULT_STATE)
             if mode == "voice":
                 err, detail, _sdr_down = _enter_voice(params)
             elif _secondary_starting_or_up(mode):
@@ -8423,6 +5166,38 @@ def _mode_reconcile_loop():
         _denoise_sync()   # לעולם לא זורק
 
 
+# תלויות הניסוי/הרשם (experiment.py) — lambda שפותר את השם *בזמן הקריאה*, כך ש-monkeypatch על app ממשיך לעבוד.
+def _scanning_now():
+    with _scan_lock:
+        return _scan_thread is not None and _scan_thread.is_alive()
+
+
+experiment.bind(
+    enter_voice=lambda *a, **k: _enter_voice(*a, **k),
+    probe_params=lambda *a, **k: _probe_params(*a, **k),
+    restore_after_probe=lambda *a, **k: _restore_after_probe(*a, **k),
+    sample_probe_stats=lambda *a, **k: _sample_probe_stats(*a, **k),
+    live_mode=lambda *a, **k: _live_mode(*a, **k),
+    rtl_airband_start_wall=lambda *a, **k: _rtl_airband_start_wall(*a, **k),
+    parse_stats=lambda *a, **k: parse_stats(*a, **k),
+    tune_lock=lambda: TUNE_LOCK,
+    stats_path=lambda: STATS_PATH,
+    config_path=lambda: CONFIG_PATH,
+    sample_sec=lambda: ANTENNA_CHECK_SAMPLE_SEC,
+    version=VERSION,
+    composite_secondary=lambda: COMPOSITE_SECONDARY,
+    composite_label=lambda: COMPOSITE_LABEL,
+    scanning=_scanning_now,
+)
+
+
+xcheck_jobs.bind(
+    buffers=lambda *a, **k: _xc_buffers(*a, **k),
+    day_bounds=lambda *a, **k: _day_bounds(*a, **k),
+    version=VERSION,
+)
+
+
 if __name__ == "__main__":
     # ניקוי קובצי tmp יתומים מכתיבה שנקטעה (כיבוי פתאומי) — *לפני* כל השאר,
     # ורק כאן: בעלייה אין מופע אחר באמצע כתיבה. ר' _cleanup_orphan_tmp.
@@ -8431,7 +5206,7 @@ if __name__ == "__main__":
         log.warning("נוקו %d קובצי tmp יתומים (כתיבה שנקטעה — כיבוי פתאומי?)", _orphans)
     # sdr.env מסונכרן ל-state (שער airam-wait-sdrplay מחכה ל-serial הזה). עטוף: עלייה היא חובה.
     try:
-        _st0 = load_state()
+        _st0 = appstate.load_state()
         if _st0.get("sdr_primary") or _st0.get("sdr_secondary") or SDR_ENV_PATH.exists():
             write_sdr_env(_st0.get("sdr_primary"), _st0.get("sdr_secondary"))
     except Exception as _e:
@@ -8440,17 +5215,21 @@ if __name__ == "__main__":
     # satcom/scan/off) נעשה כאן, ברקע (satcom חריג — לא משוחזר אוטומטית,
     # ר' _boot_restore/§12 ב-CLAUDE.md). מכסה גם שדרוג קונפיג
     # (stats_filepath/localtime) — כניסה לקול תמיד משכתבת את הקונפיג מה-state.
+    try:
+        _diag_boot()      # בדיקה שנקטעה ב-restart/reboot ממשיכה (ר' שם)
+    except Exception:
+        log.exception("יומן בדיקה: שחזור בעלייה נכשל — ממשיכים בלי")
     threading.Thread(target=_boot_restore, daemon=True).start()
     # התאוששות מקריסת sdrplay.service שלא הופצה לצרכן הפעיל (ר' _mode_reconcile_loop) —
     # thread נפרד מ-_boot_restore: זה רץ *במשך* הסשן, לא רק פעם אחת באתחול.
     threading.Thread(target=_mode_reconcile_loop, daemon=True).start()
-    REC_DIR.mkdir(parents=True, exist_ok=True)
-    _saved_dir().mkdir(parents=True, exist_ok=True)
+    recordings.REC_DIR.mkdir(parents=True, exist_ok=True)
+    recordings._saved_dir().mkdir(parents=True, exist_ok=True)
     threading.Thread(target=_activity_watcher, daemon=True).start()
     # ⚠ טעינת ההיסטוריה עטופה: היא רצה לפני app.run(), וכל חריגה כאן מונעת
     # מהמתזמר לעלות => לולאת קריסה (Restart=always) והתחנה כולה מתה. זה כבר
     # קרה פעמיים מקובץ שנפגם בכיבוי פתאומי (שורה שאינה אובייקט, ותו UTF-8 קטוע
-    # — ר' _jsonl_records/_read_log_lines). היסטוריה היא נוחות; עלייה היא חובה.
+    # — ר' storage.jsonl_records/storage.read_log_lines). היסטוריה היא נוחות; עלייה היא חובה.
     for _load in (_load_acars_history, _load_vdl2_history, _load_satcom_history):
         try:
             _load()                                                 # לפני ה-listener => אין מרוץ
@@ -8460,7 +5239,7 @@ if __name__ == "__main__":
     threading.Thread(target=_vdl2_listener, daemon=True).start()    # פיד UDP מ-dumpvdl2 (שקט בשאר המצבים)
     threading.Thread(target=_satcom_listener, daemon=True).start()  # פיד UDP מ-inmarsat-sniffer (שקט בשאר המצבים)
     # הצלבת ADS-B (docs/adsb-crosscheck-design.md) — thread נפרד; ה-listeners רק מכניסים לתור
-    threading.Thread(target=_xc_worker, name="xcheck", daemon=True).start()
+    threading.Thread(target=xcheck_jobs._xc_worker, name="xcheck", daemon=True).start()
     # תמלול ATC — דמון נפרד (לא חוסם את היומן/retention). עולה **תמיד**, גם
     # כש-transcribe_auto כבוי: תמלול לפי דרישה (📝) ותמלול של הקלטות שמורות
     # (★) עובדים בכל מקרה. ה-thread ישן כשwhisper לא מותקן ומזהה התקנה

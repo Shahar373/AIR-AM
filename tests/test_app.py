@@ -12,25 +12,24 @@ import time
 import pytest
 
 import app
+import appstate  # noqa: E402
+import config  # noqa: E402
+import recordings  # noqa: E402
+import storage
 
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     """מנתב את כל קבצי המערכת ל-tmp כדי שהבדיקות לא יגעו ב-/etc ו-/var."""
     monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "airband.conf")
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "STATS_PATH", tmp_path / "stats.txt")
     monkeypatch.setattr(app, "PRESETS_PATH", tmp_path / "presets.json")
     monkeypatch.setattr(app, "ACTIVITY_PATH", tmp_path / "activity.jsonl")
     rec = tmp_path / "recordings"
     rec.mkdir()
-    monkeypatch.setattr(app, "REC_DIR", rec)
+    monkeypatch.setattr(recordings, "REC_DIR", rec)
     return tmp_path
-
-
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
 
 
 @pytest.fixture(autouse=True)
@@ -47,14 +46,9 @@ def _clean_power_cache():
 def _clean_state_corrupt_flag():
     """‏load_state מזהיר על state.json פגום פעם אחת לאירוע (flag גלובלי) —
     בלי איפוס, בדיקה שמשאירה state פגום הייתה מדכאת בשקט את אזהרת הבדיקה הבאה."""
-    app._reset_state_corrupt_warned()
+    appstate._reset_state_corrupt_warned()
     yield
-    app._reset_state_corrupt_warned()
-
-
-@pytest.fixture
-def no_sleep(monkeypatch):
-    monkeypatch.setattr(app.time, "sleep", lambda *a, **k: None)
+    appstate._reset_state_corrupt_warned()
 
 
 # --- render_config ----------------------------------------------------------
@@ -100,23 +94,23 @@ def test_render_config_recording_only_when_squelch_closes():
 # --- state ------------------------------------------------------------------
 
 def test_load_state_defaults_and_merge(paths):
-    assert app.load_state() == app.DEFAULT_STATE          # אין קובץ => ברירת מחדל
-    app.STATE_PATH.write_text(json.dumps({"freq": 121.5}))
-    st = app.load_state()
+    assert appstate.load_state() == appstate.DEFAULT_STATE          # אין קובץ => ברירת מחדל
+    appstate.STATE_PATH.write_text(json.dumps({"freq": 121.5}))
+    st = appstate.load_state()
     assert st["freq"] == 121.5
-    assert st["mod"] == app.DEFAULT_STATE["mod"]          # מפתחות חסרים מושלמים
-    app.STATE_PATH.write_text("{corrupt")
-    assert app.load_state() == app.DEFAULT_STATE          # קובץ פגום => ברירת מחדל
+    assert st["mod"] == appstate.DEFAULT_STATE["mod"]          # מפתחות חסרים מושלמים
+    appstate.STATE_PATH.write_text("{corrupt")
+    assert appstate.load_state() == appstate.DEFAULT_STATE          # קובץ פגום => ברירת מחדל
 
 
 def test_load_state_missing_file_no_warning_logged(paths, caplog):
     """קובץ חסר = התקנה טרייה (לא אירוע) — בניגוד ל-JSON פגום, אסור שיילוג
     אזהרה או ייכתב עותק .corrupt."""
-    assert not app.STATE_PATH.exists()
+    assert not appstate.STATE_PATH.exists()
     with caplog.at_level("WARNING", logger="airam"):
-        assert app.load_state() == app.DEFAULT_STATE
+        assert appstate.load_state() == appstate.DEFAULT_STATE
     assert caplog.records == []
-    assert not app.STATE_PATH.with_suffix(".json.corrupt").exists()
+    assert not appstate.STATE_PATH.with_suffix(".json.corrupt").exists()
 
 
 def test_load_state_corrupt_warns_and_saves_copy_once_per_incident(paths, caplog):
@@ -124,23 +118,23 @@ def test_load_state_corrupt_warns_and_saves_copy_once_per_incident(paths, caplog
     בלי flag חד-פעמי, state.json פגום יחיד היה מייצר לוג-ספאם וכתיבת .corrupt
     חוזרת *בכל קריאה*, לא רק פעם אחת לאירוע (כפי שה-docstring של load_state
     מבטיחה)."""
-    app.STATE_PATH.write_text("{corrupt")
-    corrupt_copy = app.STATE_PATH.with_suffix(".json.corrupt")
+    appstate.STATE_PATH.write_text("{corrupt")
+    corrupt_copy = appstate.STATE_PATH.with_suffix(".json.corrupt")
     with caplog.at_level("WARNING", logger="airam"):
         for _ in range(3):
-            assert app.load_state() == app.DEFAULT_STATE
+            assert appstate.load_state() == appstate.DEFAULT_STATE
     warnings = [r for r in caplog.records if "state.json פגום" in r.message]
     assert len(warnings) == 1                      # לא 3 — פעם אחת לאירוע
     assert corrupt_copy.read_text() == "{corrupt"
 
     # התאוששות: רק *קריאה* תקינה מאפסת את ה-flag (לא עצם הכתיבה) => אירוע
     # פגימה *עתידי* עדיין יתועד
-    app.save_state(dict(app.DEFAULT_STATE))
-    assert app.load_state() == app.DEFAULT_STATE
+    appstate.save_state(dict(appstate.DEFAULT_STATE))
+    assert appstate.load_state() == appstate.DEFAULT_STATE
     caplog.clear()
-    app.STATE_PATH.write_text("{corrupt again")
+    appstate.STATE_PATH.write_text("{corrupt again")
     with caplog.at_level("WARNING", logger="airam"):
-        app.load_state()
+        appstate.load_state()
     warnings2 = [r for r in caplog.records if "state.json פגום" in r.message]
     assert len(warnings2) == 1
 
@@ -166,7 +160,7 @@ def test_parse_stats_label_order_independent():
 
 
 def test_api_metrics(client, paths):
-    app.STATE_PATH.write_text(json.dumps({**app.DEFAULT_STATE, "freq": 132.5}))
+    appstate.STATE_PATH.write_text(json.dumps({**appstate.DEFAULT_STATE, "freq": 132.5}))
     app.STATS_PATH.write_text(STATS)
     m = client.get("/api/metrics").get_json()
     assert m["fresh"] and m["snr"] == pytest.approx(12.8)
@@ -194,7 +188,7 @@ def test_tune_success_persists_state(client, paths, tuned_ok):
                                        "if_gain": 30, "rf_gain": 2,
                                        "squelch_mode": "manual", "squelch_snr": 11})
     assert r.status_code == 200 and r.get_json()["ok"]
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["freq"] == 134.6 and st["if_gain"] == 30 and st["rf_gain"] == 2
     assert st["squelch_mode"] == "manual"
     cfg = app.CONFIG_PATH.read_text()
@@ -208,14 +202,14 @@ def test_tune_sanitizes_inputs(client, paths, tuned_ok):
     body = r.get_json()
     assert body["mod"] == "am"                    # אפנון לא מוכר => AM
     assert body["agc"] is False                   # "false" טקסטואלי מזוהה
-    assert body["if_gain"] == app.IFGR_MAX        # clamp לתקרה
-    assert body["rf_gain"] == app.RFGR_MIN        # clamp לרצפה
+    assert body["if_gain"] == config.IFGR_MAX        # clamp לתקרה
+    assert body["rf_gain"] == config.RFGR_MIN        # clamp לרצפה
     assert body["squelch_mode"] == "auto"         # מצב לא מוכר => auto
     assert body["squelch_snr"] == 0.0             # clamp לרצפה
 
 
 def test_tune_failure_rolls_back(client, paths, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "freq": 132.5})
+    appstate.save_state({**appstate.DEFAULT_STATE, "freq": 132.5})
     monkeypatch.setattr(app, "_restart_and_verify", lambda: ("נכשל", "detail", False))
     rolled = []
     # _rollback מאומת: True = הקונפיג הקודם עלה בהצלחה => נשארים בקול
@@ -224,12 +218,12 @@ def test_tune_failure_rolls_back(client, paths, monkeypatch):
     assert r.status_code == 500
     assert rolled == [132.5]
     assert r.get_json()["state"]["app_mode"] == "voice"   # רולבק בתוך קול, לא נפילה ל-off
-    assert app.load_state()["freq"] == 132.5          # state נשאר על האחרון שעבד
+    assert appstate.load_state()["freq"] == 132.5          # state נשאר על האחרון שעבד
 
 
 def test_tune_rollback_failure_falls_to_off(client, paths, no_sleep, monkeypatch):
     # גם הרולבק לתדר הקודם נכשל => נופלים ל-off (לא משאירים שירות בלולאת קריסה)
-    app.save_state({**app.DEFAULT_STATE, "freq": 132.5, "app_mode": "voice"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "freq": 132.5, "app_mode": "voice"})
     monkeypatch.setattr(app, "_restart_and_verify", lambda: ("נכשל", "detail", False))
     monkeypatch.setattr(app, "_rollback", lambda prev: False)
     monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: None)
@@ -238,12 +232,12 @@ def test_tune_rollback_failure_falls_to_off(client, paths, no_sleep, monkeypatch
     assert r.status_code == 500
     body = r.get_json()
     assert body["app_mode"] == "off" and body["state"]["app_mode"] == "off"
-    assert app.load_state()["app_mode"] == "off"
+    assert appstate.load_state()["app_mode"] == "off"
 
 
 def test_api_mode_voice_failure_falls_to_off(client, paths, no_sleep, monkeypatch):
     # כניסה לקול ממצב דאטה שנכשלת (וגם הרולבק) => off, בדיוק כמו כל מצב אחר
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "acars"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "acars"})
     monkeypatch.setattr(app, "_restart_and_verify", lambda: ("נכשל", None, False))
     monkeypatch.setattr(app, "_rollback", lambda prev: False)
     monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: None)
@@ -251,7 +245,7 @@ def test_api_mode_voice_failure_falls_to_off(client, paths, no_sleep, monkeypatc
     r = client.post("/api/mode", json={"mode": "voice"})
     assert r.status_code == 500
     assert r.get_json()["state"]["app_mode"] == "off"
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["app_mode"] == "off" and st["prev_mode"] == "acars"
 
 
@@ -260,7 +254,7 @@ def test_tune_sdr_down_keeps_new_config(client, paths, monkeypatch):
     monkeypatch.setattr(app, "_restart_and_verify", lambda: ("נתקע", None, True))
     r = client.post("/api/tune", json={"freq": 134.6})
     assert r.status_code == 500
-    assert app.load_state()["freq"] == 134.6
+    assert appstate.load_state()["freq"] == 134.6
 
 
 def test_tune_preserves_unrelated_state_fields(client, paths, tuned_ok):
@@ -270,13 +264,13 @@ def test_tune_preserves_unrelated_state_fields(client, paths, tuned_ok):
     satcom_bias_tee=False (המשתמש מזין LNA חיצוני) היה נדרס בחזרה ל-True
     (ברירת המחדל, ר' load_state/DEFAULT_STATE) בכניסה הבאה ל-SATCOM — בדיוק
     הסיכון החומרתי ש-§12 מזהיר מפניו."""
-    app.save_state({**app.DEFAULT_STATE, "satcom_bias_tee": False, "satcom_gain": 40,
+    appstate.save_state({**appstate.DEFAULT_STATE, "satcom_bias_tee": False, "satcom_gain": 40,
                     "signal_baseline": {"noise": -70.0, "freq": 132.5, "ts": 1.0},
                     "scan_plan": [{"mode": "acars", "dwell_sec": 60}],
                     "last_session_view_at": 123.0})
     r = client.post("/api/tune", json={"freq": 134.6})
     assert r.status_code == 200
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["satcom_bias_tee"] is False
     assert st["satcom_gain"] == 40
     assert st["signal_baseline"] == {"noise": -70.0, "freq": 132.5, "ts": 1.0}
@@ -291,13 +285,13 @@ def test_api_mode_off_twice_preserves_prev_mode(client, paths, monkeypatch):
     האחרון שהיה פעיל."""
     monkeypatch.setattr(app, "_sysctl", lambda action, svc, timeout=45: None)
     monkeypatch.setattr(app, "_is_active", lambda svc: False)
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "acars"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "acars"})
     r1 = client.post("/api/mode", json={"mode": "off"})
     assert r1.status_code == 200
-    assert app.load_state()["prev_mode"] == "acars"
+    assert appstate.load_state()["prev_mode"] == "acars"
     r2 = client.post("/api/mode", json={"mode": "off"})
     assert r2.status_code == 200
-    assert app.load_state()["prev_mode"] == "acars"   # לא נדרס ל-"off"
+    assert appstate.load_state()["prev_mode"] == "acars"   # לא נדרס ל-"off"
 
 
 # --- presets ------------------------------------------------------------------
@@ -341,7 +335,7 @@ def test_atomic_write_concurrent_threads_dont_corrupt_file(paths):
     def writer(text):
         try:
             for _ in range(20):
-                app._atomic_write(target, text)
+                storage.atomic_write(target, text)
         except Exception as e:                    # noqa: BLE001
             errors.append(e)
 
@@ -371,7 +365,7 @@ def test_atomic_write_fsyncs_file_and_directory(paths, monkeypatch):
     monkeypatch.setattr(app.os, "fsync", spy_fsync)
 
     target = paths / "durable.json"
-    app._atomic_write(target, "content")
+    storage.atomic_write(target, "content")
 
     assert target.read_text() == "content"
     assert len(fsync_calls) == 2      # ה-tmp file וגם ה-fd של התיקייה
@@ -412,9 +406,9 @@ def test_cleanup_orphan_tmp_default_dirs_cover_etc_airam_and_recordings(paths, m
     monkeypatch.setattr(app, "ACARS_ENV_PATH", etc_airam / "acars.env")
 
     old = time.time() - app._TMP_ORPHAN_AGE_SEC - 10
-    state_orphan = app.STATE_PATH.parent / "state.json.tmp10-1"
+    state_orphan = appstate.STATE_PATH.parent / "state.json.tmp10-1"
     env_orphan = etc_airam / "acars.env.tmp20-1"
-    rec_orphan = app.REC_DIR / "airam_x.mp3.txt.tmp30-1"
+    rec_orphan = recordings.REC_DIR / "airam_x.mp3.txt.tmp30-1"
     for p in (state_orphan, env_orphan, rec_orphan):
         p.write_text("x")
         os.utime(p, (old, old))
@@ -430,7 +424,7 @@ def test_cleanup_orphan_tmp_default_dirs_cover_etc_airam_and_recordings(paths, m
 # --- יומן שידורים והקלטות -----------------------------------------------------
 
 def _mk_rec(paths, name, size=6000, age=60):
-    p = app.REC_DIR / name
+    p = recordings.REC_DIR / name
     p.write_bytes(b"\0" * size)
     t = time.time() - age
     os.utime(p, (t, t))
@@ -438,24 +432,24 @@ def _mk_rec(paths, name, size=6000, age=60):
 
 
 def test_rec_freq_parsing():
-    assert app._rec_freq_mhz("airam_20260611_120001_134600000.mp3") == 134.6
-    assert app._rec_freq_mhz("not_a_recording.mp3") is None
+    assert recordings._rec_freq_mhz("airam_20260611_120001_134600000.mp3") == 134.6
+    assert recordings._rec_freq_mhz("not_a_recording.mp3") is None
 
 
 def test_activity_log_and_api(client, paths):
     _mk_rec(paths, "airam_20260611_120001_134600000.mp3", size=42000, age=300)
     _mk_rec(paths, "airam_20260611_120203_121500000.mp3", age=120)
     rows = []
-    for p in sorted(app.REC_DIR.glob("*.mp3"), key=lambda p: p.stat().st_mtime):
+    for p in sorted(recordings.REC_DIR.glob("*.mp3"), key=lambda p: p.stat().st_mtime):
         st = p.stat()
-        rows.append({"ts": st.st_mtime, "freq": app._rec_freq_mhz(p.name),
-                     "file": p.name, "dur": round(st.st_size / app.REC_BYTES_PER_SEC, 1)})
+        rows.append({"ts": st.st_mtime, "freq": recordings._rec_freq_mhz(p.name),
+                     "file": p.name, "dur": round(st.st_size / recordings.REC_BYTES_PER_SEC, 1)})
     app._append_activity(rows)
     evs = client.get("/api/activity").get_json()["events"]
     assert [e["freq"] for e in evs] == [121.5, 134.6]      # חדש => ישן
     assert evs[1]["dur"] == 7.0 and evs[1]["exists"] is True
     # הקלטה שנמחקה ב-retention => האירוע נשאר עם exists=False
-    (app.REC_DIR / evs[0]["file"]).unlink()
+    (recordings.REC_DIR / evs[0]["file"]).unlink()
     evs = client.get("/api/activity").get_json()["events"]
     assert evs[0]["exists"] is False
 
@@ -472,21 +466,21 @@ def test_scan_no_duplicate_after_restart(paths):
     # ה-ts הנשמר ביומן מעוגל, אבל פעם השוואנו מולו את ה-mtime הלא-מעוגל.
     p = _mk_rec(paths, "airam_20260611_120001_134600000.mp3")
     os.utime(p, (1000.04, 1000.04))   # מתעגל ל-1000.0
-    rows, newest = app._scan_new_recordings(0.0)
+    rows, newest = recordings._scan_new_recordings(0.0)
     assert len(rows) == 1 and rows[0]["ts"] == 1000.0
     app._append_activity(rows)
     # restart: ממשיכים מה-ts שנכתב ביומן => אותה הקלטה לא נסרקת שוב
-    rows2, _ = app._scan_new_recordings(app._last_logged_ts())
+    rows2, _ = recordings._scan_new_recordings(app._last_logged_ts())
     assert rows2 == []
 
 
 def test_sweep_retention(paths):
-    for i in range(app.REC_MAX_FILES + 10):
+    for i in range(recordings.REC_MAX_FILES + 10):
         _mk_rec(paths, f"airam_20260611_13{i:04d}_134600000.mp3", size=10, age=i)
     stale_tmp = _mk_rec(paths, "airam_x.mp3.tmp", age=7200)   # שידור שנקטע בקריסה
     fresh_tmp = _mk_rec(paths, "airam_y.mp3.tmp", age=10)     # שידור בכתיבה כרגע
-    app._sweep_recordings()
-    assert len(list(app.REC_DIR.glob("*.mp3"))) == app.REC_MAX_FILES
+    recordings._sweep_recordings()
+    assert len(list(recordings.REC_DIR.glob("*.mp3"))) == recordings.REC_MAX_FILES
     assert not stale_tmp.exists() and fresh_tmp.exists()
 
 
@@ -494,7 +488,7 @@ def test_sweep_retention(paths):
 
 def test_activity_includes_transcript(client, paths):
     p = _mk_rec(paths, "airam_20260611_120001_134600000.mp3")
-    app._transcript_path(p).write_text("cleared for takeoff runway 26\n")
+    recordings._transcript_path(p).write_text("cleared for takeoff runway 26\n")
     app._append_activity([{"ts": p.stat().st_mtime, "freq": 134.6,
                            "file": p.name, "dur": 1.0}])
     ev = client.get("/api/activity").get_json()["events"][0]
@@ -508,13 +502,13 @@ def test_activity_text_none_without_sidecar(client, paths):
 
 
 def test_sweep_removes_transcript_sidecar(paths, monkeypatch):
-    monkeypatch.setattr(app, "REC_MAX_FILES", 1)
+    monkeypatch.setattr(recordings, "REC_MAX_FILES", 1)
     for i in range(3):
         p = _mk_rec(paths, f"airam_2026061{i}_120001_134600000.mp3", size=10, age=30 - i)
-        app._transcript_path(p).write_text("t")
-    app._sweep_recordings()
-    assert len(list(app.REC_DIR.glob("*.mp3"))) == 1
-    assert len(list(app.REC_DIR.glob("*.txt"))) == 1   # קובץ-הצד של הנמחק הוסר איתו
+        recordings._transcript_path(p).write_text("t")
+    recordings._sweep_recordings()
+    assert len(list(recordings.REC_DIR.glob("*.mp3"))) == 1
+    assert len(list(recordings.REC_DIR.glob("*.txt"))) == 1   # קובץ-הצד של הנמחק הוסר איתו
 
 
 def test_sweep_removes_orphaned_transcript_without_mp3(paths):
@@ -522,9 +516,9 @@ def test_sweep_removes_orphaned_transcript_without_mp3(paths):
     _transcribe_worker ל-_sweep_recordings, ר' §12) לא אמור להצטבר לנצח: הלולאה
     הרגילה מוחקת .txt רק יחד עם .mp3 שעדיין ברשימת ה-retention, ולא רואה קובץ
     שכבר נעדר ממנה בכלל."""
-    orphan = app.REC_DIR / "airam_20260611_120001_134600000.mp3.txt"
+    orphan = recordings.REC_DIR / "airam_20260611_120001_134600000.mp3.txt"
     orphan.write_text("תמלול של הקלטה שכבר נמחקה")
-    app._sweep_recordings()
+    recordings._sweep_recordings()
     assert not orphan.exists()
 
 
@@ -532,13 +526,13 @@ def test_transcribe_file_handles_failure(paths, monkeypatch):
     """כשל (ffmpeg חסר) => ('failed', ...) עם סיבה, ובלי לזרוק. ⚠ החוזה השתנה
     במכוון מ-None ל-3-tuple: 'נכשל' ו'לא ניסינו' חייבים להיות מובחנים (§12)."""
     p = _mk_rec(paths, "airam_20260611_120001_134600000.mp3")
-    monkeypatch.setattr(app, "WHISPER_BIN", str(paths / "whisper-cli"))
+    monkeypatch.setattr(recordings, "WHISPER_BIN", str(paths / "whisper-cli"))
     (paths / "whisper-cli").write_text("#!/bin/sh\n")
-    monkeypatch.setattr(app, "_whisper_model", lambda lang="en": str(paths / "model.bin"))
+    monkeypatch.setattr(recordings, "_whisper_model", lambda lang="en": str(paths / "model.bin"))
     def boom(*a, **k):
         raise FileNotFoundError("ffmpeg")
     monkeypatch.setattr(app.subprocess, "run", boom)
-    state, text, err = app._transcribe_file(p)
+    state, text, err = recordings._transcribe_file(p)
     assert state == "failed" and text is None and err
 
 
@@ -670,7 +664,7 @@ def test_tune_does_not_revert_concurrent_transcribe_toggle(client, paths, monkey
     """⚠ regression: _voice_tune שמר {**prev, ...} מ-snapshot שנלקח *לפני*
     restart של 3–45ש'. מתג "תמלל הכול" שהופעל באמצע (POST /api/transcribe, בלי
     TUNE_LOCK) קיבל ok ואז נדרס בשקט כשהכיוונון הסתיים."""
-    app.save_state({**app.DEFAULT_STATE, "transcribe_auto": False})
+    appstate.save_state({**appstate.DEFAULT_STATE, "transcribe_auto": False})
 
     def slow_restart():
         # "באמצע ה-restart" המשתמש מדליק תמלול אוטומטי
@@ -679,13 +673,13 @@ def test_tune_does_not_revert_concurrent_transcribe_toggle(client, paths, monkey
     monkeypatch.setattr(app, "_restart_and_verify", slow_restart)
     r = client.post("/api/tune", json={"freq": 134.6})
     assert r.status_code == 200
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["freq"] == 134.6 and st["transcribe_auto"] is True
 
 
 def test_mode_switch_does_not_revert_concurrent_transcribe_lang(client, paths, monkeypatch):
     """אותו lost update במסלול /api/mode (ACARS/VDL2/SATCOM)."""
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "off", "transcribe_lang": "en"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "off", "transcribe_lang": "en"})
 
     def slow_enter(freqs):
         assert client.post("/api/transcribe", json={"lang": "he"}).get_json()["ok"]
@@ -693,5 +687,5 @@ def test_mode_switch_does_not_revert_concurrent_transcribe_lang(client, paths, m
     monkeypatch.setattr(app, "_enter_acars", slow_enter)
     r = client.post("/api/mode", json={"mode": "acars"})
     assert r.status_code == 200
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["app_mode"] == "acars" and st["transcribe_lang"] == "he"

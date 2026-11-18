@@ -22,6 +22,10 @@ import json
 import pytest
 
 import app
+import experiment  # noqa: E402
+import appstate  # noqa: E402
+import recordings  # noqa: E402
+import storage
 
 # שורות JSON *תקינות* שאינן אובייקט — כולן עברו את except ValueError
 NON_DICT_LINES = ["null", "0", '"str"', "[]", "[1,2]", "true"]
@@ -33,7 +37,7 @@ def logs(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "VDL2_LOG_PATH", tmp_path / "vdl2.jsonl")
     monkeypatch.setattr(app, "SATCOM_LOG_PATH", tmp_path / "satcom.jsonl")
     monkeypatch.setattr(app, "ACTIVITY_PATH", tmp_path / "activity.jsonl")
-    monkeypatch.setattr(app, "REC_DIR", tmp_path / "recordings")
+    monkeypatch.setattr(recordings, "REC_DIR", tmp_path / "recordings")
     (tmp_path / "recordings").mkdir()
     return tmp_path
 
@@ -114,8 +118,8 @@ def test_parse_stats_survives_unparsable_value(bad):
 
 def test_api_metrics_survives_torn_stats_file(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "STATS_PATH", tmp_path / "stats.txt")
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
-    app.save_state({**app.DEFAULT_STATE, "freq": 132.5, "app_mode": "voice"})
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
+    appstate.save_state({**appstate.DEFAULT_STATE, "freq": 132.5, "app_mode": "voice"})
     app.STATS_PATH.write_text('channel_dbfs_noise_level{freq="132.500"} .\n')
     r = app.app.test_client().get("/api/metrics")
     assert r.status_code == 200
@@ -164,7 +168,7 @@ def test_export_and_trim_survive_cut_utf8(logs):
     assert r.status_code == 200 and len(json.loads(r.data)) == 1
     p = app.ACARS_LOG_PATH
     p.write_bytes(b'{"t": 1}\n' + p.read_bytes())    # שורה עודפת => הקיצוץ באמת כותב
-    app._trim_jsonl_log(p, keep=2)                   # לא זורק
+    storage.trim_jsonl_log(p, keep=2)                   # לא זורק
     assert [r.get("decoded") for r in app._read_acars_log()] == ["לא פוענח"]
     p.read_bytes().decode("utf-8")                   # הכתיבה מחדש ניקתה את הקידוד
 
@@ -178,25 +182,25 @@ def test_append_after_power_cut_keeps_next_record(logs, tail):
     והקורא דילג על השורה המשולבת כולה — רשומה אחת אבדה בכל כיבוי פתאומי.
     (שוחזר לפני התיקון: התקבל [1, 4] במקום [1, 3, 4].)"""
     app.ACARS_LOG_PATH.write_bytes(b'{"t": 1}\n' + tail)
-    app._append_jsonl_log(app.ACARS_LOG_PATH, {"t": 3})
-    app._append_jsonl_log(app.ACARS_LOG_PATH, {"t": 4})
+    storage.append_jsonl_log(app.ACARS_LOG_PATH, {"t": 3})
+    storage.append_jsonl_log(app.ACARS_LOG_PATH, {"t": 4})
     assert [r["t"] for r in app._read_acars_log()] == [1, 3, 4]
 
 
 def test_append_to_empty_or_missing_file_adds_no_blank_line(logs):
-    app._append_jsonl_log(app.ACARS_LOG_PATH, {"t": 1})
-    app._append_jsonl_log(app.ACARS_LOG_PATH, {"t": 2})
+    storage.append_jsonl_log(app.ACARS_LOG_PATH, {"t": 1})
+    storage.append_jsonl_log(app.ACARS_LOG_PATH, {"t": 2})
     assert app.ACARS_LOG_PATH.read_bytes() == b'{"t": 1}\n{"t": 2}\n'
 
 
 def test_rflog_append_after_power_cut_keeps_next_row(tmp_path, monkeypatch):
     """רשם ה-RF כותב עם fsync בדיוק בגלל power bank שקוטע — אבל fsync לא עוזר
     לשורה שנכתבה *לפני* הקטיעה. השורה הראשונה אחרי האתחול חייבת לשרוד."""
-    monkeypatch.setattr(app, "RFLOG_PATH", tmp_path / "rf_log.jsonl")
-    monkeypatch.setattr(app, "_rflog_fsync", lambda fd: None)
-    app.RFLOG_PATH.write_bytes(b'{"kind": "x"}\n{"kind": "y", "a')
-    assert app._rflog_write({"kind": "after"}) is True
-    lines = app._read_log_lines(app.RFLOG_PATH)
+    monkeypatch.setattr(experiment, "RFLOG_PATH", tmp_path / "rf_log.jsonl")
+    monkeypatch.setattr(experiment, "_rflog_fsync", lambda fd: None)
+    experiment.RFLOG_PATH.write_bytes(b'{"kind": "x"}\n{"kind": "y", "a')
+    assert experiment._rflog_write({"kind": "after"}) is True
+    lines = storage.read_log_lines(experiment.RFLOG_PATH)
     assert json.loads(lines[-1]) == {"kind": "after"}
 
 
@@ -219,6 +223,6 @@ def test_trim_write_failure_does_not_raise(tmp_path, monkeypatch):
 
     def boom(path, data):
         raise OSError(28, "No space left on device")
-    monkeypatch.setattr(app, "_atomic_write", boom)
-    app._trim_jsonl_log(p, 5)                      # לא זורק
+    monkeypatch.setattr(storage, "atomic_write", boom)
+    storage.trim_jsonl_log(p, 5)                      # לא זורק
     assert len(p.read_text().splitlines()) == 10   # הקובץ לא נפגע

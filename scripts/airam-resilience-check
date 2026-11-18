@@ -14,7 +14,8 @@ set -u
 
 API="${AIRAM_API:-http://127.0.0.1:8080}"
 DATA="${AIRAM_DATA:-/var/lib/airam}"
-SERVICES="sdrplay rtl_airband airam-acars airam-vdl2 airam-satcom airam-web icecast2"
+# כל היחידות של AIR-AM — כולל הצרכנים על המקלט המשני (מצבים כפולים) וסינון הרעשים
+SERVICES="sdrplay rtl_airband airam-acars airam-vdl2 airam-satcom rtl_airband2 airam-acars2 airam-vdl2-2 airam-denoise airam-web icecast2"
 
 echo "=== AIR-AM resilience snapshot  $(date '+%F %T')"
 echo "boot: $(uptime -s 2>/dev/null || echo '?')   ($(uptime -p 2>/dev/null || echo '?'))"

@@ -459,8 +459,6 @@
     .rf.stale .nodata { display: block; }
 
     /* ---------- מסלולים פעילים (ADS-B) ---------- */
-    .aw-head { display: flex; align-items: center; justify-content: space-between; gap: .6rem; margin-bottom: .55rem; }
-    .aw-head .section-title { margin: 0; }
     .aw-cols { display: flex; gap: .55rem; }
     .aw-col {
       flex: 1; text-align: center; padding: .55rem .6rem .65rem;
@@ -542,6 +540,14 @@
       display: flex; flex-direction: column; gap: .2rem; }
     .exp-msg { margin: .5rem 0 0; font-size: .8rem; color: var(--dim); }
     .exp-msg.err { color: var(--red-fg); }
+    /* יומן בדיקה (#diagCard) */
+    .diag-row { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-2); align-items: center; }
+    .diag-row input[type=text] { flex: 1 1 12rem; min-width: 0; }
+    .diag-row button, .diag-row a, .diag-row select { min-height: 40px; }
+    .diag-checks { margin-top: var(--sp-3); display: grid; gap: var(--sp-1); font-size: .82rem; }
+    .diag-chk { display: grid; grid-template-columns: 1.4rem 1fr; gap: var(--sp-1); }
+    .diag-chk .d { color: var(--dim); grid-column: 2; font-size: .76rem; overflow-wrap: anywhere;
+                   unicode-bidi: plaintext; }   /* נתיבים/פלט אנגלי מהשרת — כיוון לפי התוכן */
     .exp-head { margin: 0 0 .6rem; padding: .6rem .75rem; border-radius: var(--r-sm);
       background: var(--panel-2); border: 1px solid var(--border); font-size: .88rem; line-height: 1.5; }
     .exp-head.good { border-color: rgba(var(--green-rgb),.5); background: rgba(var(--green-rgb),.1); }
@@ -739,7 +745,6 @@
     .tune-row input::placeholder { direction: rtl; font-size: .9rem; color: var(--text-faint); }
 
     /* ---------- פריסטים ---------- */
-    .section-title { font-size: .74rem; font-weight: 600; color: var(--dim); margin: 0 0 .65rem; letter-spacing: .02em; }
     .presets { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--sp-2); }
     .presets button {
       display: flex; flex-direction: column; gap: .28rem;
@@ -1456,6 +1461,9 @@
       <!-- חיווי SDR: מזוהה ב-USB? פנוי (ה-API מציע אותו)? — GET /api/sdr, ר' pollSdr -->
       <button type="button" id="sdrChip" class="pill hidden" title="מצב ה-SDR">
         <span class="dot"></span><span id="sdrChipTxt">SDR…</span></button>
+      <!-- יומן בדיקה פעיל (GET /api/diag) — גלובלי, כדי לסמן אירוע מכל תצוגה. נגיעה = סימון. -->
+      <button type="button" id="diagChip" class="pill busy hidden" title="יומן בדיקה פעיל — נגיעה מוסיפה סימון">
+        <span class="dot"></span><span id="diagChipTxt">🧾 בדיקה</span></button>
       <!-- חיווי מתח ל-Raspberry Pi (מוסתר עד /api/power) -->
       <div class="pwr hidden" id="pwrChip" title="מתח האספקה ל-Raspberry Pi">
         <span class="pdot"></span><span id="pwrText">בודק מתח…</span>
@@ -1703,6 +1711,41 @@
       </div>
       <div id="expResult" class="hidden"></div>
       <p class="exp-msg" id="expMsg"></p>
+    </div>
+  </section>
+
+  <!-- ═══ יומן בדיקה + ייצוא לוגים (GET/POST /api/diag, GET /api/diag/export) ═══
+       כשבודקים משהו חדש: ה-Pi דוגם כל 5ש' מצב/שירותים/מתח ורושם כל פעולה מהטלפון.
+       הייצוא = ZIP אחד: summary.md (בדיקות + ציר זמן) ואחריו היומנים המלאים. -->
+  <section class="panel p-diag" id="diagCard">
+    <div class="panel-hd"><p class="ttl">🧾 יומן בדיקה וייצוא לוגים</p>
+      <div class="hd-end"><span id="diagPill" class="pill"><span class="dot"></span><span id="diagPillTxt">כבוי</span></span></div>
+    </div>
+    <div class="panel-bd">
+      <p class="hint" style="margin:0 0 .5rem">לפני שבודקים משהו: כתוב מה בודקים ולחץ "התחל". ה-Pi רושם כל 5 שניות
+        את המצב, השירותים והמתח, וגם כל פעולה מהטלפון. בסוף — "ייצא" נותן קובץ ZIP אחד: דוח (summary.md) וכל היומנים.</p>
+      <div class="diag-row" id="diagStartRow">
+        <input type="text" id="diagLabel" maxlength="80" placeholder="מה בודקים? (למשל: קול כפול על power bank)" />
+        <button type="button" class="primary" id="diagStartBtn">▶ התחל בדיקה</button>
+      </div>
+      <div class="diag-row hidden" id="diagRunRow">
+        <input type="text" id="diagMarkTxt" maxlength="80" placeholder="סימון: מה עשית עכשיו?" />
+        <button type="button" class="ghost" id="diagMarkBtn">📍 סמן</button>
+        <button type="button" class="ghost" id="diagStopBtn">⏹ סיים</button>
+      </div>
+      <div class="diag-row">
+        <select id="diagWindow" aria-label="חלון הזמן לייצוא">
+          <option value="">הבדיקה האחרונה</option>
+          <option value="15">15 דקות אחרונות</option>
+          <option value="60">שעה אחרונה</option>
+          <option value="240">4 שעות</option>
+          <option value="1440">24 שעות</option>
+        </select>
+        <button type="button" class="ghost" id="diagCheckBtn">🩺 בדוק</button>
+        <a class="ghost" id="diagExport" href="/api/diag/export" download>⬇ ייצא לוגים</a>
+      </div>
+      <div id="diagChecks" class="diag-checks hidden"></div>
+      <p class="exp-msg" id="diagMsg"></p>
     </div>
   </section>
   </div><!-- /home-dash -->
@@ -2668,7 +2711,28 @@
     function setComposite(m) {
       dualMode = (m === "voice_acars"); voice2Mode = (m === "voice2"); dualVdl2 = (m === "voice_vdl2");
     }
-    const COMPOSITE_MODES = ["voice_acars", "voice2", "voice_vdl2"];
+    // ההפך של setComposite: המצב הכפול מתוך הדגלים, או null
+    const compositeFromFlags = () =>
+      dualMode ? "voice_acars" : voice2Mode ? "voice2" : dualVdl2 ? "voice_vdl2" : null;
+    /* טבלת המצבים — מקור יחיד ל"מה רץ במצב X" (קודם: אותן שאלות נכתבו בנפרד בכל מקום):
+       decoder — מופע הדאטה שמאזין (acars/vdl2/satcom), גם כשהמשני מפענח *לצד* הקול;
+       tabs — הכרטיסיות שה-SDR חי בהן (נקודה ירוקה); secondary/secName — מה על המקלט המשני. */
+    const MODES = {
+      voice:       { tabs: ["voice"] },
+      acars:       { decoder: "acars",  tabs: ["acars"] },
+      vdl2:        { decoder: "vdl2",   tabs: ["vdl2"] },
+      satcom:      { decoder: "satcom", tabs: ["satcom"] },
+      voice_acars: { decoder: "acars",  tabs: ["voice", "acars"], secondary: "📡 ACARS",    secName: "ACARS" },
+      voice_vdl2:  { decoder: "vdl2",   tabs: ["voice", "vdl2"],  secondary: "🛰️ VDL2",     secName: "VDL2" },
+      voice2:      {                    tabs: ["voice"],          secondary: "📻 ערוץ שני", secName: "ערוץ שני" },
+    };
+    const COMPOSITE_MODES = Object.keys(MODES).filter((m) => MODES[m].secondary);
+    const decoderOf = (m) => (MODES[m] && MODES[m].decoder) || null;
+    // מיישר את שלושת מופעי הדאטה למצב m (אחד פעיל לכל היותר; voice/off/scan ⇒ אף אחד)
+    function syncDecoders(m) {
+      const d = decoderOf(m);
+      acars.setActive(d === "acars"); vdl2.setActive(d === "vdl2"); satcom.setActive(d === "satcom");
+    }
     const isVoiceMode = (m) => m === "voice" || COMPOSITE_MODES.includes(m);
     // התצוגה שמצב נוחת בה: מצבים מורכבים ⇒ קול; off/scan ⇒ בית
     const viewFor = (m) => (m == null || m === "off" || m === "scan") ? "home" : isVoiceMode(m) ? "voice" : m;
@@ -2742,6 +2806,42 @@
     }
     // עוזר קצר לבקשות GET שמפענחות JSON ישירות — התבנית החוזרת ביותר בקובץ.
     async function fetchJSON(url, opts) { return (await fetchTimeout(url, opts)).json(); }
+
+    // טוקן CSS מ-:root (מתחלף לפי ערכת נושא) — לציור ב-canvas/Leaflet, שלא קוראים CSS בעצמם.
+    const cssVar = (name, fallback) =>
+      getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+
+    /* Leaflet (vendored) נטען בעצלות, *פעם אחת לכל הדף*. שלוש מפות (פידי הדאטה, שחזור-סשן,
+       הצלבה) חולקות את אותו Promise — קודם לכל אחת היה דגל טעינה משלה, ושתי מפות שנפתחו יחד
+       הזריקו את הסקריפט פעמיים. כשל ⇒ ה-Promise מתאפס, וניסיון הבא טוען מחדש. */
+    let leafletPromise = null;
+    function loadLeaflet() {
+      if (window.L) return Promise.resolve(window.L);
+      if (!leafletPromise) {
+        leafletPromise = new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = "/static/vendor/leaflet/leaflet.js";
+          s.onload = () => resolve(window.L);
+          s.onerror = () => { leafletPromise = null; s.remove(); reject(new Error("leaflet")); };
+          document.head.appendChild(s);
+        });
+      }
+      return leafletPromise;
+    }
+    // אריחי OSM + הודעה אחרי 6 כשלונות (אין אינטרנט — הסמנים עדיין מוצגים)
+    function leafletTiles(onTilesFail) {
+      const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        { maxZoom: 12, attribution: "© OpenStreetMap" });
+      let tileErr = 0;
+      if (onTilesFail) tiles.on("tileerror", () => { if (++tileErr === 6) onTilesFail(); });
+      return tiles;
+    }
+    const leafletMarkerIcon = () => L.icon({
+      iconUrl: "/static/vendor/leaflet/images/marker-icon.png",
+      iconRetinaUrl: "/static/vendor/leaflet/images/marker-icon-2x.png",
+      shadowUrl: "/static/vendor/leaflet/images/marker-shadow.png",
+      iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41],
+    });
 
     async function apiSend(method, url, body, timeoutMs) {
       // timeoutMs — רק לבקשות ארוכות במכוון ("אמת מול ADS-B": רשת, עד ~30ש' בשרת)
@@ -3159,10 +3259,9 @@
         if (satcom.active) showToast("🔌 החזר את אנטנת ה-airband ל-SDR");
         sdrOff = false; scanning = false;
         // ‏/api/tune שומר מצב כפול (השרת מחזיר את app_mode) — ACARS על המשני ממשיך
-        const am = data.app_mode || (dualMode ? "voice_acars" : voice2Mode ? "voice2"
-                                     : dualVdl2 ? "voice_vdl2" : "voice");
+        const am = data.app_mode || compositeFromFlags() || "voice";
         setComposite(am);
-        acars.setActive(am === "voice_acars"); vdl2.setActive(am === "voice_vdl2"); satcom.setActive(false);
+        syncDecoders(am);
         renderVoice2();
         modeSwitchSeq++;            // poll שיצא בזמן הכיוונון ראה מצב-ביניים — מושלך
         // התדר מהשרת, לא מהלחיצה: כיוונון שני שקיבל 409 בזמן שהראשון רץ איפס את
@@ -3797,6 +3896,102 @@
     setInterval(() => { if (!document.hidden && expState && expState.running) pollExperiment(); }, 2000);
     setInterval(() => { if (!document.hidden && appMode === "home") pollExperiment(); }, 15000);
     document.addEventListener("visibilitychange", () => { if (!document.hidden) pollExperiment(); });
+
+    /* ---------- יומן בדיקה + ייצוא לוגים (GET/POST /api/diag) ----------
+       הרישום בצד השרת (ממשיך עם מסך כבוי, ושורד restart/reboot של ה-Pi). כאן: התחלה/סיום,
+       סימונים, ובדיקה מהירה (/api/diag/summary). הייצוא הוא קישור GET רגיל ל-ZIP. */
+    let diagState = null, diagInFlight = false;
+    const diagMsg = (t, err) => { const m = $("diagMsg"); m.textContent = t || ""; m.classList.toggle("err", !!err); };
+    function diagExportHref() {
+      const w = $("diagWindow").value;
+      $("diagExport").href = "/api/diag/export" + (w ? "?minutes=" + w : "");
+    }
+    function renderDiag(d) {
+      if (!d || !d.ok) return;
+      diagState = d;
+      const on = !!d.active;
+      $("diagStartRow").classList.toggle("hidden", on);
+      $("diagRunRow").classList.toggle("hidden", !on);
+      const pill = $("diagPill");
+      pill.className = "pill" + (on ? " busy" : "");
+      $("diagPillTxt").textContent = on
+        ? "רושם · נותרו " + fmtRflogLeft(d.remaining || 0)
+        : (d.last_run ? "כבוי · יש בדיקה אחרונה לייצוא" : "כבוי");
+      const chip = $("diagChip");
+      chip.classList.toggle("hidden", !on);
+      $("diagChipTxt").textContent = "🧾 " + (d.label ? (d.label.length > 18 ? d.label.slice(0, 17).trim() + "…" : d.label) : "בדיקה");
+      $("diagPill").title = on ? d.samples + " דגימות · " + d.marks + " סימונים · " + d.requests + " פעולות" : "";
+      $("diagWindow").options[0].textContent = on ? "הבדיקה הנוכחית" : (d.last_run ? "הבדיקה האחרונה" : "שעה אחרונה (אין בדיקה)");
+    }
+    async function pollDiag() {
+      if (diagInFlight) return;
+      diagInFlight = true;
+      try { renderDiag(await fetchJSON("/api/diag")); }
+      catch (e) { /* המחזור הבא ינסה שוב */ }
+      finally { diagInFlight = false; }
+    }
+    async function diagPost(url, body) {
+      const res = await apiSend("POST", url, body);
+      const d = await res.json();
+      if (d.ok) renderDiag(d);
+      return d;
+    }
+    async function diagMark(label) {
+      label = (label || "").trim();
+      if (!label) { diagMsg("כתוב קודם מה עשית.", true); return false; }
+      try {
+        const d = await diagPost("/api/diag/mark", { label });
+        if (!d.ok) { diagMsg(d.error || "הסימון נכשל", true); pollDiag(); return false; }
+        // אישור גלוי עם שעה — בלי זה אי אפשר לדעת אם הלחיצה נקלטה
+        diagMsg("✓ סומן: " + d.mark + " · " + new Date().toLocaleTimeString("he-IL"));
+        showToast("📍 סומן: " + d.mark);
+        return true;
+      } catch (e) { diagMsg("שגיאת רשת — הסימון לא נרשם, נסה שוב.", true); return false; }
+    }
+    $("diagStartBtn").onclick = async () => {
+      $("diagStartBtn").disabled = true;
+      try {
+        const d = await diagPost("/api/diag", { action: "start", label: $("diagLabel").value.trim() });
+        diagMsg(d.ok ? "רושם. סמן כל פעולה פיזית (ניתוק/חיבור/החלפת ספק) מיד אחריה — גם מהכפתור 🧾 למעלה."
+                     : (d.error || "ההתחלה נכשלה"), !d.ok);
+      } catch (e) { diagMsg("שגיאת רשת — נסה שוב.", true); }
+      finally { $("diagStartBtn").disabled = false; }
+    };
+    $("diagStopBtn").onclick = async () => {
+      try {
+        const d = await diagPost("/api/diag", { action: "stop" });
+        if (d.ok) { $("diagWindow").value = ""; diagExportHref(); diagMsg("הבדיקה הסתיימה — לחץ \"ייצא לוגים\" ושלח את הקובץ."); }
+      } catch (e) { diagMsg("שגיאת רשת — נסה שוב.", true); }
+    };
+    $("diagMarkBtn").onclick = async () => { if (await diagMark($("diagMarkTxt").value)) $("diagMarkTxt").value = ""; };
+    $("diagMarkTxt").addEventListener("keydown", (e) => { if (e.key === "Enter") $("diagMarkBtn").click(); });
+    $("diagChip").onclick = () => { const t = prompt("סימון ביומן הבדיקה — מה עשית עכשיו?"); if (t) diagMark(t); };
+    $("diagWindow").onchange = diagExportHref;
+    $("diagCheckBtn").onclick = async () => {
+      const box = $("diagChecks"), w = $("diagWindow").value;
+      $("diagCheckBtn").disabled = true;
+      diagMsg("בודק… (קורא את יומני המערכת)");
+      try {
+        const d = await fetchJSON("/api/diag/summary" + (w ? "?minutes=" + w : ""), { timeoutMs: 30000 });
+        if (!d.ok) throw new Error(d.error || "");
+        const ICON = { ok: "✅", info: "ℹ️", warn: "⚠️", fail: "❌" };
+        box.replaceChildren();
+        (d.checks || []).forEach((c) => {
+          const row = document.createElement("div"), i = document.createElement("span"),
+                t = document.createElement("span");
+          row.className = "diag-chk"; i.textContent = ICON[c.level] || "•"; t.textContent = c.title;   // textContent — טקסט מהשרת
+          row.append(i, t);
+          if (c.detail) { const dd = document.createElement("span"); dd.className = "d"; dd.textContent = c.detail; row.append(dd); }
+          box.append(row);
+        });
+        box.classList.remove("hidden");
+        diagMsg({ ok: "✅ הכול תקין בחלון שנבדק", warn: "⚠️ יש אזהרות — פרטים למעלה", fail: "❌ נמצאו תקלות — פרטים למעלה" }[d.overall] || "");
+      } catch (e) { diagMsg("הבדיקה נכשלה — נסה שוב.", true); }
+      finally { $("diagCheckBtn").disabled = false; }
+    };
+    setInterval(() => { if (!document.hidden) pollDiag(); }, 10000);
+    pollDiag();   // הצ'יפ הגלובלי צריך להופיע גם כשהדף נפתח בתצוגה אחרת
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) pollDiag(); });
 
     /* ---------- אבחון SATCOM: נעילת דמודולטור (GET /api/satcom/health) ----------
        proxy מקומי ל---web dashboard המובנה של inmarsat-sniffer — lock=נעילת
@@ -5151,12 +5346,11 @@
         setComposite(live);
         if (wasV2 && !voice2Mode) stopV2Audio();   // המצב באמת השתנה (טלפון אחר / נפילה)
         scanning = (h.app_mode === "scan");
-        const acarsOn = live === "acars" || live === "voice_acars";
-        const vdl2On = live === "vdl2" || live === "voice_vdl2";
-        if (acarsOn !== acars.active) acars.setActive(acarsOn);
-        if (vdl2 && vdl2On !== vdl2.active) vdl2.setActive(vdl2On);
-        if (satcom && (live === "satcom") !== satcom.active) {
-          satcom.setActive(live === "satcom");
+        const dec = decoderOf(live);
+        if ((dec === "acars") !== acars.active) acars.setActive(dec === "acars");
+        if (vdl2 && (dec === "vdl2") !== vdl2.active) vdl2.setActive(dec === "vdl2");
+        if (satcom && (dec === "satcom") !== satcom.active) {
+          satcom.setActive(dec === "satcom");
           // המקלט נדלק ממקום אחר (טלפון שני/⏻) — פאנל הכיוון לא מפולל כשהמקלט
           // כבוי (ר' ה-interval), אז מתניעים אותו כאן במקום לחכות לגילוי.
           if (live === "satcom" && appMode === "satcom") { pollSatcomHealth(); pollSatcomSpectrum(); }
@@ -5215,7 +5409,7 @@
       replayScreen = null;
       segSet("modeSeg", mode);
       renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acars/vdl2/satcom.active — עדכן בכל מעבר
-      if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); pollExperiment(); pollXc(); }
+      if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); pollExperiment(); pollXc(); pollDiag(); }
       if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); pollRflog(); pollDenoise(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
       if (mode === "acars") acarsFm.poll();
       if (mode === "vdl2") vdl2Fm.poll();
@@ -5247,9 +5441,7 @@
       if (!(uiOpts && uiOpts.keepView)) showView(viewFor(mode));
       if (!isVoiceMode(mode)) { wantPlaying = false; player.pause(); }  // ה-SDR יוצא מקול
       renderVoice2();
-      setStatus(mode === "voice_acars" ? "מפעיל קול, ואחריו ACARS על המקלט השני…"
-                : mode === "voice_vdl2" ? "מפעיל קול, ואחריו VDL2 על המקלט השני…"
-                : mode === "voice2" ? "מפעיל קול, ואחריו ערוץ שני על המקלט השני…"
+      setStatus(COMPOSITE_MODES.includes(mode) ? "מפעיל קול, ואחריו " + MODES[mode].secName + " על המקלט השני…"
                 : mode === "acars" ? "מפעיל ACARS…" : mode === "vdl2" ? "מפעיל VDL2…"
                 : mode === "satcom" ? "מפעיל SATCOM…" : mode === "scan" ? "מפעיל סריקה…"
                 : mode === "off" ? "מכבה מקלט…" : "מפעיל קול…", "busy");
@@ -5287,9 +5479,7 @@
           sdrOff = (back === "off");
           scanning = (back === "scan");
           setComposite(back);
-          acars.setActive(back === "acars" || back === "voice_acars");
-          vdl2.setActive(back === "vdl2" || back === "voice_vdl2");
-          satcom.setActive(back === "satcom");
+          syncDecoders(back);
           showView(viewFor(back));
           renderVoice2();
           if (back === "off") showHomeError(data.error, data.detail);
@@ -5414,9 +5604,7 @@
         sdrOff = (leaving === null);
         scanning = (leaving === "scan");
         setComposite(leaving);
-        acars.setActive(leaving === "acars" || leaving === "voice_acars");
-        vdl2.setActive(leaving === "vdl2" || leaving === "voice_vdl2");
-        satcom.setActive(leaving === "satcom");
+        syncDecoders(leaving);
         showView(viewFor(leaving));
         renderPower(); renderHome(); renderVoice2();
         if (isVoiceMode(leaving)) reloadStream();   // ה-player הושהה למעלה — לנסות לחזור לשידור
@@ -5474,19 +5662,16 @@
     }
 
     function liveFromFlags() {
-      return sdrOff ? null : dualMode ? "voice_acars" : voice2Mode ? "voice2" : dualVdl2 ? "voice_vdl2"
-           : (satcom && satcom.active) ? "satcom"
-           : (vdl2 && vdl2.active) ? "vdl2" : acars.active ? "acars" : "voice";
+      return sdrOff ? null : compositeFromFlags()
+           || ((satcom && satcom.active) ? "satcom"
+           : (vdl2 && vdl2.active) ? "vdl2" : acars.active ? "acars" : "voice");
     }
     function updateSdrPip() {
       // נקודה ירוקה על הכרטיסייה שה-SDR באמת פעיל בה; ב-standby אין אף אחת.
       // קול + ACARS ⇒ על שתי הכרטיסיות.
       const realMode = liveFromFlags();
       document.querySelectorAll("#modeSeg button").forEach(b => {
-        b.classList.toggle("sdr-live", b.dataset.v === realMode
-          || (realMode === "voice_acars" && (b.dataset.v === "voice" || b.dataset.v === "acars"))
-          || (realMode === "voice2" && b.dataset.v === "voice")
-          || (realMode === "voice_vdl2" && (b.dataset.v === "voice" || b.dataset.v === "vdl2")));
+        b.classList.toggle("sdr-live", !!(MODES[realMode] && MODES[realMode].tabs.includes(b.dataset.v)));
       });
       if (appMode === "home") renderHome();
     }
@@ -5544,17 +5729,12 @@
           txt.innerHTML = "🔁 <b>סורק</b> — רגל נוכחית: <b>" + legLabel + "</b>"
             + (secLeft != null ? " · מעבר בעוד " + secLeft + "ש׳" : "");
         }
-      } else if (live === "voice_acars")
+      } else if (COMPOSITE_MODES.includes(live))
         // <bdi>: תדר לטיני באמצע משפט עברי — בלעדיו הכיוון מתבלגן (נבדק ב-360px)
         txt.innerHTML = "שני מקלטים: <b>📻 קול</b> <bdi>" + Number(current).toFixed(3)
-          + " MHz</bdi> ועוד <b>📡 ACARS</b> על המשני";
-      else if (live === "voice_vdl2")
-        txt.innerHTML = "שני מקלטים: <b>📻 קול</b> <bdi>" + Number(current).toFixed(3)
-          + " MHz</bdi> ועוד <b>🛰️ VDL2</b> על המשני";
-      else if (live === "voice2")
-        txt.innerHTML = "שני מקלטים: <b>📻 קול</b> <bdi>" + Number(current).toFixed(3)
-          + " MHz</bdi> ועוד <b>📻 ערוץ שני</b> <bdi>" + (v2.freq != null ? Number(v2.freq).toFixed(3) : "—")
-          + " MHz</bdi>";
+          + " MHz</bdi> ועוד <b>" + MODES[live].secondary + "</b>"
+          + (live === "voice2" ? " <bdi>" + (v2.freq != null ? Number(v2.freq).toFixed(3) : "—") + " MHz</bdi>"
+                               : " על המשני");
       else if (live === "voice")
         txt.innerHTML = "המקלט במצב <b>📻 קול</b> — " + Number(current).toFixed(3) + " MHz";
       else if (live === "acars") txt.innerHTML = "המקלט במצב <b>📡 ACARS</b> — מאזין להודעות דאטה";
@@ -5942,21 +6122,20 @@
         secs[i] += (c.dur || 1);
       }
       const peak = Math.max(1, ...secs);
-      const css = getComputedStyle(document.documentElement);
-      ctx.fillStyle = (css.getPropertyValue("--accent") || "#6ea8fe").trim();
+      ctx.fillStyle = cssVar("--accent", "#6ea8fe");
       for (let i = 0; i < buckets; i++) {
         if (!secs[i]) continue;
         const bh = Math.max(3, secs[i] / peak * (h - 8));
         ctx.fillRect(i * bw + .5, h - bh - 3, Math.max(1.5, bw - 1), bh);
       }
       // פערי קליטת ADS-B (§7.2) — נקודתיים, לא מרווח מומצא
-      ctx.fillStyle = (css.getPropertyValue("--red") || "#ec7b73").trim();
+      ctx.fillStyle = cssVar("--red", "#ec7b73");
       for (const g of (rp.meta.gaps || [])) {
         const x = (g.t - rp.t0) / dur * w;
         ctx.fillRect(x - 1, 0, 2, 5);
       }
       // סמן המיקום הנוכחי
-      ctx.fillStyle = (css.getPropertyValue("--text") || "#e8e8ea").trim();
+      ctx.fillStyle = cssVar("--text", "#e8e8ea");
       const cx = (rp.playT - rp.t0) / dur * w;
       ctx.fillRect(cx - 1, 0, 2, h);
     }
@@ -5967,28 +6146,18 @@
       if (replayLeafLoading) return;
       if (window.L) { initReplayMap(); return; }
       replayLeafLoading = true;
-      const s = document.createElement("script");
-      s.src = "/static/vendor/leaflet/leaflet.js";
-      s.onload = () => { replayLeafLoading = false; initReplayMap(); };
-      s.onerror = () => {
+      loadLeaflet().then(() => { replayLeafLoading = false; initReplayMap(); }, () => {
         replayLeafLoading = false;
         $("replayMap").classList.add("hidden");
         const n = $("replayMapNote"); n.textContent = "המפה לא נטענה (אין חיבור?)"; n.classList.remove("hidden");
-      };
-      document.head.appendChild(s);
+      });
     }
     function initReplayMap() {
       try {
         replayMapObj = L.map("replayMap", { zoomControl: true }).setView([32.0114, 34.8867], 8);
-        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-          { maxZoom: 12, attribution: "© OpenStreetMap" }).addTo(replayMapObj);
+        leafletTiles(null).addTo(replayMapObj);
         replayMarkersLayer = L.layerGroup().addTo(replayMapObj);
-        replayMapIcon = L.icon({
-          iconUrl: "/static/vendor/leaflet/images/marker-icon.png",
-          iconRetinaUrl: "/static/vendor/leaflet/images/marker-icon-2x.png",
-          shadowUrl: "/static/vendor/leaflet/images/marker-shadow.png",
-          iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41],
-        });
+        replayMapIcon = leafletMarkerIcon();
         setTimeout(() => replayMapObj.invalidateSize(), 60);
         if (window.ResizeObserver) {
           new ResizeObserver(() => {
@@ -6439,26 +6608,14 @@
         if (leafLoading) return;
         if (window.L) { initMap(); return; }
         leafLoading = true;
-        const s = document.createElement("script");
-        s.src = "/static/vendor/leaflet/leaflet.js";
-        s.onload = () => { leafLoading = false; initMap(); };
-        s.onerror = () => { leafLoading = false; mapFail("המפה לא נטענה (אין חיבור?)"); };
-        document.head.appendChild(s);
+        loadLeaflet().then(() => { leafLoading = false; initMap(); },
+                           () => { leafLoading = false; mapFail("המפה לא נטענה (אין חיבור?)"); });
       }
       function initMap() {
         try {
           map = L.map(opts.prefix + "Map", { zoomControl: true }).setView([32.0114, 34.8867], 7);
-          const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-            { maxZoom: 12, attribution: "© OpenStreetMap" });
-          let tileErr = 0;
-          tiles.on("tileerror", () => { if (++tileErr === 6) mapNote("רקע המפה לא נטען (אין אינטרנט?) — הסמנים עדיין מוצגים."); });
-          tiles.addTo(map);
-          icon = L.icon({
-            iconUrl: "/static/vendor/leaflet/images/marker-icon.png",
-            iconRetinaUrl: "/static/vendor/leaflet/images/marker-icon-2x.png",
-            shadowUrl: "/static/vendor/leaflet/images/marker-shadow.png",
-            iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41],
-          });
+          leafletTiles(() => mapNote("רקע המפה לא נטען (אין אינטרנט?) — הסמנים עדיין מוצגים.")).addTo(map);
+          icon = leafletMarkerIcon();
           setTimeout(() => map.invalidateSize(), 60);
           // כמו ב-ACARS: פאנל-המפה בדשבורד עשוי להשתנות בגודלו בלי resize-חלון
           if (window.ResizeObserver) {
@@ -6715,7 +6872,6 @@
         const g = m.group || "text";
         const el = document.createElement("div"); el.className = "amsg g-" + g;
         const top = document.createElement("div"); top.className = "amsg-top";
-        const mk = (cls, txt) => { const s = document.createElement("span"); s.className = cls; s.textContent = txt; return s; };
         const idClick = (s) => {
           s.title = "סנן למטוס זה";
           s.tabIndex = 0; s.setAttribute("role", "button");
@@ -6724,21 +6880,21 @@
           s.onkeydown = (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); } };
           return s;
         };
-        if (m.tail) top.appendChild(idClick(mk("amsg-tail clickable", m.tail)));
-        if (m.flight) top.appendChild(idClick(mk("amsg-flight clickable", m.flight)));
+        if (m.tail) top.appendChild(idClick(mkSpan("amsg-tail clickable", m.tail)));
+        if (m.flight) top.appendChild(idClick(mkSpan("amsg-flight clickable", m.flight)));
         // פריים בלי רישום (CPDLC/XID) => מזהה ה-ICAO הוא הזהות הלחיצה
-        if (!m.tail && !m.flight && m.icao) top.appendChild(idClick(mk("amsg-tail clickable", m.icao)));
+        if (!m.tail && !m.flight && m.icao) top.appendChild(idClick(mkSpan("amsg-tail clickable", m.icao)));
         const db = dirBadge(m.dir); if (db) top.appendChild(db);
-        if (m.category) top.appendChild(mk("amsg-cat cat-" + g, m.category));
+        if (m.category) top.appendChild(mkSpan("amsg-cat cat-" + g, m.category));
         if (m.lat != null) {
-          const pos = mk("amsg-pos", "📍 " + Number(m.lat).toFixed(2) + "," + Number(m.lon).toFixed(2));
+          const pos = mkSpan("amsg-pos", "📍 " + Number(m.lat).toFixed(2) + "," + Number(m.lon).toFixed(2));
           pos.title = "מקד במפה"; pos.onclick = () => focusOnMap(m); top.appendChild(pos);
         }
         if (m.error && m.error > 0) {
           const errLabels = ["", "CRC ⚠", "link ⚠", "decode ⚠"];
-          top.appendChild(mk("amsg-err", errLabels[m.error] || ("err " + m.error + " ⚠")));
+          top.appendChild(mkSpan("amsg-err", errLabels[m.error] || ("err " + m.error + " ⚠")));
         }
-        if (m.freq != null) top.appendChild(mk("amsg-freq", Number(m.freq).toFixed(3)));
+        if (m.freq != null) top.appendChild(mkSpan("amsg-freq", Number(m.freq).toFixed(3)));
         const xb = xcBadge(m.xc);
         if (xb) {
           xb.tabIndex = 0; xb.setAttribute("role", "button");
@@ -6753,7 +6909,7 @@
           vb.onclick = (ev) => { ev.stopPropagation(); xcOpen(opts.prefix, m); };
           top.appendChild(vb);
         }
-        const tm = mk("amsg-time", fmtRel(m.t));
+        const tm = mkSpan("amsg-time", fmtRel(m.t));
         if (m.t) tm.title = new Date(m.t * 1000).toLocaleString("he-IL");
         top.appendChild(tm);
         el.appendChild(top);
@@ -6763,7 +6919,7 @@
         if (m.mode) metaParts.push("mode " + m.mode);
         if (m.msgno) metaParts.push("#" + m.msgno);
         if (blockCount && blockCount > 1) {
-          const bc = mk("amsg-block-count", "×" + blockCount); bc.title = "קובץ מרובה-block (" + blockCount + " חלקים)";
+          const bc = mkSpan("amsg-block-count", "×" + blockCount); bc.title = "קובץ מרובה-block (" + blockCount + " חלקים)";
           metaEl.appendChild(document.createTextNode(metaParts.join(" · ")));
           if (metaParts.length) metaEl.appendChild(document.createTextNode(" · "));
           metaEl.appendChild(bc);
@@ -6771,27 +6927,27 @@
         if (m.level != null) {
           const lvl = Number(m.level);
           if (metaParts.length || (blockCount && blockCount > 1)) metaEl.appendChild(document.createTextNode(" · "));
-          metaEl.appendChild(mk(qualityCls(lvl, -30, -45), lvl.toFixed(0) + " dBFS"));
+          metaEl.appendChild(mkSpan(qualityCls(lvl, -30, -45), lvl.toFixed(0) + " dBFS"));
         }
         if (m.snr != null) {                 // SNR — רק כשהמקור סיפק רצפת רעש אמינה (VDL2; ACARS לא)
           const snr = Number(m.snr);
           metaEl.appendChild(document.createTextNode(" · "));
-          metaEl.appendChild(mk(qualityCls(snr, 15, 8), snr.toFixed(0) + " dB SNR"));
+          metaEl.appendChild(mkSpan(qualityCls(snr, 15, 8), snr.toFixed(0) + " dB SNR"));
         }
         if (hasRetx) {                       // התקבל שוב (רטרנסמיט)
           if (metaEl.childNodes.length || metaEl.textContent) metaEl.appendChild(document.createTextNode(" · "));
-          const rx = mk("amsg-retx", "↻ שודר שוב");
+          const rx = mkSpan("amsg-retx", "↻ שודר שוב");
           rx.title = "התקבל יותר מפעם אחת — מוצג העותק הנקי ביותר";
           metaEl.appendChild(rx);
         }
         if (metaEl.childNodes.length || metaEl.textContent) el.appendChild(metaEl);
-        if (m.decoded) el.appendChild(mk("amsg-decoded", m.decoded));
+        if (m.decoded) el.appendChild(mkSpan("amsg-decoded", m.decoded));
         if (m.text) {
           if (m.decoded) {
             const det = document.createElement("details");
             const sum = document.createElement("summary"); sum.textContent = "טקסט גולמי";
-            det.append(sum, mk("amsg-text", m.text), mkCopyBtn(m.text)); el.appendChild(det);
-          } else el.append(mk("amsg-text", m.text), mkCopyBtn(m.text));
+            det.append(sum, mkSpan("amsg-text", m.text), mkCopyBtn(m.text)); el.appendChild(det);
+          } else el.append(mkSpan("amsg-text", m.text), mkCopyBtn(m.text));
         }
         return el;
       }
@@ -7517,20 +7673,13 @@
       if (window.L) { xcInitMap(); return; }
       if (xcLeafLoading) return;
       xcLeafLoading = true;
-      const s = document.createElement("script");
-      s.src = "/static/vendor/leaflet/leaflet.js";
-      s.onload = () => { xcLeafLoading = false; xcInitMap(); };
-      s.onerror = () => { xcLeafLoading = false; xcMapNote("המפה לא נטענה (אין חיבור?) — הנתונים מוצגים למעלה."); };
-      document.head.appendChild(s);
+      loadLeaflet().then(() => { xcLeafLoading = false; xcInitMap(); },
+        () => { xcLeafLoading = false; xcMapNote("המפה לא נטענה (אין חיבור?) — הנתונים מוצגים למעלה."); });
     }
     function xcInitMap() {
       try {
         xcMap = L.map("xcMap", { zoomControl: true }).setView([32.0, 34.9], 6);
-        const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-          { maxZoom: 12, attribution: "© OpenStreetMap" });
-        let tileErr = 0;
-        tiles.on("tileerror", () => { if (++tileErr === 6) xcMapNote("רקע המפה לא נטען (אין אינטרנט?) — הסמנים עדיין מוצגים."); });
-        tiles.addTo(xcMap);
+        leafletTiles(() => xcMapNote("רקע המפה לא נטען (אין אינטרנט?) — הסמנים עדיין מוצגים.")).addTo(xcMap);
         xcLayer = L.layerGroup().addTo(xcMap);
         setTimeout(() => { xcMap.invalidateSize(); if (xcPending) xcDraw(xcPending); }, 60);
       } catch (e) { xcMapNote("שגיאה בטעינת המפה"); }
@@ -7538,10 +7687,8 @@
     function xcDraw(r) {
       if (!xcMap || !xcLayer || !r) return;
       xcLayer.clearLayers();
-      const css = getComputedStyle(document.documentElement);
-      const col = (v, fb) => css.getPropertyValue(v).trim() || fb;
-      const accent = col("--accent", "#6ea8fe"), amber = col("--amber", "#dcae4d"),
-            green = col("--green", "#5fce85"), dim = col("--dim", "#9a9da3");
+      const accent = cssVar("--accent", "#6ea8fe"), amber = cssVar("--amber", "#dcae4d"),
+            green = cssVar("--green", "#5fce85"), dim = cssVar("--dim", "#9a9da3");
       const bounds = [];
       const st = r.station, m = r.msg || {}, rx = r.rx_at || {}, ac = r.aircraft_at_rx, hz = r.horizon;
       if (r.track && r.track.length > 1) {
@@ -8130,28 +8277,14 @@
       // app_mode מגיע מהמציאות (השירות הפעיל), ובאין צרכן — מהכוונה השמורה
       // (mode_ok=false אומר שהמצב השמור אמור לרוץ אבל לא רץ). נוחתים בתצוגת
       // המצב הפעיל; off/תקלה נוחתים במסך הבית (התצוגה הניטרלית).
-      if (st.app_mode === "voice_acars" && st.mode_ok !== false) {
-        dualMode = true;
-        acars.setActive(true);
+      if (COMPOSITE_MODES.includes(st.app_mode) && st.mode_ok !== false) {
+        setComposite(st.app_mode);
+        const dec = decoderOf(st.app_mode);
+        if (dec) (dec === "acars" ? acars : vdl2).setActive(true);
         updateSdrPip();
         showView("voice");
-        setStatus("מוכן — לחץ ▶ · ACARS פעיל על המקלט השני");
-        player.src = streamURL();
-        pollActivity();
-      } else if (st.app_mode === "voice_vdl2" && st.mode_ok !== false) {
-        dualVdl2 = true;
-        vdl2.setActive(true);
-        updateSdrPip();
-        showView("voice");
-        setStatus("מוכן — לחץ ▶ · VDL2 פעיל על המקלט השני");
-        player.src = streamURL();
-        pollActivity();
-      } else if (st.app_mode === "voice2" && st.mode_ok !== false) {
-        voice2Mode = true;
-        updateSdrPip();
-        showView("voice");
-        renderVoice2();
-        setStatus("מוכן — לחץ ▶ · ערוץ שני פעיל על המקלט השני");
+        if (st.app_mode === "voice2") renderVoice2();
+        setStatus("מוכן — לחץ ▶ · " + MODES[st.app_mode].secName + " פעיל על המקלט השני");
         player.src = streamURL();
         pollActivity();
       } else if (st.app_mode === "acars" && st.mode_ok !== false) {

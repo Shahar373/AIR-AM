@@ -15,80 +15,10 @@ from pathlib import Path
 import pytest
 
 import app
+import appstate  # noqa: E402
+from dual_env import A, B, ORIGIN, _params, _roles, env  # noqa: F401  (fixtures נטענים לפי שם)
 
 ROOT = Path(__file__).resolve().parent.parent
-B, A = "240404AF60", "230405A498"
-ORIGIN = {"Origin": "http://localhost"}
-
-
-class FakeSystemd:
-    def __init__(self):
-        self.active = set()
-        self.log = []            # (event, unit, t)
-
-    def sysctl(self, action, svc, timeout=45):
-        self.log.append((action, svc, time.monotonic()))
-        if action == "stop":
-            self.active.discard(svc)
-        elif action in ("restart", "start"):
-            if svc in self.fail:
-                self.active.discard(svc)
-            else:
-                self.active.add(svc)
-        return type("R", (), {"returncode": 0, "stderr": "", "stdout": ""})()
-
-    def is_active(self, svc):
-        return svc in self.active
-
-    fail = set()
-
-
-@pytest.fixture
-def env(tmp_path, monkeypatch):
-    for name, fn in (("STATE_PATH", "state.json"), ("ACARS_ENV_PATH", "acars.env"),
-                     ("ACARS2_ENV_PATH", "acars2.env"), ("SDR_ENV_PATH", "sdr.env"),
-                     ("CONFIG_PATH", "airband.conf"), ("STATS_PATH", "stats.txt"),
-                     ("VDL2_ENV_PATH", "vdl2.env"), ("SATCOM_ENV_PATH", "satcom.env")):
-        monkeypatch.setattr(app, name, tmp_path / fn)
-    sd = FakeSystemd()
-    sd.fail = set()
-
-    def restart_voice():
-        sd.log.append(("restart", "rtl_airband", time.monotonic()))
-        sd.active.add("rtl_airband")
-        app.STATS_PATH.write_text("x")          # rtl_airband סיים לעלות
-        sd.log.append(("stats", "rtl_airband", time.monotonic()))
-        return None, None, False
-
-    monkeypatch.setattr(app, "_sysctl", sd.sysctl)
-    monkeypatch.setattr(app, "_is_active", sd.is_active)
-    monkeypatch.setattr(app, "_restart_and_verify", restart_voice)
-    monkeypatch.setattr(app, "_journal_tail", lambda *a, **k: "")
-    monkeypatch.setattr(app, "_sdr_present", lambda: True)
-    # מקלטים ב-USB / מה ה-API מציע (‏_role_present) ו-systemctl show — דטרמיניסטי, בלי lsusb/Soapy אמיתיים
-    monkeypatch.setattr(app, "_sdr_usb_full", lambda: (True, "SDRplay", 2))
-    monkeypatch.setattr(app, "_serial_on_api", lambda serial: None)
-    monkeypatch.setattr(app, "_rtl_airband_start_wall", lambda: None)
-    monkeypatch.setattr(app, "_denoise_after_voice", lambda: None)
-    monkeypatch.setattr(app, "ACARS2_STAGGER_SEC", 0)
-    monkeypatch.setattr(app, "VOICE_STARTUP_WAIT_SEC", 2)
-    monkeypatch.setattr(app.time, "sleep", lambda s: None)
-    monkeypatch.setattr(app, "_services_status",
-                        lambda names: {n: ("active" if n in sd.active or n in ("icecast2", "sdrplay")
-                                           else "inactive") for n in names})
-    monkeypatch.setattr(app, "_denoise_status", lambda services: {})
-    return sd
-
-
-def _roles(primary=B, secondary=A):
-    app._merge_state({"sdr_primary": primary, "sdr_secondary": secondary})
-
-
-def _params():
-    p, _ = app._parse_tune(app.DEFAULT_STATE)
-    return p
-
-
 # --- env + תנאי תפקידים -------------------------------------------------------
 
 def test_acars2_env_pins_secondary_and_acars_env_keeps_primary(env):
@@ -160,7 +90,7 @@ def test_api_mode_success_and_failure_paths(env):
     c = app.app.test_client()
     r = c.post("/api/mode", json={"mode": "voice_acars", "freqs": ["131.550"]}, headers=ORIGIN)
     assert r.status_code == 200, r.get_json()
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["app_mode"] == "voice_acars" and st["acars_freqs"] == ["131.550"]
     env.fail = {"airam-acars2"}
     # כבר במצב ⇒ רק המשני מאותחל (בנק אחר); כשלו לא מפיל את הקול (test_voice2: ‏secondary_only)
@@ -191,7 +121,7 @@ def test_live_mode_needs_both(env):
 
 def test_state_and_health_report_partial_as_fault(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars"})
+    appstate._merge_state({"app_mode": "voice_acars"})
     c = app.app.test_client()
     env.active = {"rtl_airband", "airam-acars2"}
     s = c.get("/api/state").get_json()
@@ -215,22 +145,22 @@ def test_standby_stops_acars2(env):
 
 def test_tune_inside_dual_keeps_acars(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars"})
+    appstate._merge_state({"app_mode": "voice_acars"})
     env.active = {"rtl_airband", "airam-acars2"}
     r = app.app.test_client().post("/api/tune", json={"freq": 120.5}, headers=ORIGIN)
     assert r.status_code == 200, r.get_json()
     assert "airam-acars2" in env.active
-    assert app.load_state()["app_mode"] == "voice_acars"
+    assert appstate.load_state()["app_mode"] == "voice_acars"
     assert ("stop", "airam-acars2") not in [(a, u) for a, u, _t in env.log]
 
 
 def test_explicit_voice_mode_leaves_dual(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars"})
+    appstate._merge_state({"app_mode": "voice_acars"})
     env.active = {"rtl_airband", "airam-acars2"}
     r = app.app.test_client().post("/api/mode", json={"mode": "voice"}, headers=ORIGIN)
     assert r.status_code == 200
-    assert env.active == {"rtl_airband"} and app.load_state()["app_mode"] == "voice"
+    assert env.active == {"rtl_airband"} and appstate.load_state()["app_mode"] == "voice"
 
 
 @pytest.mark.parametrize("mode", ["acars", "vdl2"])
@@ -245,7 +175,7 @@ def test_other_modes_stop_acars2(env, mode):
 
 def test_reconcile_restarts_only_acars2_when_voice_alive(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
+    appstate._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
     env.active = {"rtl_airband"}
     app._mode_reconcile_once()
     seq = [(a, u) for a, u, _t in env.log]
@@ -256,17 +186,17 @@ def test_reconcile_restarts_only_acars2_when_voice_alive(env):
 
 def test_reconcile_full_reenter_when_nothing_runs(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
+    appstate._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
     app._mode_reconcile_once()
     assert env.active == {"rtl_airband", "airam-acars2"}
 
 
 def test_boot_restore_enters_dual(env):
     _roles()
-    app._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
+    appstate._merge_state({"app_mode": "voice_acars", "acars_freqs": ["131.550"]})
     app._boot_restore()
     assert env.active == {"rtl_airband", "airam-acars2"}
-    assert app.load_state()["app_mode"] == "voice_acars"
+    assert appstate.load_state()["app_mode"] == "voice_acars"
 
 
 def test_antenna_check_refused_in_dual(env):

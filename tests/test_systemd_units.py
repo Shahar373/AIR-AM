@@ -24,9 +24,18 @@ import pytest
 
 UNITS = Path(__file__).resolve().parent.parent / "systemd"
 
-# ארבעת צרכני ה-SDR: מתחרים על אותו RSP1B, ולכן מודרים הדדית.
-SDR_CONSUMERS = ["rtl_airband.service", "airam-acars.service",
-                 "airam-vdl2.service", "airam-satcom.service"]
+# כל צרכני ה-SDR — ארבעת המצבים על המקלט הראשי ושלושת הצרכנים על המשני (מצבים כפולים).
+PRIMARY_CONSUMERS = ["rtl_airband.service", "airam-acars.service",
+                     "airam-vdl2.service", "airam-satcom.service"]
+SECONDARY_CONSUMERS = ["airam-acars2.service", "rtl_airband2.service", "airam-vdl2-2.service"]
+SDR_CONSUMERS = PRIMARY_CONSUMERS + SECONDARY_CONSUMERS
+
+# הזוגות היחידים שמותר להם לרוץ יחד: צרכן על המשני *לצד* הקול על הראשי — זה כל
+# הרעיון של המצבים הכפולים (voice_acars / voice2 / voice_vdl2, docs/dual-sdr-feasibility.md).
+# כל זוג אחר — גם שני צרכנים על המשני — חייב Conflicts.
+ALLOWED_TOGETHER = {frozenset(("rtl_airband.service", s)) for s in SECONDARY_CONSUMERS}
+CONFLICT_PAIRS = [p for p in itertools.combinations(SDR_CONSUMERS, 2)
+                  if frozenset(p) not in ALLOWED_TOGETHER]
 
 
 def _unit(name):
@@ -55,7 +64,7 @@ def test_all_sdr_consumer_units_exist():
         assert (UNITS / name).is_file(), f"יחידה חסרה: {name}"
 
 
-@pytest.mark.parametrize("a,b", list(itertools.combinations(SDR_CONSUMERS, 2)))
+@pytest.mark.parametrize("a,b", CONFLICT_PAIRS)
 def test_every_sdr_consumer_pair_conflicts(a, b):
     """⚠ הליבה: כל *זוג* צרכני SDR חייב להיות מודר הדדית. שני תהליכים על
     RSP1B אחד לא נכשלים ברעש — הם נראים כמו קליטה גרועה."""

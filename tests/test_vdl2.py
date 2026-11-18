@@ -14,31 +14,21 @@ import types
 import pytest
 
 import app
+import appstate  # noqa: E402
+import config  # noqa: E402
+import acars_parse
+from helpers import ok_proc as _ok
 
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "airband.conf")
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "ACARS_ENV_PATH", tmp_path / "acars.env")
     monkeypatch.setattr(app, "ACARS_LOG_PATH", tmp_path / "acars.jsonl")
     monkeypatch.setattr(app, "VDL2_ENV_PATH", tmp_path / "vdl2.env")
     monkeypatch.setattr(app, "VDL2_LOG_PATH", tmp_path / "vdl2.jsonl")
     return tmp_path
-
-
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
-@pytest.fixture
-def no_sleep(monkeypatch):
-    monkeypatch.setattr(app.time, "sleep", lambda *a, **k: None)
-
-
-def _ok(**kw):
-    return types.SimpleNamespace(returncode=0, stdout="", stderr="", **kw)
 
 
 def _reset_buffer():
@@ -87,7 +77,7 @@ def test_normalize_vdl2_acars_label15_position():
         "flight": "LY0315", "msg_num": "M55", "msg_num_seq": "A",
         "msg_text": "(2N32016E034538ELY315",
     }}), t_sec=t0)
-    n = app._normalize_vdl2(m)
+    n = acars_parse._normalize_vdl2(m)
     assert n is not None
     assert abs(n["t"] - (t0 + 0.25)) < 1e-6        # t.sec + t.usec/1e6
     assert n["freq"] == 136.975                    # Hz => MHz
@@ -109,7 +99,7 @@ def test_normalize_vdl2_acars_msgno_int_does_not_raise():
     """⚠ רגרסיה אמיתית: msg_num/msg_num_seq עלולים להגיע כ-int (dumpvdl2 לא
     מבטיח str) — חיבור מחרוזות ישיר (‎"" + int) היה מפיל את כל הפריים
     ב-TypeError, שנתפס ע"י _vdl2_listener אבל זרק את ההודעה כולה בשקט."""
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
         "err": False, "crc_ok": True, "more": False, "reg": ".4X-EKF",
         "mode": "2", "label": "_d", "blk_id": "3", "ack": "^",
         "msg_num": 5, "msg_num_seq": "A", "msg_text": "",
@@ -120,20 +110,20 @@ def test_normalize_vdl2_acars_msgno_int_does_not_raise():
 
 def test_normalize_vdl2_acars_empty_ack_tolerated():
     """ACK ריק (label _d, בלי טקסט) — נסבל בלי קריסה, כמו ב-acarsdec."""
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
         "err": False, "crc_ok": True, "more": False, "reg": ".4X-EKF",
         "mode": "2", "label": "_d", "blk_id": "3", "ack": "^", "msg_text": "",
     }})))
     assert n is not None
     assert n["label"] == "_d" and not n["text"]
-    assert n["category"] == app.ACARS_LABELS["_d"][0]
+    assert n["category"] == acars_parse.ACARS_LABELS["_d"][0]
     assert n["icao"] == "738065"
 
 
 def test_normalize_vdl2_acars_arinc622_nested():
     """יישום מפוענח (ADS-C) מקונן *בתוך* אובייקט ה-acars (מבנה libacars) =>
     מוזרם כ-libacars ל-_normalize_acars: מיקום מ-_scan_latlon, קטגוריית ADS-C."""
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
         "err": False, "crc_ok": True, "more": False, "reg": ".4X-EDA",
         "mode": "2", "label": "H1", "blk_id": "2", "ack": "!",
         "flight": "LY0027", "msg_num": "D64", "msg_num_seq": "A",
@@ -153,7 +143,7 @@ def test_normalize_vdl2_path_a_uplink_adsc_never_yields_position():
     למטה, שם זה כן עובד במסלול B) לא חל בכלל כאן, בדיוק המסלול הכי סביר לשאת
     ADS-C אמיתי (ACARS-over-AVLC). err=False בכל מקום (הפענוח "מצליח" מבנית) —
     ה-guard חייב לחסום בכל זאת מכיוון בלבד."""
-    n = app._normalize_vdl2(_vdl2(_avlc_uplink({"acars": {
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_uplink({"acars": {
         "err": False, "crc_ok": True, "more": False, "reg": ".4X-EDA",
         "mode": "2", "label": "H1", "blk_id": "2", "ack": "!",
         "flight": "LY0027", "msg_num": "D64", "msg_num_seq": "A",
@@ -170,7 +160,7 @@ def test_normalize_vdl2_path_a_uplink_adsc_never_yields_position():
 def test_normalize_vdl2_crc_error_blocks_text_heuristic():
     """crc_ok=False => error=1 => שומר ה-error חוסם חילוץ נ"צ מטקסט חופשי
     (בדיוק כמו acarsdec error>0)."""
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({"acars": {
         "err": False, "crc_ok": False, "more": False, "reg": ".4X-EKF",
         "mode": "2", "label": "H1", "blk_id": "1", "ack": "!",
         "msg_text": "POS N3206.0,E03450.0",
@@ -188,7 +178,7 @@ def test_normalize_vdl2_structural_dir_overrides_label():
             "acars": {"err": False, "crc_ok": True, "reg": ".4X-EKF",
                       "mode": "2", "label": "80", "blk_id": "A", "ack": "!",
                       "msg_text": "TEST"}}
-    n = app._normalize_vdl2(_vdl2(avlc))
+    n = acars_parse._normalize_vdl2(_vdl2(avlc))
     assert n["dir"] == "uplink"
     assert n["icao"] == "738065"                   # צד-המטוס הוא ה-dst
 
@@ -202,7 +192,7 @@ def test_normalize_vdl2_cpdlc_generic_card():
             "x25": {"err": False, "pkt_type_name": "Data",
                     "clnp": {"cotp": {"cpdlc": {
                         "atc_uplink_msg": {"msg_data": {"msg_text": "CLIMB TO FL350"}}}}}}}
-    n = app._normalize_vdl2(_vdl2(avlc))
+    n = acars_parse._normalize_vdl2(_vdl2(avlc))
     assert n["category"] == "CPDLC (VDL2)" and n["group"] == "clearance"
     assert "CLIMB TO FL350" in (n["decoded"] or "")
     assert n["dir"] == "uplink" and n["icao"] == "738065"
@@ -213,7 +203,7 @@ def test_normalize_vdl2_cpdlc_generic_card():
 
 
 def test_normalize_vdl2_adsc_x25_position():
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({
         "x25": {"err": False, "pkt_type_name": "Data",
                 "clnp": {"cotp": {"adsc": {
                     "basic_report": {"lat": 31.9, "lon": 35.1, "alt": 37000}}}}}})))
@@ -227,7 +217,7 @@ def test_normalize_vdl2_cpdlc_with_adsc_substring_not_treated_as_position():
     exclusive מול "cpdlc" בו. הודעת CPDLC שמזכירה "ADSC" בתוך טקסט חופשי מקונן
     (למשל בקשת קונטרקט) עדיין עברה בעבר את תנאי חילוץ המיקום למרות שה-category
     כבר הוכרע כ-CPDLC — waypoint מ-route_clearance יוחס בטעות כמיקום המטוס."""
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({
         "x25": {"err": False, "pkt_type_name": "Data",
                 "clnp": {"cotp": {"cpdlc": {
                     "err": False,
@@ -244,7 +234,7 @@ def test_normalize_vdl2_adsc_decode_failed_never_yields_position():
     err:true על יישום ה-ADS-C המקונן, שדה lat/lon שרירותי/שריד-מפענוח-חלקי
     עדיין היה מתפרסם כאילו הוא מיקום אמיתי. תיקון: מיקום מ-ADS-C (VDL2 מסלול B)
     נאמן רק כש-decode_failed=False."""
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({
         "x25": {"err": False, "pkt_type_name": "Data",
                 "clnp": {"cotp": {"adsc": {
                     "err": True, "basic_report": {"lat": 5.69, "lon": 2.11}}}}}})))
@@ -261,7 +251,7 @@ def test_normalize_vdl2_uplink_adsc_never_yields_position_even_without_err():
     מ-adsc.c). כאן ‏err=False בכל מקום (הפענוח "מצליח" מבנית) — ה-guard חייב
     לחסום בכל זאת מכיוון בלבד (`direction` נגזר מבנית מ-AVLC src/dst.type,
     לא heuristic)."""
-    n = app._normalize_vdl2(_vdl2(_avlc_uplink({
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_uplink({
         "x25": {"err": False, "pkt_type_name": "Data",
                 "clnp": {"cotp": {"adsc": {
                     "err": False, "basic_report": {"lat": 18.34167, "lon": 2.11006}}}}}})))
@@ -272,7 +262,7 @@ def test_normalize_vdl2_uplink_adsc_never_yields_position_even_without_err():
 
 
 def test_normalize_vdl2_xid_generic_card():
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({
         "frame_type": "U", "cmd": "XID",
         "xid": {"err": False, "type": "XID_CMD_LE",
                 "type_descr": "Link Establishment", "vdl_params": {}}})))
@@ -283,12 +273,12 @@ def test_normalize_vdl2_xid_generic_card():
 
 def test_normalize_vdl2_bare_frame_and_garbage():
     # פריים AVLC בלי תוכן מוכר => כרטיס גנרי לפי frame_type
-    n = app._normalize_vdl2(_vdl2(_avlc_downlink({"frame_type": "S", "cmd": "RR"})))
+    n = acars_parse._normalize_vdl2(_vdl2(_avlc_downlink({"frame_type": "S", "cmd": "RR"})))
     assert n["category"] == "VDL2 · S" and n["group"] == "comm"
     # בלי עטיפת vdl2 / בלי avlc => None (לא בר-הצגה)
-    assert app._normalize_vdl2({"foo": 1}) is None
-    assert app._normalize_vdl2({"vdl2": {"t": {"sec": 1}, "freq": 136975000}}) is None
-    assert app._normalize_vdl2({"vdl2": "not-a-dict"}) is None
+    assert acars_parse._normalize_vdl2({"foo": 1}) is None
+    assert acars_parse._normalize_vdl2({"vdl2": {"t": {"sec": 1}, "freq": 136975000}}) is None
+    assert acars_parse._normalize_vdl2({"vdl2": "not-a-dict"}) is None
 
 
 # --- write_vdl2_env (פורמט EnvironmentFile + המרת Hz) ------------------------
@@ -316,15 +306,15 @@ def test_write_vdl2_env_sanitizes(paths):
 
 def test_write_vdl2_env_empty_falls_to_default(paths):
     app.write_vdl2_env([])
-    expect = " ".join(str(int(round(float(f) * 1e6))) for f in app.VDL2_FREQS_DEFAULT)
+    expect = " ".join(str(int(round(float(f) * 1e6))) for f in config.VDL2_FREQS_DEFAULT)
     assert f"VDL2_FREQS={expect}" in app.VDL2_ENV_PATH.read_text()
 
 
 # --- בנקים + ולידציית חלון ---------------------------------------------------
 
 def test_vdl2_banks_all_valid():
-    assert app.VDL2_FREQS_DEFAULT == app.VDL2_BANKS[0]["freqs"]
-    for bank in app.VDL2_BANKS:
+    assert config.VDL2_FREQS_DEFAULT == config.VDL2_BANKS[0]["freqs"]
+    for bank in config.VDL2_BANKS:
         assert app._vdl2_window_error(bank["freqs"]) is None
         assert len(bank["freqs"]) <= app.VDL2_MAX_CHANNELS
 
@@ -338,7 +328,7 @@ def test_vdl2_window_error_cases():
 
 def test_generic_window_error_shared_with_acars():
     # ה-wrapper של ACARS ממשיך לעבוד דרך הפונקציה המשותפת
-    assert app._acars_window_error(list(app.ACARS_FREQS_DEFAULT)) is None
+    assert app._acars_window_error(list(config.ACARS_FREQS_DEFAULT)) is None
     assert app._acars_window_error(["130.450", "136.975"]) is not None
 
 
@@ -429,19 +419,19 @@ def test_api_mode_enter_vdl2(client, paths, no_sleep, monkeypatch):
     r = client.post("/api/mode", json={"mode": "vdl2"})
     j = r.get_json()
     assert r.status_code == 200 and j["ok"] and j["app_mode"] == "vdl2"
-    assert j["vdl2_freqs"] == list(app.VDL2_FREQS_DEFAULT)
-    assert app.load_state()["app_mode"] == "vdl2"
+    assert j["vdl2_freqs"] == list(config.VDL2_FREQS_DEFAULT)
+    assert appstate.load_state()["app_mode"] == "vdl2"
     # שחרר את *שני* הצרכנים האחרים והרים את dumpvdl2
     assert ("stop", "rtl_airband") in calls and ("stop", app.ACARS_SERVICE) in calls
     assert ("restart", app.VDL2_SERVICE) in calls
     # נכתב env תקין (בנק ברירת המחדל, ב-Hz)
-    expect = " ".join(str(int(round(float(f) * 1e6))) for f in app.VDL2_FREQS_DEFAULT)
+    expect = " ".join(str(int(round(float(f) * 1e6))) for f in config.VDL2_FREQS_DEFAULT)
     assert f"VDL2_FREQS={expect}" in app.VDL2_ENV_PATH.read_text()
 
 
 def test_api_mode_enter_vdl2_failure_falls_to_off(client, paths, no_sleep, monkeypatch):
     # אין fallback לקול: כישלון כניסה למצב נופל ל-off (standby) — המצבים שווי-מעמד
-    app.save_state({**app.DEFAULT_STATE, "freq": 121.5, "app_mode": "acars"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "freq": 121.5, "app_mode": "acars"})
     calls = []
     monkeypatch.setattr(app, "_sysctl",
                         lambda action, svc, timeout=45: calls.append((action, svc)) or _ok())
@@ -451,7 +441,7 @@ def test_api_mode_enter_vdl2_failure_falls_to_off(client, paths, no_sleep, monke
     body = r.get_json()
     assert body["app_mode"] == "off" and body["state"]["app_mode"] == "off"
     assert body["state"]["prev_mode"] == "acars"               # המצב שממנו ניסינו לעבור
-    assert app.load_state()["app_mode"] == "off"
+    assert appstate.load_state()["app_mode"] == "off"
     assert ("restart", "rtl_airband") not in calls             # שום ניסיון "לחזור לקול"
 
 
@@ -469,14 +459,14 @@ def test_api_mode_vdl2_custom_freqs_saved(client, paths, no_sleep, monkeypatch):
     monkeypatch.setattr(app, "_is_active", lambda svc: True)
     r = client.post("/api/mode", json={"mode": "vdl2", "freqs": ["136.975"]})
     assert r.status_code == 200
-    assert app.load_state()["vdl2_freqs"] == ["136.975"]
+    assert appstate.load_state()["vdl2_freqs"] == ["136.975"]
     # כניסה חוזרת בלי freqs => משתמש בתדרים השמורים
     r = client.post("/api/mode", json={"mode": "vdl2"})
     assert r.get_json()["vdl2_freqs"] == ["136.975"]
 
 
 def test_api_mode_voice_stops_vdl2(client, paths, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "freq": 121.5, "app_mode": "vdl2"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "freq": 121.5, "app_mode": "vdl2"})
     monkeypatch.setattr(app, "_restart_and_verify", lambda: (None, None, False))
     monkeypatch.setattr(app, "_is_active", lambda svc: True)   # vdl2 פעיל כרגע
     calls = []
@@ -525,13 +515,13 @@ def test_api_state_reports_vdl2(client, paths, monkeypatch):
     monkeypatch.setattr(app, "_is_active", lambda svc: svc == app.VDL2_SERVICE)
     body = client.get("/api/state").get_json()
     assert body["app_mode"] == "vdl2"
-    assert body["vdl2_freqs"] == list(app.VDL2_FREQS_DEFAULT)
-    assert body["vdl2_banks"] == app.VDL2_BANKS
+    assert body["vdl2_freqs"] == list(config.VDL2_FREQS_DEFAULT)
+    assert body["vdl2_banks"] == config.VDL2_BANKS
 
 
 def test_api_state_vdl2_wins_over_saved(client, paths, monkeypatch):
     """מציאות-תחילה: state שמור 'acars' אבל dumpvdl2 הוא שרץ => vdl2."""
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "acars"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "acars"})
     monkeypatch.setattr(app, "_is_active", lambda svc: svc == app.VDL2_SERVICE)
     assert client.get("/api/state").get_json()["app_mode"] == "vdl2"
 
@@ -550,7 +540,7 @@ def test_api_health_vdl2_mode(client, paths, monkeypatch):
 
 
 def test_api_health_off_not_fault_with_vdl2(client, paths, monkeypatch):
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "off"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "off"})
     def run(cmd, **kw):
         active = "active" if cmd[-1] in ("sdrplay", "icecast2") else "inactive"
         return types.SimpleNamespace(returncode=0, stdout=active, stderr="")
@@ -563,7 +553,7 @@ def test_api_health_off_not_fault_with_vdl2(client, paths, monkeypatch):
 def test_api_health_fault_when_saved_mode_not_running(client, paths, monkeypatch):
     # המצב השמור (vdl2) אמור לרוץ אבל אף צרכן לא פעיל => תקלה מדווחת עם המצב
     # המקורי — לא טענת-"voice" שקטה כמו פעם
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "vdl2"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "vdl2"})
     def run(cmd, **kw):
         active = "active" if cmd[-1] in ("sdrplay", "icecast2") else "inactive"
         return types.SimpleNamespace(returncode=0, stdout=active, stderr="")

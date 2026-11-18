@@ -29,6 +29,7 @@ import itertools
 import pytest
 
 import app
+import acars_parse
 
 LAT, LON = 18.34167, 2.11006
 
@@ -98,9 +99,9 @@ def _vdl2_path_b(direction, decode_failed):
 
 
 PATHS = {
-    "satcom": (_satcom_msg, lambda m: app._normalize_satcom(m)),
-    "vdl2_path_a": (_vdl2_path_a, lambda m: app._normalize_vdl2(m)),
-    "vdl2_path_b": (_vdl2_path_b, lambda m: app._normalize_vdl2(m)),
+    "satcom": (_satcom_msg, lambda m: acars_parse._normalize_satcom(m)),
+    "vdl2_path_a": (_vdl2_path_a, lambda m: acars_parse._normalize_vdl2(m)),
+    "vdl2_path_b": (_vdl2_path_b, lambda m: acars_parse._normalize_vdl2(m)),
 }
 
 

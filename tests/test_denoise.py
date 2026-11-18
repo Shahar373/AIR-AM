@@ -13,24 +13,23 @@ import json
 import pytest
 
 import app
+import appstate  # noqa: E402
+import config  # noqa: E402
+import conftest  # נתיבים אמיתיים לפני הבידוד — ר' conftest.real_path
+import recordings  # noqa: E402
 
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "airband.conf")
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "STATS_PATH", tmp_path / "stats.txt")
     monkeypatch.setattr(app, "PRESETS_PATH", tmp_path / "presets.json")
     monkeypatch.setattr(app, "DENOISE_ENV_PATH", tmp_path / "denoise.env")
     rec = tmp_path / "recordings"
     rec.mkdir()
-    monkeypatch.setattr(app, "REC_DIR", rec)
+    monkeypatch.setattr(recordings, "REC_DIR", rec)
     return tmp_path
-
-
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
 
 
 @pytest.fixture(autouse=True)
@@ -194,7 +193,7 @@ def test_icecast_status_cached(monkeypatch):
 
 def test_sync_starts_when_enabled_and_voice_live(paths, monkeypatch, installed):
     s = Sys(monkeypatch)
-    app.save_state({**app.DEFAULT_STATE, "denoise": True})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": True})
     app._denoise_sync()
     assert s.calls == [("start", app.DENOISE_SERVICE)]
     app._denoise_sync()                                 # idempotent
@@ -203,7 +202,7 @@ def test_sync_starts_when_enabled_and_voice_live(paths, monkeypatch, installed):
 
 def test_sync_stops_when_disabled(paths, monkeypatch, installed):
     s = Sys(monkeypatch, units={app.DENOISE_SERVICE: "active"})
-    app.save_state({**app.DEFAULT_STATE, "denoise": False})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": False})
     app._denoise_sync()
     assert s.calls == [("stop", app.DENOISE_SERVICE)]
 
@@ -211,7 +210,7 @@ def test_sync_stops_when_disabled(paths, monkeypatch, installed):
 def test_sync_does_not_start_without_voice(paths, monkeypatch, installed):
     """בלי קול אין מה לסנן — לא מפעילים (ה-PartOf יעצור ממילא)."""
     s = Sys(monkeypatch, units={"rtl_airband": "inactive"})
-    app.save_state({**app.DEFAULT_STATE, "denoise": True})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": True})
     app._denoise_sync()
     assert s.calls == []
 
@@ -219,7 +218,7 @@ def test_sync_does_not_start_without_voice(paths, monkeypatch, installed):
 def test_sync_does_not_start_when_not_installed(paths, monkeypatch):
     monkeypatch.setattr(app, "_denoise_missing", lambda engine=None: ["airam-rnnoise"])
     s = Sys(monkeypatch)
-    app.save_state({**app.DEFAULT_STATE, "denoise": True})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": True})
     app._denoise_sync()
     assert s.calls == []
 
@@ -231,13 +230,13 @@ def test_sync_never_raises(paths, monkeypatch, installed):
     def boom(*a, **k):
         raise RuntimeError("systemctl died")
     monkeypatch.setattr(app, "_sysctl", boom)
-    app.save_state({**app.DEFAULT_STATE, "denoise": True})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": True})
     app._denoise_sync()                                 # לא זורק
 
 
 def test_sync_start_failure_logged_not_raised(paths, monkeypatch, installed, caplog):
     Sys(monkeypatch, start_rc=1)
-    app.save_state({**app.DEFAULT_STATE, "denoise": True})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": True})
     app._denoise_sync()
     assert "start נכשל" in caplog.text
 
@@ -246,10 +245,10 @@ def test_after_voice_is_free_when_disabled(paths, monkeypatch):
     """הנתיב רץ בכל כיוונון — מתג כבוי (ברירת המחדל) = אפס קריאות systemctl."""
     called = []
     monkeypatch.setattr(app, "_denoise_sync", lambda: called.append(1))
-    app.save_state({**app.DEFAULT_STATE, "denoise": False})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": False})
     app._denoise_after_voice()
     assert called == []
-    app.save_state({**app.DEFAULT_STATE, "denoise": True})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": True})
     app._denoise_after_voice()
     assert called == [1]
 
@@ -257,7 +256,7 @@ def test_after_voice_is_free_when_disabled(paths, monkeypatch):
 # --- כניסה לקול ---------------------------------------------------------------
 
 def _voice_params():
-    params, err = app._parse_tune(app.DEFAULT_STATE)
+    params, err = app._parse_tune(appstate.DEFAULT_STATE)
     assert err is None
     return params
 
@@ -283,7 +282,7 @@ def test_enter_voice_unaffected_by_denoise_failure(paths, monkeypatch, installed
         raise RuntimeError("no systemd")
     monkeypatch.setattr(app, "_services_status", boom)
     monkeypatch.setattr(app, "_sysctl", boom)
-    app.save_state({**app.DEFAULT_STATE, "denoise": True})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": True})
     assert app._enter_voice(_voice_params()) == (None, None, False)
 
 
@@ -292,7 +291,7 @@ def test_boot_restore_voice_already_live_syncs(paths, monkeypatch):
     hooked = []
     monkeypatch.setattr(app, "_denoise_after_voice", lambda: hooked.append(1))
     monkeypatch.setattr(app, "_live_mode", lambda: "voice")
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "voice"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "voice"})
     app.CONFIG_PATH.write_text(app.render_config(132.5, "am", True, 40, 4, "open"))
     app._boot_restore()
     assert hooked == [1]
@@ -315,13 +314,13 @@ def test_api_post_enable(client, monkeypatch, installed):
     r = client.post("/api/denoise", json={"enabled": True})
     d = r.get_json()
     assert r.status_code == 200 and d["enabled"] is True and d["state"] == "live"
-    assert app.load_state()["denoise"] is True
+    assert appstate.load_state()["denoise"] is True
     assert ("start", app.DENOISE_SERVICE) in s.calls
 
 
 def test_api_post_disable(client, monkeypatch, installed):
     s = Sys(monkeypatch, units={app.DENOISE_SERVICE: "active"})
-    app.save_state({**app.DEFAULT_STATE, "denoise": True})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": True})
     d = client.post("/api/denoise", json={"enabled": False}).get_json()
     assert d["enabled"] is False and d["state"] == "off"
     assert ("stop", app.DENOISE_SERVICE) in s.calls
@@ -336,7 +335,7 @@ def test_api_post_not_installed_501_and_state_unchanged(client, monkeypatch):
     assert r.status_code == 501 and d["ok"] is False
     assert d["install_hint"] == app.DENOISE_INSTALL_HINT
     assert "airam-rnnoise" in d["error"]
-    assert app.load_state()["denoise"] is False
+    assert appstate.load_state()["denoise"] is False
 
 
 @pytest.mark.parametrize("body", [None, {}, {"enabled": "yes"}, {"enabled": 1}, [True]])
@@ -351,7 +350,7 @@ def test_api_post_guarded(client, monkeypatch, installed):
     r = client.post("/api/denoise", json={"enabled": True},
                     headers={"Origin": "http://evil.example.com"})
     assert r.status_code == 403
-    assert s.calls == [] and app.load_state()["denoise"] is False
+    assert s.calls == [] and appstate.load_state()["denoise"] is False
 
 
 def test_missing_reports_each_component(monkeypatch, tmp_path):
@@ -380,7 +379,7 @@ def test_health_includes_denoise_and_ok_unaffected(client, monkeypatch, installe
     monkeypatch.setattr(app.subprocess, "run", fake_run)
     fake, _ = _fake_urlopen({"icestats": {}})
     monkeypatch.setattr(app.urllib.request, "urlopen", fake)
-    app.save_state({**app.DEFAULT_STATE, "app_mode": "voice", "denoise": True})
+    appstate.save_state({**appstate.DEFAULT_STATE, "app_mode": "voice", "denoise": True})
     h = client.get("/api/health").get_json()
     assert h["ok"] is True
     assert h["services"][app.DENOISE_SERVICE] == "failed"
@@ -418,7 +417,7 @@ def test_stream_proxy_mount_whitelist(client, monkeypatch, query, mount):
 
 def test_external_playlist_follows_global_switch(client):
     assert "/live.mp3" in client.get("/live.m3u").get_data(as_text=True)
-    app.save_state({**app.DEFAULT_STATE, "denoise": True})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": True})
     assert f"/{app.DENOISE_MOUNT}" in client.get("/live.m3u").get_data(as_text=True)
 
 
@@ -444,13 +443,13 @@ def test_constants_match_script_and_installer():
         assert f"NOPASSWD: /usr/bin/systemctl {action} {app.DENOISE_SERVICE}\n" in inst
     assert f'cp "$REPO_DIR/systemd/{app.DENOISE_SERVICE}.service"' in inst
     assert f'cp "$REPO_DIR/scripts/{app.DENOISE_SCRIPT.name}" /usr/local/bin/' in inst
-    assert f"install -m755 airam-rnnoise {app.DENOISE_RNNOISE}" in inst
+    assert f"install -m755 airam-rnnoise {conftest.real_path(app, 'DENOISE_RNNOISE')}" in inst
     # תיקון ה-ARM של upstream (בלעדיו v0.2 לא נבנה על ה-Pi) — הקובץ קיים ומוחל
     patch = ROOT / "tools" / "rnnoise-0.2-372f7b4-arm-build-fix.patch"
     assert patch.exists() and "vec_neon.h" in patch.read_text(encoding="utf-8")
     assert f'RNNOISE_PATCH="$REPO_DIR/tools/{patch.name}"' in inst
     assert 'patch -p1 -s < "$RNNOISE_PATCH"' in inst
-    assert f"ExecStart={app.DENOISE_SCRIPT}" in unit
+    assert f"ExecStart={conftest.real_path(app, 'DENOISE_SCRIPT')}" in unit
     assert "PartOf=rtl_airband.service" in unit
     # לא enabled — airam-web מפעיל (שורת מקטע אמיתית; ההערה ביחידה מזכירה את המילה)
     assert "[Install]" not in [line.strip() for line in unit.splitlines()]
@@ -465,9 +464,9 @@ def test_unit_never_conflicts_with_sdr_consumers():
 # --- בחירת מנוע (docs/audio-comfort-design.md) -----------------------------------
 
 def test_engine_default_and_bad_saved_value(paths):
-    assert app._denoise_engine() == app.DENOISE_ENGINE_DEFAULT
-    app.save_state({**app.DEFAULT_STATE, "denoise_engine": "prod"})   # מנוע שנפסל / ערך זר
-    assert app._denoise_engine() == app.DENOISE_ENGINE_DEFAULT
+    assert app._denoise_engine() == config.DENOISE_ENGINE_DEFAULT
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise_engine": "prod"})   # מנוע שנפסל / ערך זר
+    assert app._denoise_engine() == config.DENOISE_ENGINE_DEFAULT
 
 
 def test_missing_is_per_engine(monkeypatch, tmp_path):
@@ -490,7 +489,7 @@ def test_sync_writes_engine_env_before_start(paths, monkeypatch, installed):
         seen.append(app.DENOISE_ENV_PATH.read_text() if app.DENOISE_ENV_PATH.exists() else None)
         return real(action, svc, timeout)
     monkeypatch.setattr(app, "_sysctl", spy)
-    app.save_state({**app.DEFAULT_STATE, "denoise": True, "denoise_engine": "speex"})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": True, "denoise_engine": "speex"})
     app._denoise_sync()
     assert seen and "AIRAM_DENOISE_ENGINE=speex\n" in seen[0]
 
@@ -502,19 +501,19 @@ def test_write_env_refuses_unknown_engine(paths):
 
 def test_api_switch_engine_while_running_restarts_only_denoise(client, monkeypatch, installed):
     s = Sys(monkeypatch, units={app.DENOISE_SERVICE: "active"})
-    app.save_state({**app.DEFAULT_STATE, "denoise": True})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": True})
     d = client.post("/api/denoise", json={"engine": "speex"}).get_json()
     assert d["ok"] is True and d["engine"] == "speex" and d["enabled"] is True
     assert s.calls == [("stop", app.DENOISE_SERVICE), ("start", app.DENOISE_SERVICE)]
-    assert app.load_state()["denoise_engine"] == "speex"
+    assert appstate.load_state()["denoise_engine"] == "speex"
     assert "AIRAM_DENOISE_ENGINE=speex" in app.DENOISE_ENV_PATH.read_text()
     assert all(svc == app.DENOISE_SERVICE for _, svc in s.calls)      # הרדיו לא נגע
 
 
 def test_api_same_engine_no_restart(client, monkeypatch, installed):
     s = Sys(monkeypatch, units={app.DENOISE_SERVICE: "active"})
-    app.save_state({**app.DEFAULT_STATE, "denoise": True})
-    client.post("/api/denoise", json={"engine": app.DENOISE_ENGINE_DEFAULT})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": True})
+    client.post("/api/denoise", json={"engine": config.DENOISE_ENGINE_DEFAULT})
     assert s.calls == []
 
 
@@ -528,10 +527,10 @@ def test_api_unavailable_engine_while_enabled_501_unchanged(client, monkeypatch)
     monkeypatch.setattr(app, "_denoise_missing",
                         lambda engine=None: ["airam-speexdn"] if engine == "speex" else [])
     s = Sys(monkeypatch, units={app.DENOISE_SERVICE: "active"})
-    app.save_state({**app.DEFAULT_STATE, "denoise": True})
+    appstate.save_state({**appstate.DEFAULT_STATE, "denoise": True})
     r = client.post("/api/denoise", json={"engine": "speex"})
     assert r.status_code == 501 and "airam-speexdn" in r.get_json()["error"]
-    assert app.load_state()["denoise_engine"] == app.DENOISE_ENGINE_DEFAULT
+    assert appstate.load_state()["denoise_engine"] == config.DENOISE_ENGINE_DEFAULT
     assert s.calls == []
 
 
@@ -556,8 +555,8 @@ def test_status_lists_engines_with_availability(client, monkeypatch):
     Sys(monkeypatch)
     d = client.get("/api/denoise").get_json()
     eng = {e["id"]: e for e in d["engines"]}
-    assert set(eng) == set(app.DENOISE_ENGINES)
+    assert set(eng) == set(config.DENOISE_ENGINES)
     assert eng["rnmix"]["available"] is True and eng["speex"]["available"] is False
-    assert d["engine"] == app.DENOISE_ENGINE_DEFAULT
+    assert d["engine"] == config.DENOISE_ENGINE_DEFAULT
     st = client.get("/api/state").get_json()
-    assert st["denoise_engine"] == app.DENOISE_ENGINE_DEFAULT
+    assert st["denoise_engine"] == config.DENOISE_ENGINE_DEFAULT

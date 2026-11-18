@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import app
+import appstate  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 B, A = "240404AF60", "230405A498"            # ה-serials מה-Pi (17.11.2026)
@@ -24,7 +25,8 @@ FIND_TWO = (f"Found device 0\n  driver = sdrplay\n  label = SDRplay Dev0 RSP1A {
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
-    for name, fn in (("STATE_PATH", "state.json"), ("ACARS_ENV_PATH", "acars.env"),
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
+    for name, fn in (("ACARS_ENV_PATH", "acars.env"),
                      ("VDL2_ENV_PATH", "vdl2.env"), ("SATCOM_ENV_PATH", "satcom.env"),
                      ("SDR_ENV_PATH", "sdr.env"), ("CONFIG_PATH", "airband.conf")):
         monkeypatch.setattr(app, name, tmp_path / fn)
@@ -32,13 +34,8 @@ def paths(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 def _set_primary(serial):
-    app._merge_state({"sdr_primary": serial})
+    appstate._merge_state({"sdr_primary": serial})
 
 
 # --- בלי בחירה: בדיוק כמו קודם ----------------------------------------------
@@ -77,7 +74,7 @@ def test_sanitize_serial_rejects(bad):
 
 def test_bad_serial_in_state_never_reaches_device_string(paths):
     # state.json ידני/פגום — לא נכנס לקונפיג של תהליך root
-    app._merge_state({"sdr_primary": "X,driver=evil"})
+    appstate._merge_state({"sdr_primary": "X,driver=evil"})
     assert app._primary_serial() is None
     assert 'device_string = "driver=sdrplay";' in app.render_config(132.5, "am", True, 40, 0,
                                                                     serial=app._primary_serial())
@@ -153,7 +150,7 @@ def _post(client, body):
 def test_roles_set_writes_state_and_sdr_env(client):
     r = _post(client, {"primary": B, "secondary": A})
     assert r.status_code == 200, r.get_json()
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["sdr_primary"] == B and st["sdr_secondary"] == A
     assert app.SDR_ENV_PATH.read_text().splitlines()[1:3] == [f"SDR_PRIMARY={B}", f"SDR_SECONDARY={A}"]
 
@@ -161,7 +158,7 @@ def test_roles_set_writes_state_and_sdr_env(client):
 def test_roles_clear_and_partial_update(client):
     _post(client, {"primary": B, "secondary": A})
     assert _post(client, {"secondary": None}).status_code == 200
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["sdr_primary"] == B and st["sdr_secondary"] is None
     assert "SDR_SECONDARY=\n" in app.SDR_ENV_PATH.read_text()
 
@@ -170,14 +167,14 @@ def test_roles_clear_and_partial_update(client):
                                   {"primary": B, "secondary": B}, {"primary": "X,y=z"}])
 def test_roles_rejects(client, body):
     assert _post(client, body).status_code == 400
-    assert app.load_state().get("sdr_primary") is None
+    assert appstate.load_state().get("sdr_primary") is None
 
 
 def test_roles_requires_guard(client):
     # כמו כל route משנה-מצב: Origin זר ⇒ נחסם ב-_guard
     r = client.post("/api/sdr/roles", json={"primary": B}, headers={"Origin": "http://evil.example"})
     assert r.status_code == 403
-    assert app.load_state().get("sdr_primary") is None
+    assert appstate.load_state().get("sdr_primary") is None
 
 
 # --- השער airam-wait-sdrplay ---------------------------------------------------

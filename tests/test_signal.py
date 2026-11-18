@@ -6,17 +6,18 @@
 # ============================================================================
 import threading
 import time
-import types
 
 import pytest
 
 import app
+import appstate  # noqa: E402
+import config  # noqa: E402
 
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "airband.conf")
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "STATS_PATH", tmp_path / "stats.txt")
     monkeypatch.setattr(app, "ACARS_ENV_PATH", tmp_path / "acars.env")
     monkeypatch.setattr(app, "VDL2_ENV_PATH", tmp_path / "vdl2.env")
@@ -24,16 +25,11 @@ def paths(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
-
-
 @pytest.fixture(autouse=True)
 def _clean_state_corrupt_flag():
-    app._reset_state_corrupt_warned()
+    appstate._reset_state_corrupt_warned()
     yield
-    app._reset_state_corrupt_warned()
+    appstate._reset_state_corrupt_warned()
 
 
 @pytest.fixture(autouse=True)
@@ -103,11 +99,11 @@ def test_signal_off_mode_reports_none_kind(client, monkeypatch):
 
 def test_signal_voice_continuous_with_baseline(client, paths, monkeypatch):
     monkeypatch.setattr(app, "_live_mode", lambda: "voice")
-    st = app.load_state()
+    st = appstate.load_state()
     st["freq"] = 121.500
     st["agc"] = True
     st["signal_baseline"] = {"noise": -74.0, "freq": 121.5, "ts": 1.0}
-    app.save_state(st)
+    appstate.save_state(st)
     _write_stats(paths / "stats.txt", 121.500, sig=-40.0, noise=-73.0)
 
     r = client.get("/api/signal")
@@ -123,11 +119,11 @@ def test_signal_voice_continuous_with_baseline(client, paths, monkeypatch):
 def test_signal_voice_manual_gain_skips_verdict(client, paths, monkeypatch):
     """gain ידני => לא בר-השוואה לבסיס (נמדד תחת AGC) => 'unknown', לא ניחוש."""
     monkeypatch.setattr(app, "_live_mode", lambda: "voice")
-    st = app.load_state()
+    st = appstate.load_state()
     st["freq"] = 121.500
     st["agc"] = False
     st["signal_baseline"] = {"noise": -74.0, "freq": 121.5, "ts": 1.0}
-    app.save_state(st)
+    appstate.save_state(st)
     _write_stats(paths / "stats.txt", 121.500, sig=-40.0, noise=-96.0)
 
     r = client.get("/api/signal")
@@ -188,10 +184,6 @@ def test_signal_satcom_points_to_dedicated_panel(client, monkeypatch):
 
 # --- POST /api/antenna/check --------------------------------------------------
 
-def _ok(**kw):
-    return types.SimpleNamespace(returncode=0, stdout="", stderr="", **kw)
-
-
 def test_antenna_check_busy_returns_409(client):
     assert app.TUNE_LOCK.acquire(blocking=False)   # מדמה כיוונון/מעבר מצב אחר שכבר רץ
     try:
@@ -220,9 +212,9 @@ def test_antenna_check_switches_samples_and_restores(client, paths, monkeypatch)
     monkeypatch.setattr(app, "_enter_acars", fake_enter_acars)
     monkeypatch.setattr(app, "ANTENNA_CHECK_SAMPLE_SEC", 1.0)
 
-    st = app.load_state()
+    st = appstate.load_state()
     st["acars_freqs"] = ["131.550"]
-    app.save_state(st)
+    appstate.save_state(st)
 
     r = client.post("/api/antenna/check", json={"freq": 121.5})
     assert r.status_code == 200
@@ -233,7 +225,7 @@ def test_antenna_check_switches_samples_and_restores(client, paths, monkeypatch)
     # שוחזר ל-ACARS אחרי הבדיקה, ובדיוק עם התדרים שהיו שמורים
     assert calls == [("voice", 121.5), ("acars", ["131.550"])]
     # פעולת אבחון בלבד — לא נוגעת ב-app_mode השמור
-    assert app.load_state()["app_mode"] == "off"
+    assert appstate.load_state()["app_mode"] == "off"
 
 
 def test_antenna_check_calibrate_saves_baseline(client, paths, monkeypatch):
@@ -250,7 +242,7 @@ def test_antenna_check_calibrate_saves_baseline(client, paths, monkeypatch):
     assert data["calibrated"] is True
     assert data["baseline"]["noise"] == -70.0
 
-    saved = app.load_state()["signal_baseline"]
+    saved = appstate.load_state()["signal_baseline"]
     assert saved["noise"] == -70.0
     assert saved["freq"] == 136.975
 
@@ -267,9 +259,9 @@ def test_antenna_check_calibrate_saves_baseline(client, paths, monkeypatch):
 def test_antenna_check_already_in_voice_at_same_freq_skips_switch(client, paths, monkeypatch):
     """כבר בקול על אותו תדר => אין restart מיותר, רק קריאה ישירה."""
     monkeypatch.setattr(app, "_live_mode", lambda: "voice")
-    st = app.load_state()
+    st = appstate.load_state()
     st["freq"] = 121.5
-    app.save_state(st)
+    appstate.save_state(st)
     _write_stats(paths / "stats.txt", 121.5, sig=-33.0, noise=-71.0)
 
     def boom(*a, **k):
@@ -291,7 +283,7 @@ def test_antenna_check_enter_voice_failure_restores_and_reports_error(client, pa
     assert r.status_code == 500
     assert r.get_json()["ok"] is False
     assert restored   # best-effort ניסה לשחזר את ACARS למרות הכשל
-    assert app.load_state()["app_mode"] == "off"   # ולא נגע ב-state.json
+    assert appstate.load_state()["app_mode"] == "off"   # ולא נגע ב-state.json
 
 
 def test_antenna_check_no_fresh_data_returns_504(client, paths, monkeypatch):
@@ -318,9 +310,9 @@ def test_antenna_check_restores_active_scan_leg_not_state_bank(client, paths, mo
         app._scan_thread_stop = stop_evt
         app._scan_status.update(idx=0, leg=scan_leg, next_switch_at=time.time() + 600, plan=[scan_leg])
 
-    st = app.load_state()
+    st = appstate.load_state()
     st["acars_freqs"] = ["136.700"]      # בנק כללי שונה מהרגל הפעילה בפועל
-    app.save_state(st)
+    appstate.save_state(st)
 
     monkeypatch.setattr(app, "_live_mode", lambda: "acars")
     calls = []
@@ -344,10 +336,10 @@ def test_antenna_check_reenters_voice_when_live_params_differ_from_probe(client,
     (AGC כבוי) קיבל דגימה בסקאלה אחרת לגמרי מהבסיס שנמדד תחת AGC — ומכאן
     verdict של below_baseline ("האנטנה מנותקת!") בלי שדבר השתנה בחומרה.
     עכשיו מדלגים על ההכנה רק כשהמצב החי זהה *בפועל* לתנאי הבדיקה."""
-    st = app.load_state()
+    st = appstate.load_state()
     st.update(app_mode="voice", freq=121.5, mod="am",
               agc=False, if_gain=30, rf_gain=2, squelch_mode="auto")
-    app.save_state(st)
+    appstate.save_state(st)
     monkeypatch.setattr(app, "_live_mode", lambda: "voice")
     entered = []
 
@@ -371,11 +363,11 @@ def test_antenna_check_reenters_voice_when_live_params_differ_from_probe(client,
 def test_antenna_check_skips_reentry_when_live_params_match_probe(client, paths, monkeypatch):
     """הצד השני: כשהמצב החי *כן* זהה לתנאי הבדיקה — לא עושים restart מיותר
     (‏~3 שניות של קטיעת שמע) רק כדי להגיע לאותה מדידה בדיוק."""
-    st = app.load_state()
+    st = appstate.load_state()
     st.update(app_mode="voice", freq=121.5, mod="am", agc=True,
-              if_gain=app.IF_GAIN_DEFAULT, rf_gain=app.RF_GAIN_DEFAULT,
+              if_gain=config.IF_GAIN_DEFAULT, rf_gain=config.RF_GAIN_DEFAULT,
               squelch_mode="open")
-    app.save_state(st)
+    appstate.save_state(st)
     monkeypatch.setattr(app, "_live_mode", lambda: "voice")
     entered = []
     monkeypatch.setattr(app, "_enter_voice", lambda p: entered.append(p) or (None, None, False))
@@ -396,6 +388,6 @@ def test_antenna_check_refused_while_satcom_live(client, paths, monkeypatch):
     monkeypatch.setattr(app, "_enter_voice", lambda params: entered.append(1) or (None, None, False))
     r = client.post("/api/antenna/check", json={"freq": 121.5, "calibrate": True})
     assert r.status_code == 409
-    assert not entered and not app.load_state().get("signal_baseline")
+    assert not entered and not appstate.load_state().get("signal_baseline")
     assert app.TUNE_LOCK.acquire(blocking=False)   # הנעילה שוחררה
     app.TUNE_LOCK.release()

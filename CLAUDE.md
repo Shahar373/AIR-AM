@@ -77,6 +77,9 @@
 `Conflicts` (כל יחידה מצהירה Conflicts מול *כל* קודמותיה => כל הזוגות מכוסים,
 דו-כיווני; `airam-satcom` מצהיר מול שלושת האחרים) — הפעלת אחת עוצרת אוטומטית את השאר.
 **אי אפשר שניים מהם בו-זמנית עם SDR אחד.** מעבר מצב = ~3 שניות.
+עם **מקלט שני** (v2.33+) יש שלושה צרכנים נוספים על המשני (`airam-acars2`/`rtl_airband2`/`airam-vdl2-2`)
+שרצים *לצד* הקול על הראשי — Conflicts מול כל השאר, אבל לא מול `rtl_airband` (ר' §5, המצבים הכפולים;
+נאכף ב-`tests/test_systemd_units.py`).
 
 **תפיסת ההפעלה — אין "מצב ראשי", airam-web הוא המתזמר:** קול/ACARS/VDL2/SATCOM הם
 "אפליקציות" שוות-מעמד על משאב ה-SDR, ו-`off` (standby) הוא המצב הניטרלי היחיד.
@@ -99,16 +102,45 @@ CLAUDE.md                   # ← המסמך הזה: ארכיטקטורה + פי
 webtune/
   app.py                    # ★ הליבה: שרת Flask. בורר תדרים, ACARS, VDL2, SATCOM, סריקה,
                             #   רוסטר מאוחד, מד שדה + בדיקת אנטנה, דוח סשן, REST API, יומן,
-                            #   הקלטות, תמלול, METAR, מדדי RF, מעבר מצבים, ארכיון חיפוש. ~5200 שורות.
+                            #   הקלטות, תמלול, METAR, מדדי RF, מעבר מצבים, ארכיון חיפוש. הקובץ הגדול בפרויקט.
   adsb.py                   # ניתוח ADS-B עצמאי: מסלול פעיל + שיבוש GPS + סדרת סשן +
                             #   buffer מתגלגל לשחזור-סשן (docs/session-replay-design.md,
                             #   שלב 1) + שכבת הנתונים של ההצלבה (lookup ממוקד/trace/OpenSky,
                             #   אינדקס hex, רישום↔hex). thread נפרד. ידני:
                             #   `python3 adsb.py [--selftest | --lookup reg G-ZBKM | --trace 406f79 [epoch]]`.
+  acars_parse.py            # נרמול ופענוח ACARS/VDL2/SATCOM: `_normalize_acars/vdl2/satcom` + כל ה-parsers, טבלאות ה-labels, כיוון מבני,
+                            #   `_libacars_decode`/`_decode_libacars_app`/`_run_libacars`. טהור — בלי Flask/state/systemd (נבדק מכנית).
+                            #   הוצא מ-app.py בשלב ג2. ⚠ קוראים אליו כ-`acars_parse.<שם>` (לא `from … import`).
+  appstate.py               # המצב השמור (state.json): `STATE_PATH`, `DEFAULT_STATE`, `load_state`, `save_state`, `_merge_state` (+`_STATE_LOCK`, דגל פגימה).
+                            #   תלוי רק ב-`config`/`recordings`(ברירת שפת תמלול)/`storage`. ⚠ קוראים אליו `appstate.<שם>` — לא `state` (משתנה מקומי נפוץ
+                            #   שמסתיר מודול). בבדיקות: `monkeypatch.setattr(appstate, "STATE_PATH", …)`. הוצא בשלב ג2.
+  config.py                 # נתונים טהורים: בנקי תדרים (`ACARS_BANKS`/`VDL2_BANKS`/`SATCOM_BANKS` + `*_FREQS_DEFAULT`), רווחים (`IFGR_*`/`RFGR_*`/`SNR_*`),
+                            #   `CHAN_FILTERS`, `DENOISE_ENGINES`, `DISCONNECT_DROP_DB`. בלי לוגיקה/IO. ⚠ קוראים אליו כ-`config.<שם>`; ב-`_FEEDS` כשם-מחרוזת "config.X".
+                            #   קיים כדי ש-appstate לא ייצור ייבוא מעגלי. הוצא בשלב ג2. עריכת ברירת מחדל קבועה — כאן.
+  experiment.py             # רשם ניסוי RF (`_rflog_*`, `_parse_airband_conf`) + ניסוי הכיול האוטומטי (`_experiment_*`, `_exp_*`, `EXP_*`, `_experiment_summary`).
+                            #   באותו מודול כי תלויים הדדית. ⚠ תלויות ב-app (`_enter_voice`, `_probe_params`, `_restore_after_probe`, `_sample_probe_stats`,
+                            #   `_live_mode`, `TUNE_LOCK`, `STATS_PATH`/`CONFIG_PATH`, `ANTENNA_CHECK_SAMPLE_SEC`…) **מוזרקות** ב-`experiment.bind(...)` (בסוף app.py)
+                            #   כ-lambda שפותר את השם בזמן הקריאה ⇒ החלפה על `app` בבדיקות ממשיכה לעבוד. אין לייבא `app` מכאן (`__main__` ⇒ עותק שני).
+                            #   בבדיקות: `RFLOG_PATH`/`EXP_*`/`RFLOG_*` על `experiment`; `_enter_voice`/`ANTENNA_CHECK_SAMPLE_SEC`/`TUNE_LOCK` נשארים על `app`. הוצא בשלב ג2.
+  xcheck_jobs.py            # תור ההצלבה מול ADS-B: `_xc_submit` (heap בלבד — נקרא מה-listeners), `_xc_worker` (שני שלבים), `_xc_evaluate`/`_xc_collect`,
+                            #   `_xc_store` (תקצירי פיד), `_xc_save_event`/`_xc_read_events` (ראיות), `XC_*`. ⚠ המעגליות מול הבאפרים של הפידים נפתרת בהזרקה
+                            #   `xcheck_jobs.bind(buffers=…, day_bounds=…, version=…)` (בסוף app.py, lambda שפותר את `_xc_buffers` בזמן קריאה). נתיבי HTTP,
+                            #   `_xc_feed_payload`, `_xc_export`, `_xc_buffers` נשארו ב-app.py. בבדיקות: `xcheck_jobs._xc_heap`/`XC_QUEUE_MAX`/`XC_EVENTS_PATH`. הוצא בשלב ג2.
+  recordings.py             # הקלטות (`_rec_*`, `_iter_recordings`, `_sweep_recordings`, `_scan_new_recordings`), ★ שמורות (`saved/`,
+                            #   `_move_recording`, `_saved_usage`), תמלול (sidecar `.tx.json`, `_whisper_*`, `_transcribe_file`,
+                            #   `_tx_next_target`, `transcribe_worker(get_cfg)`) ועזרי סשן (`_session_dir`, `_session_clip_paths`).
+                            #   עובד על קבצים בלבד — בלי Flask/state/systemd (pyflakes: כל שם מוגדר). נתיבי ה-HTTP ו-`load_state`
+                            #   נשארו ב-app.py (ה-worker מקבל `(lang, auto)` דרך `get_cfg`). ⚠ קוראים אליו כ-`recordings.<שם>`;
+                            #   הבדיקות מחליפות `REC_DIR`/`WHISPER_*`/`_write_tx` על `recordings`, לא על `app`. הוצא בשלב ג2.
+  storage.py                # כתיבה אטומית (`atomic_write`, fsync לקובץ+תיקייה) וקריאה/כתיבה של JSONL (`read_log_lines`,
+                            #   `append_line_on_boundary`, `jsonl_records`, `trim_jsonl_log`, `csv_safe`). בלי תלות ב-app. ⚠ קוראים
+                            #   אליו כ-`storage.<שם>` (לא `from storage import`) — כדי שהחלפה בבדיקה תשפיע. הוצא מ-app.py בשלב ג2.
+  diag.py                   # יומן בדיקה וייצוא לוגים — החלק הטהור: פענוח journald/systemctl show,
+                            #   אירועי קרנל/יחידות, analyze (תקין/אזהרה/תקלה — רק מעובדה שנרשמה), summary.md.
   xcheck.py                 # ★ הצלבת הודעות מול ADS-B + אופק רדיו/BLOS — פונקציות טהורות בלבד
                             #   (גאודזיה, אופק, זהות, מיקום-בזמן, קריטריונים). ר' §5.
   static/
-    index.html              # ה-UI כולו (HTML+CSS+JS inline, ~5800 שורות). PWA. 5 תצוגות:
+    index.html              # ה-UI כולו (HTML+CSS+JS inline). PWA. 5 תצוגות:
                             #   🏠 מרכז (בית/standby/scan, כולל דוח סשן+התראות) + קול + ACARS +
                             #   VDL2 + SATCOM. ACARS/VDL2/SATCOM שלושה מופעים סימטריים של אותו
                             #   פקטורי createDataView (ר' §7); מד השדה — פקטורי מקביל, שני.
@@ -186,7 +218,10 @@ udev/
   99-airam.rules           # חיבור RSP1B (Vendor 1df7) → restart אוטומטי לשירותי SDR.
 
 tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/systemd ממוקפים).
-  conftest.py              # מוסיף webtune/ ל-sys.path.
+  conftest.py              # מוסיף webtune/ ל-sys.path + fixtures משותפים: `client` (לפי ה-`paths` של הקובץ)
+                           #   ו-`no_sleep`. קובץ עם fixture באותו שם דורס (‏test_sdr/test_security/test_xcheck_api).
+  helpers.py               # `ok_proc` (תוצאת subprocess מוצלחת מזויפת), `ORIGIN`.
+  dual_env.py              # סביבת המצבים הכפולים: `env`/`env2` (systemd מדומה), `A`/`B` (serials), `_roles`/`_params`.
   test_app.py              # render_config, parse, presets, מדדים, יומן, רולבק/נפילה-ל-off.
   test_acars.py            # נרמול ACARS, כיוון מבני (block ID), latlon, labels, ATIS, OOOI, actype,
                            #   מעברי מצב; פערי קליטת 24.10.2026 (label 11/15/16, QP–QS, B3/B4, זנב פגום).
@@ -202,13 +237,20 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_adsb_enrich.py      # היתוך ADS-B↔ACARS: העשרת /api/acars מ-snapshot של adsb.py (בלי רשת).
   test_adsb_lookup.py      # הרחבת adsb.py להצלבה: זמן מדידה, by_hex, רישום↔hex, lookup (cache/קצב/
                            #   fallback), parse/fetch trace, OpenSky, gzip/חסם גודל — רשת ממוקפת.
+  test_diag.py             # יומן בדיקה: פענוח journald, analyze (בלי ספים), רשם start/mark/stop, רישום בקשות
+                           #   (בלי headers, trace מוחלף בגודלו), המשך אחרי restart, ZIP הייצוא, כלים חסרים.
   test_xcheck.py           # xcheck.py: Vincenty, אופק, זהות/טיסה, 4 קטגוריות מיקום, הערכה — G-ZBKM.
   test_xcheck_api.py       # שילוב: /api/station, תור+worker דו-שלבי, /api/xcheck/verify (G-ZBKM היסטורי,
                            #   re-decode, סתירה, בלי ADS-B), ראיות/סינון/ייצוא, worker לא קורא את ה-buffer.
   test_recordings.py       # ★ שמירת הקלטות (saved/, מכסה תחת מרוץ-מקביל, ?starred=1, ZIP) +
                            #   תמלול (5 מצבי tx.state, תור מבוסס-sidecar ששורד restart, שתי
                            #   שפות/מודלים, fallback מודל, retention עמיד ל-stat שנכשל).
-  test_security.py         # _guard: Origin/CSRF, PIN (55 שורות).
+  test_path_isolation.py   # שער הבידוד: ‏conftest מנתב כל נתיב-מערכת (/var,/etc,/run,/opt,/usr) של כל מודול ל-tmp; נכשל אם נשאר אחד.
+                           #   ⚠ בדיקה שצריכה את הערך האמיתי (מול install.sh/systemd) — `conftest.real_path(app, "NAME")`.
+  test_security.py         # _guard: Origin/CSRF, PIN.
+  test_systemd_units.py    # אינווריאנטות היחידות: Conflicts לכל זוג צרכנים (חוץ מהמשני לצד הקול), אף צרכן לא
+                           #   enabled, Requires+PartOf=sdrplay, StartLimit רק ל-satcom ורק ב-[Unit].
+  test_adsc_matrix.py      # מטריצת ADS-C: מיקום מותר ⟺ הפענוח לא נכשל וגם הכיוון אינו uplink, בשלושת המסלולים.
   test_frontend.py         # UI בלי דפדפן: `node --check` על הסקריפט ה-inline + בדיקות סטטיות.
   test_ui_browser.py       # ★ UI בדפדפן אמיתי (Playwright, API מזויף ב-route interception):
                            #   אישור bias-T ב-SATCOM, כישלון כניסה⇒בית, הודעות SDR-חסר, ארכיון,
@@ -253,6 +295,7 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
                            #   ל-TRACK_BUFFER_MIN, path-traversal ב-<id>/<name>.
 
 docs/                       # מסמכי תכנון/החלטות. מתעדים *למה* — ומה נדחה ועל סמך מה.
+  lessons-learned.md        # ★ הסיפורים שמאחורי הכללים ב-§5/§7/§12 (ADS-C/CPDLC כיוון, תמלול, ★, retention, renderStats) — כלשונם.
   field-station-roadmap.md  # מפת הדרכים שהובילה למד השדה, דוח הסשן ורוסטר המטוסים.
   satcom-feasibility.md     # היתכנות ואפיון מצב SATCOM (מומש).
   dual-sdr-feasibility.md   # היתכנות שני SDR (RSP1A+RSP1B) — קול כפול / קול+ACARS, בספק 3A (מומשו v2.34/v2.35;
@@ -271,7 +314,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
                             #   מפת טווח קליטה, פעילות לפי שעה + הצעת לוח סריקה, היסטוריית מסלול/GPS, יומן מטוסים,
                             #   ומקלט GPS ב-USB (VK-162) כמיקום תחנה/חיישן שיבוש מקומי/שעה. טרם מומש.
   session-replay-design.md  # ★ תכנון "שחזור סשן" (מפה+אודיו על ציר זמן). שלבים 0–2 בוצעו
-                            #   (buffer מתגלגל + POST /api/sessions) — ר' §11 למימוש שנותר (UI).
+                            #   (buffer מתגלגל + POST /api/sessions), ושלב 3 (רשימה + נגן ב-UI) — ר' §7.
   denoise-design.md         # ★ סינון רעשים חי (מומש, v2.29.0): ארכיטקטורה מקבילית, ממצאי מקור (rtl_airband
                             #   udp_stream, Icecast fallback), הניסוי והחלטת המנוע, ניתוח כשלים, מה נדחה, אימות על ה-Pi.
   audio-comfort-design.md   # ★ המשך ל-denoise-design (מומש, v2.32.0): האזנה על ATC אמיתי פסלה את RNNoise+
@@ -326,6 +369,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | `/var/lib/airam/recordings/saved/` | הקלטות **שמורות** (★) — **תת-תיקייה, לא רשימה בקובץ צד**. עד 100 קבצים / 100MB, פטורות לגמרי מ-`_sweep_recordings` (‏`glob("*.mp3")` אינו רקורסיבי — הפטור מגיע ב*אפס* שורות לוגיקה, ר' §5/§12) | app.py (`/api/recordings/star`) |
 | `/var/lib/airam/sessions/<id>/` | סשן שמור (שחזור-סשן שלב 2) — `meta.json` (אטומי), `track.jsonl.gz` (חתך `track.jsonl` בטווח), `clips/*.mp3` (הקלטות רלוונטיות — שמורה מ*עתיקה*, לא-שמורה מ*ועברת*). אין retention אוטומטי — מחיקה היא `DELETE /api/sessions/<id>` בלבד | app.py (`POST /api/sessions`) |
 | `/run/rtl_airband_stats.txt` | מדדי RF (tmpfs, ~1Hz) | rtl_airband |
+| `/var/lib/airam/diag.jsonl` | יומן בדיקה: `start`/`resume`/`stop`, `sample` כל 5ש' (מצב, services, מתח, load), `mark`, `request` (פעולה משנת-מצב מהטלפון). **רק בזמן בדיקה** (עצירה אוטומטית 4ש'); append+`fsync`; מעל 5MB בהתחלה ⇒ `.prev`. בדיקה שלא נעצרה ממשיכה בעלייה (`_diag_boot`) | app.py (`/api/diag`) |
 | `/var/lib/airam/rf_log.jsonl` | רשם ניסוי RF — שורה לכל כתיבה חדשה של המדדים + הקונפיג שרץ + סימוני משתמש + תוצאות בדיקת-אנטנה. **רק כשמופעל** (כבוי כברירת מחדל, כיבוי אוטומטי אחרי שעתיים); append+`fsync` (תוצאת ניסוי שדה); מעל 5MB בהפעלה ⇒ `.prev` | app.py (`/api/rflog`) |
 
 ---
@@ -334,7 +378,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 
 הקובץ מאורגן בבלוקים מסומנים `# --- ... ---`. נקודות עיקריות:
 
-- **קבועים (ל~145):** נתיבים, gain של SDRplay (IFGR 20–59 / RFGR 0–9, **קטן=רווח גדול**),
+- **קבועים (ראש הקובץ):** נתיבים, gain של SDRplay (IFGR 20–59 / RFGR 0–9, **קטן=רווח גדול**),
   ספי squelch, קבועי ACARS, מילוני `ACARS_LABELS` ו-`_ACARS_DIR_BY_LABEL` (חלקם
   התווספו רק מקליטת שטח אמיתית — למשל `A0`/`1B`/`4P`/`2F`, לייבלים שנצפו
   בקליטת SATCOM ראשונה מוצלחת ולא היו מתועדים קודם; ר' §12), הקלטות, whisper.
@@ -349,7 +393,13 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   ו-`fft_size<256`/קצב שאינו כפולה של 16kHz אסורים. `_parse_tune`: מפתח שלא נשלח ⇒ **הערך השמור**.
   `_probe_params`/`_exp_voice_params` לא נושאים אותם ⇒ בדיקת אנטנה/ניסוי בתנאים קבועים;
   `_restore_after_probe`/`_rollback` מחזירים את בחירת המשתמש.
-- **restart מאומת + רולבק:** `_restart_and_verify` בודק שה-SDR נוכח ושהשירות עלה;
+- **שלושת פידי הדאטה — מימוש אחד:** `_FEEDS` (מפרט לכל פיד: פורט, jsonl, נעילה/buffer/seq, נרמול, זהות
+  ל-dedup, שירותים, adsb) + `_feed_listener`/`_load_feed_history`/`_feed_response`. ⚠ ערכי המפרט הם *שמות*
+  גלובליים שנפתרים בזמן הקריאה (`_fv`) — הבדיקות מחליפות `app.ACARS_LOG_PATH`/`app._acars_seq` ישירות.
+  `_acars_listener`/`_load_vdl2_history`/`api_satcom` וכו' הם עטיפות דקות (נקראות מ-`__main__` ומהבדיקות).
+- **הפעלת צרכן מאומתת:** `_stop_services` (עצירה best-effort לפי סדר) + `_restart_verified` (restart + פולינג
+  ~3.5ש' שהשירות *נשאר* למעלה) — משותפים לכל `_enter_acars/vdl2/satcom` ו-`_start_acars2/voice2/vdl2b`.
+- **restart מאומת + רולבק (קול):** `_restart_and_verify` בודק שה-SDR נוכח ושהשירות עלה;
   `_rollback` מחזיר לקונפיג קודם אם נכשל **ומאומת** (מחזיר bool; כישלון ⇒ `_fail_to_off`).
   כיוונון אחד בכל רגע (`TUNE_LOCK`). **כל שמירת state אחרי פעולה ארוכה עוברת
   `_merge_state(changes)`** (טוען טרי + ממזג רק את מפתחות הקורא, תחת `_STATE_LOCK`) —
@@ -360,7 +410,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   שרץ בפועל או None), `_enter_voice` (peer סימטרי של `_enter_acars`/`_enter_vdl2`/
   `_enter_satcom`: עצירת צרכני דאטה + write_config + verify), `_fail_to_off` (כישלון
   כניסה ⇒ standby + state off+prev_mode + payload 500 — **לעולם לא fallback לקול**).
-  `/api/mode` הוא dispatcher מאוחד לששת המצבים (voice/acars/vdl2/**satcom**/off/**scan**);
+  `/api/mode` הוא dispatcher מאוחד לכל המצבים (voice/acars/vdl2/**satcom**/off/**scan** + שלושת המצבים הכפולים);
   acars/vdl2/satcom חולקים זנב גנרי `(key, default, sanitize, wcheck, enter)`.
   `_boot_restore` (thread ב-startup) משחזר את המצב השמור באתחול — ה-orchestration
   שמאפשר לאף צרכן לא להיות enabled ב-systemd.
@@ -395,7 +445,8 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   כניסה ללוח שאף רגל שלו לא בחלון **עוצרת את הצרכן שרץ** (`_enter_standby`) — אחרת
   SATCOM נשאר דלוק (bias-T) בזמן שה-UI מציג "ממתין". רגל "זהה" לא נכנסת מחדש רק
   כשהצרכן שלה עדיין `active` (ה-reconcile לא מטפל ב-scan).
-- **ACARS:** `_acars_listener` (thread, מאזין UDP 5556), `_normalize_acars` (הלב —
+- **ACARS** (⚠ כל פונקציות הנרמול/הפענוח שבסעיפים ACARS/VDL2/SATCOM שלמטה — `_normalize_*`, `_parse_*`, `_libacars_*`, טבלאות ה-labels —
+  יושבות עכשיו ב-`acars_parse.py`, לא ב-`app.py`): `_acars_listener` (thread, מאזין UDP 5556), `_normalize_acars` (הלב —
   ממיר JSON גולמי לכרטיס אחיד: label→קטגוריה, **כיוון מבני מה-block ID**
   (`_acars_block_dir`: ספרה=downlink / אות=uplink — הכלל של acarsdec עצמו, שפולט
   msgno/flight רק ב-downlink; `block_id` נשמר בכרטיס. `_ACARS_DIR_BY_LABEL`/header —
@@ -422,7 +473,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   מקליטה אמיתית; ל-16 גם וריאנט מופרד-`/` בלי waypoint; **CPDLC נבדק ונמצא ללא תעבורה
   בפועל** בקליטה שנבדקה — לא מומש),
   `_acars_adsb` (העשרת ADS-B לזנבות שבזיכרון — ראה §6),
-  `_enter_acars` (כתיבת env + מעבר שירות), `_enter_standby` (כיבוי **ארבעת** הצרכנים, משאיר
+  `_enter_acars` (כתיבת env + מעבר שירות), `_enter_standby` (כיבוי **כל** צרכני ה-SDR — כולל אלה שעל המשני, משאיר
   sdrplay חי), `_acars_window_error` (wrapper דק מעל `_window_error` הגנרי — ≤8 ערוצים,
   span ≤ `ACARS_WINDOW_MHZ`), `ACARS_BANKS` (בנקי תדרים, כל בנק בחלון אחד), `_today_start`,
   `_day_bounds` (גבולות יום מקומי לארכיון החיפוש — `?day=YYYY-MM-DD` ב-`/api/acars`,
@@ -436,76 +487,18 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   ה-AVLC של צד-המטוס; `dir` מבני מסוג הכתובת דורס heuristics), `write_vdl2_env` (**ממיר
   MHz→Hz**, `VDL2_GAIN` מכיל את הדגל כולו או ריק), `_enter_vdl2` (עוצר rtl_airband+acars,
   מרים dumpvdl2, verify), `_vdl2_window_error`, `_vdl2_adsb`, `VDL2_BANKS`. התמדה:
-  `_append_vdl2_log`/`_trim_vdl2_log`/`_load_vdl2_history` (clones של צמד ה-ACARS).
+  `_append_vdl2_log`/`_trim_vdl2_log`/`_load_vdl2_history` (עטיפות מעל `_FEEDS`, ר' למעלה).
 - **SATCOM (מצב רביעי, ACARS דרך לוויין Inmarsat):** `_satcom_listener` (thread, מאזין
   UDP 5558 מ-`inmarsat-sniffer`), `_normalize_satcom` (מסלול יחיד — הכלי מפיק רק ACARS:
   מסנתז dict בסגנון acarsdec משדות `isu.acars.*` (סכמת JAERO JSONdump, אומתה מ-`feed.c`
   במקור) ומזרים דרך `_normalize_acars` ⇒ כל הפרסרים חלים; `arinc622` מקונן ⇒ ADS-C —
-  **אבל מיקום ADS-C נאמן *רק* כש-`decode_failed=False`, לא סתם "יש `libacars`"
-  (⚠ תוקן אחרי regression — ר' §12).** ראשונית תועד "מאומת בקליטת שדה אמיתית" על
-  סמך הודעת A6 בודדת שהניבה `pos_src="adsc"` עם נ"צ — **זו הייתה מסקנה מוקדמת
-  מדי**: לא הושוותה מול מקור-אמת חיצוני (ADS-B). קליטה נוספת חשפה הודעת A6
-  אמיתית (C-GHKX) עם `decoded="לא פוענח"` (כלומר `err:true` פנימי) **שעדיין
-  הניבה מיקום** — 5.69°N/2.11°E, בעוד המטוס האמיתי (מאומת מול ADS-B חיצוני)
-  היה ~45.85°N/‑29.6°W, אלפי ק"מ משם. הסיבה: `_scan_latlon` רץ *ללא תלות*
-  ב-`decode_failed` וסרק רקורסיבית כל שדה numeric בשם lat/lon — כולל שריד-
-  מפענוח-חלקי במבנה שהמפענח עצמו סימן כנכשל. **תוקן**: מיקום מ-ADS-C (גם
-  ב-SATCOM וגם ב-VDL2 מסלול B — אותה משפחת באג בשני המקומות) מותנה עכשיו
-  ב-`not decode_failed`; `group="position"` גם הוא מותנה (אחרת כרטיס-שנכשל
-  היה מסונן תחת "📍 מיקום" ב-UI בלי מיקום אמיתי — `group` משמש לסינון, לא
-  רק לצביעה). `_libacars_decode`
-  (משותף ל-SATCOM/VDL2 מסלול B) מחזיר 3-tuple: `(kind, text, decode_failed)` —
-  `decode_failed=True` (נגזר מסריקה רקורסיבית אחר `"err":true` כלשהו; §12: לא
-  ממציאים טקסט, אבל *כן* חושפים שהיה ניסיון) מציג `decoded="לא פוענח — libacars
-  החזיר שגיאת פענוח; הטקסט הגולמי נשמר"` במקום `None` סתמי, כדי להבדיל "לא ניסינו"
-  מ"ניסינו ונכשלנו" (⚠ הניסוח הקודם ("כנראה איתות שולי") הוסר — קליטת 14.08.2026
-  הוכיחה שזו לא הייתה הסיבה בפועל, ר' הבולט הבא).
-  **⚠ המשך: `decode_failed=False` לבד עדיין לא היה מספיק — תוקן פעם שנייה
-  (משתמש הצליב מול ADS-B חיצוני, לא אנחנו מצאנו את זה).** ADS-C משתמש ב-tag
-  מספרי (7 וכו') ש**פירושו הפוך לגמרי** לפי כיוון ההודעה — מאומת ישירות
-  מ-`libacars/adsc.c` במקור: `la_adsc_uplink_tag_descriptor_table` (tag 7 =
-  "Periodic contract request", קרקע→מטוס, *אין בו מיקום מטוס בכלל*) מול
-  `la_adsc_downlink_tag_descriptor_table` (tag 7 = "Basic report", מטוס→קרקע,
-  מיקום אמיתי). אם ה-uplink נותח עם טבלת downlink (או להפך) — הפענוח "מצליח"
-  מבנית (**אין שום `err`שמתגלה**, `decode_failed=False`), אבל שולף בייטים
-  שהם בכלל פרמטרי-בקשה כאילו הם נ"צ. נצפה בפועל: **גם** ההודעה ש"הוכיחה"
-  שה-מנגנון עובד (A7-BBB, 18.34°N/2.11°E) **וגם** C-GHKX (5.69°N/2.11°E)
-  היו `dir="uplink"` — כלומר ה"הוכחה" המקורית עצמה הייתה אותו באג, לא ראיה
-  נגדית לו. **תוקן**: `_structural_dir` (SATCOM: `isu.src/dst.type`, מחושב
-  *לפני* הקריאה ל-`_normalize_acars` ולא אחריה כמו קודם; VDL2: `direction`
-  מ-AVLC src/dst.type, כבר זמין מוקדם בפונקציה) — `adsc_dir_ok = dir != "uplink"`
-  חוסם מיקום ADS-C כש-uplink, **גם** בלי `err`. חסר-רמז (ACARS-over-VHF רגיל,
-  שכמעט ולא מפיק ADS-C בפועל) permissive בכוונה — לא לשנות התנהגות במקום
-  שלא נבדק. **המשמעות: אין לנו עדיין ולו הוכחה אחת ש-ADS-C downlink אמיתי
-  עובד** — כל קליטה עד כה הייתה 100% uplink (ר' §12, "P channel בלבד"), ולכן
-  כל מיקום שהוצג עד עכשיו (כולל ה"הצלחה" המתועדת) היה על תקן שגוי מבנית.
-  לוקחים ברצינות שגם התיקון *השני* הזה נבנה בלי לכידת --feed -v גולמית של
-  downlink אמיתי — הטסטים המתאימים מתועדים ככאלה שלא-מאומתים-נגד-שדה
-  (ר' `tests/test_satcom.py`), רק נגד-הפרוטוקול (מאומת מ-`libacars` במקור).
-  **⚠ CPDLC (label AA) נצפה בשפע בקליטה** (14 הודעות ב-33 דק', וקליטה נוספת
-  ב-14.08.2026: 12 CPDLC + 11 ADS-C, **כולן uplink**, מעטפות ARINC-622 תקינות)
-  אבל ברוב המקרים `decoded` הציג הודעת-כישלון — **וזו הייתה מסקנה שגויה**, לא
-  "המפענח נכשל ביישום המקונן" (איתות חלש/מקרי) כמו שתועד קודם כאן. **הסיבה
-  האמיתית: `inmarsat-sniffer` פענח את היישום המקונן בכיוון ASN.1 הלא-נכון.**
-  ‏CPDLC משתמש במבני-הודעה נפרדים לגמרי לכל כיוון (`FANSATCUplinkMessage` מול
-  `FANSATCDownlinkMessage`) — בדיוק אותה משפחת-באג כמו tag 7 ב-ADS-C (הבולט
-  הקודם), רק שכאן היא גם *מונעת* פענוח (מחזירה `err`) ולא רק מייצרת תוכן שגוי.
-  **תוקן**: `_decode_libacars_app` (ליד `_libacars_decode`) מריץ re-decode
-  מקומי עם `decode_acars_apps` — כלי ה-CLI ה**רשמי** של `libacars` (מותקן
-  ע"י `install.sh`, ר' §10), לא אקסטרקטור תוצרת-בית — בכיוון האמיתי מ-`structural_dir`
-  (‏uplink→`u`/GND2AIR, downlink→`d`/AIR2GND; כיוון לא-ידוע ⇒ לא מריצים, לא
-  מנחשים). **שתי הרצות, לא אחת — אומת מהמקור של libacars שזה הכרחי:**
-  ‏`LA_JSON=1` **לא** מכיל את הטקסט האנושי (ADS-C: רק מפתחות מספריים כמו
-  `contract_num`; CPDLC: הטקסט קיים אבל תחת `choice_label`, ש-`_libacars_decode`
-  לא קוצר כי הוא מחפש `text`/`msg`/`message` בלבד) — לכן הרצת **TEXT** (בלי
-  `LA_JSON`) היא המקור **היחיד** לטקסט הקריא (`raw["_libacars_text"]`,
-  עדיפות ראשונה ב-`_normalize_acars`), במקביל להרצת **JSON** שמוזרמת ל-
-  `raw["libacars"]` (עדיפות: re-decode מתוקן > הפענוח המקורי > כלום — כשל לא
-  מאבד הודעה) כך שכל מה שתלוי בה (`kind`, `decode_failed`, `adsc_dir_ok`,
-  `_scan_latlon`) ממשיך לעבוד ללא שינוי ארכיטקטוני. `error` (CRC המעטפת
-  הפנימית) **לא** מושפע מ-re-decode — ערוץ נפרד, אף פעם לא "מתקן" CRC כושל
-  אמיתי. `src/dst.type` "Aircraft/Ground Earth Station" קובע
-  `dir` מבני. **בלי `level`/`snr`/`freq`**
+  **מיקום ADS-C נאמן רק כש-`decode_failed=False` *וגם* הכיוון אינו uplink** (`adsc_dir_ok`; `_structural_dir` מחושב
+  *לפני* `_normalize_acars`; כיוון לא-ידוע = permissive). `_libacars_decode` מחזיר `(kind, text, decode_failed)`;
+  כישלון מוצג "לא פוענח — libacars החזיר שגיאת פענוח; הטקסט הגולמי נשמר" — בלי לנחש סיבה. `_decode_libacars_app`
+  מריץ re-decode עם `decode_acars_apps` (כלי ה-CLI הרשמי) בכיוון המבני — **שתי הרצות**: TEXT לטקסט הקריא
+  (`raw["_libacars_text"]`), JSON למבנה (`raw["libacars"]`); כיוון לא-ידוע ⇒ לא מריצים. re-decode לעולם לא מחליף
+  את בדיקת הכיוון ולא את `error` (CRC). הסיפור המלא (שלוש טעויות, מה נבדק מול המקור): `docs/lessons-learned.md` §1.
+  `dir` מבני מ-`isu.src/dst.type`. **בלי `level`/`snr`/`freq`**
   — הכלי לא חושף אותם (§12), ו-`isu.refno`≠MSN ⇒ `msgno` לא ממופה), `write_satcom_env`
   (לוויין `--satellite=`, `SATCOM_GAIN`=`--sdrplay-gain` (נייטיבי, לא `--soapy-gain`) או
   ריק=AGC — נבחר מה-UI דרך `_sanitize_satcom_gain` (`None`=AGC / int 20–59, ר' §12), `SATCOM_BIAS_TEE`=`-B`/ריק, `SATCOM_SKIP_C`=`--skip-c-channel`/ריק — ר' §12),
@@ -513,7 +506,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   תקרת-הפעלות קודמת עם `reset-failed` לפני ה-restart — ר' §12, מרים
   inmarsat-sniffer, verify), `_sanitize_satellite`/`_satcom_window_error` (לוויין יחיד
   מתוך `SATCOM_BANKS`, לא בנק תדרים), `SATCOM_BANKS` (לוויינים: AF1/4F3/3F5/F1). התמדה:
-  `_append_satcom_log`/`_trim_satcom_log`/`_load_satcom_history` (clones של צמד ה-VDL2).
+  `_append_satcom_log`/`_trim_satcom_log`/`_load_satcom_history` (עטיפות מעל `_FEEDS`).
   **אבחון (שלוש שכבות, כל אחת עונה על שאלה שהקודמת לא יכולה):** (1)
   `_fetch_satcom_web_state`/`api_satcom_health` — proxy מקומי (כמו `/stream`)
   ל-dashboard האבחוני המובנה של inmarsat-sniffer (`--web=SATCOM_WEB_PORT`,
@@ -547,7 +540,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   אומתה, ר' §12 ו-`docs/antenna-calibration-experiment.md`), `_sample_probe_stats`+
   `_restore_after_probe` (הלב של `POST /api/antenna/check`: מעבר זמני לקול,
   מדידה, שחזור המצב הקודם — best-effort גם בכישלון, לא נוגע ב-`state["app_mode"]`).
-  **רשם ניסוי RF** (`docs/antenna-calibration-experiment.md`): `_rflog_start`/`_rflog_stop`/
+  **רשם ניסוי RF** (⚠ הרשם והניסוי האוטומטי שלמטה יושבים ב-`experiment.py`, לא ב-`app.py`; ר' §3) (`docs/antenna-calibration-experiment.md`): `_rflog_start`/`_rflog_stop`/
   `_rflog_worker` (thread רק כשמופעל, `stop_evt.wait` ולא sleep), `_rflog_sample` (שורה רק
   כשחתימת ה-mtime של stats/conf השתנתה), `_parse_airband_conf` (הקונפיג *שבאמת רץ* — לא
   state, כי ה-probe לא כותב state), `_rflog_event` (סימונים + תוצאת כל `/api/antenna/check`,
@@ -562,6 +555,14 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   מבחין בין כתיבות התהליך הנוכחי ל-flush של הקודם — ⚠ השוואת `stats_mtime` ל-`conf_mtime`
   **לא** יכולה, כי ה-flush נכתב אחרי הקונפיג), `_experiment_summary` (פונקציה טהורה — חציונים,
   ירידה, "מזהה?" = הסף של המוצר עצמו; `None` כשחסר), `_read_rflog_run`.
+- **יומן בדיקה + ייצוא לוגים** (אחרי בלוק רשם ה-RF; הניתוח ב-`diag.py`): `_diag_start`/`_diag_stop`/
+  `_diag_worker` (דגימה `_diag_sample` = `_health_snapshot` + `_power_cached` כל `DIAG_SAMPLE_SEC`), `_diag_event`,
+  `_diag_after_request` (בזמן בדיקה: כל POST/PUT/DELETE ל-`/api/*` חוץ מ-`/api/diag*` נרשם עם body מקוצר —
+  ⚠ בלי headers (PIN), `trace_b64` מוחלף בגודלו; לעולם לא מפיל תשובה), `_diag_boot` (בדיקה שנקטעה ממשיכה
+  עם שורת `resume`), `_diag_window` (‏`?minutes=` או הבדיקה הפעילה/האחרונה ± דקה), `_diag_collect` (journald
+  כ-JSON ב-`_diag_cmd` — שאילתה אחת לכל היחידות + `_TRANSPORT=kernel` (לא `-k`: הוא רק האתחול הנוכחי),
+  `systemctl show`, קונפיג מ-`_diag_config_files()` — ⚠ **לעולם לא `airam.env`**, state עם נ"צ מעוגל; מקור
+  שנכשל נרשם ב-`collect_errors` ולא מבטל את החבילה). הרשאה ליומן: `airam` בקבוצה `systemd-journal` (install.sh 6b).
 - **תפקידי המקלטים — קיבוע לפי serial** (`docs/dual-sdr-feasibility.md` §3.1): עם שני מקלטי
   SDRplay, ‏`driver=sdrplay` בלי serial פותח את הראשון שה-API מחזיר — איזה מקלט נקבע במקרה.
   `_SERIAL_RE` (אותיות/ספרות 4–32, מעוגן) + `_sanitize_serial` — ערך לא תקין לא נכתב לשום
@@ -596,6 +597,8 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   `_parse_voice2` (זהה לראשי ⇒ 400 — גם שמות ההקלטות היו מתנגשים). `POST /api/tune2` — רק המשני, תחת `TUNE_LOCK`,
   כשל ⇒ restart לתדר הקודם. `/api/metrics?ch=2`, `/stream?m=live2` (רשימה סגורה). `_voice_tune` במצב מורכב שומר
   את המשני. UI: `voice2Mode`, `setComposite(m)`/`isVoiceMode`/`viewFor` (מקור יחיד לדגלים), `#homeCardVoice2`,
+  `MODES` (טבלה: `decoder`/`tabs`/`secondary`/`secName` לכל מצב — מקור יחיד ל"מה רץ במצב X"), `decoderOf`,
+  `syncDecoders(m)` (מיישר את שלושת מופעי הדאטה), `compositeFromFlags()`; `COMPOSITE_MODES` נגזר מהטבלה.
   `#v2Box` (בתוך פאנל הרדיו — לא פאנל בגריד) עם `player2` נפרד, `pollV2Metrics` (2ש'). נגן 2: ניסיונות
   חוזרים על error/ended (`v2Retry`), עצירה רק אחרי מעבר מצב שאושר. 🎧 **ערוץ לכל אוזן** (`ensureEarGraph`/
   `applyEars`): Web Audio — StereoPanner+Gain לכל נגן; ⚠ הסטרים *חייב* same-origin (`/stream?m=…`) כשהגרף קיים,
@@ -648,6 +651,8 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   `/live.mp3` למבקשי `/clean.mp3` כשהסינון לא חי, ומעביר מאזינים בלי ניתוק כשהוא קורס.
 - **REST API** (ראה §8). **יומן/הקלטות:** `_activity_watcher` (thread סורק MP3 חדשים),
   `_sweep_recordings` (retention — **לא רואה `saved/` בכלל**, ר' למטה).
+- **הקלטות/★/תמלול/סשנים:** (⚠ הלוגיקה שעל קבצים — `_rec_*`, `_iter_recordings`, `_sweep_recordings`, sidecar התמלול, `_whisper_*`, `_session_dir` —
+  יושבת עכשיו ב-`recordings.py`; ב-app.py נשארו רק נתיבי ה-HTTP, יומן השידורים ו-wrapper דק ל-`_transcribe_worker`.)
 - **הקלטות שמורות (★) + תמלול — שני פיצ'רים מחוברים:** הפטור מ-retention הוא
   **מיקום הקובץ**, לא רשומה במאגר-מצב: `_saved_dir()` (`REC_DIR/saved/`),
   `_rec_path`/`_is_saved` (מחפשים בשתי התיקיות), `_rec_event` (בונה שורת-יומן
@@ -681,7 +686,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   קורא `adsb.read_track_slice`, ובונה את `sessions/<id>/`: קליפ **שמור מ*עתיק***
   (`shutil.copy2` — נשאר גם מוגן ב-`saved/`), קליפ **רגיל מ*ועבר*** (`_move_recording`
   הקיים — משתחרר מ-`_sweep_recordings` בדיוק כמו ★, ר' §4.4 בתכנון), `track.jsonl.gz`
-  נכתב עם `gzip.open`+`os.replace`, `meta.json` עם `_atomic_write`; `app_mode`/`freq`
+  נכתב עם `gzip.open`+`os.replace`, `meta.json` עם `storage.atomic_write`; `app_mode`/`freq`
   הם תמונת-מצב *נוכחית* (מ-`load_state()`), לא היסטוריית-מעברים — אין ל-AIR-AM
   יומן כזה, סטייה מתועדת מהתכנון המקורי), `api_session_detail` (dispatcher
   ל-`GET`/`DELETE /api/sessions/<id>` — ה-GET מעשיר כל קליף ב-`tx` **שנקרא
@@ -691,7 +696,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   ‏`/recordings/<name>`), `api_session_export` (`GET .../export.zip`, אותו דפוס
   בדיוק כמו `api_starred_zip`). **בלי retention אוטומטי לסשנים** — מחיקה היא
   ‏`DELETE` מפורש בלבד, עקבי עם "לא מוחקים מה שהמשתמש הגן עליו".
-- **הצלבת ADS-B + אופק רדיו / BLOS (`docs/adsb-crosscheck-design.md`):** שלוש שכבות —
+- **הצלבת ADS-B + אופק רדיו / BLOS (`docs/adsb-crosscheck-design.md`):** (⚠ התור, ה-worker, ההערכה והראיות — `_xc_*`/`XC_*` — יושבים ב-`xcheck_jobs.py`; ב-app.py נשארו נתיבי ה-HTTP ו-`_xc_buffers`) שלוש שכבות —
   `adsb.py` (נתונים), `xcheck.py` (ניתוח טהור), וכאן תזמור. ה-listeners קוראים
   `_xc_submit(src, rec)` אחרי ההתמדה — **הכנסה ל-heap בלבד** (נעילה לרגע, בלי רשת/I/O,
   לעולם לא זורק; מלא ⇒ `dropped`). `_xc_worker` (thread יחיד) מריץ `_xc_run_job` בשני
@@ -805,7 +810,7 @@ ADS-B מ-`GET /api/aircraft`, כולל כשה-SDR ב-standby; כולל מקור 
 נוכחית + ספירה-לאחור מקומית כל שנייה מול `scanStatus.next_switch_at` שמגיע
 מ-`GET /api/scan`; "ממתין לחלון הזמן הבא" כשאף רגל לא בחלון שלה כרגע). **אין תצוגה ייעודית
 לסריקה** — `showView` מחזיק חמש תצוגות (home/voice/acars/vdl2/**satcom**) ו-`applyMode`
-שישה מצבים; `scan` תמיד ממופה ל-`"home"` (הוא "אפליקציית-על", לא תוכן-תצוגה). הדף מושך מצב מ-`/api/*`
+את כל המצבים (כולל הכפולים, שנוחתים בתצוגת הקול); `scan` תמיד ממופה ל-`"home"` (הוא "אפליקציית-על", לא תוכן-תצוגה). הדף מושך מצב מ-`/api/*`
 ב-polling; ה-pollers של airspace/power/METAR/roster רצים בכל תצוגה, metrics/activity רק
 בקול. `pollSatcomHealth` (1ש' ב-satcom בלבד, `GET /api/satcom/health`, in-flight guard
 בדפוס `metricsInFlight`, קריאה מיידית ב-`showView`+אחרי כניסה מוצלחת — לא ממתינים
@@ -864,6 +869,9 @@ iOS: מתג ההשתקה משתיק Web Audio — רמז בלבד; ה-workaround
 ‏`showView`), 🧪 הפעלה/עצירה, שלושה כפתורי סימון (44px — כפפות/שטח) עם אישור גלוי ושעה
 ("✓ סומן: מנותק · 10:31:05" — בשטח אין דרך אחרת לדעת שהלחיצה נקלטה), וקישור הורדה.
 ההקלטה בצד השרת — ממשיכה כשהמסך כבוי.
+**יומן בדיקה** (`#diagCard` במסך הבית + `#diagChip` גלובלי ברצועת הסטטוס כשבדיקה רצה — נגיעה = `prompt` לסימון):
+`pollDiag` (10ש' + `visibilitychange` + `showView("home")`), `renderDiag`, `diagMark`, "🩺 בדוק" ⇒ `/api/diag/summary`
+(טקסט מהשרת רק ב-`textContent`, פירוט עם `unicode-bidi: plaintext`), וקישור הייצוא נגזר מ-`#diagWindow`.
 **ניסוי כיול אוטומטי** (`#expCard` במסך הבית + `#expBar` — סרגל **גלובלי** קבוע בתחתית, מחוץ
 ל-`<main>`, כי הבקשה לנתק/לחבר חייבת להופיע בכל תצוגה): `pollExperiment` (2ש' בזמן ריצה, 15ש'
 בבית כשלא רץ, ומיד ב-`visibilitychange` — חוזרים לטאב ואולי ממתינים לך), `renderExperiment`
@@ -871,7 +879,8 @@ iOS: מתג ההשתקה משתיק Web Audio — רמז בלבד; ה-workaround
 ה-AudioContext נוצר רק מלחיצה), `renderExpResult` (טבלה ב-`innerHTML` — ⚠ דרך `expEsc`, כי
 התוויות מהשרת מכילות מירכאות; נבדקה ב-360px).
 **אין build step** — עורכים את הקובץ ישירות. Leaflet vendored תחת `static/vendor/`
-(בלי CDN, עובד גם בלי אינטרנט).
+(בלי CDN, עובד גם בלי אינטרנט). ‏**כל מפה** נטענת דרך `loadLeaflet()` (Promise יחיד לכל הדף) +
+`leafletTiles(onFail)`/`leafletMarkerIcon()`; צבע מטוקן לציור ב-canvas/Leaflet — `cssVar(name, fallback)`.
 
 **טוקני עיצוב ב-`:root`:** גיאומטריה (`--r-card`/`--r-ctrl`/`--r-sm`), מרווח (`--sp-1..5`,
 בסיס 4px), הצללה (`--sh-card`/`--sh-1`/`--sh-blue`), משטחים (`--panel`/`--panel-2`/`--hover`)
@@ -905,18 +914,9 @@ cursor/filters משלו — כלום לא משותף בזיכרון בין הש�
 OOOI/דיווחי מיקום/הודעות טייס) חלשים משמעותית ותלויי-כיוון אנטנת המטוס. בלי
 פירוט כיווני, "P channel בלבד" ו"קליטה דו-כיוונית מלאה" נראים זהים בפיד —
 זו לא תקלה, אלא סימן ברור למה עוד לכוון/לחזק.
-**⚠ regression: `renderStats()` לא קורא מ-`msgs` (חלון-נגלל, `MAX`=500) עבור
-מספרים שאמורים לגדול כל הסשן.** `msgs` נועד *רק* לפיד/מפה/חיפוש — ברגע שסשן
-עובר 500 הודעות, `msgs.length` נתקע על 500 לנצח (הכי-ישן מוחלף בהכי-חדש, לא
-מצטבר), ובלי הפרדה `StTotal`/`StCraft`/`StPos`/`StUp`/`StDown` (כולם חושבו
-מ-`msgs` בעבר) "נתקעו" יחד איתו — נראה כאילו הקליטה הפסיקה לרשום מעל 500,
-כשבפועל הפיד המשיך לזרום כרגיל (נצפה בשטח בפועל, לא רק תיאורטית). התיקון:
-`totalMsgs` — משתנה נפרד שרק גדל (מתאפס רק יחד עם `lastId` בזיהוי restart של
-השרת, ר' `poll()`) — ו-`craft` (כבר לא נגזם, ר' `updateCraft`) הם המקורות
-ל-`StTotal`/`StCraft`/`StPos`; `StUp`/`StDown` מסוכמים מ-`craft[id].up/down`
-(שם ותמיד היו נצברים בלי הגבלה — הבאג היה רק בקריאה החוזרת דרך `msgs`
-ב-`renderStats`, לא בצבירה עצמה). `StRate` **נשאר** מבוסס-`msgs` בכוונה —
-קצב הוא מגמה עדכנית, לא ממוצע-כל-הסשן, וחלון-500 הוא בדיוק מה שרוצים שם.
+**`renderStats()` לא קורא מ-`msgs`** (חלון נגלל, `MAX`=500) למספרים שגדלים כל הסשן: `totalMsgs` ו-`craft` הם
+המקורות ל-`StTotal`/`StCraft`/`StPos`, ו-`StUp`/`StDown` מסוכמים מ-`craft[id].up/down`. `StRate` נשאר מבוסס-`msgs`
+בכוונה (מגמה עדכנית). הרקע: `docs/lessons-learned.md` §8.
 ארכיון-יום (`enterArchiveDay`/`exitArchive`) משמר/משחזר את `totalMsgs`
 כחלק מ-`liveSnapshot`, בדיוק כמו `lastId`/`feedMax`. הפקטורי עושה שימוש חוזר
 בעוזרים ה*טהורים* הגלובליים בלבד (`fmtTime`/`mkSpan`/`dirBadge`/`normReg`/`trackColor`/
@@ -1086,12 +1086,16 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/session` | דוח סשן ("מה קרה בזמן שלא הסתכלת"): כמות הודעות/מטוסים (וחדשים), עד `SESSION_HIGHLIGHTS_MAX` הודעות `notable` (ר' `_interest_score`; שידור חוזר — אותו MSN וטקסט — מאוחד), ומסלול פעיל/שיבוש GPS מתוך `adsb.session_series`. קורא מהדיסק (jsonl), לא מהזיכרון — עקבי עם `?day=`. `?since=<epoch>` דורס את הסמן השמור; `GET` idempotent — לא מקדם אותו |
 | POST | `/api/session/ack` | מקדם את הסמן (`state["last_session_view_at"]`) ל"עכשיו" — הפעולה המפורשת היחידה שמקדמת אותו. דרך `_guard` |
 | GET | `/api/signal` | מד שדה מאוחד למצב שרץ *בפועל* כרגע: רציף בקול (`_read_voice_metrics`), "הודעה אחרונה בלבד" ב-ACARS/VDL2 (`level`+`snr` — ACARS לעולם בלי `snr`, ר' §12), הפניה ל-`/api/satcom/health` ב-SATCOM. `verdict` (`ok`/`below_baseline`/`no_baseline`/`unknown`) תמיד מול `state["signal_baseline"]` בלבד — לעולם לא סף מומצא |
+| GET/POST | `/api/diag` | יומן בדיקה: GET מצב (`active`/`label`/`samples`/`marks`/`requests`/`remaining`/`last_run`); POST `{action: start\|stop, label?}` (409 כשכבר רצה). דרך `_guard` (POST) |
+| POST | `/api/diag/mark` | `{label}` — סימון בציר הזמן. 409 כשאין בדיקה. דרך `_guard` |
+| GET | `/api/diag/export` | ZIP: `summary.md` + `logs/` (journald יחידות+קרנל) + `test-log.jsonl` + `snapshot.json` + `config/` + `messages.json` + `system.txt`. `?minutes=N` (1–1440) או ברירת מחדל = הבדיקה הפעילה/האחרונה |
+| GET | `/api/diag/summary` | אותו ניתוח בלי ZIP: `overall`, `checks`, `summary` (ל-"🩺 בדוק" בטלפון) |
 | GET/POST | `/api/rflog` | רשם ניסוי RF: GET מצב (`active`/`until`/`rows`/`marks`/`size`); POST `{active}` הפעלה/עצירה (idempotent). דרך `_guard` (POST). ר' `docs/antenna-calibration-experiment.md` |
 | POST | `/api/rflog/mark` | `{label}` (עד 40 תווים) — סימון אירוע פיזי. **409 כשהרשם כבוי** (סימון שלא נרשם לא נראה כאילו נרשם). דרך `_guard` |
 | GET | `/api/rflog/export` | הורדת `rf_log.jsonl` (404 כשאין) |
 | GET/POST | `/api/experiment` | ניסוי כיול אוטומטי. GET: מצב (`running`/`step`/`step_index`/`steps_total`/`waiting`/`eta_sec`/`eta_prompt_sec`/`error`/`result`). POST `{action}`: `start` (409 כש-SATCOM חי/סריקה/`TUNE_LOCK` תפוס/כבר רץ), `confirm` (הפעולה הפיזית בוצעה; 409 כשאין בקשה ממתינה), `abort`. מחזיק את `TUNE_LOCK` לכל אורכו. דרך `_guard` (POST) |
 | POST | `/api/antenna/check` | בדיקת אנטנה בת ~3 שניות: מעבר זמני לקול (AGC, סקוולץ' פתוח) בתדר המבוקש, מדידת רצפת רעש אמיתית (`_sample_probe_stats`), וחזרה למצב הקודם (`_restore_after_probe`, גם בכישלון). `calibrate:true` שומר את התוצאה כ-`signal_baseline`. לא נוגע ב-`state["app_mode"]` — פעולת אבחון, לא מעבר-מצב. סריאלי תחת `TUNE_LOCK`; 409 כשתפוס |
-| GET | `/api/activity` | יומן שידורים. כל אירוע כולל `exists`, `starred`, ו-`tx` (‏`{state, text, err?, raw?, filtered?}` — ר' §12). `?starred=1` => רק ההקלטות המסומנות, **מ-`starred.json` ולא מהיומן** (שורדות את קיצוץ `ACTIVITY_KEEP`) |
+| GET | `/api/activity` | יומן שידורים. כל אירוע כולל `exists`, `starred`, ו-`tx` (‏`{state, text, err?, raw?}` — ר' §12). `?starred=1` => רק ההקלטות המסומנות, **נסרקות מ-`saved/`** ולא מהיומן (שורדות את קיצוץ `ACTIVITY_KEEP`) |
 | POST | `/api/recordings/star` | `{file, starred}` — שמירה/ביטול (★, מעביר ל/מ-`saved/`, `os.replace` אטומי תחת `_STAR_LOCK`). שמורה פטורה מ-retention. 409 כשהמכסה מלאה (**לא מוחקים שמורה ותיקה**), 404 כשההקלטה כבר לא קיימת. דרך `_guard` |
 | POST | `/api/recordings/transcribe` | `{file, lang?}` — תמלול שידור בודד לפי דרישה (כותב sidecar `state="pending"` — שורד restart, לא תור-בזיכרון). 501 עם פקודת ההתקנה כשwhisper/המודל לשפה חסר. דרך `_guard` |
 | GET | `/api/recordings/starred.zip` | ZIP של כל ההקלטות השמורות + תמלוליהן (`ZIP_STORED`, ללא דחיסה — MP3 כבר דחוס). 404 כשאין שמורות. הדרך להוציא את השמורות לפני מוות של כרטיס SD |
@@ -1222,17 +1226,19 @@ enabled, וגם לא `airam-denoise`, ובשדרוג `disable rtl_airband` אי�
   ראה ה-CHANGELOG: כל גרסה כמעט הוסיפה בדיקות).
 - **CI** (`.github/workflows/ci.yml`): pytest על **Python 3.11 ו-3.13** (מטריצה —
   Pi OS Bookworm/Debian 12 מול Pi OS Trixie/Debian 13; שתיהן בשטח בפועל)
-  + `bash -n` (בדיקת תחביר) על `install.sh` ו-`airam-wait-sdrplay`. **שמור את שניהם ירוקים.**
+  + `bash -n` ו-`shellcheck -S warning` על `install.sh` והסקריפטים, `systemd-analyze verify` על היחידות,
+  ו-job נפרד לבדיקות הדפדפן (Playwright). הרשימה המדויקת — ב-`ci.yml` עצמו. **שמור הכול ירוק.**
 - **בדיקה ידנית של adsb:** `python3 webtune/adsb.py --selftest` (בלי רשת).
 
 ---
 
 ## 12. מוסכמות וגוצ'אות (קרא לפני שינוי)
 
-- **כיוונון אחד בכל רגע:** RSP1B יחיד = תדר/מצב אחד פעיל. אל תנסה ריבוי ערוצים בו-זמני.
-- **שישה מצבי `app_mode`, שווי-מעמד:** `voice` (rtl_airband) · `acars` (acarsdec) ·
+- **כיוונון אחד בכל רגע — לכל מקלט:** מקלט = תהליך אחד = תדר/מצב אחד. ריבוי ערוצים בו-זמני רק דרך
+  מקלט *שני* (המצבים הכפולים, ר' §5 ו-`docs/dual-sdr-feasibility.md`), לא בתהליך אחד.
+- **מצבי `app_mode`, שווי-מעמד** (שישה של מקלט אחד, למטה, + `voice_acars`/`voice2`/`voice_vdl2` — ר' §5): `voice` (rtl_airband) · `acars` (acarsdec) ·
   `vdl2` (dumpvdl2) · `satcom` (inmarsat-sniffer — ACARS דרך לוויין Inmarsat, ר' §5/
-  docs/satcom-feasibility.md) · `off` (standby — **ארבעת** הצרכנים עצורים, ה-SDR פנוי
+  docs/satcom-feasibility.md) · `off` (standby — **כל** הצרכנים עצורים, ה-SDR פנוי
   ליישום אחר) · `scan` (סבב אוטומטי — **לא** צרכן/שירות נוסף, אלא thread שמסתובב בין
   קריאות ל-`_enter_voice`/`_enter_acars`/`_enter_vdl2` הקיימים; ראו §5. `satcom` **אינו**
   scannable כרגע — MVP מכוון).
@@ -1258,7 +1264,7 @@ enabled, וגם לא `airam-denoise`, ובשדרוג `disable rtl_airband` אי�
   השמורה; מצב שמור שלא רץ = תקלה (`mode_ok=False`/`ok=False`), standby ≠ תקלה.
   ב-`scan` ה"מצב" המדווח הוא `scan` עצמו (לא הרגל הנוכחית) — ראו `/api/scan`.
   ברירת המחדל של state חסר היא `off` (התקנה טרייה נוחתת במסך הבית).
-  `_enter_standby`/`_voice_tune` עוצרים את *שלושת* הצרכנים האחרים; `_scan_stop_thread`
+  `_enter_standby` עוצר את כל הצרכנים ו-`_voice_tune` את כל השאר (חוץ מהמשני כשהמצב הכפול נשמר); `_scan_stop_thread`
   נקרא ב*כל* מעבר `/api/mode` (גם למעבר בין תוכן-לוח שונה של scan עצמו).
 - **⚠ satcom דורש החלפת אנטנה פיזית *ידנית*** (VHF airband ↔ L-band+LNA) —
   ר' docs/satcom-feasibility.md §3. הבחירה במצב מהטלפון **לא** מבצעת את ההחלפה
@@ -1364,141 +1370,27 @@ enabled, וגם לא `airam-denoise`, ובשדרוג `disable rtl_airband` אי�
   טקסט-פענוח** (עדיין `None` בפועל, לא ניחוש-תוכן) — אבל *כן* חושפים עובדה אמיתית
   שקיימת במבנה (הניסיון-שנכשל עצמו), כי הסתרתה גם היא סוג של הטעיה (המשתמש
   לא יכול להבדיל "המפענח לא תמך בזה" מ"האיתות היה חלש מדי הפעם").
-- **⚠ אותו עיקרון, הפעם בפיצ'ר שלנו: תמלול ATC היה בלתי-נראה כי ארבעה מצבים
-  הוצגו זהים.** משתמש דיווח שמעולם לא ראה תמלול — ובדיקה הראתה שהפיצ'ר "עבד"
-  אבל **לא היה שום ערוץ שבו הוא יכול לדווח על עצמו**: `/api/activity` החזיר
-  `text: null` בלבד, ולכן "whisper לא מותקן", "עדיין בתור", "פוענח ואין דיבור"
-  ו-"הפענוח נכשל" נראו כולם כשורה בלי טקסט. בנוסף, ה-worker עשה `return` **ומת**
-  כשהבינארי חסר בעלייה, כך שהתקנה מאוחרת לא הורגשה עד restart. **תוקן**: sidecar
-  ‏`<file>.mp3.tx.json` עם `state` מפורש (`none` = לא ניסינו · `pending` · `ok` ·
-  `empty` = נוסה ואין דיבור · `failed` + `err`), זמינות **נבדקת חיה בכל מחזור**
-  ולא פעם אחת, ושורת סטטוס ב-UI שמציגה את פקודת ההתקנה. **הלקח:** "לא ניסינו ≠
-  ניסינו ונכשלנו" אינו כלל על *פענוח רדיו* בלבד — הוא חל על כל דיווח-מצב שלנו
-  למשתמש. פיצ'ר שאין לו דרך לומר "אני כבוי/חסר/נכשלתי" הוא, מבחינת המשתמש,
-  פיצ'ר שלא קיים.
-- **⚠ regression בגרסה הראשונה של הסינון עצמו — נמחק לגמרי, לא רק תוקן.**
-  ניסיון ראשון לסנן הזיות-whisper-על-רעש (blocklist מילולי) נבדק ע"י ביקורת
-  אדוורסרית ונמצא **הוא עצמו** מפר את §12: הנרמול מחק ספרות מהטקסט לפני
-  ההשוואה, כך ש-`"Thank you, 385"` (מסירת תדר שגרתית במגדל) ו-`"Okay, 03"`
-  (אישור קליטה) סוננו — **והוצגו למשתמש כ"סונן כהזיה"**, טענה שלא הייתה לה שום
-  הוכחה. זו לא הייתה המצאת-ערך (§12 הרגיל) אלא **המצאת-פסילה**: לא ניחשנו
-  תוכן, ניחשנו שתוכן-אמיתי הוא רעש. **התיקון: הוסר הסינון כליל.** אין
-  `WHISPER_NOISE_PHRASES`, אין `_tx_is_noise` — `_transcribe_file` מחזיר את מה
-  ש-whisper פלט, בלי שיפוט. הסינון היחיד שנשאר הוא `TX_MIN_SEC` (גודל קובץ —
-  עובדה מדידה, לא ניחוש-תוכן). **הלקח:** blocklist מילולי על תוכן קצר וסטנדרטי
-  (ATC כמעט כולו כזה) הוא סיכון-גבוה במיוחד — כל מילה חוקית עלולה להיות גם
-  התחלה של תשדורת אמיתית.
-- **★ הקלטות שמורות: תת-תיקייה (`saved/`), לא מאגר-מצב מקביל לקבצים.**
-  גרסה ראשונה ניהלה `starred.json` — רשימת-פטורים ש-`_sweep_recordings` קרא
-  כדי לדעת מה לא למחוק. ביקורת אדוורסרית הוכיחה (לא ניחשה) שלוש משפחות-כשל
-  מאותה בחירה: (1) **fail-open** — קובץ פגום/לא-קריא הוחזר כ-`{}` (=אין
-  שמורות), ו-`_sweep_recordings` **מחק בדיוק את ההקלטות שהמשתמש הגן עליהן**,
-  בניגוד ישיר ללוג-האזהרה שהבטיח שהן לא ייפגעו; (2) **מרוץ**: סימון שהצליח
-  (`ok:true`) יכול היה להימחק מיד ע"י `_sweep_recordings` שקרא snapshot ישן
-  לפני שהכתיבה הספיקה; (3) **read-modify-write בלי נעילה** בשני כיוונים —
-  ביטול-סימון שהתבטל מעצמו, ו-20 בקשות מקבילות על מכסה-5 שקיבלו 20 תשובות
-  `ok:true` בזמן ש-2 בלבד נשמרו בפועל (מכסה עקיפה + תשובה שקרית). **התיקון:**
-  שמורה יושבת פיזית ב-`REC_DIR/saved/`. `glob("*.mp3")` אינו רקורסיבי, כך
-  שהפטור מ-`_sweep_recordings` מגיע ב**אפס שורות לוגיקה** — אין רשימה לקרוא,
-  אין מה לפגום, אין עם מה להתחרות. `_STAR_LOCK` (יחיד, כמו `_METAR_LOCK`)
-  מגן על בדיקת-המכסה+ה-`os.replace` כיחידה אטומית אחת, כך שמקבילות לא עוקפת
-  את המכסה. **הלקח:** מאגר-מצב שמשקף "מה נמצא היכן על הדיסק" הוא סיכון
-  מובנה — הקובץ *הוא* המצב שלו; ברגע שיש שני מקורות-אמת (מיקום הקובץ + רשומה
-  עליו), הם *יתפרדו*, השאלה רק מתי.
-- **⚠ retention עמיד ל-symlink/EACCES על קובץ בודד — לא רק על התיקייה כולה.**
-  ‏`sorted(glob(...), key=p.stat().st_mtime)` עטוף ב-`try/except OSError: return`
-  *סביב כל הקריאה* הוא רגרסיה שקטה: `stat()` שנכשל על קובץ **אחד** (symlink
-  שבור, הרשאה) מפיל את כל ה-`sorted` וה-retention **מפסיק לגמרי** בלי שגיאה
-  גלויה — הכרטיס מתמלא בשקט. התיקון: ה-`key` עצמו בולע כשל-פר-פריט (`try:
-  ...except OSError: return 0.0`), כך שקובץ בעייתי אחד פשוט ממוין כ"הכי ישן"
-  ולא מפיל את התהליך. אותו דפוס ב-`_scan_new_recordings`/`_tx_next_target`.
-- **⚠ תור בזיכרון לא שורד restart — בדיוק הבאג ש-§12 בא לתקן, שוב.** גרסה
-  ראשונה של "תמלל לפי דרישה" שמרה את הבקשה ברשימת-Python (`_TX_QUEUE`).
-  ‏`systemctl restart airam-web` (עדכון קוד, קריסה, reboot) איפס אותה, וההקלטה
-  חזרה להיראות **בדיוק כמו "לא ניסינו"** — למרות שהמשתמש ביקש וחיכה. התיקון:
-  הבקשה נכתבת כ-sidecar `state="pending"` על הדיסק; `_tx_next_target` בוחר
-  קודם כל `pending`. שורד restart מהגדרה, כי הוא הקובץ עצמו, לא מבנה-נתונים
-  שגר בתהליך.
-- **⚠ `decode_failed=True` חייב לחסום גם חילוץ נתונים, לא רק להוסיף הודעת-כישלון
-  ל-`decoded` — regression אמיתי שקרה בפועל.** כשהוספנו לראשונה את `decode_failed`
-  (הבולט הקודם), חילוץ המיקום מ-ADS-C (`_scan_latlon`) המשיך לרוץ *ללא תלות* בדגל
-  הזה — טעות: מבנה שהמפענח עצמו סימן `err:true` יכול עדיין להכיל שדה numeric
-  בשם `lat`/`lon` (שריד-מפענוח-חלקי, לא ערך אמיתי), ו-`_scan_latlon` הרקורסיבי
-  לא יודע להבדיל. בפועל: הודעת A6 אמיתית (C-GHKX) עם `decoded="לא פוענח"`
-  הניבה מיקום שגוי באלפי ק"מ (5.69°N/2.11°E במקום ~45.85°N/‑29.6°W האמיתי,
-  מאומת מול ADS-B חיצוני). **הלקח הכללי:** דגל "ניסיון-שנכשל" צריך לחסום *כל*
-  חילוץ-נתונים מהמבנה שסומן ככושל, לא רק להישאר כהערת-שוליים לצד ערך שעדיין
-  יוצא. תוקן ב-`_normalize_acars`/`_normalize_vdl2`: מיקום מ-ADS-C מותנה כעת
-  ב-`not decode_failed`, וכך גם `group="position"` (אחרת כרטיס-שנכשל מסונן
-  תחת "📍 מיקום" ב-UI בלי מיקום אמיתי — `group` הוא גם מנגנון סינון, לא רק
-  צביעה). **מסקנה מתודולוגית:** "מאומת בקליטת שדה אמיתית" על הודעה *אחת*
-  שהצליחה איננה הוכחה שהמנגנון תקין באופן כללי — נדרשת השוואה מול מקור-אמת
-  חיצוני (כאן: ADS-B), לא רק "יצא ערך והוא נראה סביר".
-- **⚠ אותה מסקנה, פעם שנייה — הפעם כי `decode_failed=False` לבד גם לא הספיק.**
-  מיד אחרי התיקון הקודם, משתמש שהצליב את "הוכחת ההצלחה" המקורית (A7-BBB, ר'
-  למעלה) מול ADS-B חיצוני גילה שהיא **גם היא** הייתה שגויה — לא הזדמן לתפוס
-  אותה קודם כי `decode_failed` היה `False` שם (אין `err` שמתגלה בכלל). הסיבה
-  האמיתית: tag ADS-C מספרי (7) מתפרש **הפוך לגמרי** לפי כיוון ההודעה
-  (`libacars/adsc.c`, אומת ישירות מהמקור: טבלת-תגיות נפרדת ל-uplink מול
-  downlink) — "בקשה" בכיוון אחד, "דיווח מיקום אמיתי" בכיוון השני, בלי שום
-  שגיאה מתגלה אם משתמשים בטבלה הלא-נכונה. שני "המיקומים" שנצפו עד כה
-  (A7-BBB **וגם** C-GHKX) התבררו כ-uplink — כלומר **אף אחת** מהודעות ה-ADS-C
-  שנקלטו לא הוכיחה עדיין מיקום אמיתי; שתיהן היו אותו באג, לא ראיה-בעד ולא
-  נגד. תוקן ב-`_structural_dir` (SATCOM)/`direction` (VDL2, כבר זמין) —
-  חוסמים מיקום ADS-C כש-uplink, בלי תלות ב-`decode_failed`. **הלקח שחוזר על
-  עצמו:** "יצא ערך סביר, בלי שגיאה גלויה" הוא הרף הכי-נמוך שיש להוכחת-נכונות,
-  לא הכי-גבוה — צריך גם לבדוק את *הפרוטוקול עצמו* (לא רק את קוד-השגיאה של
-  היישום), וגם אז אין תחליף להשוואה מול מקור-אמת חיצוני אמיתי.
-- **⚠ "כיוון שגוי" ≠ "איתות חלש" — אותה משפחת-באג בפעם שלישית, הפעם בתור סיבת-
-  כישלון מדווחת ולא רק תוכן שגוי.** קליטת SATCOM נוספת (14.08.2026, 12 CPDLC +
-  11 ADS-C, כולן uplink, מעטפות ARINC-622 תקינות — `crc_ok=true`) הראתה ש-רוב
-  ההודעות הוצגו כ-"לא פוענח — המפענח החזיר שגיאה (כנראה איתות שולי)". התירוץ
-  ("כנראה איתות שולי") היה **ניחוש שלנו, לא עובדה** — בדיוק סוג ה"המצאה" ש-§12
-  אוסר, רק שהפעם זו הייתה סיבה מוצעת לכישלון ולא ערך מומצא. הסיבה האמיתית:
-  ‏`inmarsat-sniffer` פענח את היישום המקונן (CPDLC/ADS-C) ב**כיוון ASN.1 הלא-
-  נכון** — ASN.1 PER תלוי-כיוון (‏CPDLC: `FANSATCUplinkMessage` מול
-  `FANSATCDownlinkMessage`, מבנים שונים לגמרי; ADS-C: כבר תועד למעלה). **תוקן**:
-  ‏`_decode_libacars_app` מריץ re-decode מקומי עם `decode_acars_apps` (כלי ה-CLI
-  הרשמי של `libacars`) בכיוון האמיתי מ-`structural_dir`. **ממצא מפתיע באימות
-  מהמקור, לא הנחה שקיבלנו מוכנה:** `LA_JSON=1` **לא** מספיק — ה-JSON של libacars
-  ל-ADS-C מכיל רק מפתחות מספריים (בלי משפט אחד), ול-CPDLC הטקסט קיים אבל תחת
-  `choice_label` ש-`_libacars_decode` לא קוצר (מחפש `text`/`msg`/`message` בלבד).
-  **הלקח:** מפרט-פענוח שמניח "דגל אחד מספיק כדי לקבל גם מבנה-מכונה וגם טקסט-
-  אנושי" כדאי לבדוק מול קוד-המקור לפני מימוש — לא כל כלי CLI חושף את שניהם
-  באותו מסלול פלט. הודעת השגיאה תוקנה בהתאם ("לא פוענח — libacars החזיר שגיאת
-  פענוח; הטקסט הגולמי נשמר") — לא מסיקים סיבה שאין לה הוכחה. **ה-invariant
-  שחוזר בכל התיקונים הקודמים נשאר בעינו ללא שינוי**: `adsc_dir_ok` ו-`decode_failed`
-  עדיין חוסמים מיקום מ-ADS-C uplink, גם אחרי re-decode "מוצלח" — re-decode
-  מחליף רק את תוצאת ה-application decode, לעולם לא את הבדיקה המבנית של הכיוון.
-- **מיקום — לא רק "לא ממציאים ערך", גם "לא מייחסים ערך אמיתי לישות הלא-נכונה":**
-  שני לקחים מקליטת שטח אמיתית (SATCOM, 33 דק'/465 הודעות/84 מטוסים), מעבר
-  ל-`_parse_sq`'s "לקח 1.7.1" (כתובת תחנת-קרקע ≠ מיקום מטוס):
-  (1) **`_text_latlon` דורש בדיוק התאמת-קואורדינטה *אחת*.** הודעת H1 עם תוכנית
-  טיסה (`#M3FPN/.../F:IVAKI,N32558E015065..LUMED,N34200E014420..`) מכילה
-  *שרשרת* waypoints בפורמט קומפקטי זהה-מבנית לדיווח-מיקום בודד — לקיחת
-  ההתאמה הראשונה (כמו לפני התיקון) מדביקה את נ"צ ה-waypoint הראשון כאילו
-  הוא מיקום המטוס. 2+ התאמות ⇒ מסלול, לא דיווח ⇒ `None` (לא ניחוש איזו
-  התאמה "האמיתית"). (2) **tail דמוי-כתובת-תחנה (`_UPLINK_HEADER_RE`, אותו
-  דפוס בדיוק כמו זיהוי הדר-ניתוב בטקסט) לא מקבל מיקום מנתיבי ה-heuristic**
-  (`_text_latlon`/`_parse_label16`) **בכלל** — תחנת-קרקע לא "טסה", ללא קשר
-  לכמה התאמות קואורדינטה נמצאו. שני ה-guards עצמאיים (כל אחד תופס את המקרה
-  שהשני מפספס): tail תקין עם שרשרת-waypoints עדיין נחסם ע"י (1); tail
-  דמוי-תחנה עם דיווח-מיקום-בודד-תקני עדיין נחסם ע"י (2). **תיקון נלווה, לא
-  קשור למיקום:** `_H1_SUB_RE`/`_parse_fpn` לא תפסו אף הודעת H1 אחת בקליטת
-  ה-SATCOM (12/12) — הפורמט האמיתי הוא `"- #XX..."` (מקף+רווח לפני ה-`#`,
-  לא `#` בתחילת הטקסט ממש) ו-`"M3FPN/"` (בלי קו-נטוי פותח, בניגוד ל-VHF
-  `"/FPN/"`) — שני הרחבות תוספתיות-בלבד (הפורמט המקורי נשאר תקין), שלא
-  נוגעות במיקום כלל (`_parse_h1` תמיד היה string-only, לא lat/lon).
-- **⚠ כיוון ACARS: עובדה מבנית קודמת לטבלת labels — אותה משפחת-באג כמו כיוון ה-ADS-C.**
-  הכיוון חושב עד כה מ-`_ACARS_DIR_BY_LABEL` ומ-header ניתוב, בזמן שה-JSON של acarsdec נשא
-  כל הזמן את התשובה: `block_id` (ספרה = downlink, אות = uplink — ‏ARINC 618; acarsdec עצמו
-  פולט msgno/flight רק כשהוא ספרה, `output.c`). ניתוח קליטת 24.10.2026 (614 הודעות) מצא
-  19 שגויים ו-262 בלי כיוון: ‏C1 (‏loadsheet/NOTOC *אל* הקוקפיט) סומן downlink, ‏H1 דו-כיווני
-  סומן תמיד downlink, ו-DCL של המטוס (B3/B4) סומן uplink בגלל ה-header ‎`"/LLBG.DC1/"` —
-  אותה מלכודת כמו B6. זה לא קוסמטי: ההצלבה (§5) בוחנת downlink כשידור *מהמטוס* מול אופק
-  הרדיו, ו-uplink כ"לא רלוונטי". **הכלל:** טבלת labels היא נפילה ל-VDL2/SATCOM המסונתזים
-  (שדורסים ממילא בכיוון מבני משלהם) ולהודעות ישנות — לא מקור. label שראיה סותרת אותו (‏3L,
-  ‏12/12 בלי MSN) **מוסר** מהטבלה, לא "מתהפך" על סמך מדגם קטן.
+- **כל דיווח-מצב חייב לדעת לומר "כבוי/חסר/נכשלתי"** (לא רק פענוח רדיו): תמלול ATC מדווח `tx.state` מפורש
+  (`none`/`pending`/`ok`/`empty`/`failed`+`err`) ב-sidecar `<file>.mp3.tx.json`; זמינות whisper נבדקת **חי** בכל
+  מחזור; ה-worker לא מת כשהבינארי חסר; ה-UI מציג את פקודת ההתקנה. (`docs/lessons-learned.md` §2)
+- **אין סינון-תוכן על תמלול** — לא blocklist ולא "סונן כהזיה". blocklist על ATC (תוכן קצר וסטנדרטי) פוסל תשדורות
+  אמיתיות (`"Thank you, 385"`). הסינון היחיד: `TX_MIN_SEC` (גודל קובץ — עובדה מדידה). (§3)
+- **★ שמורות = תת-תיקייה `saved/`, לא רשימה בקובץ צד.** הפטור מ-retention הוא *מיקום הקובץ*; שני מקורות-אמת
+  (מיקום + רשומה) יתפרדו. `_STAR_LOCK` על בדיקת-המכסה+`os.replace`; מכסה מלאה ⇒ 409, לא מוחקים שמורה ותיקה. (§4)
+- **retention עמיד ל-`stat()` שנכשל על קובץ בודד:** ה-`key` של `sorted` בולע `OSError` ⇒ `0.0`, לא `try` סביב
+  כל הקריאה. אותו דפוס ב-`_scan_new_recordings`/`_tx_next_target`. (§5)
+- **תור בקשות = sidecar על הדיסק** (`state="pending"`), לא רשימת Python — לא שורד restart. (§6)
+- **דגל "ניסיון-שנכשל" חוסם *כל* חילוץ-נתונים מהמבנה** (`decode_failed` ⇒ אין מיקום ADS-C, ואין `group="position"`),
+  לא רק מוסיף הודעה. (§1)
+- **ADS-C/CPDLC תלויי-כיוון:** tag מספרי (7) ומבני ASN.1 של CPDLC שונים לגמרי ל-uplink/downlink; פענוח בכיוון הלא-נכון
+  "מצליח" בלי `err`. לכן מיקום ADS-C נחסם ב-uplink גם בלי שגיאה, וה-re-decode רץ בכיוון המבני. **"יצא ערך סביר" הוא
+  הרף הכי-נמוך להוכחה; אין תחליף להשוואה מול ADS-B חיצוני.** אין עדיין הוכחה אחת ל-ADS-C downlink אמיתי. (§1)
+- **"איתות חלש" אינו סיבת-כישלון שמותר לנחש.** לא מציגים סיבה שאין לה הוכחה; הניסוח הוא עובדה ("libacars החזיר שגיאה"). (§1)
+- **מיקום — לא מייחסים ערך אמיתי לישות הלא-נכונה:** `_text_latlon` דורש בדיוק התאמה *אחת* (2+ = מסלול, לא דיווח);
+  tail דמוי-כתובת-תחנה (`_UPLINK_HEADER_RE`) לא מקבל מיקום מנתיבי ה-heuristic בכלל. שני ה-guards עצמאיים. (§7)
+- **כיוון ACARS: עובדה מבנית קודמת לטבלת labels.** `block_id` (ספרה=downlink / אות=uplink) קובע; `_ACARS_DIR_BY_LABEL`/header
+  רק נפילה. label שראיה סותרת אותו **מוסר** מהטבלה, לא "מתהפך" על מדגם קטן. (§1, §9)
+  הסיפורים המלאים והראיות לכל הסעיפים: `docs/lessons-learned.md`.
 - **בנקי ACARS/VDL2 = חלון אחד כל אחד:** acarsdec/dumpvdl2 מפענחים ערוצים מרובים בתוך
   חלון דגימה אחד (~2MHz). צביר 131.x ו-136.x רחוקים ~5MHz ⇒ לעולם לא יחד. בנק חדש חייב
   לעבור `_acars_window_error`/`_vdl2_window_error` (שניהם wrappers מעל `_window_error`).
@@ -1544,7 +1436,7 @@ enabled, וגם לא `airam-denoise`, ובשדרוג `disable rtl_airband` אי�
   נגזרים שניהם מהניווט של המטוס (רק MLAT בלתי-תלוי). מנגנון התפשטות ושיבוש GPS — לעולם לא
   נטענים כעובדה. אינטרפולציה רק בתנאים של `xcheck.position_at`; אחרת "לא מאומת"/"אין" —
   לא מיקום מחושב. **אין ברירת מחדל לתחנה** (AIR-AM נייד; נתב"ג כברירת מחדל היה אופק שגוי בשקט).
-- **כתיבה אטומית + עמידה בניתוק חשמל** לקבצי קונפיג/state (`_atomic_write`) — אסור
+- **כתיבה אטומית + עמידה בניתוק חשמל** לקבצי קונפיג/state (`storage.atomic_write`) — אסור
   להשאיר קובץ חצי-כתוב. לא רק `tmp`+`rename` (אטומי מול קוראים מקבילים) אלא גם
   `fsync` על קובץ ה-tmp *ועל תיקיית היעד* — בלעדיו הנתונים יכולים לשבת ב-page cache
   בלבד ולהיעלם בכיבוי פתאומי (תרחיש אמיתי בהפעלה מסוללה). `_cleanup_orphan_tmp`
@@ -1555,14 +1447,14 @@ enabled, וגם לא `airam-denoise`, ובשדרוג `disable rtl_airband` אי�
   דרך flag גלובלי שמתאפס בקריאה תקינה הבאה — לא לכל קריאה, כי הפונקציה נקראת גם
   מראוטים ב-polling תכוף כמו `/api/metrics`).
   **קובצי JSONL (append, בלי rewrite) — שני כללים, שניהם נלמדו מכיבוי פתאומי:**
-  קוראים **רק** דרך `_read_log_lines` (`errors="replace"` — תו עברי קטוע זרק
+  קוראים **רק** דרך `storage.read_log_lines` (`errors="replace"` — תו עברי קטוע זרק
   `UnicodeDecodeError`, שהוא `ValueError` ולא `OSError`, והפיל את airam-web
-  בעלייה), וכותבים דרך `_append_line_on_boundary` (משלים `\n` לשורה קטועה,
+  בעלייה), וכותבים דרך `storage.append_line_on_boundary` (משלים `\n` לשורה קטועה,
   אחרת הרשומה הבאה מודבקת אליה ואובדת). כל קוד שרץ ב-`__main__` לפני
   `app.run()` חייב להיות עטוף — היסטוריה היא נוחות, עלייה היא חובה.
 - **threaded=True חובה** ל-Flask (סטרים ארוך-טווח לא חוסם בקשות).
 - **שמע ברקע = MediaSession** (אין API ל"שיחת טלפון" בדפדפן). אל תחפש חלופה.
-- **עברית ב-RTL** ב-UI; CSV עם BOM ל-Excel. `_csv_safe` (`_export_response`)
+- **עברית ב-RTL** ב-UI; CSV עם BOM ל-Excel. `storage.csv_safe` (`_export_response`)
   מנטרל הזרקת נוסחה: תא שמתחיל ב-`=`/`+`/`-`/`@`/Tab/CR (למשל תוכן `text`/`tail`
   שמגיע משידור רדיו — לא נתון סטטי-מהימן) מקבל `'` מוביל לפני שהוא נכתב.
 

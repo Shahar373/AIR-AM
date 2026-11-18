@@ -10,6 +10,7 @@ import pytest
 
 import adsb
 import app
+import appstate  # noqa: E402
 
 
 @pytest.fixture
@@ -24,15 +25,10 @@ def clean_adsb():
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "airband.conf")
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "ACARS_ENV_PATH", tmp_path / "acars.env")
     monkeypatch.setattr(app, "ACARS_LOG_PATH", tmp_path / "acars.jsonl")
     return tmp_path
-
-
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
 
 
 def _feed(ac_list, now=None):

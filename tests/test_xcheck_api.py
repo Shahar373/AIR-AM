@@ -15,6 +15,9 @@ import pytest
 
 import adsb
 import app
+import xcheck_jobs  # noqa: E402
+import appstate  # noqa: E402
+import acars_parse
 import xcheck
 
 T_RX = calendar.timegm((2026, 10, 23, 13, 45, 40)) + 0.0
@@ -56,15 +59,17 @@ def _synthetic(lat0, lon0, t0, times, brg=120.0, gs=480.0, src_type="adsb_icao")
 
 @pytest.fixture(autouse=True)
 def env(tmp_path, monkeypatch):
-    for name, fname in (("STATE_PATH", "state.json"), ("ACARS_LOG_PATH", "acars.jsonl"),
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(xcheck_jobs, "XC_EVENTS_PATH", tmp_path / "xcheck_events.jsonl")
+    for name, fname in (("ACARS_LOG_PATH", "acars.jsonl"),
                         ("VDL2_LOG_PATH", "vdl2.jsonl"), ("SATCOM_LOG_PATH", "satcom.jsonl"),
-                        ("XC_EVENTS_PATH", "xcheck_events.jsonl"), ("CONFIG_PATH", "airband.conf")):
+                        ("CONFIG_PATH", "airband.conf")):
         monkeypatch.setattr(app, name, tmp_path / fname)
     monkeypatch.setattr(adsb, "TRACK_PATH", tmp_path / "track.jsonl")
     monkeypatch.setattr(adsb, "REG_HEX_PATH", tmp_path / "reg_hex.json")
     monkeypatch.setattr(adsb, "_http_get_json",
                         lambda *a, **k: pytest.fail("ניסיון רשת לא-ממוקף בבדיקה"))
-    monkeypatch.setattr(app, "_run_libacars", lambda *a, **k: None)
+    monkeypatch.setattr(acars_parse, "_run_libacars", lambda *a, **k: None)
     with adsb._LOCK:
         adsb._S["aircraft"].clear()
         adsb._S["by_hex"].clear()
@@ -74,12 +79,12 @@ def env(tmp_path, monkeypatch):
                       (app._satcom_lock, app._satcom_msgs)):
         with lock:
             buf.clear()
-    with app._xc_cv:
-        app._xc_heap.clear()
-        for k in app._xc_stats:
-            app._xc_stats[k] = 0
-    with app._xc_res_lock:
-        app._xc_results.clear()
+    with xcheck_jobs._xc_cv:
+        xcheck_jobs._xc_heap.clear()
+        for k in xcheck_jobs._xc_stats:
+            xcheck_jobs._xc_stats[k] = 0
+    with xcheck_jobs._xc_res_lock:
+        xcheck_jobs._xc_results.clear()
     yield tmp_path
 
 
@@ -158,24 +163,24 @@ def test_station_post_requires_same_origin(client):
 # --- נרמול: פרטי ADS-C ו-AES ------------------------------------------------------
 
 def test_normalize_acars_extracts_adsc_report_details():
-    n = app._normalize_acars(_raw_b6())
+    n = acars_parse._normalize_acars(_raw_b6())
     assert n["dir"] == "downlink" and n["pos_src"] == "adsc"
     assert n["adsc"]["ts_sec"] == 2739.375 and n["adsc"]["alt_ft"] == 37996
     assert n["adsc"]["accuracy_nm"] == 0.05 and n["adsc"]["tcas_avail"] is True
     # הודעה בלי ADS-C — השדה קיים ו-None (תאימות: שדה חדש, לא שינוי קיים)
-    assert app._normalize_acars({"timestamp": 1.0, "label": "H1", "text": "hi"})["adsc"] is None
+    assert acars_parse._normalize_acars({"timestamp": 1.0, "label": "H1", "text": "hi"})["adsc"] is None
 
 
 def test_adsc_details_earth_reference_keys():
-    d = app._adsc_details({"tags": [{"basic_report": {"lat": 1.0, "lon": 2.0, "alt": 100}},
+    d = acars_parse._adsc_details({"tags": [{"basic_report": {"lat": 1.0, "lon": 2.0, "alt": 100}},
                                     {"earth_ref_data": {"true_trk_deg": 121.5, "true_trk_valid": True,
                                                         "gnd_spd_kts": 478.0, "vspd_ftmin": 0}}]})
     assert d["true_trk_deg"] == 121.5 and d["gnd_spd_kts"] == 478.0 and d["vspd_ftmin"] == 0
-    assert app._adsc_details({"x": 1}) is None
+    assert acars_parse._adsc_details({"x": 1}) is None
 
 
 def test_satcom_card_carries_aes_not_icao():
-    card = app._normalize_satcom({
+    card = acars_parse._normalize_satcom({
         "t": {"sec": 1_792_763_140, "usec": 0},
         "isu": {"src": {"addr": "406F79", "type": "Aircraft Earth Station"},
                 "dst": {"addr": "42", "type": "Ground Earth Station"},
@@ -189,7 +194,7 @@ def test_verify_zbkm_historical_blos_supported(client, monkeypatch):
     """ההודעה הישנה (רק ב-jsonl, לא בזיכרון) => lookup לפי רישום מגלה את ה-hex
     (מהטיסה הנוכחית) => trace היסטורי => אינטרפולציה בזמן הדוח => ראיות חזקות."""
     _set_station(client)
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     calls = _mock_net(monkeypatch, lookup=_lookup_found_now, trace=_trace_zbkm)
     r = client.post("/api/xcheck/verify", json={"src": "acars", "t": T_RX, "tail": ".G-ZBKM",
                                                 "label": "B6"})
@@ -214,7 +219,7 @@ def test_verify_zbkm_historical_blos_supported(client, monkeypatch):
 
 def _saved_zbkm(client, monkeypatch):
     _set_station(client)
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     _mock_net(monkeypatch, lookup=_lookup_found_now, trace=_trace_zbkm)
     return client.post("/api/xcheck/verify", json={"src": "acars", "t": T_RX}).get_json()["saved"]
 
@@ -254,7 +259,7 @@ def test_verify_without_adsb_still_answers_weak(client, monkeypatch):
     """ספקי ADS-B לא זמינים => תשובה תקינה (200) עם "אין נתונים" לכל מקור —
     המיקום מה-ADS-C לבדו: חריגה מאופק, ראיה חלשה. אירוע נשמר (חריג)."""
     _set_station(client)
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     _mock_net(monkeypatch)
     body = client.post("/api/xcheck/verify", json={"src": "acars", "t": T_RX}).get_json()
     res = body["result"]
@@ -269,7 +274,7 @@ def test_verify_old_record_redecodes_and_recomputes_direction(client, monkeypatc
     """הודעה שנשמרה *לפני* v2.26.0: ‏dir="uplink" (באג ה-B6) ובלי שדה adsc. הכיוון
     מחושב מחדש לפי ה-label, ופרטי הדוח מפוענחים מחדש ב-decode_acars_apps."""
     _set_station(client)
-    old = app._normalize_acars(_raw_b6())
+    old = acars_parse._normalize_acars(_raw_b6())
     old.update(dir="uplink", adsc=None)
     _store_jsonl(old)
     seen = []
@@ -278,7 +283,7 @@ def test_verify_old_record_redecodes_and_recomputes_direction(client, monkeypatc
         seen.append((dir_arg, label, as_json))
         return text + "\n" + json.dumps(LIBACARS)        # decode_acars_apps מדפיס הד + JSON
 
-    monkeypatch.setattr(app, "_run_libacars", fake_run)
+    monkeypatch.setattr(acars_parse, "_run_libacars", fake_run)
     _mock_net(monkeypatch, lookup=_lookup_found_now, trace=_trace_zbkm)
     res = client.post("/api/xcheck/verify", json={"src": "acars", "t": T_RX}).get_json()["result"]
     assert seen == [("d", "B6", True)]
@@ -291,23 +296,23 @@ def test_xc_direction_stored_acars_prefers_structure():
     """הצלבה על הודעה שמורה: block ID (מ-v2.31.0) ⇐ MSN (רק downlink נושא אחד) ⇐
     label. ‏loadsheet של C1 שנשמר כ-downlink נבחן קודם כשידור *מהמטוס* מול האופק."""
     c1 = {"label": "C1", "text": ".UTCKM1P IZ/241150\nAGM", "block_id": "C", "dir": "downlink"}
-    d, basis = app._xc_direction("acars", c1)
+    d, basis = xcheck_jobs._xc_direction("acars", c1)
     assert d == "uplink" and basis.startswith("מבני — block ID") and "חושב מחדש" in basis
     # לפני v2.31.0 לא נשמר block ID — ‏MSN מכריע (‏B3 שה-header סיווג uplink)
     b3 = {"label": "B3", "text": "/LLBG.DC1/RCD 024", "msgno": "M34A", "dir": "uplink"}
-    d, basis = app._xc_direction("acars", b3)
+    d, basis = xcheck_jobs._xc_direction("acars", b3)
     assert d == "downlink" and "MSN" in basis and "חושב מחדש" in basis
     # בלי שניהם — הטבלה (C1 תוקן ל-uplink)
-    assert app._xc_direction("acars", {"label": "C1", "text": "X"})[0] == "uplink"
+    assert xcheck_jobs._xc_direction("acars", {"label": "C1", "text": "X"})[0] == "uplink"
     # ‏MSN לא מכריע ב-VDL2 (שם יש כתובת AVLC, ובלעדיה לא מניחים את כלל ה-acarsdec)
-    assert app._xc_direction("vdl2", {"label": "H1", "text": "X", "msgno": "M01A"})[0] is None
+    assert xcheck_jobs._xc_direction("vdl2", {"label": "H1", "text": "X", "msgno": "M01A"})[0] is None
 
 
 def test_verify_user_hex_contradicted_by_trace_registration(client, monkeypatch):
     """hex שהמשתמש הזין שייך (לפי ה-trace) לרישום אחר => סתירת זהות; נקודות ה-trace
     לא משמשות, ואין פסק-דין BLOS מחוזק."""
     _set_station(client)
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     _mock_net(monkeypatch, trace=lambda hx, t: {**_trace_zbkm(hx, t), "meta": {"r": "EI-XYZ"}})
     res = client.post("/api/xcheck/verify",
                       json={"src": "acars", "t": T_RX, "hex": "4ca123"}).get_json()["result"]
@@ -318,7 +323,7 @@ def test_verify_user_hex_contradicted_by_trace_registration(client, monkeypatch)
 
 def test_verify_uplink_label_is_not_applicable(client, monkeypatch):
     _set_station(client)
-    up = app._normalize_acars({"timestamp": T_RX, "label": "A6", "tail": ".G-ZBKM",
+    up = acars_parse._normalize_acars({"timestamp": T_RX, "label": "A6", "tail": ".G-ZBKM",
                                "text": "/QUKAXBA.ADS.G-ZBKM0000"})
     _store_jsonl(up)
     _mock_net(monkeypatch)
@@ -338,7 +343,7 @@ def test_verify_input_errors(client, monkeypatch):
 
 def test_verify_station_override_is_recorded(client, monkeypatch):
     """תחנה ניידת: אימות בדיעבד מול המיקום שבו התחנה *הייתה* — נשמר בראיה."""
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     _mock_net(monkeypatch)
     near = {"lat": 33.0, "lon": 28.0, "alt_m": 10.0}
     res = client.post("/api/xcheck/verify",
@@ -356,20 +361,20 @@ def test_corrupt_events_file_is_tolerated(client, monkeypatch, env):
 # --- worker: תור לא-חוסם, שלב 1/2, תקציר לפיד ----------------------------------------
 
 def test_submit_skips_messages_without_identity_and_never_raises(monkeypatch):
-    app._xc_submit("acars", {"t": 1.0, "label": "_d"})                 # ACK ריק
-    assert app._xc_heap == []
-    app._xc_submit("acars", {"t": 1.0, "tail": ".TCARC", "tail_is_station": True})
-    assert app._xc_heap == []
-    monkeypatch.setattr(app, "_xc_push", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
-    app._xc_submit("acars", {"t": 1.0, "tail": "G-ZBKM"})               # לא זורק לנתיב הרדיו
+    xcheck_jobs._xc_submit("acars", {"t": 1.0, "label": "_d"})                 # ACK ריק
+    assert xcheck_jobs._xc_heap == []
+    xcheck_jobs._xc_submit("acars", {"t": 1.0, "tail": ".TCARC", "tail_is_station": True})
+    assert xcheck_jobs._xc_heap == []
+    monkeypatch.setattr(xcheck_jobs, "_xc_push", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+    xcheck_jobs._xc_submit("acars", {"t": 1.0, "tail": "G-ZBKM"})               # לא זורק לנתיב הרדיו
 
 
 def test_queue_bound_drops_instead_of_blocking(monkeypatch):
-    monkeypatch.setattr(app, "XC_QUEUE_MAX", 2)
+    monkeypatch.setattr(xcheck_jobs, "XC_QUEUE_MAX", 2)
     for i in range(4):
-        app._xc_submit("acars", {"t": float(i), "tail": "G-ZBKM"})
-    assert len(app._xc_heap) == 2
-    assert app._xc_stats["dropped"] == 2 and app._xc_stats["submitted"] == 2
+        xcheck_jobs._xc_submit("acars", {"t": float(i), "tail": "G-ZBKM"})
+    assert len(xcheck_jobs._xc_heap) == 2
+    assert xcheck_jobs._xc_stats["dropped"] == 2 and xcheck_jobs._xc_stats["submitted"] == 2
 
 
 def test_live_job_uses_snapshot_and_feeds_summary(client, monkeypatch):
@@ -388,8 +393,8 @@ def test_live_job_uses_snapshot_and_feeds_summary(client, monkeypatch):
     with app._acars_lock:
         app._acars_msgs.append(rec)
     calls = _mock_net(monkeypatch)
-    app._xc_run_job({"src": "acars", "rec": rec, "stage": 1, "prior": []})
-    assert calls["lookup"] == [] and app._xc_heap == []               # ב-snapshot => בלי רשת/שלב 2
+    xcheck_jobs._xc_run_job({"src": "acars", "rec": rec, "stage": 1, "prior": []})
+    assert calls["lookup"] == [] and xcheck_jobs._xc_heap == []               # ב-snapshot => בלי רשת/שלב 2
     data = client.get("/api/acars?since=0&xseq=0").get_json()
     s = data["xcheck"]["7"]
     assert s["adsb"] == "measured" and s["by"] == "reg" and s["v"] == "line_of_sight"
@@ -417,14 +422,14 @@ def test_out_of_range_aircraft_two_stage_lookup_saves_event(client, monkeypatch)
             "provider": "adsb.lol"}]}
 
     calls = _mock_net(monkeypatch, lookup=lk)
-    rec = app._normalize_acars({**_raw_b6(), "timestamp": t_rx, "libacars": None})
+    rec = acars_parse._normalize_acars({**_raw_b6(), "timestamp": t_rx, "libacars": None})
     rec.update(id=11, lat=ZBKM_LAT, lon=ZBKM_LON)                       # בלי ts_sec של ADS-C
-    app._xc_run_job({"src": "acars", "rec": rec, "stage": 1, "prior": []})
+    xcheck_jobs._xc_run_job({"src": "acars", "rec": rec, "stage": 1, "prior": []})
     assert calls["lookup"] == [("reg", ".G-ZBKM")]
-    assert len(app._xc_heap) == 1                                       # שלב 2 מתוזמן
-    _due, _tie, job2 = app._xc_heap.pop()
+    assert len(xcheck_jobs._xc_heap) == 1                                       # שלב 2 מתוזמן
+    _due, _tie, job2 = xcheck_jobs._xc_heap.pop()
     assert job2["stage"] == 2 and len(job2["prior"]) == 1
-    app._xc_run_job(job2)
+    xcheck_jobs._xc_run_job(job2)
     assert len(calls["lookup"]) == 2
     ev = client.get("/api/xcheck/events").get_json()["events"]
     assert len(ev) == 1 and ev[0]["adsb_status"] == "interpolated"
@@ -457,13 +462,13 @@ def test_live_worker_never_reads_track_buffer_and_interpolates_across_stages(cli
 
     snap(before, before["t"])
     rec = {"id": 3, "t": t_rx, "tail": ".4X-EHD", "label": "H1", "text": "x", "error": 0}
-    app._xc_run_job({"src": "acars", "rec": rec, "stage": 1, "prior": []})
-    _due, _tie, job2 = app._xc_heap.pop()
+    xcheck_jobs._xc_run_job({"src": "acars", "rec": rec, "stage": 1, "prior": []})
+    _due, _tie, job2 = xcheck_jobs._xc_heap.pop()
     assert [p["origin"] for p in job2["prior"]] == ["live"]
     snap(after, after["t"])
-    app._xc_run_job(job2)
-    with app._xc_res_lock:
-        summ = app._xc_results[("acars", 3)][1]
+    xcheck_jobs._xc_run_job(job2)
+    with xcheck_jobs._xc_res_lock:
+        summ = xcheck_jobs._xc_results[("acars", 3)][1]
     assert summ["adsb"] == "interpolated" and summ["v"] == "line_of_sight"
 
 
@@ -485,7 +490,7 @@ def test_verify_with_imported_trace_replaces_network_history(client, monkeypatch
     """globe.adsb.lol החזיר 403 על ה-Pi => המשתמש מעלה את הקובץ מהארכיון. הקובץ
     משמש במקום trace/OpenSky מהרשת (לא נקראים בכלל), ונשמר בראיה כמקור "import"."""
     _set_station(client)
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     calls = _mock_net(monkeypatch, lookup=_lookup_found_now, trace=_trace_zbkm)
     r = client.post("/api/xcheck/verify", json={"src": "acars", "t": T_RX, "trace_b64": _trace_file(),
                                                 "trace_name": "trace_full_406f79.json"})
@@ -501,7 +506,7 @@ def test_verify_with_imported_trace_replaces_network_history(client, monkeypatch
 
 def test_imported_trace_of_another_aircraft_is_a_conflict(client, monkeypatch):
     _set_station(client)
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     _mock_net(monkeypatch)
     res = client.post("/api/xcheck/verify", json={
         "src": "acars", "t": T_RX, "trace_b64": _trace_file(icao="4ca123", reg="EI-XYZ")}).get_json()["result"]
@@ -514,7 +519,7 @@ def test_imported_trace_of_another_aircraft_is_a_conflict(client, monkeypatch):
 def test_imported_trace_without_comparable_identity_is_not_used(client, monkeypatch):
     """הודעה עם מספר טיסה בלבד וקובץ בלי רישום — אין מה להשוות => לא בשימוש."""
     _set_station(client)
-    _store_jsonl(app._normalize_acars(_raw_b6(tail=None)))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6(tail=None)))
     _mock_net(monkeypatch)
     res = client.post("/api/xcheck/verify", json={
         "src": "acars", "t": T_RX, "trace_b64": _trace_file(reg=None)}).get_json()["result"]
@@ -524,7 +529,7 @@ def test_imported_trace_without_comparable_identity_is_not_used(client, monkeypa
 
 def test_imported_trace_input_errors(client, monkeypatch):
     import base64
-    _store_jsonl(app._normalize_acars(_raw_b6()))
+    _store_jsonl(acars_parse._normalize_acars(_raw_b6()))
     _mock_net(monkeypatch)
     post = lambda b64: client.post("/api/xcheck/verify", json={"src": "acars", "t": T_RX, "trace_b64": b64})
     assert post("!!!not base64!!!").status_code == 400

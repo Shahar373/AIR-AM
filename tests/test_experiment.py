@@ -13,21 +13,20 @@ import types
 import pytest
 
 import app
+import experiment  # noqa: E402
+import appstate  # noqa: E402
 
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
-    for name, fn in (("CONFIG_PATH", "airband.conf"), ("STATE_PATH", "state.json"),
-                     ("STATS_PATH", "stats.txt"), ("RFLOG_PATH", "rf_log.jsonl"),
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(experiment, "RFLOG_PATH", tmp_path / "rf_log.jsonl")
+    for name, fn in (("CONFIG_PATH", "airband.conf"),
+                     ("STATS_PATH", "stats.txt"),
                      ("ACARS_ENV_PATH", "acars.env"), ("VDL2_ENV_PATH", "vdl2.env"),
                      ("SATCOM_ENV_PATH", "satcom.env")):
         monkeypatch.setattr(app, name, tmp_path / fn)
     return tmp_path
-
-
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
 
 
 @pytest.fixture(autouse=True)
@@ -35,16 +34,16 @@ def _clean(paths):
     # ⚠ תלוי ב-paths — הניקוי חייב להתפרק לפני ש-monkeypatch מחזיר את הנתיבים
     # האמיתיים (ר' _rflog_clean ב-test_rflog.py: אחרת כותבים ל-/var/lib/airam).
     yield
-    with app._exp_lock:
-        th, stop = app._exp["thread"], app._exp["stop"]
+    with experiment._exp_lock:
+        th, stop = experiment._exp["thread"], experiment._exp["stop"]
     if stop:
         stop.set()
     if th:
         th.join(timeout=10)
-    with app._exp_lock:
-        app._exp.update(running=False, id=None, plan=[], i=-1, waiting=None, error=None,
+    with experiment._exp_lock:
+        experiment._exp.update(running=False, id=None, plan=[], i=-1, waiting=None, error=None,
                         result=None, stop=None, confirm=None, thread=None, step_started_at=None)
-    app._rflog_stop("test-teardown")
+    experiment._rflog_stop("test-teardown")
     if app.TUNE_LOCK.locked():
         app.TUNE_LOCK.release()
 
@@ -64,12 +63,12 @@ class FakeSDR:
 
     def noise(self):
         p = self.params
-        if p["agc"] and abs(p["freq"] - app.EXP_ATISWIN_FREQ) < 1e-3:
+        if p["agc"] and abs(p["freq"] - experiment.EXP_ATISWIN_FREQ) < 1e-3:
             return -58.0 if self.connected else -60.0
         return -60.0 if self.connected else -72.0
 
     def signal(self):
-        if abs(self.params["freq"] - app.EXP_ATIS_FREQ) < 1e-3:
+        if abs(self.params["freq"] - experiment.EXP_ATIS_FREQ) < 1e-3:
             return -15.0 if self.connected else -68.0
         return self.noise() + 1.0
 
@@ -113,8 +112,9 @@ def fast(monkeypatch):
                  ("EXP_FIXED_SETTLE_SEC", 0.05), ("EXP_AGC_TAIL_SEC", 0.45), ("EXP_EARLY_SEC", 0.08),
                  ("EXP_CREEP_HEAD_SEC", 0.25), ("EXP_CREEP_TAIL_SEC", 0.2),
                  ("EXP_REF_SETTLE_SEC", 0.05), ("EXP_STALE_WINDOW_SEC", 0.1),
-                 ("ANTENNA_CHECK_SAMPLE_SEC", 0.5), ("RFLOG_POLL_SEC", 0.01)):
-        monkeypatch.setattr(app, k, v)
+                 ("RFLOG_POLL_SEC", 0.01)):
+        monkeypatch.setattr(experiment, k, v)
+    monkeypatch.setattr(app, "ANTENNA_CHECK_SAMPLE_SEC", 0.5)   # נשאר ב-app (מוזרק ל-experiment בזמן קריאה)
 
 
 @pytest.fixture
@@ -125,7 +125,7 @@ def world(paths, fast, monkeypatch):
     # עם plugin שמדמה עצירות כאלה. בייצור (חלון 30ש') עצירה כזו מפילה דגימה אחת.
     # מנטרלים *רק* את ה-fsync של הרשם (כינוי מודולרי, לא os.fsync הגלובלי);
     # מסלול הכתיבה האמיתי, כולל fsync, נבדק ב-test_rflog.py.
-    monkeypatch.setattr(app, "_rflog_fsync", lambda fd: None)
+    monkeypatch.setattr(experiment, "_rflog_fsync", lambda fd: None)
     sdr = FakeSDR(paths)
     restored = []
     monkeypatch.setattr(app, "_enter_voice", sdr.enter_voice)
@@ -141,7 +141,7 @@ def world(paths, fast, monkeypatch):
 def _last_rflog_noise():
     """ערך ה-noise בשורת הרשם האחרונה (None כשאין) — מה שהרשם *ראה*, לא מה שה-SDR המדומה מדווח."""
     try:
-        lines = app.RFLOG_PATH.read_text(encoding="utf-8").splitlines()
+        lines = experiment.RFLOG_PATH.read_text(encoding="utf-8").splitlines()
     except OSError:
         return None
     for line in reversed(lines):
@@ -169,7 +169,7 @@ def _wait(pred, timeout=20):
 
 def test_plan_needs_exactly_two_physical_actions():
     """כל הטעם: שתי פעולות פיזיות בלבד (ניתוק, חיבור), לא אחת לכל תנאי."""
-    plan = app._experiment_plan(130.45)
+    plan = experiment._experiment_plan(130.45)
     prompts = [s for s in plan if s["kind"] == "prompt"]
     assert [p["action"] for p in prompts] == ["disconnect", "reconnect"]
     # אותם תנאים בשני המחזורים — אחרת אין מה להשוות
@@ -191,7 +191,7 @@ def test_full_run_two_prompts_summary_and_restore(client, world):
     assert client.post("/api/antenna/check", json={"freq": 131.55}).status_code == 409
     assert client.post("/api/rflog", json={"active": False}).status_code == 409
 
-    assert _wait(lambda: (app._exp["waiting"] or {}).get("action") == "disconnect")
+    assert _wait(lambda: (experiment._exp["waiting"] or {}).get("action") == "disconnect")
     st = client.get("/api/experiment").get_json()
     assert st["waiting"]["action"] == "disconnect" and st["eta_prompt_sec"] == 0
     world.connected = False
@@ -204,11 +204,11 @@ def test_full_run_two_prompts_summary_and_restore(client, world):
     assert _wait(lambda: _last_rflog_noise() == -60.0)
     assert client.post("/api/experiment", json={"action": "confirm"}).status_code == 200
 
-    assert _wait(lambda: (app._exp["waiting"] or {}).get("action") == "reconnect")
+    assert _wait(lambda: (experiment._exp["waiting"] or {}).get("action") == "reconnect")
     world.connected = True
     client.post("/api/experiment", json={"action": "confirm"})
 
-    app._exp["thread"].join(timeout=30)
+    experiment._exp["thread"].join(timeout=30)
     st = client.get("/api/experiment").get_json()
     assert st["running"] is False and st["error"] is None
     res = st["result"]
@@ -233,14 +233,14 @@ def test_full_run_two_prompts_summary_and_restore(client, world):
     assert world.restored and world.restored[-1][0] == "acars"
     assert app.TUNE_LOCK.acquire(blocking=False)
     app.TUNE_LOCK.release()
-    assert app._rflog["active"] is False          # הרשם הופעל ע"י הניסוי — ונכבה בסופו
+    assert experiment._rflog["active"] is False          # הרשם הופעל ע"י הניסוי — ונכבה בסופו
 
 
 def test_abort_restores_and_releases(client, world):
     client.post("/api/experiment", json={"action": "start"})
-    assert _wait(lambda: app._exp["i"] >= 1)
+    assert _wait(lambda: experiment._exp["i"] >= 1)
     client.post("/api/experiment", json={"action": "abort"})
-    app._exp["thread"].join(timeout=10)
+    experiment._exp["thread"].join(timeout=10)
     st = client.get("/api/experiment").get_json()
     assert st["running"] is False and "בוטל" in st["error"]
     assert world.restored                          # גם בביטול — חוזרים למצב הקודם
@@ -249,9 +249,9 @@ def test_abort_restores_and_releases(client, world):
 
 
 def test_prompt_timeout_stops_and_restores(client, world, monkeypatch):
-    monkeypatch.setattr(app, "EXP_PROMPT_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr(experiment, "EXP_PROMPT_TIMEOUT_SEC", 0.3)
     client.post("/api/experiment", json={"action": "start"})
-    app._exp["thread"].join(timeout=30)
+    experiment._exp["thread"].join(timeout=30)
     st = client.get("/api/experiment").get_json()
     assert st["running"] is False and "לא התקבל אישור" in st["error"]
     assert world.restored
@@ -301,7 +301,7 @@ def test_summary_flags_probe_that_read_previous_process():
              "noise": -61.0, "stats_mtime": 99.0, "proc_start": 100.0},
             {"ev": "probe", "key": "probe_product", "label": "x", "freq": 130.45, "phase": 2,
              "noise": -73.0, "stats_mtime": 201.0, "proc_start": 200.0}]
-    res = app._experiment_summary(rows)
+    res = experiment._experiment_summary(rows)
     assert res["stale_probes"] == 1
     p = res["probes"][0]
     assert p["p1"]["stale"] is True and p["p2"]["stale"] is False and p["drop"] == 12.0
@@ -315,7 +315,7 @@ def test_summary_excludes_previous_process_rows_and_incomplete_steps():
             *[_row(t, 122.6, False, -60.0, 20) for t in (15, 20, 30)],
             {"ev": "step_end", "i": 0, "t": 46.0},
             {**st, "i": 1, "phase": 2, "t_enter": 50.0, "t_ready": 51.0, "proc_start": 50.5}]
-    res = app._experiment_summary(rows)
+    res = experiment._experiment_summary(rows)
     c = res["conditions"][0]
     assert c["p1"]["steady"] == -60.0
     assert "p2" not in c and c["drop"] is None and c["detects"] is None   # לא ניחוש
@@ -323,7 +323,7 @@ def test_summary_excludes_previous_process_rows_and_incomplete_steps():
 
 
 def test_summary_empty_is_all_none():
-    res = app._experiment_summary([])
+    res = experiment._experiment_summary([])
     assert res["conditions"] == [] and res["probes"] == []
     assert res["atis"]["drop"] is None and res["atis"]["gone"] is None
 
@@ -333,10 +333,10 @@ def test_unwritable_log_does_not_leave_experiment_stuck_running(client, world, p
     נשאר running=True לנצח, וכל התחלה חדשה קיבלה 409 "כבר רץ"."""
     blocker = paths / "not-a-dir"
     blocker.write_text("x")
-    monkeypatch.setattr(app, "RFLOG_PATH", blocker / "rf_log.jsonl")
-    monkeypatch.setattr(app, "EXP_PROMPT_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr(experiment, "RFLOG_PATH", blocker / "rf_log.jsonl")
+    monkeypatch.setattr(experiment, "EXP_PROMPT_TIMEOUT_SEC", 0.3)
     assert client.post("/api/experiment", json={"action": "start"}).status_code == 200
-    app._exp["thread"].join(timeout=30)
+    experiment._exp["thread"].join(timeout=30)
     st = client.get("/api/experiment").get_json()
     assert st["running"] is False and st["error"]
     assert world.restored

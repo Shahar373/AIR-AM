@@ -9,23 +9,21 @@ rfnotch_ctrl), וברירת המחדל = ההתנהגות ההיסטורית; (2
 import pytest
 
 import app
+import appstate  # noqa: E402
+import config  # noqa: E402
+import recordings  # noqa: E402
 
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "airband.conf")
-    monkeypatch.setattr(app, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(appstate, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(app, "STATS_PATH", tmp_path / "stats.txt")
     monkeypatch.setattr(app, "PRESETS_PATH", tmp_path / "presets.json")
     rec = tmp_path / "recordings"
     rec.mkdir()
-    monkeypatch.setattr(app, "REC_DIR", rec)
+    monkeypatch.setattr(recordings, "REC_DIR", rec)
     return tmp_path
-
-
-@pytest.fixture
-def client(paths):
-    return app.app.test_client()
 
 
 def _cfg(**kw):
@@ -41,8 +39,8 @@ def test_default_is_historical_behavior():
     assert "fft_size = 512;" in cfg                 # ברירת המחדל של rtl_airband — כמו קודם
     assert 'device_string = "driver=sdrplay";' in cfg
     assert "bandwidth" not in cfg
-    assert app.DEFAULT_STATE["chan_filter"] == "standard"
-    assert app.DEFAULT_STATE["fm_notch"] is False
+    assert appstate.DEFAULT_STATE["chan_filter"] == "standard"
+    assert appstate.DEFAULT_STATE["fm_notch"] is False
 
 
 @pytest.mark.parametrize("name,fft,bw", [("standard", 512, 0), ("narrow", 1024, 0), ("narrow8k", 1024, 8000)])
@@ -75,7 +73,7 @@ def test_unknown_filter_falls_back_to_standard():
 
 def test_fft_sizes_are_valid_for_rtl_airband():
     """rtl_airband מקבל רק חזקות של 2 בטווח 256..8192 (MIN/MAX_FFT_SIZE_LOG=8..13)."""
-    for spec in app.CHAN_FILTERS.values():
+    for spec in config.CHAN_FILTERS.values():
         n = spec["fft"]
         assert 256 <= n <= 8192 and n & (n - 1) == 0
         # bandwidth 0 = כבוי; אחרת חייב להיות בתוך Nyquist של ה-I/Q ב-16kHz
@@ -95,7 +93,7 @@ def test_parse_whitelist_and_bool(paths):
 
 def test_parse_missing_keys_keep_saved_choice(paths):
     """"האזן למגדל"/curl שלא שולחים את המפתחות לא מאפסים את בחירת המשתמש."""
-    app.save_state({**app.DEFAULT_STATE, "chan_filter": "narrow", "fm_notch": True})
+    appstate.save_state({**appstate.DEFAULT_STATE, "chan_filter": "narrow", "fm_notch": True})
     p, _ = app._parse_tune({"freq": 134.6})
     assert p["chan_filter"] == "narrow" and p["fm_notch"] is True
     p, _ = app._parse_tune({"freq": 134.6, "chan_filter": "standard", "fm_notch": False})
@@ -112,7 +110,7 @@ def test_tune_persists_and_writes_config(client, monkeypatch):
                                        "rf_gain": 4, "squelch_mode": "auto", "squelch_snr": 9,
                                        "chan_filter": "narrow8k", "fm_notch": True})
     assert r.status_code == 200
-    st = app.load_state()
+    st = appstate.load_state()
     assert st["chan_filter"] == "narrow8k" and st["fm_notch"] is True
     cfg = app.CONFIG_PATH.read_text()
     assert "fft_size = 1024;" in cfg and "bandwidth = 8000;" in cfg and "rfnotch_ctrl=true" in cfg
@@ -122,7 +120,7 @@ def test_rollback_keeps_user_filter(paths, monkeypatch):
     monkeypatch.setattr(app.subprocess, "run", lambda *a, **k: None)
     monkeypatch.setattr(app, "_is_active", lambda svc: True)
     monkeypatch.setattr(app.time, "sleep", lambda *a: None)
-    prev = {**app.DEFAULT_STATE, "chan_filter": "narrow", "fm_notch": True}
+    prev = {**appstate.DEFAULT_STATE, "chan_filter": "narrow", "fm_notch": True}
     assert app._rollback(prev) is True
     cfg = app.CONFIG_PATH.read_text()
     assert "fft_size = 1024;" in cfg and "rfnotch_ctrl=true" in cfg
@@ -134,7 +132,7 @@ def test_probe_runs_under_fixed_conditions(paths, monkeypatch):
     monkeypatch.setattr(app, "_is_active", lambda svc: False)
     monkeypatch.setattr(app, "_restart_and_verify", lambda: (None, None, False))
     monkeypatch.setattr(app, "_denoise_after_voice", lambda: None)
-    app.save_state({**app.DEFAULT_STATE, "chan_filter": "narrow8k", "fm_notch": True})
+    appstate.save_state({**appstate.DEFAULT_STATE, "chan_filter": "narrow8k", "fm_notch": True})
     app._enter_voice(app._probe_params(131.55))
     cfg = app.CONFIG_PATH.read_text()
     assert "fft_size = 512;" in cfg and "bandwidth" not in cfg and "rfnotch" not in cfg
@@ -143,6 +141,6 @@ def test_probe_runs_under_fixed_conditions(paths, monkeypatch):
 def test_restore_after_probe_brings_back_user_choice(paths, monkeypatch):
     seen = []
     monkeypatch.setattr(app, "_enter_voice", lambda params: seen.append(params) or (None, None, False))
-    prev = {**app.DEFAULT_STATE, "chan_filter": "narrow", "fm_notch": True}
+    prev = {**appstate.DEFAULT_STATE, "chan_filter": "narrow", "fm_notch": True}
     app._restore_after_probe(prev, "voice")
     assert seen and seen[-1]["chan_filter"] == "narrow" and seen[-1]["fm_notch"] is True
