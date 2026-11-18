@@ -13,6 +13,7 @@ import json
 import pytest
 
 import app
+import conftest  # נתיבים אמיתיים לפני הבידוד — ר' conftest.real_path
 import recordings  # noqa: E402
 
 
@@ -440,13 +441,13 @@ def test_constants_match_script_and_installer():
         assert f"NOPASSWD: /usr/bin/systemctl {action} {app.DENOISE_SERVICE}\n" in inst
     assert f'cp "$REPO_DIR/systemd/{app.DENOISE_SERVICE}.service"' in inst
     assert f'cp "$REPO_DIR/scripts/{app.DENOISE_SCRIPT.name}" /usr/local/bin/' in inst
-    assert f"install -m755 airam-rnnoise {app.DENOISE_RNNOISE}" in inst
+    assert f"install -m755 airam-rnnoise {conftest.real_path(app, 'DENOISE_RNNOISE')}" in inst
     # תיקון ה-ARM של upstream (בלעדיו v0.2 לא נבנה על ה-Pi) — הקובץ קיים ומוחל
     patch = ROOT / "tools" / "rnnoise-0.2-372f7b4-arm-build-fix.patch"
     assert patch.exists() and "vec_neon.h" in patch.read_text(encoding="utf-8")
     assert f'RNNOISE_PATCH="$REPO_DIR/tools/{patch.name}"' in inst
     assert 'patch -p1 -s < "$RNNOISE_PATCH"' in inst
-    assert f"ExecStart={app.DENOISE_SCRIPT}" in unit
+    assert f"ExecStart={conftest.real_path(app, 'DENOISE_SCRIPT')}" in unit
     assert "PartOf=rtl_airband.service" in unit
     # לא enabled — airam-web מפעיל (שורת מקטע אמיתית; ההערה ביחידה מזכירה את המילה)
     assert "[Install]" not in [line.strip() for line in unit.splitlines()]

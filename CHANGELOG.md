@@ -58,6 +58,9 @@
   `get_cfg()` ו-wrapper דק נשאר ב-`app.py`. נתיבי ה-HTTP ויומן השידורים נשארו. בדיקות שהחליפו שמות שעברו (`REC_DIR`, `WHISPER_*`,
   `_write_tx`, `WATCH_INTERVAL`…) מצביעות על `recordings`; נבדק בחיפוש (אין `setattr(app, "<שם שעבר>"`) ובמוטציה (שבירת `_move_recording`/
   retention ⇒ 20 כשלים). פונקציית הנתיב `/recordings/<name>` שונתה ל-`recording_file` — השם `recordings` תפס את המודול.
+- **שלב ג2.4 — בידוד נתיבים בבדיקות (`tests/conftest.py`):** fixture אוטומטי מנתב *כל* `Path` של מודולי האפליקציה שמצביע על `/var`,
+  `/etc`, `/run`, `/opt`, `/usr` ל-`tmp_path` (נבחר לפי ערך, לא לפי רשימת שמות — מודול חדש נתפס לבד). `tests/test_path_isolation.py`
+  נכשל אם נתיב-מערכת נשאר. בדיקות שמשוות קבוע-נתיב מול `install.sh`/יחידות systemd קוראות את הערך האמיתי דרך `conftest.real_path`.
 - ⚠ **תגי גרסה:** במאגר קיים רק `v1.0.0`, למרות המוסכמה. גרסאות שלא קיבלו כותרת משלהן ב-CHANGELOG (למשל
   2.33–2.36.0) קובצו לגרסה שאחריהן. מעכשיו — תג בכל מיזוג ל-main.
 

@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 import app
+import conftest  # נתיבים אמיתיים לפני הבידוד
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = (ROOT / "scripts" / "airam-denoise").read_text(encoding="utf-8")
@@ -77,8 +78,8 @@ def test_rejected_chain_is_gone():
 def test_unit_reads_engine_env_and_installer_builds_speexdn():
     unit = (ROOT / "systemd" / "airam-denoise.service").read_text(encoding="utf-8")
     inst = (ROOT / "install.sh").read_text(encoding="utf-8")
-    assert f"EnvironmentFile=-{app.DENOISE_ENV_PATH}" in unit
-    assert f"/usr/local/bin/airam-speexdn" == str(app.DENOISE_SPEEXDN)
+    assert f"EnvironmentFile=-{conftest.real_path(app, 'DENOISE_ENV_PATH')}" in unit
+    assert f"/usr/local/bin/airam-speexdn" == str(conftest.real_path(app, "DENOISE_SPEEXDN"))
     assert 'install -m755 "$BUILD_DIR/airam-speexdn" /usr/local/bin/airam-speexdn' in inst
     assert '"$REPO_DIR/tools/airam-speexdn.c"' in inst
     assert "--mix 0.5 --delay 959" in inst     # בדיקת העשן מריצה את מצב המוצר

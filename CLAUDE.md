@@ -230,6 +230,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_recordings.py       # ★ שמירת הקלטות (saved/, מכסה תחת מרוץ-מקביל, ?starred=1, ZIP) +
                            #   תמלול (5 מצבי tx.state, תור מבוסס-sidecar ששורד restart, שתי
                            #   שפות/מודלים, fallback מודל, retention עמיד ל-stat שנכשל).
+  test_path_isolation.py   # שער הבידוד: ‏conftest מנתב כל נתיב-מערכת (/var,/etc,/run,/opt,/usr) של כל מודול ל-tmp; נכשל אם נשאר אחד.
+                           #   ⚠ בדיקה שצריכה את הערך האמיתי (מול install.sh/systemd) — `conftest.real_path(app, "NAME")`.
   test_security.py         # _guard: Origin/CSRF, PIN.
   test_systemd_units.py    # אינווריאנטות היחידות: Conflicts לכל זוג צרכנים (חוץ מהמשני לצד הקול), אף צרכן לא
                            #   enabled, Requires+PartOf=sdrplay, StartLimit רק ל-satcom ורק ב-[Unit].
