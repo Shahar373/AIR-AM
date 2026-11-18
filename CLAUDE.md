@@ -105,6 +105,8 @@ webtune/
                             #   שלב 1) + שכבת הנתונים של ההצלבה (lookup ממוקד/trace/OpenSky,
                             #   אינדקס hex, רישום↔hex). thread נפרד. ידני:
                             #   `python3 adsb.py [--selftest | --lookup reg G-ZBKM | --trace 406f79 [epoch]]`.
+  diag.py                   # יומן בדיקה וייצוא לוגים — החלק הטהור: פענוח journald/systemctl show,
+                            #   אירועי קרנל/יחידות, analyze (תקין/אזהרה/תקלה — רק מעובדה שנרשמה), summary.md.
   xcheck.py                 # ★ הצלבת הודעות מול ADS-B + אופק רדיו/BLOS — פונקציות טהורות בלבד
                             #   (גאודזיה, אופק, זהות, מיקום-בזמן, קריטריונים). ר' §5.
   static/
@@ -202,6 +204,8 @@ tests/                     # pytest. רצים ב-CI ללא חומרה (SDR/syste
   test_adsb_enrich.py      # היתוך ADS-B↔ACARS: העשרת /api/acars מ-snapshot של adsb.py (בלי רשת).
   test_adsb_lookup.py      # הרחבת adsb.py להצלבה: זמן מדידה, by_hex, רישום↔hex, lookup (cache/קצב/
                            #   fallback), parse/fetch trace, OpenSky, gzip/חסם גודל — רשת ממוקפת.
+  test_diag.py             # יומן בדיקה: פענוח journald, analyze (בלי ספים), רשם start/mark/stop, רישום בקשות
+                           #   (בלי headers, trace מוחלף בגודלו), המשך אחרי restart, ZIP הייצוא, כלים חסרים.
   test_xcheck.py           # xcheck.py: Vincenty, אופק, זהות/טיסה, 4 קטגוריות מיקום, הערכה — G-ZBKM.
   test_xcheck_api.py       # שילוב: /api/station, תור+worker דו-שלבי, /api/xcheck/verify (G-ZBKM היסטורי,
                            #   re-decode, סתירה, בלי ADS-B), ראיות/סינון/ייצוא, worker לא קורא את ה-buffer.
@@ -326,6 +330,7 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
 | `/var/lib/airam/recordings/saved/` | הקלטות **שמורות** (★) — **תת-תיקייה, לא רשימה בקובץ צד**. עד 100 קבצים / 100MB, פטורות לגמרי מ-`_sweep_recordings` (‏`glob("*.mp3")` אינו רקורסיבי — הפטור מגיע ב*אפס* שורות לוגיקה, ר' §5/§12) | app.py (`/api/recordings/star`) |
 | `/var/lib/airam/sessions/<id>/` | סשן שמור (שחזור-סשן שלב 2) — `meta.json` (אטומי), `track.jsonl.gz` (חתך `track.jsonl` בטווח), `clips/*.mp3` (הקלטות רלוונטיות — שמורה מ*עתיקה*, לא-שמורה מ*ועברת*). אין retention אוטומטי — מחיקה היא `DELETE /api/sessions/<id>` בלבד | app.py (`POST /api/sessions`) |
 | `/run/rtl_airband_stats.txt` | מדדי RF (tmpfs, ~1Hz) | rtl_airband |
+| `/var/lib/airam/diag.jsonl` | יומן בדיקה: `start`/`resume`/`stop`, `sample` כל 5ש' (מצב, services, מתח, load), `mark`, `request` (פעולה משנת-מצב מהטלפון). **רק בזמן בדיקה** (עצירה אוטומטית 4ש'); append+`fsync`; מעל 5MB בהתחלה ⇒ `.prev`. בדיקה שלא נעצרה ממשיכה בעלייה (`_diag_boot`) | app.py (`/api/diag`) |
 | `/var/lib/airam/rf_log.jsonl` | רשם ניסוי RF — שורה לכל כתיבה חדשה של המדדים + הקונפיג שרץ + סימוני משתמש + תוצאות בדיקת-אנטנה. **רק כשמופעל** (כבוי כברירת מחדל, כיבוי אוטומטי אחרי שעתיים); append+`fsync` (תוצאת ניסוי שדה); מעל 5MB בהפעלה ⇒ `.prev` | app.py (`/api/rflog`) |
 
 ---
@@ -562,6 +567,14 @@ docs/                       # מסמכי תכנון/החלטות. מתעדים *
   מבחין בין כתיבות התהליך הנוכחי ל-flush של הקודם — ⚠ השוואת `stats_mtime` ל-`conf_mtime`
   **לא** יכולה, כי ה-flush נכתב אחרי הקונפיג), `_experiment_summary` (פונקציה טהורה — חציונים,
   ירידה, "מזהה?" = הסף של המוצר עצמו; `None` כשחסר), `_read_rflog_run`.
+- **יומן בדיקה + ייצוא לוגים** (אחרי בלוק רשם ה-RF; הניתוח ב-`diag.py`): `_diag_start`/`_diag_stop`/
+  `_diag_worker` (דגימה `_diag_sample` = `_health_snapshot` + `_power_cached` כל `DIAG_SAMPLE_SEC`), `_diag_event`,
+  `_diag_after_request` (בזמן בדיקה: כל POST/PUT/DELETE ל-`/api/*` חוץ מ-`/api/diag*` נרשם עם body מקוצר —
+  ⚠ בלי headers (PIN), `trace_b64` מוחלף בגודלו; לעולם לא מפיל תשובה), `_diag_boot` (בדיקה שנקטעה ממשיכה
+  עם שורת `resume`), `_diag_window` (‏`?minutes=` או הבדיקה הפעילה/האחרונה ± דקה), `_diag_collect` (journald
+  כ-JSON ב-`_diag_cmd` — שאילתה אחת לכל היחידות + `_TRANSPORT=kernel` (לא `-k`: הוא רק האתחול הנוכחי),
+  `systemctl show`, קונפיג מ-`_diag_config_files()` — ⚠ **לעולם לא `airam.env`**, state עם נ"צ מעוגל; מקור
+  שנכשל נרשם ב-`collect_errors` ולא מבטל את החבילה). הרשאה ליומן: `airam` בקבוצה `systemd-journal` (install.sh 6b).
 - **תפקידי המקלטים — קיבוע לפי serial** (`docs/dual-sdr-feasibility.md` §3.1): עם שני מקלטי
   SDRplay, ‏`driver=sdrplay` בלי serial פותח את הראשון שה-API מחזיר — איזה מקלט נקבע במקרה.
   `_SERIAL_RE` (אותיות/ספרות 4–32, מעוגן) + `_sanitize_serial` — ערך לא תקין לא נכתב לשום
@@ -864,6 +877,9 @@ iOS: מתג ההשתקה משתיק Web Audio — רמז בלבד; ה-workaround
 ‏`showView`), 🧪 הפעלה/עצירה, שלושה כפתורי סימון (44px — כפפות/שטח) עם אישור גלוי ושעה
 ("✓ סומן: מנותק · 10:31:05" — בשטח אין דרך אחרת לדעת שהלחיצה נקלטה), וקישור הורדה.
 ההקלטה בצד השרת — ממשיכה כשהמסך כבוי.
+**יומן בדיקה** (`#diagCard` במסך הבית + `#diagChip` גלובלי ברצועת הסטטוס כשבדיקה רצה — נגיעה = `prompt` לסימון):
+`pollDiag` (10ש' + `visibilitychange` + `showView("home")`), `renderDiag`, `diagMark`, "🩺 בדוק" ⇒ `/api/diag/summary`
+(טקסט מהשרת רק ב-`textContent`, פירוט עם `unicode-bidi: plaintext`), וקישור הייצוא נגזר מ-`#diagWindow`.
 **ניסוי כיול אוטומטי** (`#expCard` במסך הבית + `#expBar` — סרגל **גלובלי** קבוע בתחתית, מחוץ
 ל-`<main>`, כי הבקשה לנתק/לחבר חייבת להופיע בכל תצוגה): `pollExperiment` (2ש' בזמן ריצה, 15ש'
 בבית כשלא רץ, ומיד ב-`visibilitychange` — חוזרים לטאב ואולי ממתינים לך), `renderExperiment`
@@ -1086,6 +1102,10 @@ API), **לא** Web Push/VAPID — עובד רק כשהטאב/PWA פתוחים ב
 | GET | `/api/session` | דוח סשן ("מה קרה בזמן שלא הסתכלת"): כמות הודעות/מטוסים (וחדשים), עד `SESSION_HIGHLIGHTS_MAX` הודעות `notable` (ר' `_interest_score`; שידור חוזר — אותו MSN וטקסט — מאוחד), ומסלול פעיל/שיבוש GPS מתוך `adsb.session_series`. קורא מהדיסק (jsonl), לא מהזיכרון — עקבי עם `?day=`. `?since=<epoch>` דורס את הסמן השמור; `GET` idempotent — לא מקדם אותו |
 | POST | `/api/session/ack` | מקדם את הסמן (`state["last_session_view_at"]`) ל"עכשיו" — הפעולה המפורשת היחידה שמקדמת אותו. דרך `_guard` |
 | GET | `/api/signal` | מד שדה מאוחד למצב שרץ *בפועל* כרגע: רציף בקול (`_read_voice_metrics`), "הודעה אחרונה בלבד" ב-ACARS/VDL2 (`level`+`snr` — ACARS לעולם בלי `snr`, ר' §12), הפניה ל-`/api/satcom/health` ב-SATCOM. `verdict` (`ok`/`below_baseline`/`no_baseline`/`unknown`) תמיד מול `state["signal_baseline"]` בלבד — לעולם לא סף מומצא |
+| GET/POST | `/api/diag` | יומן בדיקה: GET מצב (`active`/`label`/`samples`/`marks`/`requests`/`remaining`/`last_run`); POST `{action: start\|stop, label?}` (409 כשכבר רצה). דרך `_guard` (POST) |
+| POST | `/api/diag/mark` | `{label}` — סימון בציר הזמן. 409 כשאין בדיקה. דרך `_guard` |
+| GET | `/api/diag/export` | ZIP: `summary.md` + `logs/` (journald יחידות+קרנל) + `test-log.jsonl` + `snapshot.json` + `config/` + `messages.json` + `system.txt`. `?minutes=N` (1–1440) או ברירת מחדל = הבדיקה הפעילה/האחרונה |
+| GET | `/api/diag/summary` | אותו ניתוח בלי ZIP: `overall`, `checks`, `summary` (ל-"🩺 בדוק" בטלפון) |
 | GET/POST | `/api/rflog` | רשם ניסוי RF: GET מצב (`active`/`until`/`rows`/`marks`/`size`); POST `{active}` הפעלה/עצירה (idempotent). דרך `_guard` (POST). ר' `docs/antenna-calibration-experiment.md` |
 | POST | `/api/rflog/mark` | `{label}` (עד 40 תווים) — סימון אירוע פיזי. **409 כשהרשם כבוי** (סימון שלא נרשם לא נראה כאילו נרשם). דרך `_guard` |
 | GET | `/api/rflog/export` | הורדת `rf_log.jsonl` (404 כשאין) |

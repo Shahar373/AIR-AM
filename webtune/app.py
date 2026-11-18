@@ -29,6 +29,7 @@ import shutil
 import socket
 import statistics
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -38,6 +39,7 @@ from urllib.parse import urlparse
 
 from flask import Flask, request, jsonify, send_from_directory, send_file, abort
 
+import diag   # יומן בדיקה וייצוא לוגים — הניתוח הטהור (פענוח journald, בדיקות, summary.md)
 import adsb   # מסלול פעיל + אינדיקציית GPS מנתוני ADS-B (thread נפרד)
 import xcheck   # הצלבת הודעות מול ADS-B + אופק רדיו (פונקציות טהורות)
 
@@ -4451,6 +4453,11 @@ def api_sdr_roles():
 @app.route("/api/health")
 def api_health():
     """סטטוס המערכת — מאפשר ל-UI להבדיל בין "אין שידור" ל"משהו נפל"."""
+    return jsonify(_health_snapshot())
+
+
+def _health_snapshot():
+    """הלב של /api/health כ-dict — משותף גם ליומן הבדיקה (_diag_sample) ולייצוא."""
     services = _services_status(HEALTH_SERVICES)
     try:
         stats_age = round(time.time() - STATS_PATH.stat().st_mtime, 1)
@@ -4499,9 +4506,9 @@ def api_health():
               else vdl2_ok if mode == "vdl2" else satcom_ok if mode == "satcom" else off_ok)
     # הסינון לא נכנס ל-ok בכוונה: כשל בו לא פוגע ברדיו (Icecast מגיש /live.mp3
     # למבקשי /clean.mp3), ו"תקלה" אדומה במסך הבית בגללו הייתה שולחת לבדוק SDR.
-    return jsonify(ok=ok, app_mode=mode,
-                   services=services, sdr_present=_sdr_present(), stats_age=stats_age,
-                   denoise=_denoise_status(services))
+    return dict(ok=ok, app_mode=mode,
+                services=services, sdr_present=_sdr_present(), stats_age=stats_age,
+                denoise=_denoise_status(services))
 
 
 @app.route("/api/denoise", methods=["GET", "POST"])
@@ -6013,6 +6020,487 @@ def api_rflog_export():
                      download_name=f"airam-rflog-{time.strftime('%Y%m%d-%H%M')}.jsonl")
 
 
+# --- יומן בדיקה + ייצוא לוגים (webtune/diag.py — הניתוח הטהור) ---------------
+# כשבודקים משהו (מצב חדש, כבל, ספק כוח) רוצים אחר כך קובץ *אחד* שעונה "האם הכול
+# היה בסדר": מה המשתמש עשה (פעולות + סימונים), מה המערכת עשתה (דגימה כל 5ש' של
+# המצב/השירותים/המתח), ומה היומנים אמרו (journald של כל היחידות + הקרנל). הדגימה
+# רצה רק בזמן "בדיקה" פעילה; הייצוא עובד תמיד (חלון זמן). ⚠ אין בחבילה
+# /etc/airam/airam.env (PIN, סודות OpenSky), ונ"צ התחנה מעוגל ל-~1 ק"מ.
+DIAG_PATH = Path("/var/lib/airam/diag.jsonl")
+DIAG_SAMPLE_SEC = 5
+DIAG_MAX_SEC = 4 * 3600            # לא כותבים ל-SD לנצח אם שכחו לעצור
+DIAG_ROTATE_BYTES = 5_000_000      # בהתחלת בדיקה: קובץ גדול מזה עובר ל-.prev
+DIAG_LABEL_MAX = 80
+DIAG_BODY_MAX = 300
+DIAG_BODY_SKIP = ("trace_b64",)    # קובץ trace מיובא — גדול, ולא מעניין בציר הזמן
+DIAG_EXPORT_DEFAULT_MIN = 60
+DIAG_EXPORT_MAX_MIN = 24 * 60
+DIAG_JOURNAL_MAX = 20000           # רשומות journald לכל שאילתה (שירותים / קרנל)
+DIAG_MSG_SAMPLE = 20               # כמה הודעות אחרונות מכל מקור נכנסות לחבילה
+DIAG_PRE_SEC = 60                  # חלון "מאז תחילת הבדיקה" מתחיל דקה לפניה
+_diag_fsync = os.fsync
+_diag_lock = threading.Lock()
+_diag = {"active": False, "started_at": None, "until": None, "label": "", "samples": 0,
+         "marks": 0, "requests": 0, "write_errors": 0, "thread": None, "stop": None,
+         "last_run": None}
+
+
+def _diag_units():
+    return ("airam-web", SDR_API_SERVICE, *SDR_CONSUMERS, DENOISE_SERVICE, "icecast2")
+
+
+def _diag_config_files():
+    """הקונפיג שהאפליקציה כותבת (לא airam.env!). פונקציה ולא קבוע — הבדיקות מחליפות נתיבים."""
+    return (CONFIG_PATH, VOICE2_CONFIG_PATH, ACARS_ENV_PATH, ACARS2_ENV_PATH, VDL2_ENV_PATH,
+            VDL2B_ENV_PATH, SATCOM_ENV_PATH, SDR_ENV_PATH, DENOISE_ENV_PATH)
+
+
+def _diag_cmd(args, timeout=15):
+    """(stdout, stderr, rc) — או (None, שגיאה, None) כשהפקודה חסרה/נתקעה. לא זורק."""
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return r.stdout, r.stderr, r.returncode
+    except FileNotFoundError:
+        return None, f"{args[0]} לא מותקן", None
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return None, f"{args[0]}: {e}", None
+
+
+def _diag_write(obj):
+    """append + fsync (כמו _rflog_write: תוצאת בדיקה, ו-power bank שקוטע הוא בדיוק
+    מה שבודקים). לעולם לא זורק — כשל נספר ב-write_errors."""
+    line = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+    with _diag_lock:
+        try:
+            DIAG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(DIAG_PATH, "a+b") as f:
+                _append_line_on_boundary(f, line)
+                f.flush()
+                _diag_fsync(f.fileno())
+        except OSError as e:
+            _diag["write_errors"] += 1
+            if _diag["write_errors"] in (1, 100):
+                log.warning("יומן בדיקה: כתיבה ל-%s נכשלה: %s", DIAG_PATH, e)
+            return False
+    return True
+
+
+def _meminfo_mb(key):
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith(key + ":"):
+                return round(int(line.split()[1]) / 1024)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _diag_sample():
+    """דגימה אחת: המצב (אותו חישוב כמו /api/health), מתח/טמפ', עומס, זיכרון."""
+    h = _health_snapshot()
+    p = _power_cached() or {}
+    try:
+        load1 = round(os.getloadavg()[0], 2)
+    except OSError:
+        load1 = None
+    return {"ev": "sample", "t": round(time.time(), 2), "mode": h["app_mode"], "ok": h["ok"],
+            "services": h["services"], "sdr_present": h["sdr_present"], "stats_age": h["stats_age"],
+            "denoise": (h.get("denoise") or {}).get("state"),
+            "power": {k: p.get(k) for k in ("throttled", "undervolt_now", "throttle_now",
+                                            "volts_in", "temp")} if p else None,
+            "load1": load1, "mem_avail_mb": _meminfo_mb("MemAvailable")}
+
+
+def _diag_stop(reason):
+    """עוצר את הבדיקה (idempotent). לא עושה join כשנקרא מתוך ה-worker עצמו."""
+    now = time.time()
+    with _diag_lock:
+        if not _diag["active"]:
+            return False
+        _diag["active"] = False
+        evt, th = _diag["stop"], _diag["thread"]
+        _diag["last_run"] = {"started_at": _diag["started_at"], "ended_at": now, "label": _diag["label"]}
+    if evt:
+        evt.set()
+    _diag_write({"ev": "stop", "t": round(now, 2), "reason": reason})
+    if th and th is not threading.current_thread():
+        th.join(timeout=2)
+    return True
+
+
+def _diag_worker(stop_evt):
+    while not stop_evt.is_set():
+        with _diag_lock:
+            until = _diag["until"]
+        if until is not None and time.time() >= until:
+            _diag_stop("timeout")
+            return
+        try:
+            if _diag_write(_diag_sample()):
+                with _diag_lock:
+                    _diag["samples"] += 1
+        except Exception:
+            log.warning("יומן בדיקה: דגימה נכשלה", exc_info=True)   # לא מפילים את ה-thread
+        stop_evt.wait(DIAG_SAMPLE_SEC)
+
+
+def _diag_launch(started_at, label, first_event):
+    evt = threading.Event()
+    with _diag_lock:
+        _diag.update(active=True, started_at=started_at, until=started_at + DIAG_MAX_SEC,
+                     label=label, samples=0, marks=0, requests=0, write_errors=0,
+                     stop=evt, thread=None, last_run=None)
+    _diag_write(first_event)
+    th = threading.Thread(target=_diag_worker, args=(evt,), name="diag", daemon=True)
+    with _diag_lock:
+        _diag["thread"] = th
+    th.start()
+
+
+def _diag_start(label):
+    with _diag_lock:
+        if _diag["active"]:
+            return False
+    try:
+        if DIAG_PATH.exists() and DIAG_PATH.stat().st_size > DIAG_ROTATE_BYTES:
+            os.replace(DIAG_PATH, DIAG_PATH.with_suffix(".jsonl.prev"))
+    except OSError:
+        pass
+    now = time.time()
+    _diag_launch(now, label, {"ev": "start", "t": round(now, 2), "label": label,
+                              "version": VERSION, "max_sec": DIAG_MAX_SEC})
+    log.info("יומן בדיקה: התחלה '%s' (from %s)", label, request.remote_addr if request else "-")
+    return True
+
+
+def _diag_event(obj):
+    """אירוע (סימון / פעולה) — רק כשבדיקה פעילה. מחזיר אם נרשם."""
+    with _diag_lock:
+        active = _diag["active"]
+    return active and _diag_write({"t": round(time.time(), 2), **obj})
+
+
+def _diag_status():
+    with _diag_lock:
+        st = {k: _diag[k] for k in ("active", "started_at", "until", "label", "samples",
+                                    "marks", "requests", "write_errors", "last_run")}
+    st["remaining"] = max(0, round(st["until"] - time.time())) if st["active"] and st["until"] else None
+    try:
+        st["size"] = DIAG_PATH.stat().st_size
+    except OSError:
+        st["size"] = 0
+    return st
+
+
+def _diag_read_rows():
+    try:
+        return _jsonl_records(_read_log_lines(DIAG_PATH))
+    except OSError:
+        return []
+
+
+def _diag_boot():
+    """בעלייה: בדיקה שלא נעצרה (airam-web/ה-Pi אותחלו באמצעה — לרוב *בדיוק* מה
+    שבודקים) ממשיכה, עם שורת resume; אחרת רק משחזרים את "הבדיקה האחרונה" לייצוא."""
+    rows = _diag_read_rows()
+    start = None
+    for r in rows:
+        if r.get("ev") == "start":
+            start = r
+    if not start:
+        return
+    after = [r for r in rows if (r.get("t") or 0) >= start.get("t", 0)]
+    stopped = next((r for r in after if r.get("ev") == "stop"), None)
+    t0 = start.get("t") or 0
+    if stopped is None and time.time() < t0 + DIAG_MAX_SEC:
+        _diag_launch(t0, start.get("label") or "", {"ev": "resume", "t": round(time.time(), 2),
+                                                     "reason": "airam-web עלה מחדש", "version": VERSION})
+        log.info("יומן בדיקה: ממשיך את '%s' אחרי עלייה", start.get("label"))
+        return
+    end = stopped["t"] if stopped else max((r.get("t") or 0) for r in after)
+    with _diag_lock:
+        _diag["last_run"] = {"started_at": t0, "ended_at": end, "label": start.get("label") or ""}
+
+
+@app.before_request
+def _diag_t0():
+    request.environ["airam.t0"] = time.monotonic()
+
+
+@app.after_request
+def _diag_after_request(resp):
+    """בזמן בדיקה: כל פעולה משנת-מצב מהטלפון נכנסת לציר הזמן — מה נשלח, מה חזר,
+    ושגיאה אם הייתה. ⚠ לא כותבים headers (‏PIN), ו-trace מיובא מוחלף בגודלו."""
+    try:
+        if (request.method in ("POST", "PUT", "DELETE") and request.path.startswith("/api/")
+                and not request.path.startswith("/api/diag")):
+            with _diag_lock:
+                active = _diag["active"]
+            if active:
+                body = request.get_json(silent=True)
+                if isinstance(body, dict):
+                    body = {k: (f"<{len(str(v))} תווים>" if k in DIAG_BODY_SKIP else v)
+                            for k, v in body.items()}
+                txt = json.dumps(body, ensure_ascii=False) if body is not None else ""
+                err = None
+                if resp.status_code >= 400 and resp.is_json:
+                    err = (resp.get_json(silent=True) or {}).get("error")
+                t0 = request.environ.get("airam.t0")
+                if _diag_event({"ev": "request", "method": request.method, "path": request.path,
+                                "status": resp.status_code, "body": txt[:DIAG_BODY_MAX],
+                                "error": err, "ms": round((time.monotonic() - t0) * 1000) if t0 else None}):
+                    with _diag_lock:
+                        _diag["requests"] += 1
+    except Exception:
+        log.warning("יומן בדיקה: רישום בקשה נכשל", exc_info=True)   # לעולם לא מפילים את התשובה
+    return resp
+
+
+@app.route("/api/diag", methods=["GET", "POST"])
+def api_diag():
+    """GET: מצב יומן הבדיקה. POST {action: start|stop, label?}. דרך _guard."""
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        action = data.get("action")
+        if action == "start":
+            label = str(data.get("label") or "").strip()[:DIAG_LABEL_MAX]
+            if not _diag_start(label):
+                return jsonify(ok=False, error="בדיקה כבר רצה — עצור אותה קודם", **_diag_status()), 409
+        elif action == "stop":
+            _diag_stop("user")
+        else:
+            return jsonify(ok=False, error="נדרש action: start|stop"), 400
+    return jsonify(ok=True, **_diag_status())
+
+
+@app.route("/api/diag/mark", methods=["POST"])
+def api_diag_mark():
+    """{label} — "עכשיו ניתקתי את המשני" וכו'. 409 כשאין בדיקה: סימון שלא נרשם
+    לא יכול להיראות כאילו נרשם."""
+    data = request.get_json(silent=True) or {}
+    label = str(data.get("label") or "").strip()[:DIAG_LABEL_MAX]
+    if not label:
+        return jsonify(ok=False, error="חסרה תווית"), 400
+    if not _diag_event({"ev": "mark", "label": label}):
+        return jsonify(ok=False, error="אין בדיקה פעילה — התחל בדיקה קודם"), 409
+    with _diag_lock:
+        _diag["marks"] += 1
+    return jsonify(ok=True, mark=label, **_diag_status())
+
+
+def _diag_window(args):
+    """(start, end, test_info). ‏?minutes=N ⇒ N הדקות האחרונות; אחרת הבדיקה
+    הפעילה/האחרונה (מדקה לפניה); ואם לא הייתה — DIAG_EXPORT_DEFAULT_MIN."""
+    now = time.time()
+    st = _diag_status()
+    if not args.get("minutes"):
+        if st["active"]:
+            return st["started_at"] - DIAG_PRE_SEC, now, {"label": st["label"], "active": True}
+        if st["last_run"]:
+            lr = st["last_run"]
+            return (lr["started_at"] - DIAG_PRE_SEC, min(now, lr["ended_at"] + DIAG_PRE_SEC),
+                    {"label": lr["label"], "active": False})
+    try:
+        minutes = int(args.get("minutes") or DIAG_EXPORT_DEFAULT_MIN)
+    except (TypeError, ValueError):
+        minutes = DIAG_EXPORT_DEFAULT_MIN
+    minutes = min(DIAG_EXPORT_MAX_MIN, max(1, minutes))
+    return now - minutes * 60, now, None
+
+
+def _diag_journal(start, end, match):
+    """journald כ-JSON בחלון. מחזיר (recs, error) — error כשאין הרשאה/אין journalctl."""
+    out, err, rc = _diag_cmd(["journalctl", "-o", "json", "--no-pager", "-n", str(DIAG_JOURNAL_MAX),
+                              "--since", f"@{int(start)}", "--until", f"@{int(end) + 1}", *match])
+    if out is None:
+        return [], err
+    note = None
+    if err and re.search(r"insufficient permissions|not seeing messages", err, re.I):
+        note = "אין הרשאה מלאה ליומן (המשתמש airam צריך להיות בקבוצה systemd-journal)"
+    elif rc not in (0, None) and not out:
+        note = (err or "").strip()[:200] or f"journalctl rc={rc}"
+    return diag.parse_journal_json(out), note
+
+
+def _diag_redacted_state():
+    st = load_state()
+    station = st.get("station")
+    if isinstance(station, dict):
+        st["station"] = {**station, **{k: round(station[k], 2) for k in ("lat", "lon")
+                                       if isinstance(station.get(k), (int, float))}}
+    return st
+
+
+def _diag_boot_time():
+    try:
+        for line in Path("/proc/stat").read_text().splitlines():
+            if line.startswith("btime "):
+                return float(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _diag_system_text(units_show):
+    L = []
+    try:
+        u = os.uname()
+        L.append(f"uname: {u.sysname} {u.release} {u.machine}")
+    except AttributeError:
+        pass
+    try:
+        for line in Path("/etc/os-release").read_text().splitlines():
+            if line.startswith("PRETTY_NAME="):
+                L.append("os: " + line.split("=", 1)[1].strip('"'))
+    except OSError:
+        pass
+    L.append(f"python: {sys.version.split()[0]} · airam: {VERSION}")
+    try:
+        L.append(f"uptime: {float(Path('/proc/uptime').read_text().split()[0]) / 3600:.2f} שעות")
+        L.append("loadavg: " + Path("/proc/loadavg").read_text().strip())
+    except (OSError, ValueError, IndexError):
+        pass
+    L.append(f"memory: total={_meminfo_mb('MemTotal')}MB available={_meminfo_mb('MemAvailable')}MB")
+    try:
+        du = shutil.disk_usage(STATE_PATH.parent)
+        L.append(f"disk {STATE_PATH.parent}: free={du.free // 2**20}MB / total={du.total // 2**20}MB")
+    except OSError:
+        pass
+    for args in (["lsusb"], ["lsusb", "-t"]):
+        out, err, _rc = _diag_cmd(args, timeout=5)
+        L += ["", "$ " + " ".join(args), (out or err or "").rstrip()]
+    L += ["", "$ systemctl show (יחידות)"]
+    for unit, props in units_show.items():
+        L.append(f"[{unit}] " + " ".join(f"{k}={v}" for k, v in props.items() if k != "Id"))
+    return "\n".join(L) + "\n"
+
+
+def _diag_collect(start, end, test):
+    """אוסף הכול לחבילה. מחזיר (summary_md, files[(name, text, desc)]). לעולם לא
+    זורק בגלל מקור בודד — כשל נרשם ב-collect_errors ומופיע בדוח."""
+    d, files, errors = {"collect_errors": []}, [], []
+
+    def guard(name, fn):
+        try:
+            return fn()
+        except Exception as e:     # מקור אחד שנכשל לא מבטל את כל החבילה
+            log.warning("ייצוא לוגים: %s נכשל", name, exc_info=True)
+            errors.append(f"{name}: {e}")
+            return None
+
+    health = guard("health", _health_snapshot)
+    d["health"] = health
+    snapshot = {
+        "version": VERSION, "created": time.time(), "window": [start, end], "health": health,
+        "state": guard("state", _diag_redacted_state), "sdr": guard("sdr", _sdr_status),
+        "power": guard("power", _read_power), "transcribe": guard("transcribe", _tx_status),
+        "rflog": guard("rflog", _rflog_status), "diag": guard("diag", _diag_status),
+        "scan": guard("scan", lambda: {**_scan_status, "alive": _scan_thread_alive()}),
+        "xcheck": guard("xcheck", lambda: dict(_xc_stats)),
+        "adsb_net": guard("adsb", adsb.net_status),
+    }
+    d["sdr"], d["power"] = snapshot["sdr"], snapshot["power"]
+
+    out, err, _rc = _diag_cmd(["systemctl", "show", "-p", "Id,ActiveState,SubState,Result,NRestarts,"
+                               "ActiveEnterTimestamp,InactiveEnterTimestamp,ExecMainStatus",
+                               *[u + ".service" for u in _diag_units()]])
+    d["units"] = diag.parse_systemctl_show(out) if out is not None else {}
+    if out is None:
+        errors.append(f"systemctl show: {err}")
+    snapshot["units"] = d["units"]
+
+    match = [a for u in _diag_units() for a in ("-u", u)]
+    recs, d["units_error"] = _diag_journal(start, end, match)
+    d["unit_events"], unit_tl = diag.unit_events(recs)
+    files.append(("logs/services.log", diag.format_journal(recs),
+                  "כל היחידות יחד, לפי הזמן (journald)"))
+    for unit in _diag_units():
+        mine = [r for r in recs if r["unit"] == unit]
+        if mine:
+            files.append((f"logs/{unit}.log", diag.format_journal(mine), f"journald של {unit}"))
+    krecs, d["kernel_error"] = _diag_journal(start, end, ["_TRANSPORT=kernel"])
+    d["kernel_events"] = None if (d["kernel_error"] and not krecs) else diag.kernel_events(krecs)
+    files.append(("logs/kernel.log", diag.format_journal(krecs), "הקרנל: מתח, USB, זיכרון"))
+
+    rows = [r for r in _diag_read_rows() if start <= (r.get("t") or 0) <= end]
+    d["samples"] = [r for r in rows if r.get("ev") == "sample"]
+    files.append(("test-log.jsonl", "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+                  "יומן הבדיקה: דגימה כל 5ש', סימונים ופעולות מהטלפון"))
+
+    msgs, sample = {}, {}
+    for src, path in (("acars", ACARS_LOG_PATH), ("vdl2", VDL2_LOG_PATH), ("satcom", SATCOM_LOG_PATH)):
+        recs_m = [r for r in _read_jsonl_log(path) if start <= (r.get("t") or 0) <= end]
+        msgs[src] = len(recs_m)
+        sample[src] = recs_m[-DIAG_MSG_SAMPLE:]
+    act = [r for r in _jsonl_records(guard("activity", lambda: _read_log_lines(ACTIVITY_PATH)
+                                           if ACTIVITY_PATH.exists() else []) or [])
+           if start <= (r.get("ts") or 0) <= end]
+    msgs["שידורי קול"] = len(act)
+    sample["activity"] = act[-DIAG_MSG_SAMPLE:]
+    d["messages"] = msgs
+    files.append(("messages.json", json.dumps({"counts": msgs, "last": sample}, ensure_ascii=False,
+                                              indent=1, default=str), "ספירה + ההודעות האחרונות בחלון"))
+
+    for p in _diag_config_files():
+        try:
+            files.append((f"config/{p.name}", p.read_text(errors="replace"), f"תוכן {p}"))
+        except OSError:
+            continue
+
+    boot = _diag_boot_time()
+    d["boot_time"], d["boot_in_window"] = boot, bool(boot and start <= boot <= end)
+    files.append(("system.txt", guard("system", lambda: _diag_system_text(d["units"])) or "",
+                  "מערכת: גרסאות, זיכרון, דיסק, USB, יחידות"))
+    d["collect_errors"] = errors
+    snapshot["collect_errors"] = errors
+    files.append(("snapshot.json", json.dumps(snapshot, ensure_ascii=False, indent=1, default=str),
+                  "המצב ברגע הייצוא: state, health, SDR, מתח, תמלול, סריקה, הצלבה"))
+
+    checks = diag.analyze(d)
+    timeline, dropped = diag.build_timeline(rows, unit_tl, d["kernel_events"])
+    meta = {"version": VERSION, "start": start, "end": end, "created": time.time(),
+            "app_mode": (health or {}).get("app_mode"), "boot_time": boot,
+            "test_label": test["label"] if test else None,
+            "test_active": bool(test and test["active"])}
+    listing = [("summary.md", "הדוח הזה")] + [(n, desc) for n, _t, desc in files]
+    return diag.render_summary(meta, checks, timeline, dropped, listing), files, checks
+
+
+@app.route("/api/diag/export")
+def api_diag_export():
+    """ZIP אחד לבדיקה: summary.md (בדיקות + ציר זמן) ראשון, ואחריו היומנים המלאים.
+    ‏?minutes=N — N הדקות האחרונות; בלי — הבדיקה הפעילה/האחרונה (ר' _diag_window)."""
+    import zipfile
+    start, end, test = _diag_window(request.args)
+    summary, files, _checks = _diag_collect(start, end, test)
+    stamp = time.strftime("%Y%m%d-%H%M")
+    root = f"airam-diag-{stamp}"
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(f"{root}/summary.md", summary)
+            for name, text, _desc in files:
+                z.writestr(f"{root}/{name}", text)
+        tmp.close()
+        resp = send_file(tmp.name, mimetype="application/zip", as_attachment=True,
+                         download_name=f"{root}.zip")
+    except Exception:
+        tmp.close()
+        os.unlink(tmp.name)
+        raise
+    resp.call_on_close(lambda: os.path.exists(tmp.name) and os.unlink(tmp.name))
+    return resp
+
+
+@app.route("/api/diag/summary")
+def api_diag_summary():
+    """אותו ניתוח בלי ה-ZIP — לתצוגה בטלפון (רשימת הבדיקות + הטקסט המלא)."""
+    start, end, test = _diag_window(request.args)
+    summary, _files, checks = _diag_collect(start, end, test)
+    return jsonify(ok=True, start=start, end=end, overall=diag.worst(c["level"] for c in checks),
+                   checks=checks, summary=summary)
+
+
 # --- ניסוי כיול אוטומטי (docs/antenna-calibration-experiment.md) -----------
 # ה-Pi מריץ לבד את כל התנאים (תדר × רווח קבוע/AGC × בדיקת-האנטנה של המוצר)
 # פעם עם אנטנה מחוברת ופעם מנותקת. המשתמש מבצע **שתי פעולות פיזיות בלבד**
@@ -6537,6 +7025,17 @@ def _read_power():
             "volts_in": volts_in, "temp": temp}
 
 
+def _power_cached():
+    """_read_power דרך ה-cache (ר' _POWER_TTL) — משותף ל-/api/power וליומן הבדיקה."""
+    now = time.time()
+    with _POWER_LOCK:
+        if _power_cache["payload"] is not None and now - _power_cache["at"] < _POWER_TTL:
+            return _power_cache["payload"]
+        cached = _read_power()
+        _power_cache["at"], _power_cache["payload"] = now, cached
+        return cached
+
+
 @app.route("/api/power")
 def api_power():
     """מצב אספקת המתח ל-Pi (שימושי במיוחד עם סוללה ניידת):
@@ -6546,13 +7045,7 @@ def api_power():
     ביטים של get_throttled: 0=under-volt עכשיו · 2=throttled עכשיו ·
     16=under-volt קרה מאז אתחול · 18=throttling קרה.
     מוגש מ-cache בן _POWER_TTL שניות (ר' שם) — מכווץ טאבים מקבילים לדגימה אחת."""
-    now = time.time()
-    with _POWER_LOCK:
-        if _power_cache["payload"] is not None and now - _power_cache["at"] < _POWER_TTL:
-            cached = _power_cache["payload"]
-        else:
-            cached = _read_power()
-            _power_cache["at"], _power_cache["payload"] = now, cached
+    cached = _power_cached()
     if cached is None:
         return jsonify(ok=False)
     return jsonify(**cached)
@@ -8440,6 +8933,10 @@ if __name__ == "__main__":
     # satcom/scan/off) נעשה כאן, ברקע (satcom חריג — לא משוחזר אוטומטית,
     # ר' _boot_restore/§12 ב-CLAUDE.md). מכסה גם שדרוג קונפיג
     # (stats_filepath/localtime) — כניסה לקול תמיד משכתבת את הקונפיג מה-state.
+    try:
+        _diag_boot()      # בדיקה שנקטעה ב-restart/reboot ממשיכה (ר' שם)
+    except Exception:
+        log.exception("יומן בדיקה: שחזור בעלייה נכשל — ממשיכים בלי")
     threading.Thread(target=_boot_restore, daemon=True).start()
     # התאוששות מקריסת sdrplay.service שלא הופצה לצרכן הפעיל (ר' _mode_reconcile_loop) —
     # thread נפרד מ-_boot_restore: זה רץ *במשך* הסשן, לא רק פעם אחת באתחול.

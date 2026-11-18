@@ -542,6 +542,14 @@
       display: flex; flex-direction: column; gap: .2rem; }
     .exp-msg { margin: .5rem 0 0; font-size: .8rem; color: var(--dim); }
     .exp-msg.err { color: var(--red-fg); }
+    /* יומן בדיקה (#diagCard) */
+    .diag-row { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-2); align-items: center; }
+    .diag-row input[type=text] { flex: 1 1 12rem; min-width: 0; }
+    .diag-row button, .diag-row a, .diag-row select { min-height: 40px; }
+    .diag-checks { margin-top: var(--sp-3); display: grid; gap: var(--sp-1); font-size: .82rem; }
+    .diag-chk { display: grid; grid-template-columns: 1.4rem 1fr; gap: var(--sp-1); }
+    .diag-chk .d { color: var(--dim); grid-column: 2; font-size: .76rem; overflow-wrap: anywhere;
+                   unicode-bidi: plaintext; }   /* נתיבים/פלט אנגלי מהשרת — כיוון לפי התוכן */
     .exp-head { margin: 0 0 .6rem; padding: .6rem .75rem; border-radius: var(--r-sm);
       background: var(--panel-2); border: 1px solid var(--border); font-size: .88rem; line-height: 1.5; }
     .exp-head.good { border-color: rgba(var(--green-rgb),.5); background: rgba(var(--green-rgb),.1); }
@@ -1456,6 +1464,9 @@
       <!-- חיווי SDR: מזוהה ב-USB? פנוי (ה-API מציע אותו)? — GET /api/sdr, ר' pollSdr -->
       <button type="button" id="sdrChip" class="pill hidden" title="מצב ה-SDR">
         <span class="dot"></span><span id="sdrChipTxt">SDR…</span></button>
+      <!-- יומן בדיקה פעיל (GET /api/diag) — גלובלי, כדי לסמן אירוע מכל תצוגה. נגיעה = סימון. -->
+      <button type="button" id="diagChip" class="pill busy hidden" title="יומן בדיקה פעיל — נגיעה מוסיפה סימון">
+        <span class="dot"></span><span id="diagChipTxt">🧾 בדיקה</span></button>
       <!-- חיווי מתח ל-Raspberry Pi (מוסתר עד /api/power) -->
       <div class="pwr hidden" id="pwrChip" title="מתח האספקה ל-Raspberry Pi">
         <span class="pdot"></span><span id="pwrText">בודק מתח…</span>
@@ -1703,6 +1714,41 @@
       </div>
       <div id="expResult" class="hidden"></div>
       <p class="exp-msg" id="expMsg"></p>
+    </div>
+  </section>
+
+  <!-- ═══ יומן בדיקה + ייצוא לוגים (GET/POST /api/diag, GET /api/diag/export) ═══
+       כשבודקים משהו חדש: ה-Pi דוגם כל 5ש' מצב/שירותים/מתח ורושם כל פעולה מהטלפון.
+       הייצוא = ZIP אחד: summary.md (בדיקות + ציר זמן) ואחריו היומנים המלאים. -->
+  <section class="panel p-diag" id="diagCard">
+    <div class="panel-hd"><p class="ttl">🧾 יומן בדיקה וייצוא לוגים</p>
+      <div class="hd-end"><span id="diagPill" class="pill"><span class="dot"></span><span id="diagPillTxt">כבוי</span></span></div>
+    </div>
+    <div class="panel-bd">
+      <p class="hint" style="margin:0 0 .5rem">לפני שבודקים משהו: כתוב מה בודקים ולחץ "התחל". ה-Pi רושם כל 5 שניות
+        את המצב, השירותים והמתח, וגם כל פעולה מהטלפון. בסוף — "ייצא" נותן קובץ ZIP אחד: דוח (summary.md) וכל היומנים.</p>
+      <div class="diag-row" id="diagStartRow">
+        <input type="text" id="diagLabel" maxlength="80" placeholder="מה בודקים? (למשל: קול כפול על power bank)" />
+        <button type="button" class="primary" id="diagStartBtn">▶ התחל בדיקה</button>
+      </div>
+      <div class="diag-row hidden" id="diagRunRow">
+        <input type="text" id="diagMarkTxt" maxlength="80" placeholder="סימון: מה עשית עכשיו?" />
+        <button type="button" class="ghost" id="diagMarkBtn">📍 סמן</button>
+        <button type="button" class="ghost" id="diagStopBtn">⏹ סיים</button>
+      </div>
+      <div class="diag-row">
+        <select id="diagWindow" aria-label="חלון הזמן לייצוא">
+          <option value="">הבדיקה האחרונה</option>
+          <option value="15">15 דקות אחרונות</option>
+          <option value="60">שעה אחרונה</option>
+          <option value="240">4 שעות</option>
+          <option value="1440">24 שעות</option>
+        </select>
+        <button type="button" class="ghost" id="diagCheckBtn">🩺 בדוק</button>
+        <a class="ghost" id="diagExport" href="/api/diag/export" download>⬇ ייצא לוגים</a>
+      </div>
+      <div id="diagChecks" class="diag-checks hidden"></div>
+      <p class="exp-msg" id="diagMsg"></p>
     </div>
   </section>
   </div><!-- /home-dash -->
@@ -3798,6 +3844,102 @@
     setInterval(() => { if (!document.hidden && appMode === "home") pollExperiment(); }, 15000);
     document.addEventListener("visibilitychange", () => { if (!document.hidden) pollExperiment(); });
 
+    /* ---------- יומן בדיקה + ייצוא לוגים (GET/POST /api/diag) ----------
+       הרישום בצד השרת (ממשיך עם מסך כבוי, ושורד restart/reboot של ה-Pi). כאן: התחלה/סיום,
+       סימונים, ובדיקה מהירה (/api/diag/summary). הייצוא הוא קישור GET רגיל ל-ZIP. */
+    let diagState = null, diagInFlight = false;
+    const diagMsg = (t, err) => { const m = $("diagMsg"); m.textContent = t || ""; m.classList.toggle("err", !!err); };
+    function diagExportHref() {
+      const w = $("diagWindow").value;
+      $("diagExport").href = "/api/diag/export" + (w ? "?minutes=" + w : "");
+    }
+    function renderDiag(d) {
+      if (!d || !d.ok) return;
+      diagState = d;
+      const on = !!d.active;
+      $("diagStartRow").classList.toggle("hidden", on);
+      $("diagRunRow").classList.toggle("hidden", !on);
+      const pill = $("diagPill");
+      pill.className = "pill" + (on ? " busy" : "");
+      $("diagPillTxt").textContent = on
+        ? "רושם · נותרו " + fmtRflogLeft(d.remaining || 0)
+        : (d.last_run ? "כבוי · יש בדיקה אחרונה לייצוא" : "כבוי");
+      const chip = $("diagChip");
+      chip.classList.toggle("hidden", !on);
+      $("diagChipTxt").textContent = "🧾 " + (d.label ? (d.label.length > 18 ? d.label.slice(0, 17).trim() + "…" : d.label) : "בדיקה");
+      $("diagPill").title = on ? d.samples + " דגימות · " + d.marks + " סימונים · " + d.requests + " פעולות" : "";
+      $("diagWindow").options[0].textContent = on ? "הבדיקה הנוכחית" : (d.last_run ? "הבדיקה האחרונה" : "שעה אחרונה (אין בדיקה)");
+    }
+    async function pollDiag() {
+      if (diagInFlight) return;
+      diagInFlight = true;
+      try { renderDiag(await fetchJSON("/api/diag")); }
+      catch (e) { /* המחזור הבא ינסה שוב */ }
+      finally { diagInFlight = false; }
+    }
+    async function diagPost(url, body) {
+      const res = await apiSend("POST", url, body);
+      const d = await res.json();
+      if (d.ok) renderDiag(d);
+      return d;
+    }
+    async function diagMark(label) {
+      label = (label || "").trim();
+      if (!label) { diagMsg("כתוב קודם מה עשית.", true); return false; }
+      try {
+        const d = await diagPost("/api/diag/mark", { label });
+        if (!d.ok) { diagMsg(d.error || "הסימון נכשל", true); pollDiag(); return false; }
+        // אישור גלוי עם שעה — בלי זה אי אפשר לדעת אם הלחיצה נקלטה
+        diagMsg("✓ סומן: " + d.mark + " · " + new Date().toLocaleTimeString("he-IL"));
+        showToast("📍 סומן: " + d.mark);
+        return true;
+      } catch (e) { diagMsg("שגיאת רשת — הסימון לא נרשם, נסה שוב.", true); return false; }
+    }
+    $("diagStartBtn").onclick = async () => {
+      $("diagStartBtn").disabled = true;
+      try {
+        const d = await diagPost("/api/diag", { action: "start", label: $("diagLabel").value.trim() });
+        diagMsg(d.ok ? "רושם. סמן כל פעולה פיזית (ניתוק/חיבור/החלפת ספק) מיד אחריה — גם מהכפתור 🧾 למעלה."
+                     : (d.error || "ההתחלה נכשלה"), !d.ok);
+      } catch (e) { diagMsg("שגיאת רשת — נסה שוב.", true); }
+      finally { $("diagStartBtn").disabled = false; }
+    };
+    $("diagStopBtn").onclick = async () => {
+      try {
+        const d = await diagPost("/api/diag", { action: "stop" });
+        if (d.ok) { $("diagWindow").value = ""; diagExportHref(); diagMsg("הבדיקה הסתיימה — לחץ \"ייצא לוגים\" ושלח את הקובץ."); }
+      } catch (e) { diagMsg("שגיאת רשת — נסה שוב.", true); }
+    };
+    $("diagMarkBtn").onclick = async () => { if (await diagMark($("diagMarkTxt").value)) $("diagMarkTxt").value = ""; };
+    $("diagMarkTxt").addEventListener("keydown", (e) => { if (e.key === "Enter") $("diagMarkBtn").click(); });
+    $("diagChip").onclick = () => { const t = prompt("סימון ביומן הבדיקה — מה עשית עכשיו?"); if (t) diagMark(t); };
+    $("diagWindow").onchange = diagExportHref;
+    $("diagCheckBtn").onclick = async () => {
+      const box = $("diagChecks"), w = $("diagWindow").value;
+      $("diagCheckBtn").disabled = true;
+      diagMsg("בודק… (קורא את יומני המערכת)");
+      try {
+        const d = await fetchJSON("/api/diag/summary" + (w ? "?minutes=" + w : ""), { timeoutMs: 30000 });
+        if (!d.ok) throw new Error(d.error || "");
+        const ICON = { ok: "✅", info: "ℹ️", warn: "⚠️", fail: "❌" };
+        box.replaceChildren();
+        (d.checks || []).forEach((c) => {
+          const row = document.createElement("div"), i = document.createElement("span"),
+                t = document.createElement("span");
+          row.className = "diag-chk"; i.textContent = ICON[c.level] || "•"; t.textContent = c.title;   // textContent — טקסט מהשרת
+          row.append(i, t);
+          if (c.detail) { const dd = document.createElement("span"); dd.className = "d"; dd.textContent = c.detail; row.append(dd); }
+          box.append(row);
+        });
+        box.classList.remove("hidden");
+        diagMsg({ ok: "✅ הכול תקין בחלון שנבדק", warn: "⚠️ יש אזהרות — פרטים למעלה", fail: "❌ נמצאו תקלות — פרטים למעלה" }[d.overall] || "");
+      } catch (e) { diagMsg("הבדיקה נכשלה — נסה שוב.", true); }
+      finally { $("diagCheckBtn").disabled = false; }
+    };
+    setInterval(() => { if (!document.hidden) pollDiag(); }, 10000);
+    pollDiag();   // הצ'יפ הגלובלי צריך להופיע גם כשהדף נפתח בתצוגה אחרת
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) pollDiag(); });
+
     /* ---------- אבחון SATCOM: נעילת דמודולטור (GET /api/satcom/health) ----------
        proxy מקומי ל---web dashboard המובנה של inmarsat-sniffer — lock=נעילת
        דמודולטור *גם* באפס הודעות מפוענחות, ההבדל בין "אין אנטנה"/"לא מכוון"
@@ -5215,7 +5357,7 @@
       replayScreen = null;
       segSet("modeSeg", mode);
       renderVoiceAcarsBanner();   // banner נגזר מ-appMode+acars/vdl2/satcom.active — עדכן בכל מעבר
-      if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); pollExperiment(); pollXc(); }
+      if (mode === "home") { renderHome(); pollSession(); loadReplayBuffer(); refreshReplaySessionsCount(); pollExperiment(); pollXc(); pollDiag(); }
       if (mode === "voice") { pollActivity(); pollTxStatus(); voiceFm.poll(); pollRflog(); pollDenoise(); }   // רענון מיידי — לא לחכות עד 15ש'/60ש'/3ש' ל-poll הבא
       if (mode === "acars") acarsFm.poll();
       if (mode === "vdl2") vdl2Fm.poll();
