@@ -3210,52 +3210,51 @@ def write_satcom_env(freqs, gain=None, bias_tee=True, skip_c=True, spectrum=True
     _atomic_write(SATCOM_ENV_PATH, text)
 
 
+def _stop_services(services, timeout=30):
+    """עצירה best-effort, לפי הסדר שנשלח. Conflicts ביחידות עוצר ממילא — עוצרים מפורשות
+    קודם כדי לשחרר את ה-SDR לפני שהצרכן הבא פותח אותו (מונע מרוץ על המכשיר)."""
+    for svc in services:
+        try:
+            _sysctl("stop", svc, timeout=timeout)
+        except Exception:
+            pass
+
+
+def _restart_verified(service, stuck_msg, failed_msg, default_err):
+    """restart לצרכן SDR + אימות שהוא *נשאר* למעלה. מחזיר (error, detail).
+    השירות יכול לעלות ואז לקרוס (SDR תפוס/חסר) ⇒ פולינג ~3.5ש' ולא בדיקה בודדת.
+    ⚠ לא לבלבל עם _restart_and_verify של הקול (רולבק, SDR נוכח) — נפרד בכוונה."""
+    try:
+        r = _sysctl("restart", service, timeout=45)
+    except subprocess.TimeoutExpired:
+        return stuck_msg, None
+    if r.returncode != 0:
+        return (r.stderr or default_err).strip(), _journal_tail(service)
+    for _ in range(7):
+        time.sleep(0.5)
+        if not _is_active(service):
+            return failed_msg, _journal_tail(service)
+    return None, None
+
+
 def _enter_vdl2(freqs):
     """עוצר את שני צרכני ה-SDR האחרים ומריץ dumpvdl2. מחזיר (error, detail).
     Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות תחילה כדי לשחרר את
     ה-SDR לפני ש-dumpvdl2 פותח אותו (מונע מרוץ על המכשיר)."""
-    for svc in ("rtl_airband", ACARS_SERVICE, *SECONDARY_SERVICES, SATCOM_SERVICE):
-        try:
-            _sysctl("stop", svc, timeout=30)
-        except Exception:
-            pass
+    _stop_services(("rtl_airband", ACARS_SERVICE, *SECONDARY_SERVICES, SATCOM_SERVICE))
     write_vdl2_env(freqs)
-    try:
-        r = _sysctl("restart", VDL2_SERVICE, timeout=45)
-    except subprocess.TimeoutExpired:
-        return "הפעלת VDL2 נתקעה — בדוק שה-SDR מחובר", None
-    if r.returncode != 0:
-        return (r.stderr or "dumpvdl2 failed").strip(), _journal_tail(VDL2_SERVICE)
-    # כמו ב-acarsdec: השירות יכול לעלות ואז לקרוס => פולינג ולא בדיקה בודדת
-    for _ in range(7):
-        time.sleep(0.5)
-        if not _is_active(VDL2_SERVICE):
-            return "dumpvdl2 נכשל לעלות — בדוק journalctl -u airam-vdl2", _journal_tail(VDL2_SERVICE)
-    return None, None
+    return _restart_verified(VDL2_SERVICE, "הפעלת VDL2 נתקעה — בדוק שה-SDR מחובר",
+                             "dumpvdl2 נכשל לעלות — בדוק journalctl -u airam-vdl2", "dumpvdl2 failed")
 
 
 def _enter_acars(freqs):
     """עוצר את שאר צרכני ה-SDR ומריץ acarsdec. מחזיר (error, detail).
     Conflicts ב-unit עוצר אותם ממילא, אבל עוצרים מפורשות תחילה כדי לשחרר את
     ה-SDR לפני ש-acarsdec פותח אותו (מונע מרוץ על המכשיר)."""
-    for svc in ("rtl_airband", *SECONDARY_SERVICES, VDL2_SERVICE, SATCOM_SERVICE):
-        try:
-            _sysctl("stop", svc, timeout=30)
-        except Exception:
-            pass
+    _stop_services(("rtl_airband", *SECONDARY_SERVICES, VDL2_SERVICE, SATCOM_SERVICE))
     write_acars_env(freqs)
-    try:
-        r = _sysctl("restart", ACARS_SERVICE, timeout=45)
-    except subprocess.TimeoutExpired:
-        return "הפעלת ACARS נתקעה — בדוק שה-SDR מחובר", None
-    if r.returncode != 0:
-        return (r.stderr or "acarsdec failed").strip(), _journal_tail(ACARS_SERVICE)
-    # כמו ב-rtl_airband: השירות יכול לעלות ואז לקרוס => פולינג ולא בדיקה בודדת
-    for _ in range(7):
-        time.sleep(0.5)
-        if not _is_active(ACARS_SERVICE):
-            return "acarsdec נכשל לעלות — בדוק journalctl -u airam-acars", _journal_tail(ACARS_SERVICE)
-    return None, None
+    return _restart_verified(ACARS_SERVICE, "הפעלת ACARS נתקעה — בדוק שה-SDR מחובר",
+                             "acarsdec נכשל לעלות — בדוק journalctl -u airam-acars", "acarsdec failed")
 
 
 def _enter_satcom(freqs, bias_tee=True, skip_c=True, spectrum=True, gain=None):
@@ -3277,11 +3276,7 @@ def _enter_satcom(freqs, bias_tee=True, skip_c=True, spectrum=True, gain=None):
     ‏gain=None (ברירת מחדל) => AGC של הדרייבר; int 20..59 => gRdB ידני עם
     LNAstate מקובע ל-0 (רווח RF מקסימלי) — ר' SATCOM_GAIN_DEFAULT למה זה
     דווקא *עוזר* לאות לוויין חלש כשה-AGC נחנק מאנרגיה מחוץ לפס."""
-    for svc in ("rtl_airband", ACARS_SERVICE, *SECONDARY_SERVICES, VDL2_SERVICE):
-        try:
-            _sysctl("stop", svc, timeout=30)
-        except Exception:
-            pass
+    _stop_services(("rtl_airband", ACARS_SERVICE, *SECONDARY_SERVICES, VDL2_SERVICE))
     write_satcom_env(freqs, gain=gain, bias_tee=bias_tee, skip_c=skip_c, spectrum=spectrum)
     try:
         # airam-satcom.service (בשונה משאר צרכני ה-SDR) מוגדר עם StartLimitBurst
@@ -3291,19 +3286,9 @@ def _enter_satcom(freqs, bias_tee=True, skip_c=True, spectrum=True, gain=None):
         _sysctl("reset-failed", SATCOM_SERVICE, timeout=10)
     except Exception:
         pass
-    try:
-        r = _sysctl("restart", SATCOM_SERVICE, timeout=45)
-    except subprocess.TimeoutExpired:
-        return "הפעלת SATCOM נתקעה — בדוק שה-SDR מחובר", None
-    if r.returncode != 0:
-        return (r.stderr or "inmarsat-sniffer failed").strip(), _journal_tail(SATCOM_SERVICE)
-    # כמו ב-acarsdec/dumpvdl2: השירות יכול לעלות ואז לקרוס => פולינג ולא בדיקה בודדת
-    for _ in range(7):
-        time.sleep(0.5)
-        if not _is_active(SATCOM_SERVICE):
-            return ("inmarsat-sniffer נכשל לעלות — בדוק journalctl -u airam-satcom",
-                    _journal_tail(SATCOM_SERVICE))
-    return None, None
+    return _restart_verified(SATCOM_SERVICE, "הפעלת SATCOM נתקעה — בדוק שה-SDR מחובר",
+                             "inmarsat-sniffer נכשל לעלות — בדוק journalctl -u airam-satcom",
+                             "inmarsat-sniffer failed")
 
 
 def _enter_standby():
@@ -3314,11 +3299,7 @@ def _enter_standby():
     ממילא אינו מתיר לעצור אותו. מחזיר (error, detail). serialized תחת TUNE_LOCK
     ע"י הקורא."""
     consumers = (ACARS_SERVICE, *SECONDARY_SERVICES, VDL2_SERVICE, SATCOM_SERVICE, "rtl_airband")
-    for svc in consumers:
-        try:
-            _sysctl("stop", svc, timeout=30)
-        except Exception:
-            pass
+    _stop_services(consumers)
     stuck = []
     for _ in range(7):
         time.sleep(0.3)
@@ -3362,21 +3343,12 @@ def _enter_voice(params, keep_secondary=False):
     # מפורשות לפני שמרימים את rtl_airband (Conflicts גיבוי, אבל זה משחרר את
     # המכשיר מיד).
     # keep_secondary: כיוונון קול בתוך "קול + ACARS" — acarsdec על המקלט השני ממשיך.
-    for svc in (ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE):
-        if _is_active(svc):
-            try:
-                _sysctl("stop", svc, timeout=30)
-            except Exception:
-                pass
+    _stop_services([svc for svc in (ACARS_SERVICE, VDL2_SERVICE, SATCOM_SERVICE) if _is_active(svc)])
     # ⚠ צרכני המשני נעצרים *בלי* תנאי is-active: אין להם Conflicts מול rtl_airband, אז זה
     # המקום היחיד שעוצר אותם — ומשני ב-"activating" (השער / sleep 10 / RestartSec) היה
     # שורד את היציאה מהמצב הכפול, עולה אחר כך, ומציג מצב כפול "תקין" שהמשתמש עזב.
     if not keep_secondary:
-        for svc in SECONDARY_SERVICES:
-            try:
-                _sysctl("stop", svc, timeout=30)
-            except Exception:
-                pass
+        _stop_services(SECONDARY_SERVICES)
     # chan_filter/fm_notch אופציונליים: בדיקת האנטנה והניסוי (_probe_params/_exp_voice_params)
     # לא מעבירים אותם ⇒ רצים תמיד בתנאים הקבועים (standard, בלי notch) — בר-השוואה לבסיס.
     write_config(params["freq"], params["mod"], params["agc"], params["if_gain"],
@@ -3408,52 +3380,25 @@ def _wait_voice_settled(since):
 def _start_acars2(freqs):
     """acarsdec על המקלט המשני. מחזיר (error, detail)."""
     write_acars2_env(freqs)
-    try:
-        r = _sysctl("restart", ACARS2_SERVICE, timeout=45)
-    except subprocess.TimeoutExpired:
-        return "הפעלת ACARS על המקלט המשני נתקעה — בדוק שהוא מחובר", None
-    if r.returncode != 0:
-        return (r.stderr or "acarsdec failed").strip(), _journal_tail(ACARS2_SERVICE)
-    for _ in range(7):
-        time.sleep(0.5)
-        if not _is_active(ACARS2_SERVICE):
-            return ("ACARS על המקלט המשני נכשל לעלות — בדוק journalctl -u " + ACARS2_SERVICE,
-                    _journal_tail(ACARS2_SERVICE))
-    return None, None
+    return _restart_verified(ACARS2_SERVICE, "הפעלת ACARS על המקלט המשני נתקעה — בדוק שהוא מחובר",
+                             "ACARS על המקלט המשני נכשל לעלות — בדוק journalctl -u " + ACARS2_SERVICE,
+                             "acarsdec failed")
 
 
 def _start_voice2(st=None):
     """rtl_airband שני על המקלט המשני (קול כפול). מחזיר (error, detail)."""
     write_voice2_config(st)
-    try:
-        r = _sysctl("restart", VOICE2_SERVICE, timeout=45)
-    except subprocess.TimeoutExpired:
-        return "הפעלת הערוץ השני נתקעה — בדוק שהמקלט המשני מחובר", None
-    if r.returncode != 0:
-        return (r.stderr or "rtl_airband2 failed").strip(), _journal_tail(VOICE2_SERVICE)
-    for _ in range(7):
-        time.sleep(0.5)
-        if not _is_active(VOICE2_SERVICE):
-            return ("הערוץ השני נכשל לעלות — בדוק תדר/חיבור, journalctl -u " + VOICE2_SERVICE,
-                    _journal_tail(VOICE2_SERVICE))
-    return None, None
+    return _restart_verified(VOICE2_SERVICE, "הפעלת הערוץ השני נתקעה — בדוק שהמקלט המשני מחובר",
+                             "הערוץ השני נכשל לעלות — בדוק תדר/חיבור, journalctl -u " + VOICE2_SERVICE,
+                             "rtl_airband2 failed")
 
 
 def _start_vdl2b(freqs):
     """dumpvdl2 על המקלט המשני (קול + VDL2). מחזיר (error, detail)."""
     write_vdl2_env(freqs, path=VDL2B_ENV_PATH, serial=_secondary_serial())
-    try:
-        r = _sysctl("restart", VDL2B_SERVICE, timeout=45)
-    except subprocess.TimeoutExpired:
-        return "הפעלת VDL2 על המקלט המשני נתקעה — בדוק שהוא מחובר", None
-    if r.returncode != 0:
-        return (r.stderr or "dumpvdl2 failed").strip(), _journal_tail(VDL2B_SERVICE)
-    for _ in range(7):
-        time.sleep(0.5)
-        if not _is_active(VDL2B_SERVICE):
-            return ("VDL2 על המקלט המשני נכשל לעלות — בדוק journalctl -u " + VDL2B_SERVICE,
-                    _journal_tail(VDL2B_SERVICE))
-    return None, None
+    return _restart_verified(VDL2B_SERVICE, "הפעלת VDL2 על המקלט המשני נתקעה — בדוק שהוא מחובר",
+                             "VDL2 על המקלט המשני נכשל לעלות — בדוק journalctl -u " + VDL2B_SERVICE,
+                             "dumpvdl2 failed")
 
 
 def _start_secondary(mode, st):
@@ -3477,11 +3422,7 @@ def _enter_composite(mode, params, st):
     rerr = _roles_error(mode)
     if rerr:
         return rerr, None, False
-    for svc in (ACARS_SERVICE, *SECONDARY_SERVICES, VDL2_SERVICE, SATCOM_SERVICE):
-        try:
-            _sysctl("stop", svc, timeout=30)
-        except Exception:
-            pass
+    _stop_services((ACARS_SERVICE, *SECONDARY_SERVICES, VDL2_SERVICE, SATCOM_SERVICE))
     since = time.time()
     err, detail, sdr_down = _enter_voice(params, keep_secondary=True)
     if err:
